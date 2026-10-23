@@ -1,0 +1,2282 @@
+{
+ "byPlatform": {
+  "instagram": {
+   "candidates": 25,
+   "queries": 18,
+   "notes": [
+    "Budget: no budget-exhausted message received; 18 standard queries, 0 extended. Overran the 8-12 guideline because the first 8 queries (site:instagram.com and plain forms) returned ZERO instagram.com results — the engine ignores the site: operator. Only allowed_domains=[\"instagram.com\"] works; all 10 productive queries used it.",
+    "Yield: 25 rows returned; ~10 are Uzbekistan-confirmed with a wholesale signal (best.shopping.uz, optom_obuv_uzb, freedom.tashkent, tkani_tashkenta, tkani_abusahiy, mebeloptom_uz, optom.kelin.koylak, optom_pastel_toshkent, kanstovar_uyinchoq, mediapark_uzbekistan); ~8 have China+optom signal but location unconfirmed (partytimesopt, tibimiru, avto_aksesuary_optom, autoparts_optom_china, china.tires); 3 cargo competitors as seeds (myeds_uz, milliy.cargo, azamovabibikhonim as bayer). Nothing in the output has invented contacts; snippets almost never expose phone/Telegram.",
+    "Noise: strong leakage from Shymkent/Kazakhstan and Bishkek/Dordoi accounts (optom_shymkent*, baibol.optom.shymkent, kanstovar_dordoi, china_cargo.kz, eglc.kz) and from Russian-speaking Guangzhou bayer accounts with no stated country (opt_shop_guangzhou, optkupitut, optom_guangzhou312, optom_goodchoice, kids_stars_opt_obuv, optom_guangzhoukitai, waka_kids_, guangzhou_optom) — excluded as not UZ-confirmed; worth a manual bio check since several state 'Гуанчжоу, доставка 15-25 рабочих дней'. Korean-cosmetics wholesalers at Urikzor (_deracos.uz_, beautyandco.uz, korea_secret_tash) excluded (Korea, not China). 'optom' also collides with 'optika' (opticmaster.uzb, tashkent_optical, optimistoptics).",
+    "What worked: Russian queries ('оптом Ташкент Китай', 'Guangzhou оптом ... склад одежда обувь') give the densest account lists; Uzbek Latin queries with allowed_domains give 1-10 results; Cyrillic Uzbek gave nothing. Category x optom in Uzbek mostly returns service providers (santexnik ustasi) not wholesalers.",
+    "What Instagram realistically gives via this search tool: account title + bio fragment only; no phone digits, no follower counts, no post captions. Next step for the pipeline should be a direct Instagram/Meta scrape of bios for these handles (phone, Telegram, address) and hashtag crawls (#optomtoshkent, #оптомташкент, #xitoydanoptom, #abusaxiy) rather than more web searches.",
+    "Telegram handle in title: none observed in snippets. Legal names: none exposed."
+   ]
+  },
+  "facebook": {
+   "candidates": 17,
+   "queries": 12,
+   "notes": [
+    "Queries run: 12 (10 standard, 1 extended, 1 standard with allowed_domains=facebook.com x2 counted). Budget not exhausted; stopped at the 12-query ceiling.",
+    "Facebook is a WEAK surface for this target in Uzbekistan via web search: 8 of 12 queries returned zero facebook.com results; the search index does not cover Facebook groups at all (no 'Оптом Ташкент' / 'Xitoydan tovar optom' group surfaced under any phrasing, Uzbek Latin, Cyrillic or Russian). Only forcing allowed_domains=facebook.com produced FB pages, and those were mostly small Tashkent wholesalers (artificial flowers, wet wipes, dry creamer, raised floor, silk) with NO explicit China-import signal in snippets, plus universities/TV channels as noise.",
+    "No Facebook group was found. No FB result snippet exposed a phone or Telegram handle; live-ness (2025–2026 posting) cannot be judged from snippets — needs in-app check.",
+    "Best actual importer leads came incidentally from directories, not Facebook: FOCUS FURNITURE (direct supply Turkey/China/Malaysia), UZBEK-XITOY SAVDO UYI (equipment/trucks from China, 14+ yrs), AFEX GROUP (equipment/raw materials from China), Салон китайской мебели (Amir Temur 110), XIAN WEST BAISHUN rep office. These are goldenpages/yellowpages.uz entries with phone/address on the listing page.",
+    "Competitor/cargo seeds (X, capped at 3 in candidates): Shoptima O'zbek-Xitoy Savdo Uyi (FB, Termez), Abu Sahiy Cargo (FB), FEDLogistics (site + FB, Guangzhou/Yiwu warehouses). Also seen but not listed: CUS-GROUP UZ LTD (glotr.uz, China supply chains), Pegas Logistics (pegaslogistics.uz), Meest China (uz.meest.cn, FB page), totrans.uz, OLX ad 'xitoydan tovar olib keltiramiz' (olx.uz ID4iw5U), ok.ru/cargo1688 group. Their FB/OK comment sections are where importers surface.",
+    "Aggregator hits for follow-up on other platforms: top.uz 'стройматериалы оптом' (231 Tashkent companies), goldenpages rubric 'Оптовая торговля стройматериалами' (56 orgs) and 'Оборудование из Китая - поставка на заказ' (rubric 106079), goldenpages street listing рынок Абу-Сахий (16 orgs, Id=41003), optlist.ru Tashkent suppliers, optoviki.kz Uzbekistan clothing. yellowpages.uz tag 'Китайская мебель' nationwide.",
+    "Recommendation: drop Facebook as a primary discovery channel for this ICP; use in-app Facebook search only for the 5 FB pages above to read contacts/recency. Realistic yield from Facebook ≈ 3–5 weak candidates per 10 queries. Odnoklassniki (ok.ru) surfaced more Tashkent trade groups than Facebook (ok.ru/group/54270189305982, ok.ru/cargo1688) and may be worth a dedicated pass alongside Telegram and goldenpages/yellowpages/top.uz."
+   ]
+  },
+  "olx": {
+   "candidates": 16,
+   "queries": 12,
+   "notes": [
+    "Budget: 12 queries run (11 standard + 1 extended), no budget-exhausted message; stopped at method cap of 12.",
+    "Yield: 16 entries; 7 appliance/auto (E), 1 construction (D), 1 bazaar clothing (A), 2 unclear (Z), 3 cargo/sourcing competitors (X, capped at 3; a 4th and 5th were dropped: /d/oz/obyavlenie/mezhdunarodnye-gruzoperevozki-...-ID4kLvQ.html and '139 EXPRESS .uz' ad /d/obyavlenie/dostavka-tovarov-iz-kitaya-alibaba-taobao-aliexpress-i-dr-IDW6Z0.html), 2 aggregator seed pages (Y). No candidate has confidence >0.5.",
+    "Noise: 'Xitoydan'/'из Китая' on OLX is dominated by cargo and 1688/Taobao sourcing agents, not importers. 'Оптом' is dominated by ZIFFLER/Indesit/washing-machine/AC/gas-boiler resellers in Chilanzar and Mirzo-Ulugbek; these look like dealers of local distributors/assemblers, importer status unverified. Clothing 'optom Xitoy' listings are regional (Chortoq, Jizzax, Namangan, Bog'dod) single-item prices — bazaar scale.",
+    "Technical limitation: the search index returns OLX profile pages under the generic title 'Перейти к основному разделу' with no inline snippet, so mapping profile URL to the described listing is often ambiguous (flagged inside evidence where inferred). OLX hides phone numbers behind a button and Telegram handles never appeared in snippets; contact_visible is 'none' for all.",
+    "What worked: brand/category-specific Russian queries (ZIFFLER, стиральные машины, шины Chevrolet/BYD) surfaced real wholesale resellers; site:olx.uz with exact-phrase Uzbek terms (zavod, to'g'ridan-to'g'ri) returned nothing useful. Uzbek Latin queries returned category pages rather than listings.",
+    "Realistic platform value: OLX.uz is a B2C classifieds site; wholesale importers appear only as side activity (sklad/optom appliances, tyres, clothing). Better leverage: scrape OLX directly (Apify actor lowlanddata/olx-uz-scraper surfaced in results) with filters for 'Бизнес' accounts + keywords optom/ulgurji/sklad per category, or browse the seed pages /tashkent/q-оптом/, /tashkent/q-оптом-товар/, /list/q-товары-из-китая/ and open each seller's profile to count ads and read the phone.",
+    "Cross-platform leads from the same results (not OLX): goldenpages.uz rubrics for оптовая торговля стройматериалами (?Id=105565), автозапчастями (?Id=105588), магазины электротоваров (?Id=103622) — company directories with named firms, better suited to the Google/catalogue agent."
+   ]
+  },
+  "google_sites_maps": {
+   "candidates": 25,
+   "queries": 12,
+   "notes": [
+    "Budget: 12 WebSearch queries run (11 standard, 1 extended); budget not reported exhausted; stopped at task cap of 12.",
+    "Yield: 25 candidates, of which ~12 segment E (brand distributors/machinery/solar/AC/auto), 5 segment D (building-material/metal wholesalers from directory tag pages, no China signal), 1 C, 1 B, 3 X seeds (Import Universal, Grande, Pegas Logistics), 1 Y seed (Abu Sakhiy market). Strongest: Soventus Energy (Jinko/Huawei distributor), TEXNIKA ADVANS SERVIS ООО (XCMG), Runking Motor (Changan), Uzbek-Chinese Trading House (Foton/Howo + equipment), Zoomlion entities.",
+    "What Google realistically gives: almost no direct company websites; results are dominated by directory cards (goldenpages.uz, yellowpages.uz, top.uz, prom.uz, glotr.uz) and news. Brand-distributor queries (Gree/Haier/Hisense/Xiaomi/Honor/TCL/Sany/BYD) return news articles and Russian sites, not Uzbek legal entities. 2gis.uz and yandex.uz/maps pages never appeared in results (not indexed via this tool) - map rubrics must be scraped directly.",
+    "Noise: 'прямые поставки из Китая' and 'импорт из Китая' queries return mostly cargo/sourcing competitors (X); 'rasmiy distribyutor' Uzbek-Latin query returned only government/academic pages; Kuylyuk/Abu Sakhiy query returned market news, not listings.",
+    "Contacts: no phone numbers or Telegram handles appeared in any snippet; directory cards (goldenpages/yellowpages) hold address+phone behind the page and would need a fetch/scrape step (WebFetch unavailable in this run).",
+    "Recommended next step for this platform: crawl goldenpages.uz rubrics 1424 (оптово-розничная торговля), 1277 (кондиционеры), 1558 (Ulgurji savdo) and yellowpages.uz tags 'import' / 'optovaya-torgovlya-strojmaterialami' for Tashkent to enumerate ООО/MChJ with phones; cross-check China signal via product names (XCMG, Zoomlion, Midea, Jinko, Foton, Howo)."
+   ]
+  },
+  "telegram": {
+   "candidates": 25,
+   "queries": 12,
+   "notes": [
+    "Budget: 12 WebSearch queries run (11 standard, 1 extended); search budget not exhausted, stopped at the 8-12 cap.",
+    "site:t.me and t.me/s previews never surfaced — the tool ignores/omits the site: operator and does not index t.me preview pages. Telegram is only reachable indirectly through catalogue sites telemetr.me and uz.tgstat.com.",
+    "Highest-yield method by far: extended query with allowed_domains=[telemetr.me, uz.tgstat.com, tgstat.com, telegramads.it] and mixed UZ/RU keywords (optom/Xitoy/Guangzhou/оптом/Ташкент). It produced the only direct channel pages with @username, description and subscriber counts. Recommend future Telegram runs use 2-3 domain-restricted queries on uz.tgstat.com with 'optom'/'ulgurji'/'Xitoy'/'Chinni bozor'/'Abu Saxiy' plus category words.",
+    "Category queries (mebel/maishiy texnika/o'yinchoq/avto ehtiyot/qurilish mollari + telegram) returned prom.uz, goldenpages.uz and OLX pages instead of Telegram; those are reported as non-Telegram candidates (prom.uz wholesale-tagged storefronts, OLX auto-parts dealers).",
+    "Noise: Russian-language 'оптом из Китая' clothing channels on telemetr (optom_guangzhou, optom_guangzhou1, optom_gz_clothes) do not state Uzbekistan geo — kept at low confidence. @bishkek_optom (Yasuman shop) excluded: Kyrgyzstan. Many telemetr pages return only auth prompts, so descriptions are partial.",
+    "Yield: 3 confirmed-Uzbekistan Telegram wholesale channels with China signal (@Pekinoptom_uz, Ningbo MH, Chinni Bozor Bekzod), 1 huge trade group (CHINNiLAR OPTOM TOSHKENT 165k), ~5 low-confidence channels, 6 non-Telegram importers/wholesalers, 3 cargo competitors (seeds), 3 aggregator seeds. Below the 15-30 strong target; Telegram-via-web realistically gives 3-6 qualified channels per 10 queries.",
+    "Phone numbers were present on some pages (OPTOM PARFUM, Ningbo MH, Chinni Bozor Bekzod) but the search tool summarised rather than quoted digits; none reproduced or invented. Telegram handles quoted only where they appeared verbatim.",
+    "Realistic platform value: the real pool is TGStat Uzbekistan 'Sales' ratings and bazaar trade groups (Chinni bozor, Abu Saxiy, Chorsu, Olmazor) — best harvested by browsing uz.tgstat.com directly or in-app Telegram search, not by web search. Competitor channels (CARGO GREEN, Meest China) are seeds for finding importer audiences."
+   ]
+  },
+  "marketplaces_catalogs": {
+   "candidates": 22,
+   "queries": 12,
+   "notes": [
+    "Budget: 12 WebSearch queries run (11 standard, 1 extended); stopped at method cap, not at budget exhaustion.",
+    "Yield: 22 rows; only ~7 with direct China+volume cue (CHINA MOTORS, Uzbek-Chinese Trading House, China Leasing Impex, XITOY UPAKOVSHIK, TAO.UZ, KIS.uz, Joymax). Rest are low-confidence company pages or Y aggregator pointers to enumerate manually. 3 X seeds (Import Universal, U VENDOR, SAFlogistics).",
+    "Platform reality: site:uzum.uz, site:flagma.uz, site:top.uz returned zero platform pages via this search tool; sello.uz/olcha.uz/asaxiy.uz seller pages did not surface at all. uzum.uz shop pages are not indexed/returned - needs direct browsing or Uzum API, not web search.",
+    "What worked: goldenpages.uz and yellowpages.uz rubric/tag pages ('Оборудование из Китая - поставка на заказ', 'Товары из Китая', 'Мебель из Китая') and glotr.uz /showcase/ company pages. prom.uz surfaces company pages but snippets rarely carry China/optom text; its 'страна производства: Китай' filter + /tags/optom/ is the useful entry point.",
+    "Noise: most hits were news (kun.uz, akipress), trade fairs (MebelExpo), Russian/Kazakh sourcing articles, and logistics intermediaries. Search summaries often said no legal names/phones; directory pages show phones but digits were not in snippets, so contact_visible is mostly 'none'.",
+    "Next step suggestion for orchestrator: crawl the Y pages listed (yellowpages rubric with 8 companies, yellowpages mebel-iz-kitaya tag, prom.uz optom tag filtered by China origin, OLX optom santexnika) to extract named sellers with phones; web search alone will not enumerate them."
+   ]
+  },
+  "directories_maps": {
+   "candidates": 30,
+   "queries": 12,
+   "notes": [
+    "queries_run=12 (10 standard, 2 extended); budget not reported as exhausted — stopped at the 12-query cap set by the task.",
+    "Yield: 21 company-level candidates + 3 X seeds + 6 Y crawl-seed pages. Only ~4 companies carry an explicit China cue in the snippet (China Motors, Узбекско-Китайский торговый дом, Tivoli Group, TAO.UZ) plus the all.biz trio; the rest are wholesale/factory listings without a China cue (confidence <=0.3).",
+    "Noise: site: operator is poorly honored — queries for yellowpages.uz/goldenpages.uz/2gis.uz returned top.uz, glotr.uz, prom.uz, all.biz, optlist.ru instead. 2gis.uz returned zero results in every query; 2GIS rubric pages are not reachable via this search tool.",
+    "Phones: no supplier phone was legible in any snippet — yellowpages.uz and top.uz mask numbers as «+998...»; goldenpages company cards show phone only on the page itself. The only visible number (78-140-09-09) is the Golden Pages hotline, excluded. contact_visible is therefore 'none' or an address for every candidate.",
+    "What worked: glotr.uz /showcase/ URLs give the richest per-company descriptions with China cues (verified-by-Soliq badge, sub-category pages); all.biz «Китайские товары оптом в Ташкенте» and optlist.ru Tashkent supplier pages name actual wholesalers; goldenpages rubric «Оборудование из Китая» (Id=106080) and yellowpages tag «tovary-iz-kitaya» are the best directory seeds.",
+    "What did not work: rubric-level queries (optom + market name) return the rubric/tag index page, not individual tenants; snippets list at most 1–4 names per rubric. Bazaar names (Абу-Сахий, Малика, Куйлюк, Урикзор) surfaced only one tenant (TERRA PRO филиал Абу-Сахий) and the market's own card.",
+    "Platform reality: Uzbek directories (yellowpages.uz, goldenpages.uz, top.uz) index well for rubric pages but not for company cards via web search; to reach 15–30 companies WITH phones the pipeline needs page fetching (WebFetch/browser) of the 6 Y seed URLs above — each rubric lists 56–231 companies with phone/address on the page.",
+    "Segment X cap respected (3): Импорт универсал, UZCHINATRANS, Abu Sahiy Logistics — kept as seeds only; their client bases are the importers.",
+    "Skipped: Knauf/Kalde (German/Turkish brand branches, not China importers), DIALOG PRINT ЧП (printing services), PERFECT CONTROL SERVICE (services), Golden Pages corporate pages, hh.uz/habr/wiki noise."
+   ]
+  }
+ },
+ "candidates": [
+  {
+   "name": "CARGO GREEN",
+   "platform": "hh.kz employer page",
+   "url": "https://hh.kz/employer/11008995",
+   "city": "Tashkent",
+   "goods": "cargo delivery China→Uzbekistan",
+   "evidence": "На hh.kz указана компания CARGO GREEN из Ташкента с описанием Доставка товаров из Китая в Узбекистан.",
+   "signals": [
+    "cargo",
+    "Kitay"
+   ],
+   "segment": "X competitor/cargo",
+   "confidence": 0.8,
+   "contact_visible": "none",
+   "volume_hint": "competitor — seed for finding its client channels",
+   "found_by": "telegram"
+  },
+  {
+   "name": "Meest China",
+   "platform": "afisha.uz article",
+   "url": "https://www.afisha.uz/uz/shops/2025/07/03/meest",
+   "city": "Samarkand, Fergana (offices), Tashkent",
+   "goods": "parcel/cargo delivery from China, Korea, Japan",
+   "evidence": "Meest China is a logistics company that delivers goods from China, Korea, and Japan to more than 30 countries, and it opened offices in Samarkand and Fergana in 2025.",
+   "signals": [
+    "cargo",
+    "Kitay"
+   ],
+   "segment": "X competitor/cargo",
+   "confidence": 0.8,
+   "contact_visible": "none",
+   "volume_hint": "competitor, mainly parcel-scale",
+   "found_by": "telegram"
+  },
+  {
+   "name": "Soventus Energy",
+   "legal_name": "not shown",
+   "platform": "Google -> enfsolar.com directory",
+   "url": "https://www.enfsolar.com/soventus-energy",
+   "city": "Tashkent",
+   "goods": "Jinko Solar panels, Huawei inverters",
+   "evidence": "The ENF directory lists it as a distributor/wholesaler covering Uzbekistan, Kazakhstan and Kyrgyzstan, with Jinko Solar Co., Ltd. panels and Huawei Technologies Co., Ltd. among its inverter suppliers. The entry was last updated in May 2025.",
+   "signals": [
+    "distributor",
+    "wholesaler",
+    "Jinko",
+    "Huawei",
+    "multi_country"
+   ],
+   "segment": "E electronics/auto/appliance distributor",
+   "confidence": 0.7,
+   "volume_hint": "PV panels/inverters distributor for 3 countries = container scale",
+   "contact_visible": "none in snippet",
+   "found_by": "google_sites_maps"
+  },
+  {
+   "name": "Pegas Logistics (pegaslogistics.uz)",
+   "legal_name": "not shown",
+   "platform": "Google -> company site",
+   "url": "https://pegaslogistics.uz/postavka-tovarov-iz-kitaya/",
+   "city": "Tashkent",
+   "goods": "cargo from China, wholesale batches, customs",
+   "evidence": "логистическая компания, которая заявляет и прямые, и оптовые партии из Китая, с растаможкой и сопровождением. Есть контакты и склады в Китае, Турции и Европе.",
+   "signals": [
+    "cargo",
+    "optom",
+    "customs",
+    "company_site"
+   ],
+   "segment": "X competitor/cargo",
+   "confidence": 0.65,
+   "volume_hint": "direct competitor; seed only",
+   "contact_visible": "none in snippet",
+   "found_by": "google_sites_maps"
+  },
+  {
+   "name": "best.shopping.uz",
+   "platform": "instagram",
+   "url": "https://www.instagram.com/best.shopping.uz/",
+   "city": "Tashkent",
+   "goods": "mixed consumer goods from China for Uzum sellers",
+   "evidence": "Товары из Китая | ОПТОМ/РОЗНИЦА | Ташкент ... заказывает товары для своего #uzum и работает как оптом, так и в розницу, а оптовые заявки принимает в директ",
+   "signals": [
+    "optom",
+    "Xitoydan",
+    "Uzum",
+    "marketplace",
+    "Toshkent"
+   ],
+   "segment": "B marketplace seller",
+   "confidence": 0.6,
+   "contact_visible": "none in snippet (wholesale via direct)",
+   "volume_hint": "wholesale + sourcing for Uzum marketplace; volume not stated",
+   "found_by": "instagram"
+  },
+  {
+   "name": "optom_obuv_uzb",
+   "platform": "instagram",
+   "url": "https://www.instagram.com/optom_obuv_uzb/",
+   "city": "Tashkent",
+   "goods": "footwear",
+   "evidence": "Обувь оптом/розницу ... оптово-розничный продавец обуви, который работает оптом и в розницу из торговой точки в ташкентском гипермаркете. Он указывает китайский контакт для связи",
+   "signals": [
+    "optom",
+    "Xitoy contact",
+    "Toshkent",
+    "hypermarket trade point"
+   ],
+   "segment": "A bazaar wholesaler",
+   "confidence": 0.6,
+   "contact_visible": "Chinese contact mentioned; digits not in snippet",
+   "volume_hint": "wholesale footwear; volume not stated",
+   "found_by": "instagram"
+  },
+  {
+   "name": "Runking Motor Co., Ltd. (Changan distributor)",
+   "legal_name": "Runking Motor Co., Ltd.",
+   "platform": "Google -> hh.ru vacancy",
+   "url": "https://hh.ru/vacancy/135869146",
+   "city": "Tashkent (assumed; vacancy for автосалон)",
+   "goods": "Changan cars",
+   "evidence": "Вакансия на hh.ru называет компанию Runking Motor Co., Ltd. эксклюзивным официальным дистрибьютором Changan в Узбекистане.",
+   "signals": [
+    "rasmiy_distribyutor",
+    "Changan",
+    "auto",
+    "vacancy_source"
+   ],
+   "segment": "E electronics/auto/appliance distributor",
+   "confidence": 0.6,
+   "volume_hint": "car importer: full container/ro-ro scale",
+   "contact_visible": "none in snippet",
+   "found_by": "google_sites_maps"
+  },
+  {
+   "name": "Import Universal ООО",
+   "legal_name": "ООО Import Universal",
+   "platform": "Google -> glotr.uz showcase",
+   "url": "https://glotr.uz/showcase/ooo-import-universal-40814/",
+   "city": "Tashkent",
+   "goods": "import services: supplier search, contracts, logistics, customs from China; industrial goods",
+   "evidence": "This is a logistics and trade firm that helps businesses import goods and equipment from China. Its services include supplier search and verification, import contracts, international logistics and customs clearance. ... Информация о данном продавце была проверена через систему Soliq.uz и подтверждена как достоверная",
+   "signals": [
+    "Xitoydan",
+    "sourcing_agent",
+    "customs",
+    "legal_form",
+    "soliq_verified"
+   ],
+   "segment": "X competitor/cargo",
+   "confidence": 0.6,
+   "volume_hint": "competitor; seed only (its clients are importers)",
+   "contact_visible": "none in snippet",
+   "found_by": "google_sites_maps"
+  },
+  {
+   "name": "Grande (grande.uz)",
+   "legal_name": "not shown",
+   "platform": "Google -> company site",
+   "url": "https://grande.uz/wholesale/",
+   "city": "Tashkent",
+   "goods": "turnkey purchase of equipment, machines, raw materials from Chinese producers",
+   "evidence": "консалтинговая компания в Ташкенте, которая закупает оборудование, станки и сырьё оптом у китайских производителей, включая доставку и монтаж «под ключ». Заявляет именно прямые поставки от производителя.",
+   "signals": [
+    "Xitoydan",
+    "optom",
+    "sourcing_agent",
+    "company_site"
+   ],
+   "segment": "X competitor/cargo",
+   "confidence": 0.6,
+   "volume_hint": "competitor/sourcing agent; seed only",
+   "contact_visible": "none in snippet",
+   "found_by": "google_sites_maps"
+  },
+  {
+   "name": "Prom.uz ad: Доставка грузов из Китая в Узбекистан (company unnamed in snippet)",
+   "platform": "prom.uz ad",
+   "url": "https://www.prom.uz/ads/dostavka-gruzov-iz-kitaya-v-uzbekistan",
+   "city": "Tashkent",
+   "goods": "LCL and FCL container/wagon forwarding",
+   "evidence": "компания предлагает доставку как сборных грузов, так и целых контейнеров и вагонов ... Заявки принимаются по почте или в Telegram Ташкент, Ждем заявки на почту или по Телеграм. Точная дата публикации объявления на странице — 2019 год",
+   "signals": [
+    "cargo",
+    "konteyner",
+    "Kitay",
+    "telegram_contact",
+    "stale_2019"
+   ],
+   "segment": "X competitor/cargo",
+   "confidence": 0.6,
+   "contact_visible": "telegram (handle not quoted)",
+   "volume_hint": "competitor; ad dated 2019",
+   "found_by": "telegram"
+  },
+  {
+   "name": "FOCUS FURNITURE МЕБЕЛЬНЫЙ САЛОН",
+   "platform": "goldenpages.uz",
+   "url": "https://www.goldenpages.uz/company/?Id=57500",
+   "city": "Tashkent",
+   "goods": "furniture",
+   "evidence": "у FOCUS FURNITURE МЕБЕЛЬНЫЙ САЛОН указаны прямые поставки из Турции, Китая и Малайзии",
+   "signals": [
+    "Xitoydan",
+    "direct_import",
+    "furniture"
+   ],
+   "segment": "D construction/furniture importer",
+   "confidence": 0.55,
+   "contact_visible": "directory listing (phone/address on goldenpages page, not in snippet)",
+   "volume_hint": "direct furniture imports from China/Turkey/Malaysia = container-scale",
+   "found_by": "facebook"
+  },
+  {
+   "name": "CHILONZOR SAVDO UYI LTD (Chilonzor Savdo Uyi)",
+   "legal_name": "CHILONZOR SAVDO UYI LTD",
+   "city": "Tashkent",
+   "platform": "glotr.uz / goldenpages.uz",
+   "url": "https://glotr.uz/showcase/chilonzor-savdo-uyi-68/",
+   "evidence": "glotr.uz: «специализируется по 3 направлениям: оптовая продажа строительных материалов, хозяйственно-бытовых материалов и канцелярских товаров»; goldenpages.uz рубрика «Оптовая торговля»: «продавец бытовой химии, хозтоваров, электротоваров и посуды» (showcase sub-pages: jidkie-stroymateriali, kladochnie-materiali, bitovaya-texnika)",
+   "signals": [
+    "optom",
+    "legal_form",
+    "many_ads",
+    "stroymaterialy",
+    "hoztovary",
+    "bytovaya_texnika"
+   ],
+   "segment": "A bazaar wholesaler",
+   "goods": "building materials, household goods, household chemicals, electrical goods, dishware, appliances, stationery",
+   "volume_hint": "multi-category wholesale trading house with several showcase sections",
+   "contact_visible": "none",
+   "confidence": 0.55,
+   "found_by": "directories_maps"
+  },
+  {
+   "name": "tkani_tashkenta (Abu Saxiy matolari)",
+   "platform": "instagram",
+   "url": "https://www.instagram.com/tkani_tashkenta/",
+   "city": "Tashkent (Abu Saxiy)",
+   "goods": "fabrics / gazlama",
+   "evidence": "Abu Saxiy matolari ( ткани ) ... магазин тканей, который работает оптом и в розницу с доставкой по Узбекистану (Лучшие цены ( оптом и в розницу ))",
+   "signals": [
+    "optom",
+    "Abu Saxiy",
+    "Toshkent",
+    "delivery across UZ"
+   ],
+   "segment": "A bazaar wholesaler",
+   "confidence": 0.5,
+   "contact_visible": "none in snippet",
+   "volume_hint": "wholesale fabric at Abu Saxiy; China origin not stated in snippet",
+   "found_by": "instagram"
+  },
+  {
+   "name": "UZBEK-XITOY SAVDO UYI",
+   "platform": "goldenpages.uz",
+   "url": "https://www.goldenpages.uz/uz/company/?Id=62755",
+   "city": "Tashkent",
+   "goods": "equipment, raw materials, trucks from China",
+   "evidence": "Xitoydan uskunalar, xom ashyo va maxsus tovarlarni qidirish va etkazib berish ... over 14 years ... focused on machinery and trucks",
+   "signals": [
+    "Xitoydan",
+    "zavod",
+    "equipment",
+    "legal_form"
+   ],
+   "segment": "E electronics/auto/appliance distributor",
+   "confidence": 0.5,
+   "contact_visible": "directory listing (phone/address on goldenpages page, not in snippet)",
+   "volume_hint": "machinery/trucks importer-intermediary, 14+ years; container/full-truck scale",
+   "found_by": "facebook"
+  },
+  {
+   "name": "OLX seller Ad4tD (household appliances, optom/sklad)",
+   "platform": "OLX.uz",
+   "url": "https://www.olx.uz/list/user/Ad4tD/",
+   "city": "Tashkent",
+   "goods": "vacuum cleaners, water coolers, refrigerators",
+   "evidence": "один продавец публикует объявления про пылесосы, кулеры и холодильники с пометкой «optom» и «sklad»",
+   "signals": [
+    "optom",
+    "sklad",
+    "many_ads"
+   ],
+   "segment": "E electronics/auto/appliance distributor",
+   "confidence": 0.5,
+   "contact_visible": "none",
+   "volume_hint": "warehouse stock of appliances; no m3 figure",
+   "legal_name": "",
+   "found_by": "olx"
+  },
+  {
+   "name": "OLX seller AujTE (washing machines / AC wholesale from warehouse)",
+   "platform": "OLX.uz",
+   "url": "https://www.olx.uz/list/user/AujTE/",
+   "city": "Tashkent",
+   "goods": "washing machines, air conditioners",
+   "evidence": "предлагает стиральные машины и кондиционеры «оптом прямо со склада»",
+   "signals": [
+    "optom",
+    "sklad"
+   ],
+   "segment": "E electronics/auto/appliance distributor",
+   "confidence": 0.5,
+   "contact_visible": "none",
+   "volume_hint": "wholesale from own warehouse; no m3 figure",
+   "legal_name": "",
+   "found_by": "olx"
+  },
+  {
+   "name": "Climate Komplekt",
+   "platform": "prom.uz (surfaced in OLX query)",
+   "url": "https://www.prom.uz/company/climate-komplekt/",
+   "city": "Tashkent",
+   "goods": "ZIFFLER air conditioners (12 DC inverter), climate equipment",
+   "evidence": "ZIFFLER 12 DC inverter wall unit at about 2.9 million UZS with delivery to Tashkent, plus a ZIFFLER air conditioner sold wholesale from the warehouse",
+   "signals": [
+    "optom",
+    "sklad",
+    "company_page"
+   ],
+   "segment": "E electronics/auto/appliance distributor",
+   "confidence": 0.5,
+   "contact_visible": "none",
+   "volume_hint": "wholesale AC stock; ZIFFLER is a China-manufactured brand, importer status unverified",
+   "legal_name": "",
+   "found_by": "olx"
+  },
+  {
+   "name": "Arif Solar",
+   "legal_name": "not shown",
+   "platform": "Google -> enfsolar.com directory",
+   "url": "https://www.enfsolar.com/arif-solar",
+   "city": "Tashkent",
+   "goods": "Jinko panels, Huawei inverters (installer)",
+   "evidence": "This installer is listed with Jinko Solar Co., Ltd. as a panel supplier and Huawei among its inverter suppliers, per ENF (last updated December 2024).",
+   "signals": [
+    "Jinko",
+    "Huawei",
+    "installer",
+    "solar"
+   ],
+   "segment": "E electronics/auto/appliance distributor",
+   "confidence": 0.5,
+   "volume_hint": "installer buying panels in pallets/containers",
+   "contact_visible": "none in snippet",
+   "found_by": "google_sites_maps"
+  },
+  {
+   "name": "Zoomlion official representative (OLX seller, Tashkent)",
+   "legal_name": "not shown",
+   "platform": "Google -> olx.uz",
+   "url": "https://www.olx.uz/d/obyavlenie/gusenichnyy-buldozer-zoomlion-zd260g-23-24-ton-ID3SBbP.html",
+   "city": "Tashkent",
+   "goods": "Zoomlion bulldozers ZD260G, excavators ZE60E-10, ZE370E",
+   "evidence": "Несколько объявлений на OLX.uz называют себя официальными представителями компании в Узбекистане. Техника, по их словам, есть в наличии в Ташкенте, а сервис и гарантия предоставляются полный комплекс услуг по сервисному обслуживанию, ТО, диагностике и гарантийному обслуживанию.",
+   "signals": [
+    "official_representative",
+    "Zoomlion",
+    "many_ads",
+    "v_nalichii",
+    "service_warranty"
+   ],
+   "segment": "E electronics/auto/appliance distributor",
+   "confidence": 0.5,
+   "volume_hint": "machinery in stock in Tashkent = regular heavy imports; related ads ID4oy1P, ID4q2Yn",
+   "contact_visible": "none in snippet (OLX ad has phone behind button)",
+   "found_by": "google_sites_maps"
+  },
+  {
+   "name": "NEFRITITA China Wholesale (@Pekinoptom_uz)",
+   "platform": "Telegram channel (via uz.tgstat.com)",
+   "url": "https://uz.tgstat.com/en/channel/@Pekinoptom_uz",
+   "city": "Tashkent",
+   "goods": "Chinese wholesale goods (Beijing-sourced per handle; category not stated in snippet)",
+   "evidence": "NEFRITITA China Wholesale (@Pekinoptom_uz), says it works with Chinese first-hand wholesale suppliers, offers air and auto cargo options, and mentions delivery within Tashkent. Its geo and language are listed as Uzbekistan and Uzbek.",
+   "signals": [
+    "optom",
+    "Xitoydan",
+    "Pekin",
+    "first_hand_suppliers",
+    "cargo_options",
+    "telegram_visible",
+    "geo_uz"
+   ],
+   "segment": "A bazaar wholesaler",
+   "confidence": 0.5,
+   "contact_visible": "telegram handle @Pekinoptom_uz",
+   "volume_hint": "wholesale from China with air/auto cargo options — intermediary/importer; may also act as buying agent",
+   "found_by": "telegram"
+  },
+  {
+   "name": "CHINA MOTORS",
+   "platform": "glotr.uz",
+   "url": "https://glotr.uz/showcase/china-motors-17060/tyagachi/",
+   "city": "Tashkent",
+   "goods": "Chinese trucks: tyagachi (tractor units), furgoni (vans), vodovozi (water trucks), equipment",
+   "evidence": "на страницах каталога компания обещает поставку оборудования и грузоперевозки из Китая в Узбекистан. Указано, что её сотрудники владеют китайским и английским языками и имеют большой опыт работы в Китае",
+   "signals": [
+    "Xitoydan",
+    "auto_import",
+    "equipment",
+    "glotr_showcase_multi_category"
+   ],
+   "segment": "E electronics/auto/appliance distributor",
+   "confidence": 0.5,
+   "volume_hint": "full vehicles / equipment supply from China (container/truck-scale by nature)",
+   "contact_visible": "none in snippet (glotr showcase page)",
+   "found_by": "marketplaces_catalogs"
+  },
+  {
+   "name": "freedom.tashkent (Цветочная база Ташкент)",
+   "platform": "instagram",
+   "url": "https://www.instagram.com/freedom.tashkent/",
+   "city": "Tashkent",
+   "goods": "cut flowers / floristry supplies",
+   "evidence": "Цветочная база Ташкент ... база «Freedom» в Ташкенте работает оптом и указывает среди поставщиков Китай, Нидерланды, Израиль, Колумбия",
+   "signals": [
+    "optom",
+    "Xitoydan",
+    "Toshkent",
+    "baza"
+   ],
+   "segment": "A bazaar wholesaler",
+   "confidence": 0.45,
+   "contact_visible": "none in snippet",
+   "volume_hint": "wholesale base; likely air cargo for flowers, truck for accessories",
+   "found_by": "instagram"
+  },
+  {
+   "name": "mebeloptom_uz (MEBEL OPTOM || TASHKENT)",
+   "platform": "instagram",
+   "url": "https://www.instagram.com/mebeloptom_uz/",
+   "city": "Tashkent",
+   "goods": "furniture",
+   "evidence": "𝐌𝐄𝐁𝐄𝐋 𝐎𝐏𝐓𝐎𝐌 || 𝐓𝐀𝐒𝐇𝐊𝐄𝐍𝐓 (@mebeloptom_uz)",
+   "signals": [
+    "optom",
+    "mebel",
+    "Toshkent"
+   ],
+   "segment": "D construction/furniture importer",
+   "confidence": 0.45,
+   "contact_visible": "none in snippet",
+   "volume_hint": "wholesale furniture; origin not stated",
+   "found_by": "instagram"
+  },
+  {
+   "name": "Цветы искусственные Ташкент Гуллар",
+   "platform": "facebook",
+   "url": "https://www.facebook.com/cveti.tashkent/",
+   "city": "Tashkent",
+   "goods": "artificial flowers (Chinni bozor market stall)",
+   "evidence": "Магазин искусственных цветов указывает адрес на рынке Чинни бозор и даёт оптовые цены, например за партию от 100 штук",
+   "signals": [
+    "optom",
+    "min_order",
+    "bazaar_address"
+   ],
+   "segment": "A bazaar wholesaler",
+   "confidence": 0.45,
+   "contact_visible": "address (Chinni bozor) in snippet; no phone/telegram in snippet",
+   "volume_hint": "wholesale from 100 pcs; artificial flowers are a classic Yiwu import category but China origin not stated in snippet",
+   "found_by": "facebook"
+  },
+  {
+   "name": "ИндП САЛОН КИТАЙСКОЙ МЕБЕЛИ",
+   "platform": "yellowpages.uz",
+   "url": "https://www.yellowpages.uz/teg/kitajskaya-mebel/tashkent",
+   "city": "Tashkent",
+   "goods": "Chinese furniture",
+   "evidence": "Yellowpages.uz по тегу «Китайская мебель» в Ташкенте показывает всего две организации: ИндП САЛОН КИТАЙСКОЙ МЕБЕЛИ по адресу проспект Амира Темура, 110, и GARANT MEBEL МАГАЗИН №1",
+   "signals": [
+    "Xitoydan",
+    "furniture",
+    "legal_form"
+   ],
+   "segment": "D construction/furniture importer",
+   "confidence": 0.45,
+   "contact_visible": "address (проспект Амира Темура, 110) in snippet; phone on directory page",
+   "volume_hint": "dedicated Chinese furniture showroom = recurring container imports",
+   "found_by": "facebook"
+  },
+  {
+   "name": "Midea Alba inverter seller claiming official Midea distributor",
+   "legal_name": "not shown",
+   "platform": "Google -> prom.uz ad",
+   "url": "https://www.prom.uz/ads/kondicioner-midea-alba-invertor/",
+   "city": "Tashkent",
+   "goods": "Midea air conditioners",
+   "evidence": "на Prom.uz продавец объявления о Midea Alba заявляет, что он официальный дистрибьютор Midea в Узбекистане. Это самоописание продавца.",
+   "signals": [
+    "rasmiy_distribyutor_claim",
+    "Midea",
+    "konditsioner"
+   ],
+   "segment": "E electronics/auto/appliance distributor",
+   "confidence": 0.45,
+   "volume_hint": "AC distributor = container scale if claim true",
+   "contact_visible": "none in snippet",
+   "found_by": "google_sites_maps"
+  },
+  {
+   "name": "Hofmann / Welkin (AC brands with own stores)",
+   "legal_name": "not shown",
+   "platform": "Google -> weproject.media article",
+   "url": "https://www.weproject.media/articles/detail/top-10-mest-v-tashkente-gde-kupit-konditsioner-po-vygodnoy-tsene/?amp=y",
+   "city": "Tashkent",
+   "goods": "air conditioners under own brands (Chinese-made)",
+   "evidence": "Welkin и Hofmann, по описанию WeProject, продают кондиционеры в фирменных магазинах и через официальных дилеров",
+   "signals": [
+    "own_brand",
+    "firm_stores",
+    "dealer_network",
+    "konditsioner"
+   ],
+   "segment": "E electronics/auto/appliance distributor",
+   "confidence": 0.45,
+   "volume_hint": "brand owners with dealer network = full containers",
+   "contact_visible": "none in snippet",
+   "found_by": "google_sites_maps"
+  },
+  {
+   "name": "Chinni Bozor Bekzod InHouse kitchen",
+   "platform": "Telegram channel (via telemetr.me)",
+   "url": "https://telemetr.me/content/patnoss (probable; result page did not bind title to URL — one of telemetr.me/content/patnoss, /AAAAAEnHutoYT-5_4CHXug, /Vgmmw0tAJNG9iRXR)",
+   "city": "Tashkent",
+   "goods": "kitchenware/dishes",
+   "evidence": "Chinni Bozor Bekzod InHouse kitchen is the best match. Its page lists a wholesale contact and a Tashkent Abusaxiy supermarket address, and it refers to \"Chinni Bozor,\" the Chinese goods market. The channel shows about 1.2K in its header but 512 total subscribers in its statistics section.",
+   "signals": [
+    "optom",
+    "Chinni_bozor",
+    "Abu_Saxiy_market",
+    "Tashkent_address",
+    "wholesale_contact"
+   ],
+   "segment": "A bazaar wholesaler",
+   "confidence": 0.45,
+   "contact_visible": "wholesale contact + Abu Saxiy address present on page (not quoted in snippet)",
+   "volume_hint": "bazaar wholesaler at Abu Saxiy; Chinese kitchenware",
+   "found_by": "telegram"
+  },
+  {
+   "name": "China Leasing Impex",
+   "platform": "yellowpages.uz",
+   "url": "https://www.yellowpages.uz/rubrika/oborudovanie-iz-kitaya-postavka-na-zakaz",
+   "city": "Tashkent (Sergeli district)",
+   "goods": "equipment from China, supply to order",
+   "evidence": "Its 'Оборудование из Китая - поставка на заказ' category lists 8 companies... The second is China Leasing Impex, located in Sergeli district, Tashkent",
+   "signals": [
+    "Xitoydan",
+    "equipment",
+    "legal_form_impex",
+    "directory_rubric_china_equipment"
+   ],
+   "segment": "E electronics/auto/appliance distributor",
+   "confidence": 0.45,
+   "volume_hint": "equipment supply to order (unknown m3)",
+   "contact_visible": "address district only in snippet",
+   "found_by": "marketplaces_catalogs"
+  },
+  {
+   "name": "tkani_abusahiy",
+   "platform": "instagram",
+   "url": "https://www.instagram.com/tkani_abusahiy/",
+   "city": "Tashkent (Abu Saxiy)",
+   "goods": "fabrics",
+   "evidence": "tkani_abusahiy • Instagram photos and videos (returned for query 'оптом Ташкент Абу Сахий ... склад из Китая')",
+   "signals": [
+    "Abu Saxiy",
+    "gazlama"
+   ],
+   "segment": "A bazaar wholesaler",
+   "confidence": 0.4,
+   "contact_visible": "none in snippet",
+   "volume_hint": "unknown",
+   "found_by": "instagram"
+  },
+  {
+   "name": "optom.kelin.koylak",
+   "platform": "instagram",
+   "url": "https://www.instagram.com/optom.kelin.koylak/",
+   "city": "Tashkent area",
+   "goods": "bridal dresses / ensembles",
+   "evidence": "OPTOM KELIN KO'YLAKLAR ... Ansambllar optom narxlarda Hamma viloyatlarga dastafka",
+   "signals": [
+    "optom",
+    "kiyim",
+    "delivery all regions"
+   ],
+   "segment": "A bazaar wholesaler",
+   "confidence": 0.4,
+   "contact_visible": "none in snippet",
+   "volume_hint": "wholesale to all regions; China origin not stated",
+   "found_by": "instagram"
+  },
+  {
+   "name": "partytimesopt (ШАРЫ ОПТОМ ИЗ КИТАЯ)",
+   "platform": "instagram",
+   "url": "https://www.instagram.com/partytimesopt/",
+   "city": "unconfirmed (returned in Tashkent/Abu Saxiy query)",
+   "goods": "balloons / party goods",
+   "evidence": "ШАРЫ ОПТОМ ИЗ КИТАЯ (@partytimesopt) ... о поставках шаров оптом с фабрик",
+   "signals": [
+    "optom",
+    "Xitoydan",
+    "zavod"
+   ],
+   "segment": "A bazaar wholesaler",
+   "confidence": 0.4,
+   "contact_visible": "none in snippet",
+   "volume_hint": "factory-direct wholesale",
+   "found_by": "instagram"
+  },
+  {
+   "name": "mediapark_uzbekistan",
+   "platform": "instagram",
+   "url": "https://www.instagram.com/mediapark_uzbekistan/",
+   "city": "Tashkent",
+   "goods": "household appliances / electronics",
+   "evidence": "MEDIAPARK - texnika har biringiz uchun ... lists over 27,000 household appliances and offers delivery and installation",
+   "signals": [
+    "maishiy texnika",
+    "large retailer",
+    "many SKUs"
+   ],
+   "segment": "E electronics/auto/appliance distributor",
+   "confidence": 0.4,
+   "contact_visible": "none in snippet",
+   "volume_hint": "27,000+ SKUs — container-scale importer (large chain)",
+   "found_by": "instagram"
+  },
+  {
+   "name": "Фальшпол в ассортименте",
+   "platform": "facebook",
+   "url": "https://www.facebook.com/falshpol/",
+   "city": "Tashkent",
+   "goods": "raised access flooring (фальшпол)",
+   "evidence": "фальшполов (по оптовым ценам)",
+   "signals": [
+    "optom",
+    "construction_material"
+   ],
+   "segment": "D construction/furniture importer",
+   "confidence": 0.4,
+   "contact_visible": "none in snippet",
+   "volume_hint": "raised floor is bulky, pallet/container-scale product; origin not stated",
+   "found_by": "facebook"
+  },
+  {
+   "name": "XIAN WEST BAISHUN TRADING CO., LTD ПРЕДСТАВИТЕЛЬСТВО",
+   "platform": "goldenpages.uz",
+   "url": "https://www.goldenpages.uz/rubrics/?Id=106079",
+   "city": "Tashkent",
+   "goods": "Chinese equipment (rep office of Xi'an trading company)",
+   "evidence": "Tashkent companies that list \"Оборудование из Китая\" (Chinese equipment) as an activity, such as XIAN WEST BAISHUN TRADING CO., LTD ПРЕДСТАВИТЕЛЬСТВО",
+   "signals": [
+    "Xitoydan",
+    "equipment",
+    "legal_form"
+   ],
+   "segment": "E electronics/auto/appliance distributor",
+   "confidence": 0.4,
+   "contact_visible": "directory rubric page (contacts on goldenpages, not in snippet)",
+   "volume_hint": "Chinese manufacturer representative office; ships own goods to Uzbekistan",
+   "found_by": "facebook"
+  },
+  {
+   "name": "Wholesale tyre seller, Sergeli (Chevrolet/BYD sizes)",
+   "platform": "OLX.uz",
+   "url": "https://www.olx.uz/list/user/An3bc/",
+   "city": "Tashkent (Sergeli)",
+   "goods": "tyres for Chevrolet Spark, Cobalt, Onix, Tracker and BYD",
+   "evidence": "One OLX.uz seller page lists wholesale tyres for Chevrolet and BYD models, all located in Tashkent's Sergeli district and posted in October 2026. Nothing on that page mentions Chinese origin. URL mapping inferred from result order (An3bc / 9jz2d / fo4 in set)",
+   "signals": [
+    "optom",
+    "many_ads",
+    "recent_2026-10"
+   ],
+   "segment": "E electronics/auto/appliance distributor",
+   "confidence": 0.4,
+   "contact_visible": "none",
+   "volume_hint": "wholesale tyres, multiple models; tyres are typically container cargo",
+   "legal_name": "",
+   "found_by": "olx"
+  },
+  {
+   "name": "Jinko Solar / Sungrow trading house (China Green Energy House), Tashkent",
+   "legal_name": "not shown",
+   "platform": "Google -> akipress.com",
+   "url": "https://m.akipress.com/news:731750:Uzbekistan_-_China_Green_Energy_House_launched_in_Tashkent",
+   "city": "Tashkent",
+   "goods": "Jinko Solar panels, Sungrow inverters",
+   "evidence": "head of the Chinese company Jinko Solar for Central Asia Michael Wang noted that the trading house will provide excellent opportunities for cooperation with Uzbekistan's entrepreneurs ... the aim is to supply the Uzbek market with quality products from Jinko Solar and Sungrow.",
+   "signals": [
+    "Jinko",
+    "Sungrow",
+    "trading_house",
+    "solar"
+   ],
+   "segment": "E electronics/auto/appliance distributor",
+   "confidence": 0.4,
+   "volume_hint": "OEM trading house: container scale; local operator entity unnamed",
+   "contact_visible": "none in snippet",
+   "found_by": "google_sites_maps"
+  },
+  {
+   "name": "China.parts.uz",
+   "platform": "OLX.uz seller profile",
+   "url": "https://www.olx.uz/list/user/AsNSI/",
+   "city": "Samarkand",
+   "goods": "spare parts for Chinese cars",
+   "evidence": "A dealer-style OLX profile: One profile, China.parts.uz, lists ads for parts for Chinese cars in Samarkand. The page doesn't show a Telegram channel. (It has been on OLX since April 2026.)",
+   "signals": [
+    "Xitoy_avto",
+    "many_ads",
+    "dealer_profile"
+   ],
+   "segment": "E electronics/auto/appliance distributor",
+   "confidence": 0.4,
+   "contact_visible": "none in snippet",
+   "volume_hint": "dealer-style profile with multiple ads",
+   "found_by": "telegram"
+  },
+  {
+   "name": "OLX seller: Chery/Jetour/Haval parts (Jismoniy shaxs)",
+   "platform": "OLX.uz listing",
+   "url": "https://www.olx.uz/d/oz/obyavlenie/zapchasti-dlya-chery-jetour-haval-korobka-kuzov-xodovaya-ID4liiA.html",
+   "city": "Uzbekistan (city not in snippet)",
+   "goods": "gearbox/body/chassis parts for Chery, Jetour, Haval",
+   "evidence": "One seller of Chery, Jetour and Haval parts in Uzbekistan offers wholesale and retail prices and lists Telegram handles, but doesn't say the parts come from China. Prices are negotiable (wholesale and retail), with delivery available and Telegram handles listed.",
+   "signals": [
+    "optom",
+    "Xitoy_avto",
+    "telegram_visible",
+    "delivery"
+   ],
+   "segment": "E electronics/auto/appliance distributor",
+   "confidence": 0.4,
+   "contact_visible": "telegram handles (not quoted in snippet)",
+   "volume_hint": "wholesale + retail pricing",
+   "found_by": "telegram"
+  },
+  {
+   "name": "KIS.uz",
+   "platform": "company site",
+   "url": "https://kis.uz/",
+   "city": "Tashkent",
+   "goods": "furniture fittings (мебельная фурнитура) and household appliances",
+   "evidence": "Мебельная фурнитура и бытовая техника, купить в Ташкенте",
+   "signals": [
+    "furniture_fittings",
+    "appliances",
+    "own_site",
+    "bulky_category"
+   ],
+   "segment": "D construction/furniture importer",
+   "confidence": 0.4,
+   "volume_hint": "furniture hardware + appliances are typical container-scale Chinese imports; volume not stated",
+   "contact_visible": "none in snippet",
+   "found_by": "marketplaces_catalogs"
+  },
+  {
+   "name": "Joymax",
+   "platform": "prom.uz",
+   "url": "https://www.prom.uz/uz/company/joymax/domashnie-naduvnye-batuty-igrovye-tsentry/",
+   "city": "Tashkent",
+   "goods": "inflatable trampolines, home play centers (toys, bulky)",
+   "evidence": "Prom.uz: This marketplace lists Tashkent furniture and children's-product sellers... (company page: domashnie naduvnye batuty igrovye tsentry)",
+   "signals": [
+    "o'yinchoq",
+    "bulky_goods",
+    "marketplace_company_page"
+   ],
+   "segment": "B marketplace seller",
+   "confidence": 0.4,
+   "volume_hint": "bulky toy category (inflatables/play centers) - typically Chinese import by m3",
+   "contact_visible": "none in snippet",
+   "found_by": "marketplaces_catalogs"
+  },
+  {
+   "name": "Tivoli Group — велосипеды из Китая оптом",
+   "city": "Tashkent",
+   "platform": "optlist.ru",
+   "url": "https://optlist.ru/company/tivoli-group",
+   "evidence": "«Tivoli Group — велосипеды из Китая оптом - Поставщик, Ташкент»; карточка помечена как отключенная из-за неактивности",
+   "signals": [
+    "optom",
+    "Xitoydan",
+    "velosipedy",
+    "inactive_flag"
+   ],
+   "segment": "E electronics/auto/appliance distributor",
+   "goods": "bicycles from China, wholesale",
+   "volume_hint": "wholesale bicycle importer — bulky goods, likely container; listing inactive",
+   "contact_visible": "none",
+   "confidence": 0.4,
+   "found_by": "directories_maps"
+  },
+  {
+   "name": "optom_pastel_toshkent (Qish Bahor Kuz)",
+   "platform": "instagram",
+   "url": "https://www.instagram.com/optom_pastel_toshkent/",
+   "city": "Tashkent",
+   "goods": "textiles/bedding (pastel)",
+   "evidence": "Qish Bahor Kuz (@optom_pastel_toshkent) (returned for 'optom Toshkent Xitoydan')",
+   "signals": [
+    "optom",
+    "Toshkent"
+   ],
+   "segment": "A bazaar wholesaler",
+   "confidence": 0.35,
+   "contact_visible": "none in snippet",
+   "volume_hint": "unknown",
+   "found_by": "instagram"
+  },
+  {
+   "name": "kanstovar_uyinchoq (Aziza Safarova)",
+   "platform": "instagram",
+   "url": "https://www.instagram.com/kanstovar_uyinchoq/",
+   "city": "Tashkent",
+   "goods": "stationery and toys",
+   "evidence": "Kanstovar va o'yinchoq internet-do'koni ... Internet magazin Toshkent ichida va viloyatlarga dastavka xizmati bor, telefon raqamlari ko'rsatilgan",
+   "signals": [
+    "kanstovar",
+    "o'yinchoq",
+    "Toshkent",
+    "phone_visible",
+    "delivery regions"
+   ],
+   "segment": "B marketplace seller",
+   "confidence": 0.35,
+   "contact_visible": "phone numbers shown on page (digits not in snippet)",
+   "volume_hint": "unknown; online shop with regional delivery",
+   "found_by": "instagram"
+  },
+  {
+   "name": "posmarket_uz (POS МАТЕРИАЛЫ)",
+   "platform": "instagram",
+   "url": "https://www.instagram.com/posmarket_uz/",
+   "city": "Uzbekistan",
+   "goods": "POS materials / retail display",
+   "evidence": "POS МАТЕРИАЛЫ (@posmarket_uz) (returned for 'товары из Китая оптом Узбекистан Ташкент ... контейнер')",
+   "signals": [
+    "B2B goods",
+    ".uz"
+   ],
+   "segment": "E electronics/auto/appliance distributor",
+   "confidence": 0.35,
+   "contact_visible": "none in snippet",
+   "volume_hint": "unknown",
+   "found_by": "instagram"
+  },
+  {
+   "name": "upakovka.uz (Upakovka FlexoPlast)",
+   "platform": "instagram",
+   "url": "https://www.instagram.com/upakovka.uz/",
+   "city": "Uzbekistan",
+   "goods": "packaging production (flexo/plastic) – potential raw material/equipment importer",
+   "evidence": "Upakovka FlexoPlast (@upakovka.uz) (returned for 'товары из Китая оптом Узбекистан ... поставщик контейнер')",
+   "signals": [
+    "zavod",
+    "packaging"
+   ],
+   "segment": "C factory",
+   "confidence": 0.35,
+   "contact_visible": "none in snippet",
+   "volume_hint": "unknown",
+   "found_by": "instagram"
+  },
+  {
+   "name": "avto_aksesuary_optom (Авто аксессуары из Китая)",
+   "platform": "instagram",
+   "url": "https://www.instagram.com/avto_aksesuary_optom/",
+   "city": "unconfirmed (returned in Toshkent query)",
+   "goods": "auto accessories",
+   "evidence": "Авто аксессуары из Китая🇨🇳 ... describes direct supply from China with wholesale and retail options",
+   "signals": [
+    "optom",
+    "Xitoydan",
+    "avto"
+   ],
+   "segment": "E electronics/auto/appliance distributor",
+   "confidence": 0.35,
+   "contact_visible": "none in snippet",
+   "volume_hint": "unknown",
+   "found_by": "instagram"
+  },
+  {
+   "name": "china.tires (Шины оптом из Китая)",
+   "platform": "instagram",
+   "url": "https://www.instagram.com/china.tires/",
+   "city": "unconfirmed (CIS; returned in Ташкент query)",
+   "goods": "tires",
+   "evidence": "Шины оптом из Китая ... Минимальный заказ: 40 футов, работа по СНГ",
+   "signals": [
+    "optom",
+    "Xitoydan",
+    "konteyner",
+    "min_order 40ft"
+   ],
+   "segment": "E electronics/auto/appliance distributor",
+   "confidence": 0.35,
+   "contact_visible": "none in snippet",
+   "volume_hint": "min order 40ft container",
+   "found_by": "instagram"
+  },
+  {
+   "name": "Shoptima: O'zbek-Xitoy Savdo Uyi",
+   "platform": "facebook",
+   "url": "https://www.facebook.com/shoptima",
+   "city": "Termez",
+   "goods": "equipment and goods from China (sourcing/trade house)",
+   "evidence": "an Uzbek-Chinese trading house based in Termez. It says it supplies equipment and goods from China to Uzbekistan at factory prices. It also organizes trips in China for clients",
+   "signals": [
+    "Xitoydan",
+    "zavod",
+    "sourcing_agent"
+   ],
+   "segment": "X competitor/cargo",
+   "confidence": 0.35,
+   "contact_visible": "none in snippet",
+   "volume_hint": "trade-house intermediary; its client base (Surkhandarya importers) is the real target",
+   "found_by": "facebook"
+  },
+  {
+   "name": "Olimjon (ZIFFLER TV / Indesit fridge wholesale)",
+   "platform": "OLX.uz",
+   "url": "https://www.olx.uz/elektronika/toshkent-oblast/q-zifler/",
+   "city": "Tashkent (Mirzo-Ulugbek)",
+   "goods": "ZIFFLER TVs, Indesit refrigerators",
+   "evidence": "Телевизор ZIFFLER склад оптом и в розницу + доставко по городу Ташкент; холодильник Indesit «оптом»; ~3.30 million UZS, Mirzo-Ulugbek district. Profile URL not resolvable from snippet (result set: /list/user/22232, 7HonB, Ah2Dv, ZUEC, 28tZb); URL given is the OLX search page where the listing appears",
+   "signals": [
+    "optom",
+    "sklad",
+    "delivery"
+   ],
+   "segment": "E electronics/auto/appliance distributor",
+   "confidence": 0.35,
+   "contact_visible": "none",
+   "volume_hint": "warehouse stock; likely dealer of local distributor rather than direct importer",
+   "legal_name": "",
+   "found_by": "olx"
+  },
+  {
+   "name": "OLX seller 'optom' (microwave ovens, 8 ads)",
+   "platform": "OLX.uz",
+   "url": "https://www.olx.uz/list/user/5Wn1x/",
+   "city": "Uzbekistan (city not in snippet)",
+   "goods": "microwave ovens, small appliances",
+   "evidence": "A seller named \"optom\" on OLX has 8 listings, including microwave ovens, dated late August 2026 (Мы нашли 8 объявлений). Profile URL inferred: result set held only /list/user/fZYLY and /list/user/5Wn1x as OLX profiles",
+   "signals": [
+    "optom",
+    "many_ads"
+   ],
+   "segment": "E electronics/auto/appliance distributor",
+   "confidence": 0.35,
+   "contact_visible": "none",
+   "volume_hint": "8 active ads",
+   "legal_name": "",
+   "found_by": "olx"
+  },
+  {
+   "name": "OLX profile 'Оптом склады Ташкент' (f6FdF)",
+   "platform": "OLX.uz",
+   "url": "https://www.olx.uz/list/user/f6FdF/",
+   "city": "Tashkent",
+   "goods": "unspecified wholesale goods",
+   "evidence": "One user page is titled Оптом склады Ташкент, which suggests a wholesale or warehouse seller, though the snippet doesn't say where the goods come from (profile surfaced in both 'оптом из Китая' and 'сантехника/стройматериалы' queries)",
+   "signals": [
+    "optom",
+    "sklad"
+   ],
+   "segment": "Z unclear",
+   "confidence": 0.35,
+   "contact_visible": "none",
+   "volume_hint": "unknown",
+   "legal_name": "",
+   "found_by": "olx"
+  },
+  {
+   "name": "OLX profile 'Xitoydan pad zakaz texnika arzon narxda' (fZYLY)",
+   "platform": "OLX.uz",
+   "url": "https://www.olx.uz/list/user/fZYLY/",
+   "city": "Uzbekistan (city not in snippet)",
+   "goods": "industrial consumables: electrodes, caustic soda; equipment to order from China",
+   "evidence": "Another seller profile is titled \"Xitoydan pad zakaz texnika arzon narxda\" (ordering cheap appliances from China), but the visible items are unrelated, such as electrodes and caustic soda",
+   "signals": [
+    "Xitoydan",
+    "pod_zakaz",
+    "industrial_goods"
+   ],
+   "segment": "Z unclear",
+   "confidence": 0.35,
+   "contact_visible": "none",
+   "volume_hint": "unknown; caustic soda/electrodes are bulk industrial goods",
+   "legal_name": "",
+   "found_by": "olx"
+  },
+  {
+   "name": "Shop 7585",
+   "legal_name": "not shown",
+   "platform": "Google -> prom.uz company page",
+   "url": "https://www.prom.uz/company/shop-7585/nastennye-kondicionery/",
+   "city": "Tashkent",
+   "goods": "wall-mounted air conditioners (Midea and others)",
+   "evidence": "Настенные кондиционеры от компании Shop 7585 (prom.uz company catalogue under Midea/Gree query)",
+   "signals": [
+    "konditsioner",
+    "company_catalog",
+    "Midea"
+   ],
+   "segment": "E electronics/auto/appliance distributor",
+   "confidence": 0.35,
+   "volume_hint": "unknown; prom.uz catalogue seller",
+   "contact_visible": "none in snippet",
+   "found_by": "google_sites_maps"
+  },
+  {
+   "name": "TechnoComfort",
+   "legal_name": "not shown",
+   "platform": "Google -> prom.uz company page",
+   "url": "https://www.prom.uz/company/technocomfort/nastennye-kondicionery/",
+   "city": "Tashkent",
+   "goods": "wall-mounted air conditioners",
+   "evidence": "Настенные кондиционеры от компании TechnoComfort (prom.uz; появилась по запросу Gree/Midea официальный дистрибьютор)",
+   "signals": [
+    "konditsioner",
+    "company_catalog"
+   ],
+   "segment": "E electronics/auto/appliance distributor",
+   "confidence": 0.35,
+   "volume_hint": "unknown",
+   "contact_visible": "none in snippet",
+   "found_by": "google_sites_maps"
+  },
+  {
+   "name": "Lochin Lyuks Savdo Servis ООО (lochin mould)",
+   "legal_name": "Lochin Lyuks Savdo Servis ООО",
+   "platform": "Google -> prom.uz company page",
+   "url": "https://www.prom.uz/company/lochin-mould/",
+   "city": "Tashkent",
+   "goods": "press moulds manufacturing; transport of goods from China",
+   "evidence": "на prom.uz в его предложениях есть услуга перевозки товаров из Китая, а также изготовление пресс-форм (Перевозка товаров из Китая). Цены в объявлениях указаны как договорные.",
+   "signals": [
+    "legal_form",
+    "press_forms",
+    "Xitoydan",
+    "mixed_profile"
+   ],
+   "segment": "C factory",
+   "confidence": 0.35,
+   "volume_hint": "mould maker importing tooling/steel; also offers China transport (partly competitor)",
+   "contact_visible": "none in snippet",
+   "found_by": "google_sites_maps"
+  },
+  {
+   "name": "ULTRA PLAST ООО",
+   "legal_name": "ULTRA PLAST ООО",
+   "platform": "Google -> yellowpages.uz tag page",
+   "url": "https://www.yellowpages.uz/teg/optovaya-torgovlya-strojmaterialami/tashkent",
+   "city": "Tashkent",
+   "goods": "building materials wholesale (plastics by name)",
+   "evidence": "страница по тегу «Оптовая торговля стройматериалами» в Ташкенте. В ней перечислены, например, ULTRA PLAST ООО, EUROPOL-EXCLUSIVE ООО и ТИНЧЛИК СЕРВИС ПЛЮС ООО, с адресами и контактами.",
+   "signals": [
+    "optom",
+    "stroymaterialy",
+    "legal_form"
+   ],
+   "segment": "D construction/furniture importer",
+   "confidence": 0.35,
+   "volume_hint": "wholesale building materials; China origin not stated",
+   "contact_visible": "address/phone on yellowpages page (digits not in snippet)",
+   "found_by": "google_sites_maps"
+  },
+  {
+   "name": "Ningbo MH",
+   "platform": "Telegram channel (via telemetr.me)",
+   "url": "https://telemetr.me/content/ningbomh",
+   "city": "Tashkent",
+   "goods": "not stated (name references Ningbo, Chinese port city)",
+   "evidence": "Ningbo MH (Ташкент). Канал связан с компанией, которая, судя по описанию, работает в Ташкенте. В профиле указаны адрес в городе, контакты и каталог. Наш адрес: дом 46, ул.Нукус, г.Ташкент, Идеал Бизнес Центр. Около 448 подписчиков, при этом публикаций пока нет.",
+   "signals": [
+    "Tashkent_address",
+    "catalog",
+    "China_city_name",
+    "448_subs",
+    "no_posts"
+   ],
+   "segment": "Z unclear",
+   "confidence": 0.35,
+   "contact_visible": "address: дом 46, ул.Нукус, г.Ташкент, Идеал Бизнес Центр (contacts present but not quoted in snippet)",
+   "volume_hint": "company channel with catalog; likely Chinese supplier rep office or importer — verify",
+   "found_by": "telegram"
+  },
+  {
+   "name": "Obuvi Jeniskiy Optom - Abu Saxy (@abusaxiyoptomm)",
+   "platform": "Telegram channel (via uz.tgstat.com)",
+   "url": "https://uz.tgstat.com/en/channel/@abusaxiyoptomm",
+   "city": "Tashkent (Abu Saxiy market, inferred from title)",
+   "goods": "women's shoes wholesale",
+   "evidence": "Telegram channel \"Obuvi Jeniskiy Optom -Abu Saxy\" — @abusaxiyoptomm — TGStat",
+   "signals": [
+    "optom",
+    "Abu_Saxiy_market",
+    "telegram_visible"
+   ],
+   "segment": "A bazaar wholesaler",
+   "confidence": 0.35,
+   "contact_visible": "telegram handle @abusaxiyoptomm",
+   "volume_hint": "bazaar shoe wholesaler; China origin not stated",
+   "found_by": "telegram"
+  },
+  {
+   "name": "optlist.ru Tashkent wholesale electronics/appliances",
+   "platform": "optlist.ru",
+   "url": "https://optlist.ru/wholesales/electronika-bytovaya-tehnika-optom/tashkent--1512569",
+   "city": "Tashkent",
+   "goods": "wholesale electronics and household appliances",
+   "evidence": "на OptList есть раздел оптовых поставщиков в Ташкенте, где указано, что импорт и оптовая продажа бытовой техники из Китая, Европы, Америки",
+   "signals": [
+    "aggregator",
+    "optom",
+    "Xitoydan",
+    "appliances"
+   ],
+   "segment": "Y aggregator/classifieds",
+   "confidence": 0.35,
+   "volume_hint": "at least one Tashkent importer-wholesaler of appliances from China listed (unnamed in snippet)",
+   "contact_visible": "none",
+   "found_by": "marketplaces_catalogs"
+  },
+  {
+   "name": "Erui International",
+   "city": "Tashkent",
+   "platform": "all.biz",
+   "url": "https://all.biz/uz-ru/kitajskie-tovary-optom-cpk11482643/fltr-city-1",
+   "evidence": "all.biz «Китайские товары оптом в Ташкенте … продавцы ООО и ИП (например, Erui International, Kerui, Mass Media Plast)»",
+   "signals": [
+    "optom",
+    "Xitoydan",
+    "legal_form"
+   ],
+   "segment": "E electronics/auto/appliance distributor",
+   "goods": "Chinese goods wholesale (category listing; specific goods not in snippet)",
+   "volume_hint": "unknown",
+   "contact_visible": "none",
+   "confidence": 0.35,
+   "found_by": "directories_maps"
+  },
+  {
+   "name": "Techno Cable Group JV LLC",
+   "legal_name": "ООО «TECHNO CABLE GROUP»",
+   "city": "Tashkent region",
+   "platform": "expodat.com",
+   "url": "https://expodat.com/en/companies/company/151261-ooo-techno-cable-group.html",
+   "evidence": "«Techno Cable Group JV LLC is a cable manufacturing plant located in Uzbekistan»",
+   "signals": [
+    "zavod",
+    "legal_form",
+    "kabel"
+   ],
+   "segment": "C factory",
+   "goods": "cable manufacturing (buyer of equipment/raw materials)",
+   "volume_hint": "plant — raw material/equipment imports likely container scale",
+   "contact_visible": "none",
+   "confidence": 0.35,
+   "found_by": "directories_maps"
+  },
+  {
+   "name": "tibimiru (Товары оптом из Китая)",
+   "platform": "instagram",
+   "url": "https://www.instagram.com/tibimiru/",
+   "city": "unconfirmed (returned in Tashkent/Abu Saxiy query)",
+   "goods": "mixed goods from China",
+   "evidence": "Товары оптом из Китая (@tibimiru)",
+   "signals": [
+    "optom",
+    "Xitoydan"
+   ],
+   "segment": "Z unclear",
+   "confidence": 0.3,
+   "contact_visible": "none in snippet",
+   "volume_hint": "unknown",
+   "found_by": "instagram"
+  },
+  {
+   "name": "kitoblar_dunyosi__",
+   "platform": "instagram",
+   "url": "https://www.instagram.com/kitoblar_dunyosi__/",
+   "city": "Tashkent region (Solnechniy kanstovar bozori)",
+   "goods": "books / stationery",
+   "evidence": "SIZNING SEVIMLI OPTOM KITOB DO'KONINGIZ ARZON NARXLARDA ... Manzil Toshkent viloyati, Solnichni kanstovar bozori, 1-qator, 7-8 do'kon",
+   "signals": [
+    "optom",
+    "kanstovar bozor",
+    "address_visible"
+   ],
+   "segment": "A bazaar wholesaler",
+   "confidence": 0.3,
+   "contact_visible": "address: Solnechniy kanstovar bozori, 1-qator, 7-8 do'kon",
+   "volume_hint": "unknown; China origin not stated",
+   "found_by": "instagram"
+  },
+  {
+   "name": "diskont.uz",
+   "platform": "instagram",
+   "url": "https://www.instagram.com/diskont.uz/",
+   "city": "Tashkent",
+   "goods": "household appliances / electronics",
+   "evidence": "Maishiy texnika va elektronika do'koni (@diskont.uz) advertises installment purchases",
+   "signals": [
+    "maishiy texnika",
+    "retail chain"
+   ],
+   "segment": "E electronics/auto/appliance distributor",
+   "confidence": 0.3,
+   "contact_visible": "none in snippet",
+   "volume_hint": "unknown",
+   "found_by": "instagram"
+  },
+  {
+   "name": "autoparts_optom_china",
+   "platform": "instagram",
+   "url": "https://www.instagram.com/autoparts_optom_china/",
+   "city": "unconfirmed (returned in Uzbekistan query)",
+   "goods": "auto parts",
+   "evidence": "АВТОЗАПЧАСТИ ОПТОМ КИТАЙ (@autoparts_optom_china)",
+   "signals": [
+    "optom",
+    "Xitoydan",
+    "avto ehtiyot qismlar"
+   ],
+   "segment": "E electronics/auto/appliance distributor",
+   "confidence": 0.3,
+   "contact_visible": "none in snippet",
+   "volume_hint": "unknown",
+   "found_by": "instagram"
+  },
+  {
+   "name": "oildrive.uz",
+   "platform": "instagram",
+   "url": "https://www.instagram.com/oildrive.uz/",
+   "city": "Uzbekistan",
+   "goods": "motor oil, antifreeze, spare parts",
+   "evidence": "Oil Drive - Motor moyi / Antifriz / Ehtiyot qismlar ... Ehtiyot qismlar - Kor-Tech / Teikin / Crome",
+   "signals": [
+    "distributor",
+    "avto ehtiyot qismlar",
+    "brands"
+   ],
+   "segment": "E electronics/auto/appliance distributor",
+   "confidence": 0.3,
+   "contact_visible": "none in snippet",
+   "volume_hint": "unknown; China origin not stated",
+   "found_by": "instagram"
+  },
+  {
+   "name": "balonuz (Balon Uz)",
+   "platform": "instagram",
+   "url": "https://www.instagram.com/balonuz/",
+   "city": "Uzbekistan",
+   "goods": "tires, batteries, motor oils",
+   "evidence": "Balon Uz sells tires, batteries, and motor oils with up to one year of warranty ... 1 yilgacha kafolat",
+   "signals": [
+    "avto",
+    "tires"
+   ],
+   "segment": "E electronics/auto/appliance distributor",
+   "confidence": 0.3,
+   "contact_visible": "none in snippet",
+   "volume_hint": "unknown",
+   "found_by": "instagram"
+  },
+  {
+   "name": "kalyaski_uz (Yunusov Askar)",
+   "platform": "instagram",
+   "url": "https://www.instagram.com/kalyaski_uz/",
+   "city": "Tashkent (Abu Saxiy query)",
+   "goods": "unclear (handle suggests strollers)",
+   "evidence": "Yunusov Askar (@kalyaski_uz) (returned for 'оптом Ташкент Абу Сахий ... склад из Китая'; same result set noted 'Tashkent trade center бывший Абу Сахий базар ведёт оптовую торговлю')",
+   "signals": [
+    "Abu Saxiy"
+   ],
+   "segment": "Z unclear",
+   "confidence": 0.3,
+   "contact_visible": "none in snippet",
+   "volume_hint": "unknown",
+   "found_by": "instagram"
+  },
+  {
+   "name": "azamovabibikhonim",
+   "platform": "instagram",
+   "url": "https://www.instagram.com/azamovabibikhonim/",
+   "city": "Tashkent",
+   "goods": "sourcing from China (likely bayer/agent)",
+   "evidence": "Xitoydan optom tovarlar, zavod bilan boglanish",
+   "signals": [
+    "optom",
+    "Xitoydan",
+    "zavod"
+   ],
+   "segment": "X competitor/cargo",
+   "confidence": 0.3,
+   "contact_visible": "none in snippet",
+   "volume_hint": "sourcing agent – seed for importer contacts",
+   "found_by": "instagram"
+  },
+  {
+   "name": "UMA - Влажные салфетки оптом по Узбекистану",
+   "platform": "facebook",
+   "url": "https://www.facebook.com/uma.invest/",
+   "city": "Uzbekistan (nationwide distribution)",
+   "goods": "wet wipes",
+   "evidence": "Выгодные условия для дилеров - Низкие оптовые цены",
+   "signals": [
+    "optom",
+    "dealer_network"
+   ],
+   "segment": "E electronics/auto/appliance distributor",
+   "confidence": 0.3,
+   "contact_visible": "none in snippet",
+   "volume_hint": "dealer network across Uzbekistan implies truck-scale volumes; may be local producer rather than importer",
+   "found_by": "facebook"
+  },
+  {
+   "name": "Slivkin - сливки оптом в Ташкенте",
+   "platform": "facebook",
+   "url": "https://www.facebook.com/slivkin.uz/",
+   "city": "Tashkent",
+   "goods": "instant dry creamer / food ingredients",
+   "evidence": "Высококачественные БЫСТРОРАСТВОРИМЫЕ СУХИЕ СЛИВКИ в большом объеме",
+   "signals": [
+    "optom",
+    "bulk_volume"
+   ],
+   "segment": "A bazaar wholesaler",
+   "confidence": 0.3,
+   "contact_visible": "none in snippet",
+   "volume_hint": "'в большом объеме' — bulk food ingredient wholesaler; origin not stated (often Malaysia/China)",
+   "found_by": "facebook"
+  },
+  {
+   "name": "FEDLogistics",
+   "platform": "web (own site, links to its Facebook page)",
+   "url": "https://fedlogistics.uz/",
+   "city": "Tashkent",
+   "goods": "freight from Guangzhou/Yiwu to Uzbekistan",
+   "evidence": "FEDLogistics указывает склады в Гуанчжоу и Иу и офис в Ташкенте, а также ссылку на свою страницу в Facebook (Основные склады расположены в городах Гуанчжоу и Иу)",
+   "signals": [
+    "Yiwu",
+    "Guangzhou",
+    "cargo"
+   ],
+   "segment": "X competitor/cargo",
+   "confidence": 0.3,
+   "contact_visible": "none in snippet",
+   "volume_hint": "competitor seed; its FB page comments/followers are importer leads",
+   "found_by": "facebook"
+  },
+  {
+   "name": "OLX seller JM0E (smart gates wholesale/retail)",
+   "platform": "OLX.uz",
+   "url": "https://www.olx.uz/list/user/JM0E/",
+   "city": "Uzbekistan (city not in snippet)",
+   "goods": "smart/automatic gates",
+   "evidence": "A seller page lists a smart gate product available wholesale and retail",
+   "signals": [
+    "optom"
+   ],
+   "segment": "D construction/furniture importer",
+   "confidence": 0.3,
+   "contact_visible": "none",
+   "volume_hint": "unknown",
+   "legal_name": "",
+   "found_by": "olx"
+  },
+  {
+   "name": "Chortoq children's clothing wholesaler (Xitoy fabrichniy)",
+   "platform": "OLX.uz",
+   "url": "https://www.olx.uz/oz/detskiy-mir/detskaya-odezhda/chartak/",
+   "city": "Chortoq (Namangan region)",
+   "goods": "children's clothing from Chinese factories",
+   "evidence": "A listing for Kiyimlar optom bolalar kiyimlari Xitoy fabrishniy is priced at 200,000 so'm (listing appears on the Chortoq children's clothing category page; individual listing URL not in snippet)",
+   "signals": [
+    "optom",
+    "Xitoy",
+    "fabrichniy"
+   ],
+   "segment": "A bazaar wholesaler",
+   "confidence": 0.3,
+   "contact_visible": "none",
+   "volume_hint": "unknown; regional bazaar-scale",
+   "legal_name": "",
+   "found_by": "olx"
+  },
+  {
+   "name": "OLX search page 'оптом' Tashkent (aggregator seed)",
+   "platform": "OLX.uz",
+   "url": "https://www.olx.uz/tashkent/q-%D0%BE%D0%BF%D1%82%D0%BE%D0%BC/",
+   "city": "Tashkent",
+   "goods": "gas boilers, membranes, washing machines, appliances marked 'оптом со склада'",
+   "evidence": "Объявления с пометкой «оптом со склада» встречаются в основном по газовым котлам, мембранам, стиральным машинам и другой бытовой технике. Они размещены частными продавцами",
+   "signals": [
+    "optom",
+    "sklad",
+    "aggregator"
+   ],
+   "segment": "Y aggregator/classifieds",
+   "confidence": 0.3,
+   "contact_visible": "none",
+   "volume_hint": "n/a; page to browse/scrape for 'Бизнес' accounts",
+   "legal_name": "",
+   "found_by": "olx"
+  },
+  {
+   "name": "TRANS ASIA ООО",
+   "legal_name": "TRANS ASIA ООО",
+   "platform": "Google -> top.uz rubric",
+   "url": "https://top.uz/section/stroymaterialy-optom?PAGEN_1=12",
+   "city": "Tashkent",
+   "goods": "building materials wholesale",
+   "evidence": "Стройматериалы оптом Ташкенте - найдено 231 компании. Там есть и ООО, например TRANS ASIA ООО, но без данных о происхождении товаров.",
+   "signals": [
+    "optom",
+    "stroymaterialy",
+    "legal_form"
+   ],
+   "segment": "D construction/furniture importer",
+   "confidence": 0.3,
+   "volume_hint": "wholesale; origin not stated",
+   "contact_visible": "none in snippet",
+   "found_by": "google_sites_maps"
+  },
+  {
+   "name": "Рынок «Абу Сахий» (wholesale market, Tashkent)",
+   "legal_name": "n/a (market)",
+   "platform": "Google -> occrp.org / top.uz",
+   "url": "https://www.occrp.org/interactives/the-shadow-investor-abdukadyr/ru/asset/247/tamozhennyj-terminal-yunilab-na-granicze-s-kazahstanom",
+   "city": "Tashkent",
+   "goods": "mixed Chinese consumer goods wholesale",
+   "evidence": "Совместное расследование OCCRP называет рынок «Абу Сахий» крупнейшим оптовым рынком Узбекистана и указывает его в Ташкенте.",
+   "signals": [
+    "optom",
+    "bazaar",
+    "aggregator"
+   ],
+   "segment": "Y aggregator/classifieds",
+   "confidence": 0.3,
+   "volume_hint": "seed location for bazaar wholesalers (segment A), not a lead itself",
+   "contact_visible": "none",
+   "found_by": "google_sites_maps"
+  },
+  {
+   "name": "CHINNiLAR OPTOM TOSHKENT",
+   "platform": "Telegram group (via uz.tgstat.com ratings)",
+   "url": "https://uz.tgstat.com/en/ratings/chats",
+   "city": "Tashkent",
+   "goods": "chinni (dishware/porcelain) wholesale",
+   "evidence": "TGStat's rankings list large Tashkent groups such as CHINNiLAR OPTOM TOSHKENT, which has about 165,000 participants.",
+   "signals": [
+    "optom",
+    "Toshkent",
+    "many_members_165k",
+    "group_not_channel"
+   ],
+   "segment": "Y aggregator/classifieds",
+   "confidence": 0.3,
+   "contact_visible": "none",
+   "volume_hint": "165k-member wholesale trade group — high-value seed for finding dishware importers (Chinni bozor)",
+   "found_by": "telegram"
+  },
+  {
+   "name": "Женская одежда оптом из Китая (optom_guangzhou1)",
+   "platform": "Telegram channel (via telemetr.me)",
+   "url": "https://telemetr.me/content/optom_guangzhou1",
+   "city": "not stated",
+   "goods": "women's clothing wholesale from China (Guangzhou)",
+   "evidence": "A Russian-language channel, \"Женская одежда оптом из Китая,\" focuses on women's clothing wholesale from China and directs customers to managers via a bot and to a product catalog site. Its subscriber count is about 4,800 per Telemetr.",
+   "signals": [
+    "optom",
+    "Guangzhou",
+    "Kitay",
+    "4800_subs",
+    "bot_contact",
+    "catalog_site"
+   ],
+   "segment": "Z unclear",
+   "confidence": 0.3,
+   "contact_visible": "bot (not quoted)",
+   "volume_hint": "Uzbekistan geo not confirmed; surfaced in Tashkent-targeted query",
+   "found_by": "telegram"
+  },
+  {
+   "name": "TEXNOSHOP",
+   "platform": "prom.uz (wholesale category)",
+   "url": "https://www.prom.uz/uz/company/texnoshop/bytovaya-tekhnika",
+   "city": "Tashkent",
+   "goods": "home appliances",
+   "evidence": "A home appliance seller, TEXNOSHOP, appears in the same wholesale category.",
+   "signals": [
+    "optom_category",
+    "maishiy_texnika"
+   ],
+   "segment": "E electronics/auto/appliance distributor",
+   "confidence": 0.3,
+   "contact_visible": "none in snippet",
+   "volume_hint": "wholesale-tagged storefront",
+   "found_by": "telegram"
+  },
+  {
+   "name": "Overseas warehouse of Chinese goods, Tashkent (operator unnamed in snippet)",
+   "platform": "uza.uz news",
+   "url": "https://uza.uz/ar/posts/v-uzbekistane-nachal-rabotu-zarubezhnyy-sklad-kitayskix-tovarov_437554",
+   "city": "Tashkent",
+   "goods": "Chinese products for distribution across Uzbekistan and neighbours",
+   "evidence": "Агентство УзА сообщало об открытии зарубежного склада китайских товаров в Ташкенте. ... «Товары поступят прежде, чем будет размещен заказ». Склад рассчитан на распределение китайской продукции по Узбекистану и соседним странам.",
+   "signals": [
+    "Kitay",
+    "sklad",
+    "distribution_hub"
+   ],
+   "segment": "Z unclear",
+   "confidence": 0.3,
+   "contact_visible": "none",
+   "volume_hint": "container-scale bonded/overseas warehouse — large importer or competitor-adjacent; name needs follow-up",
+   "found_by": "telegram"
+  },
+  {
+   "name": "ООО Star Gayer Business",
+   "platform": "prom.uz",
+   "url": "https://www.prom.uz/company/ooo-star-gayer-business/",
+   "city": "Tashkent",
+   "goods": "building materials: tile adhesive, galvanized sheet",
+   "evidence": "Star Gayer Business ... shows building-material listings such as tile adhesive and galvanized sheet. Neither mentions China or wholesale",
+   "signals": [
+    "legal_form",
+    "construction_materials",
+    "marketplace_company_page"
+   ],
+   "segment": "D construction/furniture importer",
+   "confidence": 0.3,
+   "volume_hint": "unknown; no China cue in snippet",
+   "contact_visible": "none in snippet",
+   "legal_name": "ООО Star Gayer Business",
+   "found_by": "marketplaces_catalogs"
+  },
+  {
+   "name": "Divan.uz",
+   "platform": "uzum.uz (brand on Uzum Market) / own showrooms",
+   "url": "https://www.spot.uz/ru/2023/11/08/divan-uz/",
+   "city": "Tashkent",
+   "goods": "sofas, tables, chairs, storage furniture, garden and decor items",
+   "evidence": "Uzum added furniture brands, including Divan.uz, and said its furniture category assortment doubled compared with the prior year... Its showrooms opened in Tashkent in late 2023, and it sells sofas, tables and chairs online",
+   "signals": [
+    "mebel",
+    "divan",
+    "uzum_brand",
+    "showrooms"
+   ],
+   "segment": "D construction/furniture importer",
+   "confidence": 0.3,
+   "volume_hint": "multi-showroom furniture retailer on Uzum; sourcing (China vs local) not stated",
+   "contact_visible": "none in snippet",
+   "found_by": "marketplaces_catalogs"
+  },
+  {
+   "name": "yellowpages.uz tag 'Мебель из Китая'",
+   "platform": "yellowpages.uz",
+   "url": "https://www.yellowpages.uz/teg/mebel-iz-kitaya",
+   "city": "Uzbekistan",
+   "goods": "furniture from China - company tag list",
+   "evidence": "Several tag pages cover China-sourced goods, shipping, logistics and furniture. Their text says the companies asked to be found under the tag themselves",
+   "signals": [
+    "aggregator",
+    "mebel",
+    "Xitoydan",
+    "self_tagged_companies"
+   ],
+   "segment": "Y aggregator/classifieds",
+   "confidence": 0.3,
+   "volume_hint": "list page; enumerate companies on it",
+   "contact_visible": "none in snippet (directory shows phones)",
+   "found_by": "marketplaces_catalogs"
+  },
+  {
+   "name": "prom.uz tag 'Купить оптом в Ташкенте'",
+   "platform": "prom.uz",
+   "url": "https://www.prom.uz/tags/optom/",
+   "city": "Tashkent",
+   "goods": "wholesale listings across categories; sofa listings tagged Optom",
+   "evidence": "Several sofa listings are tagged 'Optom' (wholesale), for example a Divan Yostiq Мягкая мебель Мебель Yumshoq mebel Optom listing; В карточках указана страна производства, в том числе Китай",
+   "signals": [
+    "aggregator",
+    "optom",
+    "mebel",
+    "country_of_origin_china_field"
+   ],
+   "segment": "Y aggregator/classifieds",
+   "confidence": 0.3,
+   "volume_hint": "filterable by 'страна производства: Китай'",
+   "contact_visible": "none",
+   "found_by": "marketplaces_catalogs"
+  },
+  {
+   "name": "OLX.uz 'оптом' сантехника Ташкент",
+   "platform": "olx.uz",
+   "url": "https://www.olx.uz/dom-i-sad/tovari-dlya-stroitelstva-remonta/santehnika/tashkent/q-%D0%BE%D0%BF%D1%82%D0%BE%D0%BC/",
+   "city": "Tashkent",
+   "goods": "wholesale plumbing, water heaters",
+   "evidence": "на OLX.uz есть объявления об оптовой продаже сантехники и водонагревателей в Ташкенте. Это в основном частные продавцы и склады",
+   "signals": [
+    "aggregator",
+    "optom",
+    "santexnika",
+    "warehouses"
+   ],
+   "segment": "Y aggregator/classifieds",
+   "confidence": 0.3,
+   "volume_hint": "wholesale warehouse sellers; enumerate ads",
+   "contact_visible": "none",
+   "found_by": "marketplaces_catalogs"
+  },
+  {
+   "name": "Китайская торговая компания (ИП) — водяные насосы и задвижки",
+   "city": "Tashkent",
+   "platform": "pc.uz",
+   "url": "https://pc.uz/rubric/7594-inostrannye-kompanii",
+   "evidence": "PC.uz раздел «Иностранные компании»: «китайская торговая компания из Ташкента продает водяные насосы и задвижки, но это ИП, а не ООО» (название в сниппете не показано)",
+   "signals": [
+    "Xitoy",
+    "nasosy",
+    "zadvizhki",
+    "foreign_company"
+   ],
+   "segment": "E electronics/auto/appliance distributor",
+   "goods": "water pumps, gate valves",
+   "volume_hint": "unknown; industrial goods",
+   "contact_visible": "none",
+   "confidence": 0.3,
+   "found_by": "directories_maps"
+  },
+  {
+   "name": "OLX search page 'товары из китая' (aggregator seed)",
+   "platform": "OLX.uz",
+   "url": "https://www.olx.uz/list/q-%D1%82%D0%BE%D0%B2%D0%B0%D1%80%D1%8B-%D0%B8%D0%B7-%D0%BA%D0%B8%D1%82%D0%B0%D1%8F/",
+   "city": "Uzbekistan",
+   "goods": "mixed: cargo services, sourcing, goods from China",
+   "evidence": "Поиск по OLX.uz дал в основном объявления о карго-доставке и закупке товаров из Китая в Ташкенте, а не конкретные оптовые склады; related pages: /tashkent/q-товары-из-китая/, /tashkent/q-оптом-товар/, /uslugi/tashkent/q-карго-китай/",
+   "signals": [
+    "из Китая",
+    "aggregator"
+   ],
+   "segment": "Y aggregator/classifieds",
+   "confidence": 0.25,
+   "contact_visible": "none",
+   "volume_hint": "n/a; seed page, mostly competitor noise",
+   "legal_name": "",
+   "found_by": "olx"
+  },
+  {
+   "name": "Женская одежда оптом из Китая (optom_gz_clothes)",
+   "platform": "Telegram channel (via telemetr.me)",
+   "url": "https://telemetr.me/content/optom_gz_clothes",
+   "city": "not stated",
+   "goods": "women's clothing wholesale from China (Guangzhou)",
+   "evidence": "Telegram-канал \"Женская одежда оптом из Китая\" — optom_gz_clothes — Telemetr",
+   "signals": [
+    "optom",
+    "Guangzhou",
+    "Kitay"
+   ],
+   "segment": "Z unclear",
+   "confidence": 0.25,
+   "contact_visible": "none",
+   "volume_hint": "sister channel of optom_guangzhou1; geo unconfirmed",
+   "found_by": "telegram"
+  },
+  {
+   "name": "Одежда Оптом Китай (optom_guangzhou)",
+   "platform": "Telegram channel (via telemetr.me)",
+   "url": "https://telemetr.me/content/optom_guangzhou",
+   "city": "not stated (Tashkent not mentioned)",
+   "goods": "men's and women's clothing wholesale from China",
+   "evidence": "«Одежда Оптом Китай». Это канал про оптовую одежду из Китая, но Ташкент в описании не упоминается. Он описывает себя так: Женская и Мужская одежда оптом из Китая. Каталоги, по его словам, отбираются вручную ... по оптовым каталогам, которые отбираем вручную сами. Подписчиков около 287.",
+   "signals": [
+    "optom",
+    "Guangzhou",
+    "Kitay",
+    "287_subs"
+   ],
+   "segment": "Z unclear",
+   "confidence": 0.25,
+   "contact_visible": "none",
+   "volume_hint": "small; geo unconfirmed",
+   "found_by": "telegram"
+  },
+  {
+   "name": "pekin optim detskiy",
+   "platform": "Telegram channel (via telemetr.me)",
+   "url": "https://telemetr.me/content/pekin_optim_detskiy",
+   "city": "not stated",
+   "goods": "children's goods wholesale (Beijing)",
+   "evidence": "pekin optim detskiy (telemetr.me channel listing title; surfaced for query 'optom Xitoydan')",
+   "signals": [
+    "optom",
+    "Pekin",
+    "detskiy"
+   ],
+   "segment": "Z unclear",
+   "confidence": 0.25,
+   "contact_visible": "none",
+   "volume_hint": "title only; verify geo",
+   "found_by": "telegram"
+  },
+  {
+   "name": "Agama",
+   "platform": "prom.uz (wholesale category)",
+   "url": "https://www.prom.uz/uz/company/agama/mebel/",
+   "city": "Tashkent",
+   "goods": "upholstered furniture, dining groups",
+   "evidence": "Several Tashkent sellers have wholesale-tagged furniture and appliance pages ... another is Agama, which lists upholstered furniture and dining groups.",
+   "signals": [
+    "optom_category",
+    "mebel"
+   ],
+   "segment": "D construction/furniture importer",
+   "confidence": 0.25,
+   "contact_visible": "none in snippet",
+   "volume_hint": "wholesale-tagged; may be local manufacturer rather than importer",
+   "found_by": "telegram"
+  },
+  {
+   "name": "EFFECT INVEST ЧП",
+   "legal_name": "EFFECT INVEST ЧП",
+   "city": "Tashkent",
+   "platform": "yellowpages.uz",
+   "url": "https://www.yellowpages.uz/teg/optovaya-prodazha/tashkent",
+   "evidence": "тег «Оптовая продажа» Ташкент: «EFFECT INVEST ЧП ... Адрес: Узбекистан, 100100, Ташкентская область, Ташкент, Яккасарайский район»",
+   "signals": [
+    "optom",
+    "legal_form",
+    "address_visible"
+   ],
+   "segment": "Z unclear",
+   "goods": "unknown (wholesale tag)",
+   "volume_hint": "unknown",
+   "contact_visible": "address: Ташкент, Яккасарайский район",
+   "confidence": 0.25,
+   "found_by": "directories_maps"
+  },
+  {
+   "name": "Uzum seller wang001",
+   "city": "Uzbekistan",
+   "platform": "uzum.uz",
+   "url": "https://uzum.uz/ru/shop/wang001",
+   "evidence": "URL появился в выдаче по запросам «товары из Китая оптом Ташкент» и «glotr оптом Китай»; текст сниппета отсутствует",
+   "signals": [
+    "marketplace",
+    "Xitoy_query_hit"
+   ],
+   "segment": "B marketplace seller",
+   "goods": "unknown",
+   "volume_hint": "unknown",
+   "contact_visible": "none",
+   "confidence": 0.25,
+   "found_by": "directories_maps"
+  },
+  {
+   "name": "myeds_uz (Доставка грузов из Китая в Узбекистан)",
+   "platform": "instagram",
+   "url": "https://www.instagram.com/myeds_uz/",
+   "city": "Tashkent",
+   "goods": "cargo China→UZ (competitor seed)",
+   "evidence": "Доставка грузов из Китая в Узбекистан ... указывает адрес в Ташкенте и ставки: авиа около 9,5 $ и авто около 5,5 $",
+   "signals": [
+    "cargo",
+    "Toshkent address",
+    "rates"
+   ],
+   "segment": "X competitor/cargo",
+   "confidence": 0.2,
+   "contact_visible": "address shown on page (not in snippet)",
+   "volume_hint": "n/a – competitor; followers/comments are importer leads",
+   "found_by": "instagram"
+  },
+  {
+   "name": "milliy.cargo",
+   "platform": "instagram",
+   "url": "https://www.instagram.com/milliy.cargo/",
+   "city": "Uzbekistan",
+   "goods": "cargo + 1688/Taobao/Pinduoduo buyout (competitor seed)",
+   "evidence": "ТОВАРЫ ИЗ КИТАЯ / TAOBAO / PINDUODUO / 1688 🇨🇳 (@milliy.cargo)",
+   "signals": [
+    "cargo",
+    "1688",
+    "Taobao"
+   ],
+   "segment": "X competitor/cargo",
+   "confidence": 0.2,
+   "contact_visible": "none in snippet",
+   "volume_hint": "n/a – competitor seed",
+   "found_by": "instagram"
+  },
+  {
+   "name": "Elite Silk Натуральные шёлковые ткани в Ташкенте",
+   "platform": "facebook",
+   "url": "https://www.facebook.com/elitesilkuz/",
+   "city": "Tashkent",
+   "goods": "natural silk fabrics",
+   "evidence": "Elite Silk Натуральные шёлковые ткани в Ташкенте",
+   "signals": [
+    "textile"
+   ],
+   "segment": "Z unclear",
+   "confidence": 0.2,
+   "contact_visible": "none in snippet",
+   "volume_hint": "no wholesale/volume signal in snippet; silk fabric is a common China import",
+   "found_by": "facebook"
+  },
+  {
+   "name": "Abu Sahiy Cargo",
+   "platform": "facebook",
+   "url": "https://www.facebook.com/abusahiy.cargo/",
+   "city": "Tashkent",
+   "goods": "cargo from USA/Europe (air + container)",
+   "evidence": "Abu Sahiy Cargo специализируется на грузах из США и Европы, а не из Китая, и предлагает Avia va Konteyner — 5 kunda yetkazamiz",
+   "signals": [
+    "konteyner",
+    "cargo"
+   ],
+   "segment": "X competitor/cargo",
+   "confidence": 0.2,
+   "contact_visible": "none in snippet",
+   "volume_hint": "seed only: named after Abu Saxiy wholesale market; audience = bazaar importers",
+   "found_by": "facebook"
+  },
+  {
+   "name": "OLX cargo seller 4j7yr (1688 Cargo Xitoydan Toshkentga)",
+   "platform": "OLX.uz",
+   "url": "https://www.olx.uz/list/user/4j7yr/",
+   "city": "Tashkent",
+   "goods": "China→Tashkent cargo, 1688 delivery",
+   "evidence": "A user profile page shows several Tashkent-based cargo ads, such as \"1688 Cargo Xitoydan Toshkentga\" and \"Xitoy Cargo Toshkent | Minimalka Yo'q,\" with posting dates in July 2026; also \"Xitoydan Toshkentga Tezkor va Ishonchli Kargo Xizmati\"",
+   "signals": [
+    "1688",
+    "Xitoydan",
+    "cargo",
+    "many_ads",
+    "no_min_order"
+   ],
+   "segment": "X competitor/cargo",
+   "confidence": 0.2,
+   "contact_visible": "none",
+   "volume_hint": "competitor; seed for where importers comment/inquire",
+   "legal_name": "",
+   "found_by": "olx"
+  },
+  {
+   "name": "OLX sourcing agent 'Xitoydan tovar olib keltiramiz' (ID4iw5U)",
+   "platform": "OLX.uz",
+   "url": "https://www.olx.uz/d/oz/obyavlenie/xitoydan-tovar-olib-keltiramiz-zakupka-lyubyx-tovarov-iz-kitaya-ID4iw5U.html",
+   "city": "Uzbekistan",
+   "goods": "sourcing on 1688/Pinduoduo/Taobao/Alibaba + cargo",
+   "evidence": "Pinduoduo, 1688 va Taobao platformalaridan eng sifatli va arzon mahsulotlarni topib beramiz; Har qanday hajmdagi (dona yoki ulgurji) yuklar bilan ishlaymiz; Найдем лучшие предложения на 1688, Pinduoduo, Taobao и Alibaba",
+   "signals": [
+    "1688",
+    "Xitoydan",
+    "ulgurji",
+    "sourcing_agent"
+   ],
+   "segment": "X competitor/cargo",
+   "confidence": 0.2,
+   "contact_visible": "none",
+   "volume_hint": "competitor/agent; seed",
+   "legal_name": "",
+   "found_by": "olx"
+  },
+  {
+   "name": "Explorer Logistics (OLX cargo ad ID4qbOC)",
+   "platform": "OLX.uz",
+   "url": "https://www.olx.uz/d/obyavlenie/explorer-logistics-dostavka-gruzov-iz-kitaya-v-uzbekistan-kargo-i-log-ID4qbOC.html",
+   "city": "Uzbekistan",
+   "goods": "China→Uzbekistan cargo: equipment, building materials, electronics, furniture, parts",
+   "evidence": "Explorer Logistic позиционирует себя как партнёр по доставке товаров из Китая в Узбекистан. В объявлении перечислены типы грузов: оборудование, строительные материалы, электроника, мебель, запчасти",
+   "signals": [
+    "cargo",
+    "из Китая",
+    "konteyner"
+   ],
+   "segment": "X competitor/cargo",
+   "confidence": 0.2,
+   "contact_visible": "none",
+   "volume_hint": "competitor; seed",
+   "legal_name": "",
+   "found_by": "olx"
+  },
+  {
+   "name": "ЧП \"L tex\"",
+   "platform": "prom.uz (wholesale category)",
+   "url": "https://www.prom.uz/uz/company/chp-l-tex/mebel/",
+   "city": "Tashkent",
+   "goods": "mattresses and bedding",
+   "evidence": "One is a mattress and bedding seller, ЧП \"L tex\"",
+   "signals": [
+    "optom_category",
+    "legal_form_ChP",
+    "mebel"
+   ],
+   "segment": "D construction/furniture importer",
+   "confidence": 0.2,
+   "contact_visible": "none in snippet",
+   "volume_hint": "wholesale-tagged; origin not stated",
+   "found_by": "telegram"
+  },
+  {
+   "name": "Uzkit",
+   "platform": "prom.uz",
+   "url": "https://www.prom.uz/company/uzkit/",
+   "city": "Tashkent",
+   "goods": "unknown (name implies Uzbek-China trade)",
+   "evidence": "The page lists a Tashkent supplier that has been on the portal for 7 years, but shows 0 products on the service 0 товаров на сервисе",
+   "signals": [
+    "name_uz_kitay",
+    "7_years_on_portal"
+   ],
+   "segment": "Z unclear",
+   "confidence": 0.2,
+   "volume_hint": "none",
+   "contact_visible": "none in snippet",
+   "found_by": "marketplaces_catalogs"
+  },
+  {
+   "name": "Promzona uz",
+   "platform": "prom.uz",
+   "url": "https://www.prom.uz/company/promzona-uz-1531/",
+   "city": "Tashkent",
+   "goods": "home goods (kettle etc.)",
+   "evidence": "Promzona and Chp Beta pages list home goods such as a kettle and farm equipment, but their snippets don't mention wholesale or Chinese sourcing",
+   "signals": [
+    "marketplace_company_page",
+    "home_goods"
+   ],
+   "segment": "Z unclear",
+   "confidence": 0.2,
+   "volume_hint": "none",
+   "contact_visible": "none in snippet",
+   "found_by": "marketplaces_catalogs"
+  },
+  {
+   "name": "OPTOM PARFUM (@optom_parfum_optom)",
+   "platform": "Telegram channel (via telemetr.me)",
+   "url": "https://telemetr.me/content/optom_parfum_optom",
+   "city": "Tashkent",
+   "goods": "perfume replicas and testers, wholesale",
+   "evidence": "OPTOM PARFUM is a wholesale perfume channel in Tashkent, but it isn't related to Chinese goods. It lists a phone number and an order contact (@optom_parfum_zakas). ... described as an online store selling perfume replicas and testers. Its listing shows about 30 subscribers.",
+   "signals": [
+    "optom",
+    "phone_visible",
+    "telegram_visible",
+    "31_subs"
+   ],
+   "segment": "A bazaar wholesaler",
+   "confidence": 0.15,
+   "contact_visible": "phone (+998, digits not quoted in snippet) + telegram @optom_parfum_zakas",
+   "volume_hint": "tiny channel; China origin not stated",
+   "found_by": "telegram"
+  },
+  {
+   "name": "OPTOM MISR MARKET",
+   "platform": "Telegram channel (via telemetr.me)",
+   "url": "https://telemetr.me/content/ayshe_hidjab",
+   "city": "not stated (Uzbek-language)",
+   "goods": "Egyptian goods, abayas, cosmetics (wholesale)",
+   "evidence": "Telegram channel \"OPTOM MISR MARKET\" with about 6.1K subscribers ... It sells Egyptian goods, abayas, and cosmetics, and it is written in Uzbek.",
+   "signals": [
+    "optom",
+    "6100_subs",
+    "uz_language"
+   ],
+   "segment": "A bazaar wholesaler",
+   "confidence": 0.15,
+   "contact_visible": "none",
+   "volume_hint": "wholesaler but goods from Egypt, not China",
+   "found_by": "telegram"
+  },
+  {
+   "name": "U VENDOR",
+   "platform": "glotr.uz",
+   "url": "https://glotr.uz/showcase/u-vendor-12603/sanoat-uskunalari/",
+   "city": "China (Guangzhou office), listed on Uzbek platform",
+   "goods": "sourcing agent: supplier search, purchasing, export paperwork, inspections, customs consulting",
+   "evidence": "This is a sourcing agent based in China... The company is based and registered in the PRC and holds a license for importing and exporting goods in China. It also lists a Guangzhou office",
+   "signals": [
+    "Guangzhou",
+    "sourcing_agent",
+    "competitor"
+   ],
+   "segment": "X competitor/cargo",
+   "confidence": 0.15,
+   "volume_hint": "seed only; not an Uzbek importer",
+   "contact_visible": "none in snippet",
+   "found_by": "marketplaces_catalogs"
+  },
+  {
+   "name": "Ассоциация таможенных брокеров Узбекистана",
+   "platform": "facebook",
+   "url": "https://www.facebook.com/atbuz/",
+   "city": "Tashkent",
+   "goods": "customs brokers association (networking hub)",
+   "evidence": "Ассоциация таможенных брокеров Узбекистана имеет страницу в Facebook; это полезный источник по таможенным вопросам, но не группа оптовиков",
+   "signals": [
+    "customs",
+    "association"
+   ],
+   "segment": "Y aggregator/classifieds",
+   "confidence": 0.1,
+   "contact_visible": "none in snippet",
+   "volume_hint": "not a lead; seed for importer networking",
+   "found_by": "facebook"
+  },
+  {
+   "name": "Hongbao.uz | Barchasi Xitoy haqida",
+   "platform": "Telegram channel (via telemetr.me)",
+   "url": "https://telemetr.me/content/hongbaouz",
+   "city": "not stated (.uz)",
+   "goods": "info channel about China (not a seller)",
+   "evidence": "Hongbao.uz | Barchasi Xitoy haqida is a Uzbek-language channel about China, but its page shows only about 45 subscribers. It doesn't appear to be a wholesale channel. Its admin contact is listed as @Zm_admin.",
+   "signals": [
+    "Xitoy",
+    "uz_language",
+    "45_subs",
+    "telegram_visible"
+   ],
+   "segment": "Z unclear",
+   "confidence": 0.1,
+   "contact_visible": "telegram handle @Zm_admin",
+   "volume_hint": "seed only — audience of China-interested Uzbeks",
+   "found_by": "telegram"
+  },
+  {
+   "name": "SAFlogistics",
+   "platform": "yellowpages.uz",
+   "url": "https://www.yellowpages.uz/teg/tovary-iz-kitaya",
+   "city": "Tashkent",
+   "goods": "logistics / goods from China",
+   "evidence": "Yellowpages.uz ведёт рубрику «Товары из китая» и указывает в ней логистическую компанию SAFlogistics в Ташкенте",
+   "signals": [
+    "logistics",
+    "competitor",
+    "Xitoydan"
+   ],
+   "segment": "X competitor/cargo",
+   "confidence": 0.1,
+   "volume_hint": "seed only",
+   "contact_visible": "none in snippet",
+   "found_by": "marketplaces_catalogs"
+  },
+  {
+   "name": "Abu Sahiy Logistics",
+   "city": "Tashkent",
+   "platform": "own site (abusahiylogistics.uz)",
+   "url": "https://abusahiylogistics.uz/",
+   "evidence": "«supplies goods from China and runs a shipping business. It cites 16 years of experience in wholesale and retail supply from China»",
+   "signals": [
+    "Xitoydan",
+    "optom",
+    "cargo",
+    "Abu_Sahiy"
+   ],
+   "segment": "X competitor/cargo",
+   "goods": "cargo + wholesale supply from China",
+   "volume_hint": "n/a — seed",
+   "contact_visible": "none",
+   "confidence": 0.1,
+   "found_by": "directories_maps"
+  },
+  {
+   "name": "TGStat Uzbekistan — Sales channels rating",
+   "platform": "uz.tgstat.com",
+   "url": "https://uz.tgstat.com/en/ratings/channels/sales/private?sort=members_7d",
+   "city": "Uzbekistan",
+   "goods": "n/a (channel catalogue)",
+   "evidence": "Rating of Telegram channels / Uzbekistan / Sales — TGStat",
+   "signals": [
+    "aggregator",
+    "uz_geo"
+   ],
+   "segment": "Y aggregator/classifieds",
+   "confidence": 0,
+   "contact_visible": "none",
+   "volume_hint": "seed: browse for optom/ulgurji channels with subscriber counts",
+   "found_by": "telegram"
+  },
+  {
+   "name": "top.uz — Оптовая торговля в Ташкенте (815 companies)",
+   "platform": "top.uz directory",
+   "url": "https://top.uz/section/optovaya-torgovlya?PAGEN_1=39",
+   "city": "Tashkent",
+   "goods": "n/a (wholesaler directory)",
+   "evidence": "Оптовая торговля в Ташкенте - найдено 815 компании",
+   "signals": [
+    "aggregator",
+    "optom",
+    "phones_in_directory"
+   ],
+   "segment": "Y aggregator/classifieds",
+   "confidence": 0,
+   "contact_visible": "none in snippet (directory has addresses/phones)",
+   "volume_hint": "seed for a directory-platform run",
+   "found_by": "telegram"
+  },
+  {
+   "name": "goldenpages.uz рубрика «Оборудование из Китая - продажа, монтаж, установка»",
+   "city": "Uzbekistan",
+   "platform": "goldenpages.uz",
+   "url": "https://www.goldenpages.uz/en/rubrics/?Id=106080",
+   "evidence": "«рубрика «Оборудование из Китая» с несколькими компаниями, включая дистрибьюторов, но перечень в выдаче неполный»",
+   "signals": [
+    "Xitoydan",
+    "oborudovanie",
+    "rubric_page"
+   ],
+   "segment": "Y aggregator/classifieds",
+   "goods": "rubric: equipment from China",
+   "volume_hint": "crawl seed",
+   "contact_visible": "none",
+   "confidence": 0,
+   "found_by": "directories_maps"
+  },
+  {
+   "name": "goldenpages.uz «Компании и организации на рынок Абу-Сахий»",
+   "city": "Tashkent",
+   "platform": "goldenpages.uz",
+   "url": "https://www.goldenpages.uz/street/?Id=41003",
+   "evidence": "street-level directory page for the Abu-Sahiy market with category counts; ABU SAHIY ТОРГОВЫЙ ЦЕНТР (Id=65008) «на рынке Абу-Сахий на проспекте Бунёдкор»",
+   "signals": [
+    "Abu_Sahiy",
+    "bazaar",
+    "street_page"
+   ],
+   "segment": "Y aggregator/classifieds",
+   "goods": "market tenant list",
+   "volume_hint": "crawl seed — highest-density China-goods wholesalers",
+   "contact_visible": "address: рынок Абу-Сахий, пр. Бунёдкор",
+   "confidence": 0,
+   "found_by": "directories_maps"
+  },
+  {
+   "name": "yellowpages.uz теги оптовой торговли Ташкент (хозтовары / стройматериалы / офисные товары / бумага)",
+   "city": "Tashkent",
+   "platform": "yellowpages.uz",
+   "url": "https://www.yellowpages.uz/teg/optovaya-torgovlya-hoztovarami/tashkent",
+   "evidence": "тег-страницы: optovaya-torgovlya-hoztovarami, optovaya-torgovlya-strojmaterialami, optovaya-torgovlya-ofisnymi-tovarami, optovaya-torgovlya-bumagoj, optovaya-prodazha — «адреса и телефоны в сниппетах частично скрыты (видно только +998...)»",
+   "signals": [
+    "optom",
+    "tag_page"
+   ],
+   "segment": "Y aggregator/classifieds",
+   "goods": "tag pages",
+   "volume_hint": "crawl seed",
+   "contact_visible": "phone masked (+998...)",
+   "confidence": 0,
+   "found_by": "directories_maps"
+  },
+  {
+   "name": "optlist.ru — Поставщики в Ташкенте оптом (электроника/бытовая техника, товары для дома, одежда)",
+   "city": "Tashkent",
+   "platform": "optlist.ru",
+   "url": "https://optlist.ru/suppliers/electronika-bytovaya-tehnika-optom/tashkent--1512569",
+   "evidence": "«Электроника, бытовая техника в Ташкенте … (импорт из Китая, Европы и Америки)»; также /wholesales/tovary-dlya-doma-optom/tashkent--1512569 и /wholesales/odezhda-obuv-optom/tashkent--1512569",
+   "signals": [
+    "optom",
+    "Xitoydan",
+    "catalog_page"
+   ],
+   "segment": "Y aggregator/classifieds",
+   "goods": "catalog pages",
+   "volume_hint": "crawl seed",
+   "contact_visible": "none",
+   "confidence": 0,
+   "found_by": "directories_maps"
+  }
+ ],
+ "apis": "# Open-web importer discovery for GSR Logistics — platform design memo (verified 2026-10-23, 14 WebSearch calls: 13 standard + 1 extended)\n\n## 0. Headline findings that change the plan\n- **Google Custom Search JSON API is closing**: official page says it is \"not available for new customers\" and pricing (100/day free, $5/1k, max 10k/day) applies only to existing customers \"until the service discontinuation on January 1, 2027\" ([developers.google.com](https://developers.google.com/custom-search/v1/overview?hl=en)). If GSR has no existing CSE key → use a SERP provider (DataForSEO queue $0.60/1k) from day 1.\n- **Instagram hashtag budget is 30 unique hashtags / rolling 7 days per Business account**, re-queries free; needs App Review for \"Instagram Public Content Access\" ([Meta docs](https://developers.facebook.com/documentation/instagram-platform/instagram-api-with-facebook-login/hashtag-search)). No 2025–26 change found.\n- **Facebook Pages Search is NOT dead**: Meta guide (updated Apr 2026) still documents `pages/search`; app token + \"Page Public Metadata Access\" suffices for public page info ([Meta docs](https://developers.facebook.com/documentation/pages-api/search-pages)). Marketplace has no API; UZ availability unconfirmed.\n- **Meta v. Bright Data**: N.D. Cal. (Judge Chen) granted Bright Data summary judgment — \"logged-out scraping of public data … did not breach the terms\"; only tortious-interference claim remained ([fbm.com](https://www.fbm.com/data-analytics/publications/major-decision-affects-law-of-scraping-and-online-data-collection-meta-platforms-v-bright-data/), [MediaPost](https://www.mediapost.com/publications/article/392920/judge-sides-against-meta-in-battle-over-scraping-p.html)). Ruling date/appeal status not in results. US precedent only; it does not bind Uzbek courts or stop Meta IP bans.\n- **Unknowns after this run**: TGStat API price (not found; task-known S plan 4,200 RUB/mo stands), ZRU-776 art. 31 and PQ-265 (not found on the open web — verify on lex.uz), OLX `__PRERENDERED_STATE__` key (not confirmed), parse.bot Uzum endpoints (not found), 2GIS official API price (not found), Glotr/Flagma/Top.uz (not searched — budget cap).\n\n---\n\n## 1. Platform tables\n\n### 1.1 Instagram\n| Route | Fields | Limits / price | Legal risk | MVP? |\n|---|---|---|---|---|\n| **Official: Graph API Business Discovery** (by username, requires own IG Business acct + FB app + review; permission in results: `instagram_basic` + \"Instagram Public Content Access\" feature) | biography, website, followers_count, media_count, recent media captions | Per-app Graph rate limits not surfaced in this run (unverified). Free. Review needed ([Meta](https://developers.facebook.com/documentation/instagram-platform/instagram-api-with-facebook-login/hashtag-search)) | Low (ToS-compliant) | **Yes** — enrichment step for usernames found via SERP/Telegram |\n| **Official: Hashtag Search API** (`ig_hashtag_search` → `top_media`/`recent_media`) | media id, caption, permalink, like/comment count (no author username on recent_media per docs — treat as unverified) | **30 unique hashtags / 7 days / account**; emojis & Stories unsupported; `recently_searched_hashtags` shows quota ([Meta](https://developers.facebook.com/documentation/instagram-platform/instagram-graph-api/reference/ig-hashtag-search.md)). Supermetrics: quota scales per connected profile (2 profiles → 60/week) ([Supermetrics](https://docs.supermetrics.com/docs/good-to-know-about-instagram-public-data.md)) | Low | Yes, but ration: ~4 new hashtags/day |\n| **Unofficial: Apify actors** | full public profile, bio, external URL, posts | `apify/instagram-profile-scraper` \"from $1.60/1,000 profiles\", \"$2.30 per 1,000 on Starter\" ([Apify](https://apify.com/apify/instagram-profile-scraper?fpr=4nrc8)); PPR actor $2.00/1k; TrueFetch $2.50/1k; mighty_monk from $5/1k ([Apify](https://apify.com/truefetch/instagram-profile-api)) | Medium: Meta ToS breach for logged-in accounts; Bright Data ruling helps only for logged-out public data in US; account/IP bans | Only as fallback for bulk bio pulls (company handles only) |\n| **Discovery via SERP** (`site:instagram.com \"optom\" \"Toshkent\"`) | handle, bio snippet | SERP provider price (see §1.3) | Low | **Yes — primary discovery** |\n\n### 1.2 Facebook\n| Route | Fields | Limits / price | Legal risk | MVP? |\n|---|---|---|---|---|\n| **Official: Pages Search (`/pages/search?q=`)** | id, name, location, link, verification_status (public page metadata) | Needs app token + \"Page Public Metadata Access\"; \"Page Public Content Access\" (review) for content/competitive analysis ([Meta](https://developers.facebook.com/documentation/pages-api/search-pages); [v6.0 changelog](https://developers.secure.facebook.com/docs/graph-api/changelog/version6.0)) | Low | Yes (cheap, keyword → page list) |\n| **Official: Page public content (posts)** via PPCA | posts, about, phone/website if public | App Review; PPCA approval harder since 2018 restriction ([Meta 2018](https://about.fb.com/news/2018/07/a-platform-update/)) | Low | Phase 2 |\n| **Facebook Marketplace** | — | No API found; UZ availability not confirmed by results | Scraping = ToS breach, logged-in only | **No** |\n| **Groups** (e.g. \"Оптом Ташкент\") | — | No API for non-admin groups (not re-verified) | High if scraped logged-in | No (manual only) |\n| **Meta Lead Ads** (inbound) | lead form fields → webhook → LogisticsERP | Ad spend only; not searched this run | None | Yes, as compliant inbound |\n\n### 1.3 Google (web + Maps)\n| Route | Fields | Limits / price | Legal risk | MVP? |\n|---|---|---|---|---|\n| **Custom Search JSON API** | title, link, snippet | 100/day free, $5/1k, ≤10k/day — **existing customers only; discontinued 2027-01-01** ([Google](https://developers.google.com/custom-search/v1/overview?hl=en)) | None | Only if key already exists |\n| **SERP providers** | organic results, snippets, maps pack | DataForSEO Standard Queue $0.60/1k, Live $2.00/1k; SerpApi Dev $75/mo = 5k ($15/1k); Bright Data PAYG $3/1k, Growth $2.30, Business $2.03 ([apiserpent](https://apiserpent.com/blog/serpapi-vs-dataforseo-benchmark), [keyword.com](https://keyword.com/blog/bright-data-serp-api-vs-datafor-seo/)) | Low (provider bears scraping) | **Yes — DataForSEO queue** |\n| **Places API (New) Text Search** | name, formatted_address, phone, website, types, rating, place_id | IDs Only: free unlimited; Pro $32/1k (5k free/mo); Enterprise $35/1k (1k free); Enterprise+Atmosphere $40/1k; Place Details Essentials $5/1k (10k free) ([Google pricing](https://developers.google.com/maps/billing-and-pricing/pricing)) | Low if ToS: place_id cacheable \"in accordance with Places API Policies\"; lat/lng cache ≤30 days then delete ([Maps terms 2025-05-01](https://cloud.google.com/archive/maps-platform/terms/maps-service-terms-20250501)). \"Other content\" retention rule not confirmed in this run — assume no persistent storage of name/phone beyond place_id | Yes, ≤5k Pro calls/mo free |\n| **Unofficial Maps scrapers** | all card fields + reviews | Apify ~$1–5/1k (not verified for Google Maps this run) | Medium (Google ToS) | No |\n\n### 1.4 Yandex Maps / 2GIS\n| Route | Fields | Limits / price | Legal risk | MVP? |\n|---|---|---|---|---|\n| **Yandex Geosearch (Places) API** | org name, address, phone, URL, categories | Annual minimum: $2,000/yr for 1,000 queries/day … $22,000/yr for 200,000/day; overage $1–3 per 1k; >200k → quote; **Uzbekistan not mentioned** ([Yandex](https://yandex.com/dev/tariffs/doc/en/geosearch/prices/)) | Low | **No** for MVP ($2k/yr floor) |\n| **Yandex Maps unofficial** | same | Apify yandex-maps scrapers exist ([Apify](https://apify.com/dami_studio/yandex-maps-scraper)), price not captured | Medium | Fallback |\n| **2GIS Places API (official)** | org, phone, rubrics | **No official price found** — request via 2GIS developer sales | Low | Ask quote (2GIS strong in Tashkent) |\n| **2GIS unofficial (Apify)** | places + business data | $0.40–$4.99 per 1k places; covers Uzbekistan ([Apify crawlerbros](https://apify.com/crawlerbros/2gis-places-scraper), [dami_studio](https://apify.com/dami_studio/2gis-places-scraper)) | Medium (2GIS ToS) | Pilot 1k rows for \"оптовая база/склад\" rubrics |\n\n### 1.5 OLX.uz\n| Route | Fields | Limits / price | Legal risk | MVP? |\n|---|---|---|---|---|\n| **Official API** | — | None public (confirmed by absence; no partner API in results) | — | — |\n| **Embedded JSON / SSR state** | listing JSON, seller type | `__PRERENDERED_STATE__` **not confirmed by results**; verify in page source | Medium (OLX ToS not retrieved this run; phone reveal is behind a logged-in/limited endpoint — not verified) | Internal pilot only |\n| **Apify `lowlanddata/olx-uz-scraper`** | listings, price (tiyin), **business-vs-private flag**, \"zero seller personal data\", no coordinates ([Apify](https://apify.com/lowlanddata/olx-uz-scraper.md)) | $1.99/1k listings PAYG | Low–medium (no PD) | **Yes** — business-flag + volume words |\n| **Other Apify** | listings | abotapi OLX Global $1.00/1k (incl. UZ) ([Apify](https://apify.com/abotapi/olx-scraper)); scrapyx $1.05/1k (incl. UZ) ([Apify](https://apify.com/scrapyx/olx-listings-scraper)); logiover UA $3.50/1k with \"phone-available\" filter ([Apify](https://apify.com/logiover/olx-scraper.md)) | Medium if phones pulled | Secondary |\n\n### 1.6 Telegram\n| Route | Fields | Limits / price | Legal risk | MVP? |\n|---|---|---|---|---|\n| **t.me/s/<channel> public preview** | last ~20 posts HTML, no login | Free; HTML only, no search | Low | Yes, for channel snapshots |\n| **Telethon/MTProto (own acct)** | messages, members where public | Known (not re-verified): FloodWait, join limits | Medium (TOS + PD of individuals) | Yes, read-only, company-named posts only |\n| **TGStat API** | channel search, posts search, stats | Search API / Stat API split; paid tiers unlock starred methods ([rtgstat README](https://cran.rstudio.com/web/packages/rtgstat/readme/README.html)); **price not in results** (known: S 4,200 RUB/mo) | Low | **Yes** |\n| **Telegram Ads via reseller (inbound)** | — | ClickMe = \"official Telegram partner in Uzbekistan\", $1,000 min deposit ([Spot.uz](https://www.spot.uz/ru/2025/01/14/telegram-ad/)); eLama \"от 0 €\" for UZ ([eLama](https://elama.ru/blog/zapuskayte-reklamu-telegram-ads-v-uzbekistane-s-elama/)); Magnetto from €500; direct account €2M (Spot) vs €2,000 (blog) — conflicting ([telegramadsanalytics](https://telegramadsanalytics.com/blog/telegram-ads-agency-guide-2026)) | None | Phase 2 inbound |\n\n### 1.7 Marketplaces & catalogues\n| Route | Fields | Limits / price | Legal risk | MVP? |\n|---|---|---|---|---|\n| **Uzum — Apify `getascraper/uzum-scraper`** | price, discount, rating, **order count**, review count, category, image; keyword search; seller-level pull not confirmed ([Apify](https://apify.com/getascraper/uzum-scraper)) | $3.30/1k | Medium (Uzum ToS) | Yes — order-count → volume proxy; seller name needs verification |\n| **Uzum internal catalog endpoints / parse.bot** | — | **Not found in results** | Medium | Only after manual check |\n| **Glotr / Flagma / Top.uz** | company name, phone, category, \"оптом\" listings | **Not searched (budget)** — check robots.txt/sitemap first | Low–medium (B2B directories, company-level data) | Yes if robots allow; else manual |\n\n---\n\n## 2. Keyword matrix (search = category term × B2B marker × geo)\n\n**B2B markers (AND one of):**\n| UZ-Latin | UZ-Cyrillic | RU |\n|---|---|---|\n| optom, ulgurji, ulgurji narx, optom baza | оптом, улгуржи, улгуржи нарх | оптом, опт, мелкий опт, крупный опт, оптовая база, оптовые цены |\n| Xitoydan, Xitoydan to'g'ridan-to'g'ri, zavoddan, ishlab chiqaruvchidan | Хитойдан, заводдан | из Китая, напрямую из Китая, прямые поставки, от производителя, с фабрики |\n| konteyner, fura, partiya, katta hajmda | контейнер, фура, партия | контейнер, фура, партиями, крупными партиями |\n| diler, distribyutor, yetkazib beruvchi, import | дилер, дистрибьютор, импорт | дилер, дистрибьютор, поставщик, импортёр, официальный импортер |\n| do'konlar uchun, sklad, minimal buyurtma | дўконлар учун, склад | для магазинов, склад, мин. заказ, MOQ, 1688, Taobao, Alibaba, Иу/Yiwu, Гуанчжоу |\n\n**Goods categories (China-import heavy):**\n| UZ-Latin | UZ-Cyrillic | RU |\n|---|---|---|\n| mato, gazlama | мато, газлама | ткани, текстиль |\n| poyabzal | пойабзал | обувь |\n| kiyim, trikotaj | кийим | одежда, трикотаж |\n| uy-ro'zg'or buyumlari, idish-tovoq | уй-рўзғор, идиш-товоқ | хозтовары, посуда |\n| avto ehtiyot qismlar, shina | авто эҳтиёт қисмлар | автозапчасти, шины |\n| qurilish mollari, santexnika, kafel | қурилиш моллари, сантехника | стройматериалы, сантехника, плитка |\n| mebel furnitura, mebel | мебель фурнитура | мебельная фурнитура, мебель |\n| o'yinchoqlar | ўйинчоқлар | игрушки |\n| kosmetika, parfyumeriya | косметика | косметика, бытовая химия |\n| telefon aksessuarlari, elektronika, maishiy texnika | телефон аксессуарлари | аксессуары для телефонов, электроника, бытовая техника |\n| yoritgich, LED, elektr mollari | ёритгич | светильники, LED, электротовары |\n| uskuna, dastgoh, stanok | ускуна, дастгоҳ | оборудование, станки, линия |\n| xomashyo, granula, plastik | хомашё | сырьё, гранулы, полимеры |\n| qadoqlash, paket, karobka | қадоқлаш | упаковка, пакеты, гофрокороб |\n| kanselyariya | канцелярия | канцтовары |\n| sumka, chamadon | сумка | сумки, чемоданы |\n\n**Geo anchors:** Toshkent/Тошкент/Ташкент, Abu Sahiy, Bek Baraka, Chorsu, Urikzor, Yangiobod, Malika, Qo'yliq, Sergeli, Andijon, Samarqand, Farg'ona, Namangan, Buxoro, Nukus.\n\n**Query templates:** `site:instagram.com (\"optom\" OR \"оптом\") \"<category>\" (\"Toshkent\" OR \"Ташкент\")`; `site:t.me (\"оптом\" OR \"optom\") \"<category>\"`; `site:olx.uz \"оптом\" \"<category>\"`; Places text: `\"оптовая база <category> Ташкент\"`, `\"<category> optom Toshkent\"`; FB pages/search `q=<category> optom`.\n\n---\n\n## 3. Weekly crawl schedule (automated, UTC+5)\n| Day | Job | Volume / cost control |\n|---|---|---|\n| Mon | SERP batch (DataForSEO queue): 17 categories × 3 languages × 3 markers × 3 geos ≈ 460 queries → extract instagram/t.me/olx/company-site URLs | ~$0.30 at $0.60/1k |\n| Tue | Places Text Search (Pro tier) for \"оптовая база/склад/optom\" × category × city; store **place_id only** + score; re-fetch details on demand | ≤1,250 calls/wk to stay inside 5k/mo free |\n| Wed | Instagram Business Discovery enrichment of new handles (official); Hashtag API: 4 new hashtags (28/week < 30 cap) | free; log `recently_searched_hashtags` |\n| Thu | OLX.uz (lowlanddata actor) for business-flag listings in wholesale categories; dedupe by seller name | ~2k rows ≈ $4 |\n| Fri | Uzum keyword runs (order_count ≥ threshold) + Glotr/Flagma/Top.uz (robots-permitting) | ~1k rows ≈ $3.30 |\n| Sat | Telegram: t.me/s snapshots of ~50 wholesale/cargo-adjacent channels; TGStat posts search for \"оптом из Китая\", \"konteyner\"; Telethon read-only on public groups | TGStat plan + 0 |\n| Sun | Score (§4), dedupe (phone/handle/site), suppress competitors (cargo/kargo/логистика/карго in name), push to LogisticsERP lead webhook; weekly report to Telegram | — |\n| Monthly | Facebook `pages/search` sweep (metadata only); re-check quota/pricing pages; purge lat/lng >30 days | — |\n\n---\n\n## 4. Deterministic \"B2B ≥3 m³\" signal checklist (score ≥ 4 = lead; any HARD-NEG = drop)\n**Universal (+ points):** +2 \"оптом/optom/ulgurji\" in name/bio/title; +2 \"из Китая/Xitoydan/1688/Taobao/Yiwu/Guangzhou\"; +2 \"контейнер/konteyner/фура/fura/партия/partiya\"; +1 \"от производителя/zavoddan/прямые поставки\"; +1 \"дилер/дистрибьютор/поставщик/yetkazib beruvchi\"; +1 \"склад/sklad/база\" or market name (Abu Sahiy, Bek Baraka, Chorsu, Urikzor, Yangiobod, Malika, Sergeli); +1 \"для магазинов/do'konlar uchun/мин. заказ/MOQ/от N штук\"; +1 legal-entity marker (MChJ/ООО/OOO/XK/ИП/ИНН/СТИР). **HARD-NEG:** name/bio contains \"карго/kargo/cargo/логистика/logistika/доставка из Китая/yuk tashish\" (competitor); B2C-only (\"в розницу\", \"1 dona\", \"доставка по городу\", personal profile no company name).\n- **Instagram:** bio has B2B marker + website or Telegram link + `media_count ≥ 50`; captions with pack units (\"коробка/karobka\", \"упаковка/qadoq\", \"мешок/qop\", \"рулон/rulon\"); business category label (Wholesale/Shopping & retail); followers alone ≠ signal.\n- **Facebook Pages:** category \"Wholesale & Supply Store\"/\"Wholesaler\"/\"Manufacturer\" or name contains marker; location Uzbekistan; verification_status any.\n- **Google/2GIS/Yandex Places:** types/rubric contains wholesale/warehouse/\"оптовая база\"/\"склад\"; name marker; phone + website present; address inside a known wholesale market polygon.\n- **OLX.uz:** business flag = true AND title/description contains \"оптом/optom/партия/контейнер/со склада/от N шт\"; price per unit low + quantity field; same seller ≥10 active listings in one category; \"по предзаказу из Китая\" = strong.\n- **Telegram:** channel/group description has marker; posts with \"приход/новое поступление/новый контейнер/yangi konteyner keldi/фура пришла\"; price lists as files; \"опт от N штук/коробки\"; admin contact is a company handle. Members of cargo-competitor chats posting \"ищу поставщика/нужен контейнер\" = lead.\n- **Uzum:** seller with ≥N SKUs in one China-import category and order_count totals implying monthly volume (set N empirically; order_count is the only volume field returned); seller legal name present.\n- **Glotr/Flagma/Top.uz:** listing type \"оптом/опт\", \"предложение поставщика\", quantity ≥ pallet/ton/container, company card with INN.\n- **Company websites (from SERP):** pages \"о компании\" with \"импортёр/официальный дистрибьютор\", \"прямые поставки из Китая\", catalogue ≥50 SKUs, B2B price list download.\n\n---\n\n## 5. Legal posture (Uzbekistan) — one paragraph\nZRU-547 \"On Personal Data\" (2 Jul 2019, in force 1 Oct 2019) has no closed list of personal data: anything identifying a natural person counts ([lex.uz](https://www.lex.uz/acts/4396428); [Servercore](https://servercore.com/ru/blog/articles/uz-zakon-o-personalnyh-dannyh/)); amendments by ZRU-1125 of 26 Mar 2026 softened localization — only biometric/genetic data and telecom-subscriber data must be stored in Uzbekistan, other data may be stored abroad under conditions (reported as art. 27¹) ([Servercore](https://servercore.com/ru/blog/articles/uz-zakon-o-personalnyh-dannyh/); [ryskiyeva.com](https://ru.ryskiyeva.com/publications/post/personalnye-dannye-v-uzbekistane-rukovodstvo); [Legal500](https://www.legal500.com/intelligence/uzbekistan/privacy/)). Company-level data (legal name, INN/STIR, business phone, address, website) is not personal data; individual Instagram/Telegram handles and personal mobile numbers are, so store them only with a lawful basis (e.g., published by the person for commercial contact) and delete on request. **ZRU-776 art. 31 and PQ-265 (effective 2026-11-01) were not found by any query in this run** — treat those citations as unverified and confirm on lex.uz before relying on them. Practical rules: prefer official APIs; logged-out public collection only; no circumvention of logins/CAPTCHAs; keep Places data as place_id (lat/lng ≤30 days); log provenance per field; honour robots.txt; suppress competitors and B2C.\n\n---\n\n## Sources\n- [Meta — Hashtag Search](https://developers.facebook.com/documentation/instagram-platform/instagram-api-with-facebook-login/hashtag-search) · [IG Hashtag Search ref](https://developers.facebook.com/documentation/instagram-platform/instagram-graph-api/reference/ig-hashtag-search.md) · [recently_searched_hashtags](https://developers.secure.facebook.com/docs/instagram-api/reference/ig-user/recently_searched_hashtags/) · [Supermetrics note](https://docs.supermetrics.com/docs/good-to-know-about-instagram-public-data.md)\n- [Apify instagram-profile-scraper](https://apify.com/apify/instagram-profile-scraper?fpr=4nrc8) · [TrueFetch](https://apify.com/truefetch/instagram-profile-api) · [mighty_monk](https://apify.com/mighty_monk/instagram-profile-scraper)\n- [FBM on Meta v. Bright Data](https://www.fbm.com/data-analytics/publications/major-decision-affects-law-of-scraping-and-online-data-collection-meta-platforms-v-bright-data/) · [MediaPost](https://www.mediapost.com/publications/article/392920/judge-sides-against-meta-in-battle-over-scraping-p.html) · [Yahoo/TechCrunch](https://au.news.yahoo.com/court-rules-favor-scraper-bright-155721877.html)\n- [Meta — Pages Search](https://developers.facebook.com/documentation/pages-api/search-pages) · [Graph v6.0 changelog](https://developers.secure.facebook.com/docs/graph-api/changelog/version6.0) · [2018 platform update](https://about.fb.com/news/2018/07/a-platform-update/)\n- [Google Custom Search JSON API](https://developers.google.com/custom-search/v1/overview?hl=en) · [Maps Platform pricing](https://developers.google.com/maps/billing-and-pricing/pricing) · [Maps service terms 2025-05-01](https://cloud.google.com/archive/maps-platform/terms/maps-service-terms-20250501)\n- [Yandex Geosearch prices](https://yandex.com/dev/tariffs/doc/en/geosearch/prices/) · [Apify 2GIS crawlerbros](https://apify.com/crawlerbros/2gis-places-scraper) · [Apify 2GIS dami_studio](https://apify.com/dami_studio/2gis-places-scraper) · [Apify Yandex Maps](https://apify.com/dami_studio/yandex-maps-scraper)\n- [Apify OLX.uz lowlanddata](https://apify.com/lowlanddata/olx-uz-scraper.md) · [abotapi OLX](https://apify.com/abotapi/olx-scraper) · [scrapyx OLX](https://apify.com/scrapyx/olx-listings-scraper) · [logiover OLX](https://apify.com/logiover/olx-scraper.md)\n- [rtgstat README (TGStat API)](https://cran.rstudio.com/web/packages/rtgstat/readme/README.html) · [vc.ru TGStat overview](https://vc.ru/id2417772/1959009-tgstat-analitika-telegram)\n- [Spot.uz Telegram Ads](https://www.spot.uz/ru/2025/01/14/telegram-ad/) · [eLama UZ](https://elama.ru/blog/zapuskayte-reklamu-telegram-ads-v-uzbekistane-s-elama/) · [telegramadsanalytics guide](https://telegramadsanalytics.com/blog/telegram-ads-agency-guide-2026)\n- [Apify Uzum scraper](https://apify.com/getascraper/uzum-scraper)\n- [apiserpent SerpApi vs DataForSEO](https://apiserpent.com/blog/serpapi-vs-dataforseo-benchmark) · [keyword.com Bright Data vs DataForSEO](https://keyword.com/blog/bright-data-serp-api-vs-datafor-seo/) · [apiserpent pricing comparison](https://apiserpent.com/blog/serp-api-pricing-comparison)\n- [lex.uz ZRU-547](https://www.lex.uz/acts/4396428) · [Servercore ZRU-547](https://servercore.com/ru/blog/articles/uz-zakon-o-personalnyh-dannyh/) · [ryskiyeva.com guide](https://ru.ryskiyeva.com/publications/post/personalnye-dannye-v-uzbekistane-rukovodstvo) · [Legal500 Uzbekistan privacy](https://www.legal500.com/intelligence/uzbekistan/privacy/)\n\nNotes: budget cap (14 queries) reached; not exhausted by the tool. Not verified this run: Graph API numeric rate limits, instagram_business_basic vs instagram_basic naming, OLX `__PRERENDERED_STATE__`, OLX ToS text, parse.bot, Glotr/Flagma/Top.uz robots, 2GIS official pricing, Facebook Marketplace availability in UZ, Meta Lead Ads pricing, ZRU-776/PQ-265."
+}

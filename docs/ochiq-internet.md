@@ -77,3 +77,68 @@ yellowpages.uz `/rubrika/` (optovaya torgovlya, mebel optom, stroymaterialy opto
 | B2C (salbiy) | o'zim uchun, для себя, 1 dona, bitta, shaxsiy, zakaz qilaman, Taobao zakaz |
 | Raqobatchi (istisno) | kargo, карго, cargo, express, dostavka, yetkazib beramiz, ekspeditor, логист, bojxona broker |
 
+## 4. Jonli sinov: 7 platforma × ~12 so'rov, bitta sessiyada nima topildi
+
+Sinov faqat qidiruv tizimi snippetlari bilan o'tkazildi (bu muhitda sahifalarni ochib bo'lmaydi). Natija `docs/namuna-nomzodlar.md` va
+`docs/ochiq-internet-namuna.json` da: **118 noyob nomzod**, shundan 70 tasi B2B segmentlarda (A–E), 18 ta raqobatchi-seed, 15 ta «crawl sahifasi»
+(har birida o'nlab–yuzlab kompaniya telefoni bilan). Ishonchi ≥0.5 bo'lganlar: Soventus Energy (Jinko/Huawei distribyutori), Runking Motor (Changan),
+UZBEK-XITOY SAVDO UYI (uskuna, yuk mashinalari), FOCUS FURNITURE (Turkiya/Xitoy/Malayziya to'g'ridan-to'g'ri), CHILONZOR SAVDO UYI (qurilish mollari optom),
+CHINA MOTORS (Xitoy yuk mashinalari), @Pekinoptom_uz, best.shopping.uz, optom_obuv_uzb, tkani_tashkenta (Abu Saxiy), OLX'dagi «optom/sklad» maishiy texnika sotuvchilari.
+
+Platformalar haqiqati (agentlarning o'z izohlari asosida):
+
+| Platforma | Qidiruv nima berdi | Nima bermadi | Xulosa |
+|---|---|---|---|
+| Instagram | 25 akkaunt; ruscha «оптом Ташкент Китай», «Guangzhou оптом склад» so'rovlari eng zich; faqat `allowed_domains=instagram.com` ishladi, `site:` operatori emas | telefon, obunachi soni, caption — snippetda yo'q; Shimkent/Bishkek va Guanchjou bayerlari shovqini; «optom» «optika» bilan to'qnashadi | Kashf — qidiruv; **telefon/Telegram — bio'ni to'g'ridan-to'g'ri o'qish** (Business Discovery API yoki past tezlikdagi skraper); hashtaglar: #optomtoshkent #оптомташкент #xitoydanoptom #abusaxiy |
+| Facebook | 12 so'rovdan 8 tasi 0 natija; guruhlar umuman indekslanmagan; topilganlar — mayda ulgurjichilar, Xitoy belgisi yo'q | guruhlar, telefon, faollik | **Asosiy kanal emas**; Odnoklassniki (ok.ru) hatto ko'proq Toshkent savdo guruhlarini ko'rsatdi; rasmiy yo'l — Meta Lead Ads |
+| OLX | 16; «оптом» bo'yicha maishiy texnika/konditsioner/shina qayta sotuvchilari, «sklad» | telefon (tugma ortida), Telegram; profil sahifalari snippet'siz | OLX'ni **to'g'ridan-to'g'ri** o'qish kerak (Apify `lowlanddata/olx-uz-scraper`, biznes-bayroq + optom/konteyner/sklad filtri, bitta sotuvchida 10+ e'lon) |
+| Google / saytlar | 25; eng kuchlilari brend distribyutorlari (Jinko/Huawei, XCMG, Changan, Zoomlion, Foton/Howo); natijalar asosan goldenpages/yellowpages/top.uz/prom.uz/glotr kartalari | kompaniya saytlari kam; 2gis.uz va yandex.uz/maps umuman chiqmaydi | Kataloglar rubrikalarini **crawl** qilish (goldenpages 1424/1277/1558, yellowpages «import», «tovary-iz-kitaya», top.uz «стройматериалы оптом» — 231 kompaniya) + brend-diler so'rovlari |
+| Telegram | `t.me/s` va `site:t.me` qidiruvda chiqmaydi; faqat uz.tgstat.com/telemetr.me orqali: @Pekinoptom_uz, Ningbo MH, Chinni Bozor Bekzod, «CHINNiLAR OPTOM TOSHKENT» guruhi (165k a'zo) | telefon raqamlari sahifada bor, lekin snippet'da yo'q | Haqiqiy manba — **TGStat O'zbekiston «Sales» reytingi va bozor guruhlari** (Chinni bozor, Abu Saxiy, Chorsu, Olmazor); Telethon bilan ichkaridan o'qish |
+| Marketplace/katalog | 22; glotr.uz `/showcase/` sahifalari eng boy (China Motors, Uzbek-Chinese Trading House, China Leasing Impex, XITOY UPAKOVSHIK, TAO.UZ, KIS.uz) | uzum.uz do'kon sahifalari, flagma, top.uz qidiruvda chiqmaydi | Uzum — faqat API/skraper; prom.uz «страна производства: Китай» filtri + `/tags/optom/`; glotr «Soliq tasdiqlagan» belgisi |
+| Kataloglar | 30; goldenpages «Оборудование из Китая» (Id=106080), yellowpages «tovary-iz-kitaya», all.biz «Китайские товары оптом в Ташкенте», optlist.ru Toshkent | telefonlar «+998...» deb yashirilgan, faqat sahifada | Rubrika sahifalarini **ochib** kompaniya kartalarini olish — har rubrikada 56–231 kompaniya |
+
+Umumiy xulosa: **qidiruv tizimi «kim»ni topadi, telefon va yuridik nom esa sahifaning o'zida.** Ishlab chiqarishdagi agent uchun bu muammo emas — u sahifani ochadi.
+Bu sinovda eng ko'p hosil bergan tartib: (1) katalog va glotr/prom rubrikalari, (2) Instagram ruscha so'rovlar, (3) TGStat/Telemetr katalogi, (4) OLX biznes akkauntlar, (5) brend distribyutorlari.
+Facebook — oxirgi o'rinda.
+
+## 5. Rasmiy API'lar, cheklovlar va narxlar (tekshirilgan 2026-10-23; to'liq: `docs/ochiq-internet-api-memo.md`)
+
+| Platforma | Rasmiy yo'l | Norasmiy yo'l | Narx / cheklov | MVP? |
+|---|---|---|---|---|
+| Instagram | Graph API **Business Discovery** (username → bio, sayt, obunachilar, postlar; o'z biznes akkaunt + app + review), **Hashtag Search** (7 kunda 30 ta noyob hashtag) | Apify profil skraperlari $1.60–2.50 / 1 000 profil | bepul / Apify; Meta ToS xavfi faqat norasmiy yo'lda | Ha: kashf — qidiruv, boyitish — Business Discovery |
+| Facebook | `pages/search` **hali ishlaydi** (app token + Page Public Metadata Access); Meta Lead Ads | guruh/Marketplace skrapingi — yo'q | bepul | Oyda bir marta sahifa qidiruvi; asosan inbound |
+| Google qidiruv | **Custom Search JSON API yangi mijozlarga yopiq** (2027-01-01 to'xtaydi) | **DataForSEO** navbat $0.60 / 1 000 so'rov; SerpApi $75/oy = 5k; Bright Data $2–3 / 1k | arzon | **Ha — DataForSEO** bilan haftalik 460 ta so'rov (≈$0.30) |
+| Google Maps | **Places API (New) Text Search**: Pro $32 / 1k, **oyiga 5 000 bepul**; faqat `place_id` saqlanadi, koordinata ≤30 kun | Apify xarita skraperlari | bepul limit yetarli | Ha, haftasiga ≤1 250 so'rov |
+| Yandex Maps | Geosearch API — yiliga **$2 000 dan** (O'zbekiston qamrovi ko'rsatilmagan) | Apify | qimmat | Yo'q |
+| 2GIS | Places API — narx so'rov bo'yicha | Apify $0.40–4.99 / 1k, O'zbekiston bor | arzon | «оптовая база/склад» rubrikalarida 1 000 qatorli pilot |
+| OLX.uz | API yo'q | Apify `lowlanddata/olx-uz-scraper` $1.99 / 1k (biznes-bayroq bor, shaxsiy ma'lumot yo'q) | arzon | Ha |
+| Telegram | TGStat Search API (S-tarif 4 200 RUB/oy), `t.me/s` ko'rinishlar, Telethon faqat o'qish | — | arzon | Ha |
+| Uzum | — | Apify `getascraper/uzum-scraper` $3.30 / 1k (buyurtma soni bor; sotuvchi maydoni tekshirilmagan) | arzon | Ha, sotuvchi nomi qo'lda tekshirilgach |
+| Glotr / Flagma / Top.uz / Prom.uz | — | robots.txt ruxsat bersa past tezlikda | bepul | Ha |
+
+## 6. Haftalik avtomatik tsikl (UTC+5)
+
+| Kun | Ish | Hajm / xarajat |
+|---|---|---|
+| Du | SERP partiyasi (DataForSEO): 17 kategoriya × 3 til × 3 B2B marker × 3 geo ≈ 460 so'rov → instagram / t.me / olx / sayt URL'lari | ≈$0.30 |
+| Se | Places Text Search «оптовая база / склад / optom» × kategoriya × shahar; faqat `place_id` + ball | ≤1 250 so'rov/hafta (oylik bepul limit ichida) |
+| Ch | Instagram Business Discovery — yangi handle'lar bo'yicha bio/sayt; Hashtag API — 4 ta yangi hashtag | bepul |
+| Pa | OLX biznes-bayroqli e'lonlar, ulgurji kategoriyalar; sotuvchi bo'yicha jamlash | ≈2 000 qator ≈ $4 |
+| Ju | Uzum kalit so'zlar (buyurtma soni ≥ chegara) + Glotr/Flagma/Top.uz | ≈1 000 qator ≈ $3.30 |
+| Sh | Telegram: ~50 kanalning `t.me/s` suratlari, TGStat post qidiruvi («оптом из Китая», «konteyner»), Telethon faqat o'qish | TGStat tarifi |
+| Ya | Ball, dedupe (telefon/handle/sayt), raqobatchilarni bostirish, ERP'ga push, egaga haftalik hisobot | — |
+| Oyda 1 | Facebook `pages/search`, API narx/limitlarini qayta tekshirish, 30 kundan eski koordinatalarni o'chirish | — |
+
+## 7. Deterministik «B2B ≥3 m³» belgi ro'yxati (≥4 ball = lid; QATTIQ-SALBIY bo'lsa — tashlanadi)
+
+- **Umumiy:** +2 «оптом/optom/ulgurji» nom/bio/sarlavhada; +2 «из Китая/Xitoydan/1688/Taobao/Yiwu/Guangzhou»; +2 «контейнер/konteyner/фура/fura/партия/partiya»; +1 «от производителя/zavoddan/прямые поставки»; +1 «дилер/дистрибьютор/поставщик»; +1 «склад/sklad/база» yoki bozor nomi (Abu Saxiy, Bek Baraka, Chorsu, Urikzor, Yangiobod, Malika, Sergeli); +1 «для магазинов/do'konlar uchun/мин. заказ/MOQ»; +1 yuridik shakl (MChJ/ООО/XK/ИП/STIR).
+- **QATTIQ-SALBIY:** nomda/bio'da «карго/kargo/cargo/логистика/доставка из Китая/yuk tashish» (raqobatchi); faqat B2C («в розницу», «1 dona», shaxsiy profil, kompaniya nomi yo'q).
+- **Instagram:** bio'da marker + sayt yoki Telegram + ≥50 post; caption'larda qadoq birliklari («коробка/karobka», «мешок/qop», «рулон/rulon»); biznes kategoriya «Wholesale». Obunachi soni o'zi signal emas.
+- **OLX:** biznes-bayroq + «оптом/партия/контейнер/со склада/от N шт» + bir kategoriyada ≥10 faol e'lon; «по предзаказу из Китая» — kuchli.
+- **Telegram:** tavsifda marker; «новое поступление / yangi konteyner keldi / фура пришла» postlari; narx ro'yxati fayl ko'rinishida; «опт от N штук/коробки»; admin — kompaniya akkaunti. Raqobatchi chatlarida «ищу поставщика / нужен контейнер» yozgan a'zo = lid.
+- **Xaritalar/kataloglar:** rubrika «оптом/склад/оптовая база» + telefon + sayt + ulgurji bozor hududidagi manzil.
+- **Uzum:** bitta Xitoy-import kategoriyasida ≥N SKU va buyurtma soni oylik hajmni ko'rsatsa; sotuvchining yuridik nomi bor.
+- **Kompaniya saytlari:** «о компании»da «импортёр/официальный дистрибьютор», «прямые поставки из Китая», ≥50 SKU katalog, B2B narx ro'yxati.
+
+Huquqiy eslatma: kompaniya darajasidagi ma'lumot (nom, STIR, biznes telefon, manzil, sayt) — shaxsiy ma'lumot emas; shaxsiy Instagram/Telegram handle va mobil — shaxsiy ma'lumot (asos: tijorat aloqasi uchun o'zi e'lon qilgan; so'rov bo'yicha o'chirish).
+Faqat loginsiz ommaviy yig'ish; login/CAPTCHA aylanib o'tilmaydi; robots.txt hurmat qilinadi; Places ma'lumoti `place_id` sifatida saqlanadi; har maydon uchun manba va sana yoziladi.
