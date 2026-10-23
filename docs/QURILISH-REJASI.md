@@ -1,6 +1,6 @@
 # Qurilish rejasi — GSR Qidiruv Agenti v1 (javoblaringiz asosida)
 
-Sana: 2026-10-23. Egasi qarorlari: **STIR yo'q** (bojxona Excel'ida importyor ustuni yo'q) · **pullik ma'lumot va vositalarga pul yo'q** ·
+Sana: 2026-10-23. Egasi qarorlari (2026-10-23, yangilangan): **STIR yo'q** (bojxona Excel'ida importyor ustuni yo'q) · **byudjet kuniga $10** (karta bog'lanadi, qattiq limit; bojxona ma'lumoti sotib olinmaydi) · **ERP o'zgarishlari `fullprompt` repoda `agent-feed` branch'ida** · **agent lidlari uchun 15 daqiqalik eslatma o'chiriladi** ·
 **chegara: bitta partiyada ≥1 m³** · **alohida Telegram akkaunt bor** · **Python kollektorlar + lid holati ERP'da** ·
 **«qayta qilinmasin» raqamlar abadiy bostiriladi**.
 
@@ -130,7 +130,7 @@ Sizdan: (1) Telegram akkaunt raqami va login kodini kiritadigan odam; (2) ERP'da
 
 Xarajat: server — mavjud; Claude Haiku — kuniga ≤$1 cheklov; Telegram Premium — ixtiyoriy $5; qolgani 0.
 
-## 6. Sizdan 3 ta qaror (javob bersangiz boshlayman)
+## 6. Qarorlar (berildi): karta — ha; ERP o'zgarishlari — `fullprompt`, alohida branch; eslatma — o'chiriladi. To'liq spetsifikatsiya: `docs/spec/`.
 
 1. **Karta.** Google Places (telefon va sayt uchun eng kuchli bepul limit) va Brave uchun billing kartasi qattiq limit bilan bog'lanadimi? a) ha, $5–10/oy limit bilan — **tavsiya**; b) yo'q, faqat kartasiz stek.
 2. **ERP o'zgarishlari.** 4.2 dagi to'plamni men `LogisticsERP` repoda alohida branch'da qilaymi (testlar, typecheck bilan, siz ko'rib chiqib deploy qilasiz)? a) ha — **tavsiya**; b) faqat spetsifikatsiya, o'zingiz qilasiz.
