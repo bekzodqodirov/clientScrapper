@@ -1,0 +1,472 @@
+# 03 — Collectors and the shared HTTP/SERP layer
+
+Scope: every network-facing collector in `clientscrapper/collectors/`, the shared fetch layer (`services/http.py`), the SERP client (`services/serp.py`), the `Collector`/`Observation`/`Budget` contracts, budgets, heartbeats and the fixture-test discipline. Normalisation, resolution, Claude prompts and scoring are in `04-processing.md`; tables in `02-data-model.md`; the ERP contract in `05-erp-integration.md`. Names below are the names the code uses. Facts marked **UNVERIFIED** were not confirmed against a live response in this environment (no outbound HTTP from the research sandbox); each carries its day-1 check.
+
+Sources of record for the per-platform facts: `docs/manbalar.json` (cited as `[v N]` = `verified[N]`), `docs/ochiq-internet.md` (keyword matrix §3, platform reality §4), `docs/ochiq-internet-api-memo.md`, `docs/bepul-qidiruv-memo.md`, `docs/namuna-nomzodlar.md` (seed handles), `docs/huquqiy-memo.md`.
+
+---
+
+## 1. Shared layer
+
+### 1.1 `services/http.py` — the only way a collector touches the network
+
+```python
+USER_AGENT = f"clientScrapperBot/{VERSION} (+mailto:{contact_email_from(settings.hh_user_agent)}) python-httpx/{httpx.__version__}"
+# HH_USER_AGENT is "clientScrapper/1.0 (email)" as hh.ru requires; the same address
+# names the company's crawler everywhere, so one env var serves both.
+
+@dataclass(frozen=True, slots=True)
+class FetchResult:
+    url: str; final_url: str; status: int; body: bytes; headers: Mapping[str, str]
+    fetched_at: datetime; sha256: str; from_cache: bool; not_modified: bool
+
+class RobotsDisallowed(Exception): ...
+class HostPaused(Exception): ...          # breaker open for this host
+class BudgetExhausted(Exception): ...     # Budget.pages or Budget.usd at zero
+
+class Fetcher:
+    def __init__(self, *, rps_default: float = settings.collector_rps_default,
+                 host_rps: Mapping[str, float] = HOST_RPS, robots_ttl=timedelta(hours=24)) -> None: ...
+    async def get(self, url: str, *, source: str, budget: Budget, params=None, headers=None,
+                  timeout: float = 30.0, cache: bool = True, obey_robots: bool = True) -> FetchResult: ...
+    async def post_json(self, url: str, *, source: str, budget: Budget, json: Any, headers=None,
+                        timeout: float = 60.0) -> FetchResult: ...     # APIs: Places, Yandex
+```
+
+| Concern | Rule |
+|---|---|
+| Per-host token bucket | One bucket per `host`, rate = `HOST_RPS.get(host, COLLECTOR_RPS_DEFAULT=0.3)`, burst 1. `HOST_RPS = {"api.hh.ru": 1.0, "api.search.brave.com": 1.0, "places.googleapis.com": 2.0, "searchapi.api.cloud.yandex.net": 1.0, "operation.api.cloud.yandex.net": 2.0, "catalog.api.2gis.com": 1.0, "www.olx.uz": 0.33, "2gis.uz": 0.2, "html.duckduckgo.com": 0.1, "graph.facebook.com": 1.0, "api.apify.com": 1.0}`; every other host 0.3 (= 1 req/3.3 s). A `Crawl-delay` in robots.txt that is slower wins. |
+| robots.txt | Fetched once per host per 24 h (`urllib.robotparser`, agent token `clientScrapperBot`, fallback `*`); cached in memory and in `/data/http-cache/robots/<host>.txt`. Disallowed URL → `RobotsDisallowed`, counted in `collector_runs.skipped_robots`, never fetched. A robots.txt that answers 5xx/timeout → treated as "allow" for 1 h then retried. `obey_robots=False` is allowed only for documented JSON APIs with a key (Brave, Yandex, Places, 2GIS, hh, Graph, Apify); a test fences the call sites. |
+| Conditional fetch | Latest `evidence` row for the URL supplies `meta.etag` / `meta.last_modified` → `If-None-Match` / `If-Modified-Since`. 304 → `not_modified=True`, body from the stored evidence file, no new evidence row. 200 with identical `sha256` → `from_cache=False, not_modified=False`, and the runner records `unchanged` instead of a new observation. |
+| UA | Always `USER_AGENT`; collectors may add headers, never replace it. |
+| Retry-After | On 429/503 with `Retry-After` ≤ 900 s: sleep that long (counts as a 429 for the breaker). Larger → treated as a breaker trip. |
+| Backoff | `with_backoff(fn, attempts=3, base=2.0, cap=60.0, retry_on=is_transient_http)` from `services/retry.py` (MIYA, as-is). 4xx other than 429 is never retried. |
+| Breaker | Per host, in-process counter of **consecutive** 403/429 (a 2xx resets; a body that matches `CAPTCHA_MARKERS = ("captcha", "anomaly.js", "Are you a robot", "Доступ ограничен")` counts as 403). At **5** → `sources.paused_until = now + 6 h`, `paused_reason = "host_blocked:<host>"` on the source that tripped it, health problem `collector_blocked` (severity warning; critical if still paused after 24 h), owner alert in Uzbek («Manba to'xtatildi: <host>, 6 soat»). Further requests to that host raise `HostPaused` until the pause ends. |
+| Budgets | `Budget.take_page()` before every request; at zero → `BudgetExhausted` and the run ends `status='partial'`. Paid calls go through `costs.ask` (§1.3) before the request. |
+| Timeouts | connect 10 s, read 30 s (60 s for APIs); body cap 5 MB (larger → truncated, `meta.truncated=true`). |
+| Logging | JSON (`logs.py`, `RedactBodies`): host, status, elapsed, bytes, source, `cache`; never the body; query strings are scrubbed of `key=`, `token=`, `apikey=`, `access_token=`. |
+| Redirects | ≤5, same-host or to `www.`; a cross-host redirect is returned (status 3xx) and classified by the caller. |
+| Proxy | `PROXY_URL` is applied only when the collector passes `proxy=True` (uzum_sellers shop pages). Everything else goes direct. |
+
+Evidence: the runner (not the collector) writes the body gzipped to `/data/evidence/<yy>/<sha256>.gz` and the `evidence` row (`url, final_url, source, fetched_at, sha256, status, content_type, excerpt ≤600, meta jsonb {etag,last_modified,truncated}`; `02-data-model.md` must carry `meta jsonb` or the three columns).
+
+### 1.2 Collector contract
+
+```python
+# clientscrapper/collectors/base.py
+Kind = Literal["company", "listing", "post", "vacancy", "exhibitor", "place", "serp_hit", "suppression", "outcome"]
+
+@dataclass(slots=True)
+class Observation:
+    source: str                      # sources.key, e.g. "olx_business"
+    source_ref: str                  # stable id inside the source (see each collector)
+    url: str
+    fetched_at: datetime
+    raw_sha256: str                  # evidence sha256; "" for API rows the runner hashes itself
+    kind: Kind
+    company_name_raw: str | None = None
+    legal_form: str | None = None    # MChJ/OOO/ООО/XK/YaTT/ИП/AJ/QK… as written
+    stir: str | None = None
+    phones: list[str] = field(default_factory=list)    # as written; normaliser → E.164 (04)
+    telegram: str | None = None      # company/channel handle, no "@"
+    instagram: str | None = None
+    website: str | None = None       # full URL as found
+    address: str | None = None
+    city: str | None = None
+    goods_text: str | None = None
+    volume_text: str | None = None   # the verbatim fragment that carried volume
+    origin_text: str | None = None   # the verbatim fragment that carried China origin
+    signal_types: list[str] = field(default_factory=list)   # from SIGNAL_TYPES below
+    excerpt: str = ""                # ≤600 chars, verbatim, what the card will quote
+    person_name: str | None = None   # person-tier: at most one, only when self-published
+    person_role: str | None = None
+    person_telegram: str | None = None   # a group poster's username (person-tier)
+    external_ids: dict[str, str] = field(default_factory=dict)  # hh_employer_id, olx_user_id, place_id, twogis_firm_id, uzum_shop_slug, tg_chat_id
+    attrs: dict[str, Any] = field(default_factory=dict)         # source numbers: ads_count, followers, order_count, business, volume_m3, brand, official
+    published_at: datetime | None = None
+    lang: Literal["uz-Latn", "uz-Cyrl", "ru", "en", None] = None
+
+@dataclass(slots=True)
+class Budget:
+    pages: int                 # sources.daily_page_budget − pages already used today (collector_runs)
+    usd: Decimal               # sources.config.daily_usd_cap − usage_log spend today for this source's operations
+    deadline: datetime         # hard wall-clock stop for the run
+    def take_page(self) -> None: ...        # raises BudgetExhausted
+    def can_spend(self, est: Decimal) -> bool: ...
+
+class Collector(ABC):
+    key: ClassVar[str]; family: ClassVar[str]; phase: ClassVar[int] = 1
+    default_cron: ClassVar[str]; default_rps: ClassVar[float] = 0.3
+    default_page_budget: ClassVar[int]; default_usd_cap: ClassVar[Decimal] = Decimal("0")
+    heartbeat: ClassVar[str]              # f"job:collector:{key}"
+    def __init__(self, fetcher: Fetcher, serp: SerpClient | None = None) -> None: ...
+    async def collect(self, session: AsyncSession, budget: Budget) -> list[Observation]: ...
+    # Every HTML/JSON parser is a pure, synchronous @staticmethod tested on fixtures:
+    # parse_<page>(body: bytes, *, url: str, fetched_at: datetime) -> list[Observation]
+```
+
+`SIGNAL_TYPES` (collectors emit; `04` scores; points per the shared contract): `container_truck` 40 · `volume_m3_3plus` 30 · `volume_m3_1to3` 20 · `wholesale_bulky` 20 (optom/ulgurji + bulky category) · `directory_wholesale` 10 · `ved_vacancy` 15 · `exhibitor` 15 · `marketplace_velocity` 20 · `brand_distributor` (40 when `attrs.official`, else 20 — decided in 04) · `china_origin` 20 · `entity_solid` 15 · `contact_phone` / `contact_handle` 10 · `intent_ask` (volume via Haiku fields) · negatives `b2c_marker` −40, `non_china_origin` −20, `state_body` −20, `liquidated` −50 · exclusions `competitor`, `suppressed`.
+
+Runner (`collectors/runner.py`), one function per scheduled job: skip when `COLLECTORS_ENABLED=false`, `sources.enabled=false`, `paused_until > now`, or `policy.paused()`; build `Budget`; `health.beat(f"job:collector:{key}", detail={"phase":"start"})`; call `collect`; for each observation write evidence (if not already) and `observations(status='new')`, dedupe on `(source, source_ref, raw_sha256)` within 24 h; write `collector_runs` (`source_key, started_at, finished_at, status ok|partial|blocked|failed, pages, unchanged, skipped_robots, new_observations, http_403, http_429, errors, cost_usd, note`); final beat with the same counters. An exception ends the run `failed` with the error class only; the scheduler's `coalesce=True, max_instances=1` prevents overlap. Heartbeat names: `job:collector:<key>`; cadence variants `job:collector:<key>.<variant>` (`erp_sync.full`, `erp_sync.delta`, `erp_sync.outcomes`, `telegram_monitor.join`, `telegram_monitor.backfill`, `serp_layer.night`). Stale threshold per job = 2 × its interval (problem `collector_silent`, warning).
+
+### 1.3 Paid calls and budgets
+
+`costs.ask(session, operation, est_usd, call)` (MIYA `jarvis/costs.py` generalised): refuses when today's priced spend + `est_usd` > `DAILY_COST_CAP_USD` or the month's > `MONTHLY_COST_CAP_USD`, or when the operation's own daily cap is reached; records `usage_log(operation, units, cost_usd, source_key)` in its own transaction; an unpriced unit counts as over cap. Collectors never call a paid endpoint outside `costs.ask`.
+
+| operation | unit price | daily cap | used by |
+|---|---|---|---|
+| `serp_brave` | $0.005/query ($5/1k; $5 credit/month ≈ 1,000) | 40 queries | serp_layer, brand_dealers |
+| `serp_yandex_night` | $0 inside 1,000/month night quota; paid Yandex is **not** used in v1 (refuse) | 35 queries/night | serp_layer |
+| `serp_searxng`, `serp_ddg` | $0 | 300 / 40 | serp_layer |
+| `places_text_ids` | $0 (IDs-only mask) | 200 | maps |
+| `places_details_contact` | $0 for the first 1,000/month, then $0.020/call (**UNVERIFIED** SKU, §2.9) | $1.00 | maps |
+| `twogis_api` | $0 (demo key) | 40 | maps |
+| `apify_olx` | $0.00199/listing | $0.60 | olx_business (fallback only) |
+| `apify_2gis` | $0.00199/place (searchapi) | $0.40 | maps (fallback) |
+| `apify_instagram` | $0.0023/profile | $0.40 | instagram_discovery (fallback) |
+| `apify_uzum` | $0.0033/product | $0.60 | uzum_sellers (phase 2) |
+| `proxy_uzum` | per GB (provider price → `sources.config`) | $1.00 | uzum_sellers (phase 2) |
+| `classify` (Haiku ImportSignal) | per token (04) | part of Claude $5 | telegram_monitor, instagram_discovery, olx_business |
+
+Sum of collector caps ≤ $5/day; Claude ≤ $5/day (04); total ≤ `DAILY_COST_CAP_USD=10`. Page budgets (`sources.daily_page_budget`, overridable by `COLLECTOR_DAILY_PAGE_BUDGET`): see the schedule table §3.
+
+### 1.4 Shared keywords and regexes — `collectors/keywords.py`
+
+The matrix from `docs/ochiq-internet.md` §3 and `docs/ochiq-internet-api-memo.md` §2, as code. Every collector imports from here; no collector keeps its own copy.
+
+```python
+B2B_MARKERS = {
+  "uz-Latn": ("optom", "ulgurji", "ulgurji narx", "optom baza", "zavod narxida", "zavoddan", "ishlab chiqaruvchidan",
+              "dilerlik", "distribyutor", "diler", "yetkazib beruvchi", "do'konlar uchun", "minimal buyurtma", "sklad"),
+  "uz-Cyrl": ("оптом", "улгуржи", "улгуржи нарх", "заводдан", "дилер", "дистрибьютор", "дўконлар учун", "склад"),
+  "ru":      ("оптом", "опт", "мелкий опт", "крупный опт", "оптовая база", "оптовые цены", "от производителя",
+              "с фабрики", "прямые поставки", "дилер", "дистрибьютор", "поставщик", "импортёр", "официальный импортер",
+              "для магазинов", "склад", "мин. заказ", "MOQ"),
+}
+VOLUME_WORDS = ("kub", "куб", "m3", "m³", "м3", "м³", "konteyner", "kontayner", "контейнер", "20 fut", "40 fut", "20ft", "40ft",
+                "fura", "фура", "tonna", "тонна", "partiya", "партия", "konteyner keldi", "yuk keldi", "фура пришла", "новое поступление")
+CHINA_WORDS = ("Xitoydan", "Xitoy", "Хитойдан", "Хитой", "из Китая", "Китай", "КНР", "China", "1688", "Taobao", "Alibaba", "Pinduoduo",
+               "Yiwu", "Iwu", "Иу", "Guangzhou", "Guanchjou", "Гуанчжоу", "Urumchi", "Урумчи", "Xorgos", "Хоргос", "Qashqar", "Кашгар", "Shenzhen")
+GEO = ("Toshkent", "Тошкент", "Ташкент", "Tashkent", "Abu Saxiy", "Abu Sahiy", "Абу Сахий", "Bek Baraka", "Chorsu", "Чорсу", "Urikzor", "Урикзор",
+       "Yangiobod", "Янгиобод", "Malika", "Малика", "Qo'yliq", "Куйлюк", "Sergeli", "Сергели", "Chinni bozor",
+       "Andijon", "Андижан", "Samarqand", "Самарканд", "Farg'ona", "Фергана", "Namangan", "Наманган", "Buxoro", "Бухара", "Nukus", "Нукус")
+BULKY_CATEGORIES = {   # canonical key → terms in the three scripts (also the SERP <category> axis, 17 keys)
+  "textile": ("mato", "gazlama", "мато", "газлама", "ткани", "текстиль"),
+  "footwear": ("poyabzal", "пойабзал", "обувь"),
+  "apparel": ("kiyim", "trikotaj", "кийим", "одежда", "трикотаж"),
+  "household": ("uy-ro'zg'or", "idish-tovoq", "xoztovar", "идиш-товоқ", "хозтовары", "посуда"),
+  "auto_parts": ("avto ehtiyot qismlar", "zapchast", "shina", "авто эҳтиёт қисмлар", "автозапчасти", "шины"),
+  "building": ("qurilish mollari", "santexnika", "kafel", "қурилиш моллари", "стройматериалы", "сантехника", "плитка"),
+  "furniture": ("mebel", "mebel furnitura", "мебель", "мебельная фурнитура"),
+  "toys": ("o'yinchoq", "ўйинчоқ", "игрушки"),
+  "cosmetics": ("kosmetika", "parfyumeriya", "косметика", "бытовая химия"),
+  "electronics": ("telefon aksessuar", "elektronika", "maishiy texnika", "электроника", "бытовая техника", "аксессуары для телефонов"),
+  "lighting": ("yoritgich", "LED", "elektr mollari", "ёритгич", "светильники", "электротовары"),
+  "equipment": ("uskuna", "dastgoh", "stanok", "ускуна", "дастгоҳ", "оборудование", "станки", "линия"),
+  "raw": ("xomashyo", "granula", "plastik", "хомашё", "сырьё", "гранулы", "полимеры"),
+  "packaging": ("qadoqlash", "paket", "karobka", "қадоқлаш", "упаковка", "пакеты", "гофрокороб"),
+  "stationery": ("kanselyariya", "канцелярия", "канцтовары"),
+  "bags": ("sumka", "chamadon", "сумка", "сумки", "чемоданы"),
+  "sport": ("sport", "trenajyor", "спорт", "тренажер"),
+}
+```
+
+```python
+# Volume: a number next to a cubic-metre word. Group 1 = the number.
+VOLUME_RE = re.compile(r"(?<![\d.,])(\d{1,3}(?:[.,]\d)?)\s*(?:kub|куб(?:\.?\s*м)?|m3|м3|m³|м³|kubometr|кубометр)(?![a-zа-яёʻʼ'])", re.I)
+# Container / truck / batch words (no number needed).
+CONTAINER_RE = re.compile(r"(?<!\w)(?:konteyner|kontayner|контейнер|fura|фура|yarim\s*fura|полфуры|20\s*(?:ft|fut|фут|')|40\s*(?:ft|fut|фут|')|"
+                          r"tonna|тонн[аы]?|partiya|партия|партиями)(?!\w)", re.I)
+# Buyer intent (groups): Latin, Cyrillic Uzbek, Russian.
+INTENT_RE = re.compile(r"(?<!\w)(?:kim\s+olib\s+kel|olib\s+kel(?:ish|adi|asiz|ib)|kerak|kere|kimda\s+bor|kim\s+sotadi|ta[ʼ']?minotchi|"
+                       r"ким\s+олиб\s+кел|олиб\s+кел|керак|кимда\s+бор|таъминотчи|"
+                       r"ищу|нужен|нужна|нужно|требуется|кто\s+(?:возит|доставит|привез[её]т)|поставщик|закуп(?:аю|ить|ка))(?!\w)", re.I)
+# Supply-side posts by a wholesaler (channel posts): arrival of stock.
+SUPPLY_RE = re.compile(r"(?<!\w)(?:konteyner\s+keldi|yangi\s+(?:tovar|partiya|konteyner)|yuk\s+keldi|фура\s+пришла|контейнер\s+(?:пришёл|пришел)|"
+                       r"новое\s+поступление|новая\s+партия|zavod\s+narxida|optom\s+narx|оптов(?:ые|ая)\s+цен)(?!\w)", re.I)
+# Competitors / touts (forwarders, buying agents, brokers) — exclusion, their channels are seeds.
+COMPETITOR_RE = re.compile(r"(?<!\w)(?:kargo|karg[oa]|cargo|карго|logistik[a]?|логистик[аи]|ekspeditor|экспедитор|dostavka|доставка|yetkazib\s+beramiz|"
+                           r"yuk\s+tashi(?:sh|ymiz|sh\s+xizmati)|грузоперевозк\w*|broker|брокер|rastamojka|растамож\w*|bojxona\s+(?:xizmat|broker)|"
+                           r"таможенн(?:ое|ый)\s+оформлен\w*|vikup|выкуп|avia\s*kargo|авиа\s*карго|express|экспресс|1688\s*(?:kargo|cargo|карго|zakupka))(?!\w)", re.I)
+# B2C / personal use.
+B2C_RE = re.compile(r"(?<!\w)(?:o[ʻ']?zim\s+uchun|ўзим\s+учун|для\s+себя|1\s*(?:dona|шт\.?|штук[аи]?)|bitta\s+(?:dona|narsa)|битта|shaxsiy|шахсий|"
+                    r"лично\s+для|taobao\s*zakaz|zakaz\s+qilib\s+ber|в\s+розницу|доставка\s+по\s+городу)(?!\w)", re.I)
+PHONE_RE = re.compile(r"(?<!\d)(?:\+?998[\s\-]?)?\(?(\d{2})\)?[\s\-]?(\d{3})[\s\-]?(\d{2})[\s\-]?(\d{2})(?!\d)")   # normaliser validates operator codes
+TG_RE = re.compile(r"(?:(?:https?://)?t\.me/(?!joinchat|\+|s/)|(?<![\w@])@)([A-Za-z][A-Za-z0-9_]{4,31})")      # reject names ending in "bot"
+IG_RE = re.compile(r"(?:instagram\.com/|(?:инстаграм|instagram|insta|ig)\s*[:\-]?\s*@?)([A-Za-z0-9._]{2,30})(?![\w.])", re.I)
+STIR_RE = re.compile(r"(?:STIR|СТИР|ИНН|INN|TIN)\s*[:№#]?\s*(\d{9})(?!\d)", re.I)
+LEGAL_FORM_RE = re.compile(r"(?<!\w)(MChJ|MCHJ|OOO|ООО|LLC|XK|ХК|QK|ҚК|AJ|АЖ|AO|АО|ЧП|XChK|YaTT|ЯТТ|ИП|SP|ТОО|JV|QO'?SHMA)(?!\w)", re.I)
+CAPTCHA_MARKERS = ("captcha", "anomaly.js", "Are you a robot", "Доступ ограничен", "cf-chl")
+```
+
+Python's `re` is Unicode-aware for `str` patterns, so `(?<!\w)` works on Cyrillic; the JS `\b` trap does not apply here. `tests/collectors/test_keywords.py` pins ≥3 positive and ≥3 negative examples per regex in each script (e.g. «3 kub kerak Yiwudan» → VOLUME 3, INTENT; «1688 kargo Toshkentga» → COMPETITOR; «o'zim uchun 1 dona» → B2C; «оптом» must not match «оптика»).
+
+### 1.5 Fixture-based tests
+
+- `tests/fixtures/<key>/<name>.{html,json,xml}` recorded with `tools/record_fixture.py <url> --key <key> --name <name>` (goes through `Fetcher`, so robots and UA apply). Telegram fixtures are hand-written synthetic messages, never real ones.
+- `tests/collectors/test_<key>_parse.py`: each `parse_*` on each fixture → exact expected `Observation` fields (name, phones, handles, signal_types, excerpt). A parser that returns `[]` on its fixture fails (a test that passes because its subject never appeared proves nothing).
+- `tests/collectors/test_http.py`: token bucket with a fake clock (two requests to one host are ≥ 1/rps apart; two hosts interleave); robots disallow → no request made; 304 path; `Retry-After` honoured; breaker opens on the 5th 403 and `sources.paused_until` is written; `BudgetExhausted` stops a loop mid-page; UA header present on every request; `key=`/`token=` scrubbed from logs; `obey_robots=False` only at the allow-listed call sites (AST test).
+- `tests/live/test_<key>_live.py` marked `@pytest.mark.live`, run only with `LIVE=1` from the VPS (`make smoke`); each performs one real request and asserts the fixture-era selector still yields ≥1 row. A skipped live test is reported as skipped in the digest, never as green.
+
+---
+
+## 2. Collectors
+
+Schedules are Asia/Tashkent. "Yield" figures are estimates from the live sample (`docs/namuna-nomzodlar.md`: 118 candidates from ~84 queries) unless stated; treat all as UNVERIFIED until 30 days of `collector_runs`.
+
+### 2.1 `serp_layer` — the search engines (`services/serp.py` + `collectors/serp_layer.py`)
+
+**Purpose.** Turn the keyword matrix into URLs of Instagram profiles, Telegram channels, OLX sellers, directory cards and company sites, and fetch company sites for contacts. It also serves `brand_dealers` and the enrichment step in 04 (`SerpClient.search`).
+
+```python
+@dataclass(frozen=True, slots=True)
+class SerpQuery: text: str; lang: Literal["ru","uz","en"]; site: str | None = None; freshness: Literal["pw","pm",None] = None; count: int = 20
+@dataclass(frozen=True, slots=True)
+class SerpHit: engine: str; rank: int; url: str; host: str; title: str; snippet: str; fetched_at: datetime
+class SerpClient:
+    async def search(self, q: SerpQuery, *, session, budget, engines: tuple[str, ...] = ("yandex_night","brave","searxng","ddg")) -> list[SerpHit]
+def classify_hit(url: str) -> tuple[HitKind, dict]:   # HitKind = instagram_profile|instagram_post|telegram_channel|telegram_post|olx_listing|olx_seller|facebook_page|directory_card|company_site|news|noise
+```
+
+| Engine | Endpoint / auth | Request | Response parse | Limits / cost |
+|---|---|---|---|---|
+| **Brave** | `GET https://api.search.brave.com/res/v1/web/search`, header `X-Subscription-Token: $BRAVE_API_KEY`, `Accept: application/json` | `q`, `count=20`, `offset`, `search_lang=ru` (or `uz`?), `ui_lang=ru-RU`, `country=ALL` (**UNVERIFIED** whether `country=UZ` is accepted — day 1: send it once; a 422 means fall back to `ALL` + geo words), `freshness=pm` when `q.freshness` | `web.results[].{url,title,description,page_age}`, `query.more_results_available` | $5/1k, $5 credit/month ≈ 1,000 → cap 40/day via `costs.ask('serp_brave')`; rate 1 rps (**UNVERIFIED** plan limit). Attribution requirement applies only to displayed results; we display none. |
+| **Yandex Cloud Search API v2 (deferred)** | `POST https://searchapi.api.cloud.yandex.net/v2/web/searchAsync`, header `Authorization: Api-Key $YANDEX_SEARCH_API_KEY` | body `{"query":{"searchType":"SEARCH_TYPE_RU","queryText":q,"familyMode":"FAMILY_MODE_NONE","page":"0","fixTypoMode":"FIX_TYPO_MODE_ON"},"groupSpec":{"groupMode":"GROUP_MODE_FLAT","groupsOnPage":"50","docsInGroup":"1"},"maxPassages":"3","region":"10335","l10n":"LOCALIZATION_RU","folderId":$YANDEX_FOLDER_ID,"responseFormat":"FORMAT_XML","userAgent":USER_AGENT}` → `{"id": op}`; poll `GET https://operation.api.cloud.yandex.net/operations/{op}` every 20 s until `done` | `response.rawData` base64 → XML `yandexsearch/response/results/grouping/group/doc/{url,title,passages/passage}` | **1,000 free requests/user/month, only 00:00–07:59 MSK = 02:00–09:59 Tashkent** (`docs/bepul-qidiruv-memo.md`); cron 02:10, ≤35/night, `costs.ask('serp_yandex_night')` refuses outside the window or past 1,000/month. **UNVERIFIED**: `SEARCH_TYPE_UZ` acceptance (try once; 400 → stay on RU), region ids (Tashkent 10335, Uzbekistan 171 — confirm against the Yandex region list), whether the free quota applies to the deferred mode only (the memo says so). |
+| **SearXNG** (own container, optional) | `GET {SEARXNG_URL}/search` | `q`, `format=json`, `language=ru`, `categories=general`, `engines=duckduckgo,startpage,mojeek,brave`, `pageno` | `results[].{url,title,content,engine}`, `unresponsive_engines` | $0; ≤0.2 rps; `settings.yml`: `search.formats:[html,json]`, `server.limiter:false` (bound to the compose network only); empty `results` with non-empty `unresponsive_engines` = transient (retry next run), three in a row = breaker on `searxng`. Google/Bing engines stay disabled. |
+| **DDG html** (last resort) | `POST https://html.duckduckgo.com/html/` form `q`, `kl=ru-ru` | parse `a.result__a[href]` (`uddg=` param URL-decoded), `a.result__snippet` | — | ≤0.1 rps, ≤40/day; `anomaly.js`/403 → breaker. |
+
+Engine routing: `site:`-queries and English → Brave; RU/UZ-Cyrillic text queries → Yandex at night, SearXNG by day; overflow → SearXNG → DDG. Each query runs on exactly one engine per week unless it returned < 3 hits (then it is re-queued to the next engine).
+
+**Query templates** (`collectors/serp_templates.py`), rendered per `(category ∈ BULKY_CATEGORIES, lang ∈ {uz-Latn, uz-Cyrl, ru}, marker ∈ 3 per lang, geo ∈ {Toshkent, Samarqand/Farg'ona/Andijon rotated, none})` = 17 × 3 × 3 × 3 = **459 text queries/week** (≈ 66/day) plus **34 `site:` queries/week** on Brave:
+
+```
+site:instagram.com ("optom" OR "оптом" OR "ulgurji") "<category_ru>" ("Toshkent" OR "Ташкент")
+site:t.me ("оптом" OR "optom") "<category_ru>"
+site:olx.uz "оптом" "<category_ru>"                      # cheap seed for olx_business
+"<marker>" "<category>" "<geo>"                          # text query, lang-specific
+"импорт из Китая" "оптом" ООО site:.uz · "Xitoydan import" "ulgurji" MChJ   # company sites
+```
+
+`classify_hit` rules (regex on `host`+`path`): `instagram.com/<h>/` (not `/p/ /reel/ /explore/ /tags/`) → `instagram_profile{handle}`; `instagram.com/p/|/reel/` → `instagram_post`; `t.me/s/<n>` or `t.me/<n>` (not `joinchat`, `+`, `share`) → `telegram_channel{username}`, `t.me/<n>/<id>` → `telegram_post`; `olx.uz/d/.*-ID\w+\.html` → `olx_listing`, `olx.uz/list/user/<id>` → `olx_seller{olx_user_id}`; `DIRECTORY_HOSTS = {goldenpages.uz, yellowpages.uz, top.uz, glotr.uz, prom.uz, flagma.uz, orginfo.uz, 2gis.uz, uztender.com, hh.uz, hh.ru, enfsolar.com, all.biz, optlist.ru}` → `directory_card` (queued to that collector's card fetch); `NEWS_HOSTS` (spot.uz, kun.uz, gazeta.uz, daryo.uz, uznews.uz, podrobno.uz, review.uz, afisha.uz) → `news` (kept for brand_dealers name extraction); `NOISE_HOSTS` (wikipedia, youtube, facebook, tiktok, pinterest, linkedin, .ru marketplaces) → `noise`; any other host → `company_site`.
+
+**Observations.** One `kind="serp_hit"` per hit with `source_ref=f"{engine}:{sha1(url)[:16]}"`, `excerpt=snippet`, `instagram`/`telegram`/`website` set by kind, `attrs={"hit_kind","query","rank"}`, `lang`. For `company_site` hits (≤120 fetches/day from the page budget): fetch the landing page plus the first matching of `/about|/o-kompanii|/kompaniya-haqida|/biz-haqimizda|/contacts|/kontakty|/aloqa`; `parse_company_site` → `kind="company"`: `company_name_raw` (`<title>`/`og:site_name`/footer `LEGAL_FORM_RE` sentence), phones (`PHONE_RE` in `tel:` links first), `TG_RE`, `IG_RE`, `STIR_RE` (footer), address (line containing a GEO word + "ko'cha|улица|ул.|проспект|MFY"), markers → `wholesale_bulky`/`china_origin`/`brand_distributor`; `COMPETITOR_RE` in title/about → `competitor`.
+
+**Schedule / rate.** `serp_layer` 10:00 and 14:00 (Brave + SearXNG, 33 queries each), `serp_layer.night` 02:10 (Yandex, ≤35). Page budget 300/day. **Yield.** ~1.4 raw candidates/query in the live sample → 300–600 hits/week, 60–120 new handles/sites after dedupe. **Failure modes.** Brave 401/402 (key/credit) → `collector_blocked` immediately (not after 5); Yandex quota exhausted → silent skip until the 1st; SearXNG CAPTCHA storms → empty results, retried next run; `site:` ignored by an engine → post-filter on `host` (always applied). **Legal.** Low: provider terms; we store URL + snippet + our own fetch of public pages, robots respected. **Day 1.** One Brave call with `country=UZ`; one Yandex async call inside the window with `SEARCH_TYPE_UZ` then `RU`; record `tests/fixtures/serp_layer/{brave.json,yandex.xml,searxng.json,ddg.html}`; confirm the free-quota wording on the Yandex pricing page and the Brave plan rate limit in the dashboard.
+
+### 2.2 `erp_sync` — the two ERP feeds and the XLSX fallback
+
+**Purpose.** Keep the agent's `suppression` set equal to the ERP's (client-book phones ∪ leads lost with a no-contact reason) and read back what happened to pushed leads. No lead state lives here (see 05).
+
+| Item | Rule |
+|---|---|
+| Auth | `X-ERP-Key: $CRM_AGENT_KEY`. **UNVERIFIED name**: `fullprompt` today reads `x-gsr-key` (`src/app/api/leads/in/[source]/route.ts:63`); until 05 lands, send **both** `X-ERP-Key` and `X-GSR-Key` with the same value (same recipient, harmless). Until the `agent` source exists, `CRM_AGENT_KEY` is the `other` source's secret and pushes carry `utm_source=clientscrapper`. |
+| Suppression full | `GET {CRM_BASE_URL}/api/agent/suppression?limit=5000` and follow `next` until null — nightly 02:30 (`erp_sync.full`). `mode="full"`: replace the `origin='erp:*'` set (insert new, set `removed_at=now` on rows absent from the pull, clear `removed_at` on rows that came back). `salt_id` differs from the stored one → discard every `erp:*` row and re-pull (the key was re-minted). |
+| Suppression delta | `?since=<last generated_at − 10 min>&cursor=&limit=1000` hourly at :15 (`erp_sync.delta`); additive upsert only. |
+| Storage | `suppression(key_kind='phone_h', key=h, origin ∈ {'erp:client','erp:lost'}, first_seen, last_seen, removed_at)`. The agent never holds the client book in clear: a candidate phone is checked as `hmac_sha256(CRM_AGENT_KEY, tail9).hexdigest()[:20]` (same rule as the feed's `rule` string; a mismatch between `rule` and the constant → run `failed`, alert). |
+| Outcomes | `GET /api/agent/outcomes?since=&cursor=&limit=1000` nightly 03:00 (`erp_sync.outcomes`), cursor persisted in `sources.config.outcomes_cursor`. Upsert `outcomes` on `(external_id, intake_id)`; map to `push_log.outcome`; `lost_reason ∈ agent_no_contact_reasons` → also write `suppression` rows for the company's other keys (`telegram`, `instagram`, `website` host, `stir`, origin `erp:lost`) because the ERP suppresses by phone only. |
+| Freshness gate | `erp_sync.suppression_fresh()` = last successful `full` ≤ 26 h ago **and** last `delta` ≤ 3 h ago. False → health problem `suppression_stale` (critical after 6 h) and the push gate (04) refuses every push. Fail closed. |
+| Errors | 404 → the key or source is wrong → problem `push_404` (same misconfiguration as a push 404), owner alert «ERP kaliti yoki manba noto'g'ri»; 401/403 same; 5xx/timeout → `with_backoff` then `failed`; a 200 with invalid JSON → `failed`, body sha logged. |
+| XLSX fallback | Before the feed exists (or when it is down > 48 h): the owner exports **Mijozlar → XLSX** from the ERP (`/api/clients/xlsx`, columns `code, name, manager, phone, …`; the phone cell may hold several numbers split by `, ; /` or newline) and runs `make import-clients FILE=clients.xlsx` or sends the file to the owner bot (`/import`). `services/client_import.py` (MIYA, adapted) reads it, splits phones, hashes tails with `CRM_AGENT_KEY`, upserts `suppression(origin='xlsx')`. The fallback cannot see lost leads — the digest says so while `origin='erp:lost'` is empty. Requires `CRM_AGENT_KEY` set (so hashes match the feed later). |
+
+Fixtures: `tests/fixtures/erp_sync/{suppression_full.json,suppression_delta.json,outcomes.json,clients.xlsx}` (synthetic). Tests: salt change triggers a full resync; a row absent from a full pull gets `removed_at`; the gate refuses when stale; the fake-ERP 404 raises `push_404`.
+
+### 2.3 `telegram_monitor` — the read-only reader account
+
+**Purpose.** Capture buyer intent («3 kub kerak Yiwudan», «kim konteyner olib keladi») in public wholesale/cargo groups and wholesaler channel posts, and the business contacts channels publish about themselves. Two parts: `userbot/main.py` (Telethon, network) stores matching messages into `interactions`; `collectors/telegram_monitor.py` (no network) reads them every 15 min, classifies and emits observations.
+
+**Account policy** (binding): a dedicated number, 2FA on, aged ≥ 30 days before the first join; session in `TELETHON_SESSION` (StringSession made by `make userbot-login`); `connect()` not `start()`; `is_user_authorized()` false → beat `userbot_unauthorized`, idle; `USERBOT_ENABLED=false` → beat `{"enabled": false}` and idle forever; `flood_sleep_threshold=60`; `FloodWaitError > 300 s` → 24 h breaker (`flood_breaker`); never `SendMessage`, `SendReaction`, `SetTyping`, `GetParticipants`, `ImportChatInvite`, `ReadHistory`; media is not downloaded in v1 (document file names only). `tests/test_no_telegram_writes.py` (MIYA AST test) fences the write calls; a second test fences the join call to `userbot/joiner.py` only.
+
+**Seeds** (`sources.config.seeds`, from `docs/namuna-nomzodlar.md` §1 and §3, `[v 9]`, `[v 16]`, `[v 29]`): buyer-side groups first — «CHINNiLAR OPTOM TOSHKENT» (~165k members; handle **UNVERIFIED** — resolve via TGStat `ratings/chats` Uzbekistan), `@optom_tavarlar_uz` («Chinni bozor online»), `@Optom_bozor` (classifieds feed: the lead is the poster, not the channel), `@optomelonuz`; wholesaler channels — `@Pekinoptom_uz`, `@abusaxiyoptomm`, Chinni Bozor Bekzod (`patnoss`, probable); competitor channels whose **linked discussion groups** are the surface — `@mk_express`, `@fx_express`, `@Halol_Cargo`, Abu Sahiy Cargo, Meest China, CARGO GREEN (handles to confirm inside Telegram); GSR's own `@gsrgroupchat` only for pattern calibration (its members are clients → suppressed). Excluded as seeds: `@cargo5566` (Russia-audience), religion/B2C clones of «Optom bozor» (dedupe by numeric channel id, never title).
+
+**Join and discovery.** `userbot/joiner.py` daily at a random minute 10:00–20:00: take ≤ **3** rows from `chat_monitors(status='queued')` ordered by priority, `JoinChannelRequest(username)` (public usernames only; no invite links in v1), then `GetFullChannelRequest` → `full_chat.linked_chat_id` → enqueue the discussion group (priority 1), read `about`/pinned for `TG_RE` mentions of companion «xaridorlar/buyers» groups → enqueue (priority 2). Also resolve ≤ 20 usernames/day found by other collectors (`serp_layer` `telegram_channel` hits, directory cards) → `chat_monitors(status='queued', priority 3)` after a `t.me/s/<username>` HTML check (title, description, subscriber count, last post date; silent > 90 days → not queued). Cap: 60 joined chats; the weekly yield report (`stored/week` per chat) proposes pruning (owner `/chats`).
+
+**Backfill** (`telegram_monitor.backfill`, 01:00 nightly, chats joined ≥ 24 h ago and not yet backfilled): `iter_messages(chat, limit=500)` filtered **client-side** by the prefilter (server `search=` is per keyword and misses Latin/Cyrillic variants); store only matches; mark `chat_monitors.backfilled_at`. Live: `events.NewMessage(chats=ids)` → the same prefilter → store match + `fwd_from` flag + sender id/username/first+last name + chat id/title + date; non-matches increment `chat_monitors.seen_count` and are dropped (no full chat logs). Edits re-run the prefilter (`MAX_EDITS=10`).
+
+**Prefilter** (`userbot/prefilter.py`, pure): a message is stored when (group) `VOLUME_RE | CONTAINER_RE | INTENT_RE` matches and `len(text) ≥ 12`; (channel post) `SUPPLY_RE | CONTAINER_RE | B2B_MARKERS` matches. Channel description and pinned post are stored once per week as `interactions(kind='about')`.
+
+**Tout filter** (`collectors/telegram_monitor.py`, before any model call): mark `competitor` when the sender's username/first/last name/bio (bio via `GetFullUserRequest` ≤ 50/day, cached 30 d) or the message matches `COMPETITOR_RE`; or the sender posted ≥ 3 price-list-shaped messages (≥ 3 prices `\d{2,}\s*(?:so'm|сум|\$|usd|y\.e)` or > 1,500 chars) in 7 days; or `fwd_from` is a channel other than the sender's own. Competitors are excluded as leads but their messages feed the weekly competitor-offer diff (owner report). `B2C_RE` → `b2c_marker`. Messages still standing go to Haiku `ImportSignal` (04 owns the prompt; ≤ 300/day via `costs.ask('classify')`), pseudonymised: phones → `<PHONE_n>`, handles → `<TG_n>`, names → `<NAME>`. Output `{is_buyer_intent, goods, origin_cn, volume_m3_est, volume_basis ∈ stated|container|truck|inferred, frequency ∈ one_off|repeat, b2c, competitor, confidence}`.
+
+**Observations.** Group message → `kind="post"`, `source_ref=f"{chat_id}:{msg_id}"`, `url=https://t.me/{username}/{msg_id}` (or `https://t.me/c/{internal_id}/{msg_id}`), `person_telegram=sender.username` (person-tier; `legal_basis='public_source'` is attached by 04), `excerpt` = message ≤ 600 chars, `volume_text`/`origin_text` = matched fragments, `attrs={"volume_m3": float|None, "basis", "frequency", "chat_title", "repeat_count_60d"}`, `signal_types` = `intent_ask` + `volume_m3_*`/`container_truck` + `china_origin`. Channel post → `kind="post"` for the channel owner (`telegram=channel username`, `signal_types` `wholesale_bulky`/`container_truck`); channel `about` → `kind="company"` with phones/website/instagram/address parsed from the description. Repeat posters (≥ 3 intent posts in 60 days) get `attrs.repeat_count_60d` (trader, not B2C).
+
+**Schedule / rate.** Userbot continuous (heartbeat `userbot`); sweep `*/15`; join daily; backfill nightly. **Yield.** 30–50 chats → 10–40 regex hits/day → 2–8 qualified/day after the tout filter (`docs/arxitektura.md`; UNVERIFIED — `[v 16]` warns most traffic is supply-side touts). **Failure modes.** FloodWait (breaker), `ChannelPrivateError` (chat removed → `chat_monitors.status='gone'`), `UsernameNotOccupied`, account limited (`UserDeactivatedBan` → `userbot_unauthorized`, process idles, owner alert), `AuthKeyDuplicatedError` (a second client on the same session — never run two). **Legal.** Medium (`docs/huquqiy-memo.md`: Telegram content-licensing terms ban aggregation for AI; mitigations: read-only, matched-only storage, no member lists, 30-day retention of unconverted posts, company-tier extraction). **Day 1.** Login; join 3 seeds; confirm `linked_chat_id` resolves for `@mk_express`; record 20 synthetic messages as fixtures; verify the prefilter catches Cyrillic Uzbek («ким олиб келади», «керак»).
+
+### 2.4 `instagram_discovery`
+
+**Purpose.** Find wholesale business profiles (bio: optom/ulgurji/оптом, Xitoydan, bozor address) and read their business contacts. Discovery is SERP + cross-source handles; enrichment is the official Graph API; Apify is a bounded fallback.
+
+| Route | Endpoint / auth | Request | Parse | Limits |
+|---|---|---|---|---|
+| Discovery | `serp_layer` `instagram_profile` hits; `IG_RE` matches from Telegram `about`/posts, OLX text, directory cards, company sites | — | handle → `enrich_queue` (dedupe lower-case) | — |
+| **Business Discovery** (official) | `GET https://graph.facebook.com/v21.0/{IG_BUSINESS_ACCOUNT_ID}?fields=business_discovery.username({handle}){username,name,biography,website,followers_count,media_count,media.limit(12){caption,timestamp,permalink,media_type}}&access_token=$IG_GRAPH_TOKEN` | one call per handle | bio → `PHONE_RE`, `TG_RE`, `IG_RE`, GEO/bozor address, markers; captions → `SUPPLY_RE`/`CONTAINER_RE`/pack units; `website` linktree/taplink → one hop fetched for `t.me`/phones | GSR's own IG Business account + FB app; permissions `instagram_basic` (+ `pages_show_list`; exact names **UNVERIFIED**); app-level rate ~200 calls/h → cap 150/h, **200 handles/day**; error code 110/`(#100)` for personal accounts = `not_business` → the handle is dropped (B2C/personal, never stored). |
+| **Hashtag Search** (official) | `GET /ig_hashtag_search?user_id=&q=<tag>` → id; `GET /{id}/recent_media?user_id=&fields=id,caption,permalink,timestamp,media_type&limit=50` | 4 new tags/day from `HASHTAGS` (30-tag rolling list) | captions → `@mentions` (companies tag themselves) and `TG_RE`; permalink stored as evidence | **30 unique hashtags / 7 days / account**; needs "Instagram Public Content Access" app review; `recent_media` carries **no author username** (per docs) — yield is captions only (**UNVERIFIED**: check once whether `username` is returned). |
+| Apify fallback | `apify/instagram-profile-scraper` via `POST https://api.apify.com/v2/acts/apify~instagram-profile-scraper/run-sync-get-dataset-items?token=$APIFY_TOKEN`, input `{"usernames":[…≤50]}` | only when no Graph token is configured or Graph returned 4 (rate) | `biography, externalUrl, followersCount, postsCount, businessCategoryName, isBusinessAccount` (+ `businessPhoneNumber/businessEmail` **UNVERIFIED**) | $0.0023/profile, `costs.ask('apify_instagram')` ≤ $0.40/day (~170 profiles); `isBusinessAccount=false` → dropped. |
+
+`HASHTAGS = (optom, optomtoshkent, optomnarx, оптомташкент, оптомузбекистан, ulgurji, xitoydan, xitoydanoptom, xitoytovarlari, abusaxiy, abusahiy, chinnibozor, mebeloptom, qurilishmollari, santexnikaoptom, elektronikaoptom, avtozapchastioptom, gazlamaoptom, poyabzaloptom, kiyimoptom, oyinchoqoptom, konteyner, zavodnarxida, tovaryizkitaya, оптомтекстиль, оптоммебель, оптомсантехника, guangzhouoptom, yiwuoptom, 1688uz)` — 30 exactly; rotation is weekly, `recently_searched_hashtags` logged.
+
+**Observation.** `kind="company"`, `source_ref=handle`, `url=https://www.instagram.com/{handle}/`, `instagram=handle`, phones/telegram/website/address from bio, `goods_text` = bio, `attrs={"followers","media_count","category_name","is_business"}`, `excerpt` = bio + the matched caption. **Signals**: bio marker → `wholesale_bulky` (only with a bulky category word in bio or captions); CHINA_WORDS → `china_origin`; `SUPPLY_RE`/`CONTAINER_RE` in captions («yangi konteyner keldi», «фура пришла», «партия») → `container_truck`; pack units (`karobka|коробка|qop|мешок|rulon|рулон|upakovka|упаковка`) → `wholesale_bulky`; `media_count ≥ 50` and (website or telegram) → `contact_handle`; followers alone are not a signal. Negatives: `B2C_RE`, «dostavka shahar bo'ylab/доставка по городу» → `b2c_marker`; `COMPETITOR_RE` → `competitor`; scam pattern `musodara|конфискат|таможенный конфискат` → excluded (`[v 44]`). Geography noise: bios naming Shymkent/Bishkek/Almaty without a UZ city → `hold`.
+
+**Schedule.** Enrichment 11:00 daily (≤ 200), hashtags 12:00 daily (4), `apify_instagram` only on the Wednesday batch. **Yield.** Live sample 25 handles/18 queries (~10 UZ-confirmed with a wholesale cue) → 30–60 new business handles/week, ~30% with a phone or Telegram in bio. **Failure modes.** Token expiry (60-day long-lived token; refresh job monthly, problem `ig_token_expired` → fallback path), app review pending (hashtags off; Business Discovery still works for own-app testers — verify), handle renamed (404 → keep the old evidence, mark `gone`). **Legal.** Official API low; Apify medium (logged-out public business fields only; sole-proprietor +998 numbers are personal data under ZRU-547 → stored as the company contact with `legal_basis='public_source'`). **Day 1.** Create the FB app, link GSR's IG Business account, obtain `IG_GRAPH_TOKEN` and `IG_BUSINESS_ACCOUNT_ID` (two env vars to add in 06); one Business Discovery call on `optom_obuv_uzb`; one `ig_hashtag_search` for `optomtoshkent`; record both JSON fixtures.
+
+### 2.5 `olx_business`
+
+**Purpose.** Wholesale sellers on OLX.uz: business-flagged accounts with many ads in bulky categories and optom/konteyner/sklad wording; Telegram handles from ad text. Phones are **not** taken from OLX.
+
+| Item | Rule |
+|---|---|
+| Robots | Day 1: read `https://www.olx.uz/robots.txt`. `docs/bepul-qidiruv-memo.md` reports `/api/` allowed (**UNVERIFIED**). If `/api/` is disallowed → HTML route; if both are disallowed → Apify only. |
+| JSON route | `GET https://www.olx.uz/api/v1/offers/?offset=0&limit=40&category_id=<id>&query=<kw>&sort_by=created_at:desc` → `{data:[offer], metadata:{total_elements,visible_total_count}, links:{next}}`; offer: `id, url, title, description, created_time, last_refresh_time, business (bool), user{id,name,created}, category{id}, location{city{name},region{name},district}, params[], contact{name, phone: bool, chat: bool}` (field set per Apify actors' descriptions; **UNVERIFIED** against a live response). Max offset 1,000 per query → split by category × city. Category ids: resolve once from `GET /api/v1/categories/` (**UNVERIFIED** endpoint; else from the search-page `__PRERENDERED_STATE__`). |
+| HTML route | `GET https://www.olx.uz/list/q-<kw>/?search[order]=created_at:desc` (and `/tashkent/q-<kw>/`, `/dom-i-sad/.../santehnika/tashkent/q-оптом/`); parse `window.__PRERENDERED_STATE__ = "<escaped JSON>"` → `listing.listing.ads[]`. Seller page `https://www.olx.uz/list/user/<id>/` → state `user` + ads count. |
+| Apify fallback | `lowlanddata/olx-uz-scraper` ($1.99/1k; business/private flag, no personal data) with the same category URLs; `costs.ask('apify_olx')` ≤ $0.60/day (≈ 300 listings). |
+| Keywords | RU `оптом, опт, партия, со склада, контейнер, фура, от производителя, мин. заказ, завод, по предзаказу из Китая`; UZ `optom, ulgurji, sklad, konteyner, fura, zavod, partiya, Xitoydan buyurtma`. Categories: стройматериалы/qurilish, мебель, запчасти, оборудование для бизнеса, сантехника, освещение, бытовая техника, ткани/текстиль, одежда, обувь, игрушки, хозтовары, посуда. |
+| Seller aggregation | Key `olx_user_id`; per seller `attrs={"ads_count","wholesale_ads","business","registered":user.created,"categories":{id:count}}`; one `kind="company"` (`company_name_raw=user.name`, `city`, `external_ids.olx_user_id`, `telegram` from `TG_RE` over the seller's ad texts) + one `kind="listing"` per matching ad (`excerpt` = title + first 400 chars, `published_at=created_time`). |
+| Signals | `business=true` and wording (`оптом|партия|контейнер|со склада|от \d+ шт|optom|partiya|konteyner|sklad`) → `wholesale_bulky` (+ `container_truck` on контейнер/фура/konteyner/fura); ≥ 10 active ads in one bulky category → `marketplace_velocity`; «по предзаказу из Китая / Xitoydan buyurtma» → `china_origin`; `registered ≥ 1 year` → `entity_solid` (weak, 04 may halve); `COMPETITOR_RE` in any ad of the seller (`карго, выкуп, доставка из Китая, 1688 cargo`) → `competitor` (OLX «Xitoydan» searches are mostly forwarders, `[v 6]`); `business=false` and < 3 ads → `hold`. |
+| Phone policy | Never call the reveal endpoint (`/api/v1/offers/{id}/limited-phones/` is logged-in and rate-limited; ToS). Contacts = `TG_RE` and digits written in the text; a seller without a phone is routed to enrichment (directories/maps by name) and is never pushed without one. |
+| Rate / budget | 0.33 rps, page budget 400/day; daily 07:00 newest-first over the last 24 h per (category × keyword); full sweep Thursday 07:00. |
+| Yield | 50–150 wholesale sellers/month before the competitor filter (`docs/arxitektura.md`); live sample 16 rows/12 queries, 7 appliance/auto resellers. |
+| Failures | 403/CAPTCHA (breaker), state key renamed (parser returns `[]` → live test red), `metadata.total_elements` > 1,000 (split by city), seller page 410 (account gone → `gone`). |
+| Legal | OLX rules forbid aggregation for transfer to third parties (`docs/huquqiy-memo.md`); we do not republish and keep company-tier fields; medium. |
+| Day 1 | robots.txt; one `/api/v1/offers/` call; one search page with `__PRERENDERED_STATE__`; one seller page; record all three as fixtures; confirm the `business` field name. |
+
+### 2.6 `directories`
+
+**Purpose.** Company name + phone + address + rubric from the Uzbek business directories; the strongest phone source, a weak import signal (`directory_wholesale` 10) except where a tag says «из Китая». Sub-sources are rows of `sources` with `family='directory'` and a shared parser module per site.
+
+| Sub-source | Seed URLs (verified in `manbalar.json`) | List → card | Fields / notes |
+|---|---|---|---|
+| goldenpages.uz `[v 34]` | `/rubrics/?Id=1424` (Оптово-розничная торговля, 71 orgs), `?Id=1277`, `?Id=1558`, `?Id=106080` (Оборудование из Китая), `?Id=1029` (Торгово-закупочные базы), `?Id=1686` (стройматериалы; cards carry «импортер/экспортер» tags), `?Id=1800` (pharma), `/street/?Id=41003` (Abu-Sahiy market) | rubric page (+ pagination param **UNVERIFIED**, try `&page=N`) → `/company/?Id=N` | name, address, district, phones (**UNVERIFIED** whether rendered server-side; if JS-only, look for the XHR in page source; no headless browser in v1 → phone from other sources), email, site, hours, description, updated date (drop < 2024); «импортер» tag → `brand_distributor(official=False)`; «из Китая» rubric → `china_origin`. |
+| yellowpages.uz `[v 23]` | `/rubrika/<slug>[/<city>]` primary (slugs from the rubric index matching `optov|wholesale` + target goods), `/teg/<slug>` supplement: `tovary-iz-kitaya`, `mebel-iz-kitaya`, `mebel-optom`, `optovaya-torgovlya-hoztovarami`, `optovaya-torgovlya-strojmaterialami`, `optovaya-torgovlya-ofisnymi-tovarami`, `optovaya-torgovlya-bumagoj`, `optovaya-prodazha`, `optovaya-torgovlya-v-uzbekistane` (verify 200); cities `/tashkent /samarkand /namangan /andijan /fergana /bukhara`; `/en/rubric/` mirror for slug cross-check | list → `/kompaniya/<slug>` | name, legal form, district+street, phones (sometimes only fax/e-mail), website, rubrics, tags, description; tags are self-applied → `/teg/tovary-iz-kitaya` and `mebel-iz-kitaya` give `china_origin`. |
+| top.uz `[v 43]` | `/section/optovaya-torgovlya?PAGEN_1=N` (815, Tashkent), `/section/stroymaterialy-optom?PAGEN_1=N` (231), `/section/prodazha-stroitelnykh-materialov`, regional `/tashkent-obl` | Bitrix pagination → company card (phone masked `+998…` in list, shown on card) | name, phone, address, rubric; general directory (233k orgs) → `directory_wholesale` only for `*-optom` sections. |
+| glotr.uz `[v 43]` | `/showcase/<slug-id>/` seller pages (richest: China Motors, Uzbek-Chinese Trading House, XITOY UPAKOVSHIK, TAO.UZ), categories `/ru/<cat>/` (oborudovanie, mebel, sanoat-uskunalari) | category → products grouped by seller → showcase | seller with ≥ 20 SKUs or manufacturer = Chinese brand → `marketplace_velocity`; «Soliq tasdiqlagan» badge → `entity_solid`; phone/Telegram on showcase. |
+| prom.uz | `/tags/optom/`, company pages `/uz/company/<slug>/<cat>/`, product cards with «страна производства: Китай» | tag → product → company | `china_origin` only from the origin field; `/ads/dostavka-*` are competitors (skip). |
+| uzts.uz `[v 14]` | `/en/view/allmembers/entry/?pagenum=1..N` (TIN \| name \| region; bypasses the 500-row cap), detail `/en/members/entry/{id}/` | paginate → detail | STIR, region, activity, capacity, address, phone (partial); drop STIR `123456789`/«test»; textile mills → equipment/dyes/accessories importers (`entity_solid`, sector tag; no volume signal). |
+| openinfo.uz `[v 37]` | `/ru/facts/6/{id}` (major-transaction facts, ids up to ~94089 seen), flat `/ru/facts/{id}/`, `new.openinfo.uz` mirror | weekly: enumerate ids above the stored high-water mark (≤ 300/week) | issuer name, address, phone, counterparty + INN, subject, amount; counterparty matches `Co\.?,?\s*Ltd|КНР|Кита|China|Shenzhen|Guangzhou|Yiwu|Xuzhou|Ningbo|Zhejiang` → `china_origin` + `container_truck` (equipment lines are 20/40 ft), `entity_solid` (JSC); 30–120 CN-linked issuers/yr. |
+| uzpharm `[v 0]` | `uzpharm-control.uz/pages/certified-pharmaceutical-manufacturers`, `uzpharm-gxp.uz/ru/registry1..N` | table rows | organisation, scope, issue/expiry; active or expired ≤ 24 months → manufacturer (lines, APIs, packaging from China); contacts via yellowpages `farmacevticheskie-preparaty-proizvodstvo` / goldenpages `Id=1800`; `entity_solid`. |
+
+Common parse → `kind="company"`, `source_ref=f"{site}:{card_id_or_slug}"`, `legal_form` via `LEGAL_FORM_RE`, `phones` (all on the card; the normaliser flags shared numbers), `website`, `address`, `city`, `goods_text` = rubrics + description, `stir` where printed, `external_ids={"twogis_firm_id"…}` where present. Category filter: keep China-heavy goods (`BULKY_CATEGORIES`); food/metal/agri/stationery wholesale without a China cue → `hold`. Rate 0.5 rps max (slower if `Crawl-delay`), robots per host; page budget 600/day shared, one sub-source per night during the monthly full crawl (1st–7th, 23:00), weekly diff (first list page of each rubric) Thursday 23:00; uzts/openinfo/uzpharm monthly. **Yield.** Thousands of contact rows: top.uz ~1,050 cards in two sections, yellowpages hundreds, goldenpages low hundreds genuinely wholesale, uzts 1,400–2,100 STIR rows, pharma ~125. **Failures.** Layout change (fixture test red), phone behind JS (goldenpages), paginator loops (stop when a page repeats its first card id), 403 streaks. **Legal.** Medium (directory terms; company-tier; no republishing; internal use). **Day 1.** Fetch one list + one card per sub-source, confirm selectors and the goldenpages phone rendering, record fixtures; verify each yellowpages `/teg/` seed returns 200.
+
+### 2.7 `hh_vacancies`
+
+**Purpose.** Employers hiring ВЭД/закупки-Китай/declarant/Chinese-speaking staff are importers with in-house logistics needs (`ved_vacancy` 15). Discovery only; contacts always from enrichment.
+
+| Item | Rule |
+|---|---|
+| API | `GET https://api.hh.ru/vacancies?text=<kw>&area=<UZ>&search_field=name&search_field=description&order_by=publication_time&per_page=100&page=N&date_from=<iso −6 h>` (`page × per_page ≤ 2000`); then `GET /vacancies/{id}` (description HTML, address, `contacts` if `show_contacts`, employer, `published_at`), `GET /employers/{id}` (`site_url, description, industries[], open_vacancies, area, type ∈ company|agency|private_recruiter|project_director`, cached 30 d). Headers: `User-Agent: $HH_USER_AGENT` (`clientScrapper/1.0 (email)`); 403 → register an app at dev.hh.ru and send `Authorization: Bearer <app token>` (env `HH_APP_TOKEN`, to add if needed). `obey_robots=False` (documented API). |
+| Areas | `GET /areas` once (cached 30 d); walk the tree for name «Узбекистан» → country id, children for Tashkent/regions. Ids 97 / 2759 from the proposal are **UNVERIFIED**; never hard-code. |
+| Keywords | RU: `ВЭД, специалист по ВЭД, менеджер ВЭД, импорт, закупки Китай, закупщик, снабженец, менеджер по закупкам, китайского языка, переводчик китайского, декларант, таможенное оформление, логист ВЭД, Alibaba, 1688`; UZ: `tashqi savdo, Xitoy, xitoy tili, bojxona deklarant, ta'minot, xarid menejeri`; EN: `procurement, sourcing China, import manager, supply chain`. ≈ 26 queries per run. |
+| Agency handling | `employer.type != "company"` or name matches `InHunter|HR|Recruit|Staff|Кадров` → poster is an agency: parse the real client with `(?:от имени|для компании|наш клиент|компания-клиент)\s*[—:-]?\s*(?:ООО|OOO|MChJ|«)?([^»\n,.]{3,60})`; none → `attrs.agency=True`, no company row. Poster and inferred employer are always stored separately (`[v 5]` saw cross-attributed postings). |
+| Exclusions | `COMPETITOR_RE` in employer name/description or `industries[].name` matching `Перевозки|Логистика|Транспорт` → `competitor`; staffing firms, state bodies (`ГУП|Агентство|Министерство|Davlat|hokimiyat` → `state_body`), Chinese contractors (`Co., Ltd` + construction project text) → `hold`. |
+| Observation | `kind="vacancy"` (`source_ref=f"hh:{vacancy_id}"`, `url=https://hh.uz/vacancy/{id}`, `excerpt` = title + the sentence with the keyword, `published_at`) + `kind="company"` (`source_ref=f"hh_employer:{id}"`, `company_name_raw`, `website=site_url`, `goods_text` = employer description, `external_ids.hh_employer_id`, `attrs={"open_vacancies","industries","trusted"}`); signals `ved_vacancy`, `china_origin` when CHINA_WORDS appear, `entity_solid` when `trusted`. HR phone/e-mail in `contacts` → `attrs.hr_contact` only (never a lead contact). |
+| Schedule / rate | every 4 h at :20; ≤ 1 rps; ~26 list calls + ≤ 60 detail calls per run; page budget 400/day. |
+| Yield | 10–30 new importer-employers/month countrywide (`[v 5]`). |
+| Failures | 403 (UA/token → breaker + alert), `captcha_required` JSON, 400 on a bad area, agency noise, Moscow postings when `area` is omitted (fence: a test refuses a request without `area`). Fallback: `hh.uz/vacancies/<slug>` SEO pages daily (no dates; dedupe by vacancy id; robots). |
+| Legal | Official API, company-tier; low–medium. |
+| Day 1 | `GET /vacancies?text=ВЭД&per_page=1&area=<resolved>` with the UA; `GET /areas`; record `vacancies.json`, `vacancy.json`, `employer.json`, `areas.json` fixtures. |
+
+### 2.8 `exhibitors`
+
+**Purpose.** Uzbek exhibitors at trade shows (auto parts, building, textile machinery, furniture, power) import at container scale (`exhibitor` 15). Batch collector driven by a calendar.
+
+| Show | List endpoint (`[v 15]`) | Next crawl window |
+|---|---|---|
+| Automechanika Tashkent (BMCA/Messe Frankfurt, CAEx) | `https://automechanika.uz/exhibitorslisteng` (Tilda; year variants exist for 2024/2025 — look for an embedded JSON/XHR) | 21–23 Oct 2026 → crawl 2–15 Nov 2026 |
+| TransLogistica Uzbekistan | Iteca Bitrix pattern | 10–12 Nov 2026 → competitors only (seeds, not leads) |
+| UzBuild | `https://uzbuild.uz/en/exhibitors-list`; archive `/en/exhibition/spisok-uchastnikov.php?PAGEN_2=N` (2022–2026) | 16–18 Mar 2027 |
+| WoodTech & MebelExpo | `mebelexpo.uz` (pattern **UNVERIFIED**, assume Bitrix) | 27–29 Apr 2027 |
+| Power Uzbekistan | `https://power-uzbekistan.uz/en/exhibitors-list` | May 2027 (2026 list online now) |
+| TextileExpo | `textileexpo.uz` (pattern **UNVERIFIED**) | May 2027 (2026 list online now) |
+| CAITME | `https://caitme.uz/en/exhibitors-list` | Sep 2027 (2026 list online now) |
+| China–Central Asia Trade Expo (CCPIT), Chinese brands fair (CAEx) `[v 20]` | exhibitor/visitor lists **UNVERIFIED** | Sep–Oct yearly |
+
+Strategy: `sources.config.calendar = [{show, url_patterns, end_date}]`; weekly Monday 09:00 job crawls every show with `end_date + 10 d ≤ today < end_date + 60 d`, and every archive once (yearly). Paginate `PAGEN_2=N` until a page repeats or is empty; parse table rows `company | pavilion | stand | country | sector`. Keep `country ∈ {Uzbekistan, Узбекистан, O'zbekiston}` or, when absent, `LEGAL_FORM_RE` UZ forms; foreign rows are not stored as companies (supply side). **Observation** `kind="exhibitor"`, `source_ref=f"{show}:{year}:{slug(company)}"`, `company_name_raw`, `goods_text=sector`, `attrs={"stand","pavilion","show","year"}`, signal `exhibitor`; brand names in the profile → `brand_distributor(official=False)`. Cross-check row counts against the organiser's figures (UzBuild 2026 ~418–450; Automechanika 2025 489; Power 2026 250; CAITME 2025 210; MebelExpo 2026 ~130) — a crawl under 50% of the figure is `partial` and alerts. Rate 1 req/3 s, ≤ 100 pages/run. **Yield** tens of UZ rows per show, 100–200/yr (72% of MebelExpo exhibitors are foreign). **Failures.** Tilda list only in JS (look for `t-store`/`data-*` JSON; else Brave `site:automechanika.uz` snippets), list removed after the show (archive URL), truncated pagination. **Legal.** Low (published participant lists; company-tier). **Day 1.** Fetch Automechanika 2026 and UzBuild archive page 1; record fixtures; confirm the `PAGEN_2` parameter.
+
+### 2.9 `maps` — Google Places (New) and 2GIS
+
+**Purpose.** Phone + website + address for wholesale-rubric businesses («оптовая база», «склад», «optom») around the markets; a contact layer with a weak `directory_wholesale` signal.
+
+**Google Places (New).** Two-step to stay inside the free caps (`docs/bepul-qidiruv-memo.md` #7; SKU mapping **UNVERIFIED** — the data-fields page lists phone/website under the Enterprise/Advanced tier):
+1. `POST https://places.googleapis.com/v1/places:searchText`, headers `X-Goog-Api-Key: $GOOGLE_PLACES_API_KEY`, `X-Goog-FieldMask: places.id,nextPageToken` (IDs-only SKU, $0), body `{"textQuery": q, "languageCode":"ru", "regionCode":"UZ", "pageSize":20, "locationBias":{"circle":{"center":{"latitude":41.2995,"longitude":69.2401},"radius":25000}}}`; ≤ 3 pages per query. Queries: `"{category_ru} оптом {city}"`, `"{category_uz} optom {city}"`, `"оптовая база {city}"`, `"склад {category_ru} {city}"` for cities Ташкент, Самарканд, Андижан, Фергана, Наманган, Бухара → ≈ 150 queries/week, `costs.ask('places_text_ids')`.
+2. For each **new** `place_id`: `GET https://places.googleapis.com/v1/places/{place_id}` with `X-Goog-FieldMask: id,displayName,formattedAddress,types,businessStatus,nationalPhoneNumber,internationalPhoneNumber,websiteUri` → `costs.ask('places_details_contact')`: first 1,000/month at $0, then $0.020 (**UNVERIFIED**: Place Details Enterprise $20/1k with 1,000 free; confirm on the pricing page and in the Cloud Console SKU report the day after the first call). ≤ 33/day inside the free cap, ≤ 50 more/day under the $1 cap.
+
+Storage per Maps terms: `place_id` is kept for ever (`external_ids.place_id`); name/address/phone/website from Places are evidence with `retention='30d'` (purged by `retention_job`, 04/06) and are copied to `contacts` only when the candidate reaches a card or push inside those 30 days, with `source_url=https://www.google.com/maps/place/?q=place_id:{id}`. No lat/lng stored. Signals: `types` containing `wholesaler` (**UNVERIFIED** type name) or the name matching B2B markers → `directory_wholesale`; address inside a market area (`Абу Сахий|Abu Saxiy|Куйлюк|Qo'yliq|Янгиобод|Малика|Сергели|Урикзор|Чорсу|Бек Барака`) → `wholesale_bulky`; `businessStatus != OPERATIONAL` → `liquidated`-like negative (`closed`).
+
+**2GIS.** Demo key first: `GET https://catalog.api.2gis.com/3.0/items?q=<rubric>&region_id=<tashkent>&type=branch&fields=items.contact_groups,items.address,items.rubrics,items.org&page_size=10&page=N&key=<TWOGIS_API_KEY>` (demo: created once, valid 1 month, 1,000 requests per service; `region_id` via `GET https://catalog.api.2gis.com/2.0/region/search?q=Tashkent&key=` — **UNVERIFIED**). Rubric texts: `Стройматериалы оптом, Цемент оптом, Сантехника оптом, Электротовары оптом, Автозапчасти оптом, Мебель оптом, Ткани оптом, Бытовая техника оптом, Хозтовары оптом, ulgurji, qurilish mollari`; building-level pulls for firm ids `70000001057601648` (Abu Saxiy Center), `70000001038443805` (Абу Сахий рынок), `70000001043300380` (`[v 11]`; parameter for "firms in building" **UNVERIFIED**). Parse `items[].{id,name,org.name,address_name,rubrics[].name,contact_groups[].contacts[]{type,value}}` (phone, website, telegram, instagram). After the demo month: `2gis.uz` HTML is a SPA (**UNVERIFIED** server rendering) → do not crawl; fallback `searchapi/2gis-scraper` on Apify ($1.99/1k, `costs.ask('apify_2gis')` ≤ $0.40/day) for the same rubrics, monthly; in parallel the owner asks 2GIS Uzbekistan for a licensed export. Observation `kind="place"`, `source_ref=f"2gis:{item.id}"`, `external_ids.twogis_firm_id`, phones/website/address/rubrics; signal `directory_wholesale` when a rubric contains `оптом|оптовая база|склад|ulgurji`.
+
+**Schedule.** Places Tuesday 10:00 (text) and daily 10:30 (≤ 33 details); 2GIS daily 10:40 (40 req) during the demo month, then monthly Apify. **Yield.** Hundreds of wholesale-rubric businesses with phones in month 1 (UNVERIFIED). **Failures.** Places 403 (billing/key), SKU surprise (watch the console; the cap stops the bill), 2GIS key suspended at quota (expected; switch to fallback), empty `contact_groups` on UZ records. **Legal.** Places terms on caching (above); 2GIS API within key terms, Apify grey → bounded pilot. **Day 1.** One text search with IDs-only mask; one details call; next day read the SKU in the console; one 2GIS demo request; record fixtures.
+
+### 2.10 `brand_dealers`
+
+**Purpose.** Official distributors/dealers of Chinese brands in Uzbekistan — the live sample's strongest segment (Soventus/Jinko, Runking/Changan, XCMG, Zoomlion, Foton/Howo) — container-scale importers with public company contacts (`brand_distributor`).
+
+`BRANDS` (`collectors/brands.py`, ~60, grouped): HVAC/appliances `Gree, Haier, Midea, Hisense, TCL, AUX, Chigo, Hofmann, Welkin`; solar/power `Huawei FusionSolar, Jinko, LONGi, JA Solar, Trina, Sungrow, Growatt, Deye, BYD Battery, CATL, Chint, Delixi`; vehicles `Chery, BYD, Changan, Geely, Haval, Great Wall, JAC, Jetour, Exeed, Omoda, Dongfeng, FAW, Foton, Sinotruk HOWO, Shacman, Yutong, King Long`; machinery `Sany, XCMG, Zoomlion, LiuGong, Lonking, SDLG, Shantui, Weichai, Haitian, Yizumi, Bodor, Jack (sewing), Zoje`; tyres `Linglong, Sailun, Triangle, Doublestar, Aeolus`; electronics `Xiaomi, OPPO, vivo, realme, Honor, ZTE, Lenovo, Hikvision, Dahua, TP-Link, Tenda`; plumbing/lighting `Frap, Ledeme, Zerix, Opple, Yeelight`. Each entry carries `brand_domains` for `site:` queries where known.
+
+Queries per brand (via `SerpClient`, 3 per brand; 60 brands → 180 queries/month ≈ 6/day on Brave/Yandex): RU `"{brand}" официальный дистрибьютор Узбекистан`, `"{brand}" официальный дилер Ташкент`; UZ `"{brand}" rasmiy distribyutor O'zbekiston`; EN `"{brand}" authorized distributor Uzbekistan`; plus `site:{brand_domain} (Uzbekistan OR Узбекистан OR Tashkent)` for brands with a dealer locator, and the ENF Solar directory for solar (`enfsolar.com` sellers/installers in Uzbekistan, `[namuna §1]`).
+
+Handling: `company_site` hits → `parse_company_site` (§2.1); the evidence excerpt must contain the brand name within 200 chars of `официальн\w+\s+(?:дистрибьютор|дилер|представитель)|rasmiy\s+(?:distribyutor|diler|vakil)|authorized\s+(?:distributor|dealer)|exclusive` → `brand_distributor(attrs.official=True, attrs.brand)`; a dealer page naming the company without «официальный» → `official=False`. `news` hits: regex `([А-ЯA-Z][^.«»\n]{2,60})\s+(?:стал[аи]?|является|назначен[аы]?)\s+официальным\s+(?:дистрибьютором|дилером)` → `kind="serp_hit"` with `company_name_raw` for enrichment. Brand's own global pages, marketplaces (uzum/olcha/asaxiy/texnomart/mediapark — retailers) → `hold`; `COMPETITOR_RE` → excluded; hits in KZ/KG only → `hold`.
+
+**Schedule** monthly 1st–10th at 13:00 (6 queries/day), distributor pages re-fetched quarterly (conditional GET). **Yield** 30–80 distributor companies in month 1, then a trickle (new appointments via `news`). **Failures.** Engine ignores quotes (post-filter: brand word must be in title/snippet), distributor lists on image-only pages. **Legal.** Low (companies publish their distributor status). **Day 1.** Run the solar and vehicle groups first; confirm ≥ 10 `official=True` pages; record 3 company-site fixtures.
+
+### 2.11 `uzum_sellers` — phase 2
+
+**Purpose.** Marketplace sellers with high order velocity in bulky China-import categories (`marketplace_velocity`); the shop page's legal block gives the entity.
+
+| Item | Rule |
+|---|---|
+| Catalog | Apify `getascraper/uzum-scraper` ($3.30/1k product records; `[v 1]`) with 40–80 bulky keywords (`mebel, divan, shkaf, kovyor, stiralnaya mashina, velosiped, avtozapchasti, santehnika, svetilnik, igrushki, trenajyor, …`) weekly Friday 09:00, `costs.ask('apify_uzum')` ≤ $0.60/day (≈ 180 records/day, ~5,400/month). Output `product_id, title, category, price, order_count, review_count, rating`; the **seller field is unconfirmed** — phase-2 day 1: run 50 rows; if no seller, use the product JSON (`api.uzum.uz` SPA endpoint, **UNVERIFIED**) through `PROXY_URL` at 1 req/5 s, or parse.bot `get_product_details` (price unknown). |
+| Shop page | `https://uzum.uz/ru/shop/<slug>` via `PROXY_URL` (UZ/KZ residential, `costs.ask('proxy_uzum')` ≤ $1/day), 1 req/5 s, monthly, top 300 shops by bulky-order velocity. Oferta 5.3 mandates full name, state registration number, address on the shop page (`[v 17]`) — **UNVERIFIED** that pages render it: hand-check 20–30 shops before building. Parse `LEGAL_FORM_RE` sentence, reg number `\b\d{9,13}\b` after `регистрац|ro'yxat`, address; `самозанят|o'zini o'zi band` → excluded (retail only by law). |
+| Aggregation | per `uzum_shop_slug`: SKU count per category, Σ `order_count`, 30-day delta (two weekly snapshots); `marketplace_velocity` when ≥ 15 SKUs in one bulky category **and** Δorders ≥ 300/30 d (initial threshold; 04 recalibrates from outcomes); `entity_solid` when the legal block parses; Uzum's own brands → excluded. |
+| Observation | `kind="company"` (`source_ref=f"uzum:{slug}"`, `company_name_raw`=legal name or shop name, `external_ids.uzum_shop_slug`, `attrs={"sku_count","orders_30d","categories"}`) + `kind="listing"` for the top 3 products as evidence. No phone on Uzum → enrichment by legal name (directories, registry in 04). |
+| Legal | Uzum terms medium; the legal block is a statutory disclosure (company-tier). |
+| Yield | 2–3k sellers scanned → 100–300 bulky high-velocity shops (`docs/arxitektura.md`; UNVERIFIED). |
+
+### 2.12 `tenders` — phase 2
+
+**Purpose.** Entity solidity and goods categories for companies already in the DB with a STIR: `uztender.com/supplier/{INN}` shows contract count, total sum, customers, main categories (`[v 3]`). Enrichment, not discovery.
+
+Weekly Saturday 04:00: for companies with `stir` and no `tenders` evidence in 90 days (≤ 150/week), `GET https://uztender.com/supplier/{INN}` at 1 req/3 s (robots **UNVERIFIED**); parse name, INN, `contracts_count`, `total_sum`, `customers_count`, categories. Signals: goods categories ∈ (equipment, spare parts, electronics, furniture, textiles, medical) with ≥ 3 contracts → `entity_solid`; works/services only → none; presence on `xarid.uzex.uz` unreliable-supplier list (`[v 4]`, endpoint **UNVERIFIED**) → `−` (04). `/market` category stats are read once a quarter for the category list. Legal medium (commercial aggregator; public pages, no export, internal use). Observation `kind="company"`, `source_ref=f"uztender:{INN}"`, `attrs={"contracts","sum","customers","categories"}`.
+
+---
+
+## 3. Schedule, budgets and heartbeats
+
+| key | cron (Asia/Tashkent) | rps | pages/day | $/day | heartbeat(s) | phase |
+|---|---|---|---|---|---|---|
+| erp_sync | `15 * * * *` delta · `30 2 * * *` full · `0 3 * * *` outcomes | 1.0 | 50 | 0 | `job:collector:erp_sync.{delta,full,outcomes}` | 1 |
+| telegram_monitor | `*/15 * * * *` sweep · join daily (random 10–20 h) · `0 1 * * *` backfill | — | — | Claude only | `userbot`, `job:collector:telegram_monitor{,.join,.backfill}` | 1 |
+| serp_layer | `0 10,14 * * *` · `10 2 * * *` night | per engine | 300 | ≤ 1.00 | `job:collector:serp_layer{,.night}` | 1 |
+| instagram_discovery | `0 11 * * *` enrich · `0 12 * * *` hashtags | 1.0 (Graph) | 100 (linktree hops) | ≤ 0.40 | `job:collector:instagram_discovery` | 1 |
+| olx_business | `0 7 * * *` · `0 7 * * 4` full | 0.33 | 400 | ≤ 0.60 | `job:collector:olx_business` | 1 |
+| directories | `0 23 * * 4` diff · `0 23 1-7 * *` full | 0.5 | 600 | 0 | `job:collector:directories` (detail names the sub-source) | 1 |
+| hh_vacancies | `20 */4 * * *` | 1.0 | 400 | 0 | `job:collector:hh_vacancies` | 1 |
+| exhibitors | `0 9 * * 1` | 0.33 | 100 | 0 | `job:collector:exhibitors` | 1 |
+| maps | `0 10 * * 2` text · `30 10 * * *` details · `40 10 * * *` 2GIS | 2.0 / 1.0 | 150 | ≤ 1.40 | `job:collector:maps` | 1 |
+| brand_dealers | `0 13 1-10 * *` | per engine | 120 | inside serp | `job:collector:brand_dealers` | 1 |
+| uzum_sellers | `0 9 * * 5` · shop pages `0 4 15 * *` | 0.2 (proxy) | 300 | ≤ 1.60 | `job:collector:uzum_sellers` | 2 |
+| tenders | `0 4 * * 6` | 0.33 | 150 | 0 | `job:collector:tenders` | 2 |
+
+`sources` rows carry `cron`, `rps`, `daily_page_budget`, `config jsonb` (`daily_usd_cap`, seeds, calendar, cursors, api keys never) and are editable from the owner bot (`/manbalar`), which is how a cadence is changed without a deploy.
+
+---
+
+## Open questions
+
+1. **Header name.** The shared contract says `X-ERP-Key`; `fullprompt` reads `x-gsr-key` today. Does 05 rename the ERP side or does the agent keep sending both?
+2. **Places storage.** Maps terms allow caching `place_id` only; the lead's phone from Places is pushed to the ERP (a permanent store). Is "use within 30 days, then re-fetch on demand" acceptable to the owner's lawyer (`docs/huquqiy-memo.md` open item), or should Places be IDs-only and phones come from 2GIS/directories?
+3. **Env additions.** `IG_GRAPH_TOKEN`, `IG_BUSINESS_ACCOUNT_ID`, `TWOGIS_API_KEY`, optional `HH_APP_TOKEN` are not in the shared env list — 06 to add them to `Settings` and `.env.example`.
+4. **Schema touches for 02.** `evidence.meta jsonb` (etag, last_modified, truncated, retention), `collector_runs.{status,unchanged,skipped_robots,note}`, `chat_monitors.{priority,status,backfilled_at,seen_count}`, `suppression.{origin,removed_at}`, `sources.cron`.
+5. **Health keys.** `collector_silent`, `suppression_stale`, `ig_token_expired` are proposed in addition to the six in the shared contract — confirm in 06.
+6. **Telegram buyer groups.** Does the owner accept joining the large bazaar groups («CHINNiLAR OPTOM TOSHKENT», 165k members) with the company account, given the content-licensing risk, or only competitor discussion groups?
+7. **Goldenpages phones.** If phones are JS-rendered, is a headless browser (Playwright) acceptable in v1, or do goldenpages cards stay name/address-only?
+8. **Uzum phase 2 trigger.** What precision from phase-1 sources (30-day outcomes) unlocks the Apify + proxy spend for Uzum?
+
+## Acceptance criteria
+
+- `services/http.py` passes `tests/collectors/test_http.py`: per-host pacing, robots disallow, conditional GET/304, `Retry-After`, breaker at 5 consecutive 403/429 writing `sources.paused_until` and raising `collector_blocked`, `BudgetExhausted`, UA on every request, secret scrubbing in logs, `obey_robots=False` only at allow-listed call sites.
+- Every phase-1 collector has: a `Collector` subclass with the names in §3; pure `parse_*` functions with ≥ 1 recorded fixture each and a parse test that asserts concrete fields; a `@live` smoke test; a `collector_runs` row per run with counters; a heartbeat under `job:collector:<key>`.
+- `collectors/keywords.py` regex tests pass for Latin, Cyrillic Uzbek and Russian examples, including the «оптом»/«оптика» and «kargo» cases.
+- No collector calls a paid endpoint outside `costs.ask`; a run that would exceed its `$/day` or `pages/day` ends `partial`, never over budget (test with a fake price table).
+- `erp_sync`: salt change → full resync; stale feed → `suppression_stale` and the push gate refuses; XLSX import produces hashes equal to the feed's for the same phone (test vector in the fixture).
+- `telegram_monitor`: `tests/test_no_telegram_writes.py` green; join limited to 3/day (test with a fake clock); non-matching messages are not stored; the Haiku call receives no raw phone or handle (test on the pseudonymiser output).
+- `instagram_discovery`: personal/`not_business` handles are never stored; hashtag quota tracker never exceeds 30 unique tags per 7 days (test).
+- `olx_business`: no code path calls the phone-reveal endpoint (AST test on the URL constant); sellers with `COMPETITOR_RE` hits are emitted with `competitor` only.
+- `maps`: Places evidence carries `retention='30d'`; only `place_id` is in `external_ids`; details are requested at most once per `place_id`.
+- Day-1 checklist (every **UNVERIFIED** item above) is executed from the VPS and its result written into `tests/fixtures/<key>/README.md` with the date, before the collector is enabled in `sources`.

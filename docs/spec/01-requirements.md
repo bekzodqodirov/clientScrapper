@@ -18,7 +18,7 @@ Include when **all** hold:
 - Imports from China now or plausibly: explicit (Xitoydan/из Китая/1688/Taobao/Yiwu/Guangzhou, Chinese brand dealership, VED/China-procurement vacancy) or sector prior (furniture, appliances, electronics, lighting, sanitary, tools, textile machinery/fabrics, building finishes, toys, packaging, auto parts, EV/cars, solar).
 - Volume ≥1 m³ per shipment: stated («2 kub», «konteyner», «fura»), implied (wholesale + bulky category, ≥10 listings, order velocity, VED vacancy, exhibitor, dealer of a bulky brand), or measured (ERP receipts for unclaimed markings).
 
-Exclude when **any** holds: B2C wording («o'zim uchun», «для себя», single item, personal profile with no business); cargo/forwarding/customs-broker/logistics company (competitor); Chinese-side supplier; state body (tender path, not direct); liquidated entity; phone/handle/STIR in suppression; pushed in the last 30 days.
+Exclude when **any** holds: B2C wording («o'zim uchun», «для себя», single item, personal profile with no business); cargo/forwarding/customs-broker/logistics company (competitor); Chinese-side supplier; state body (tender path, not direct); liquidated entity; phone/handle/STIR in suppression; an open push for the same company in the last 90 days or the same phone in the last 24 hours.
 
 Segments (for routing and scripts): A bazaar wholesalers · B marketplace sellers · C factories (equipment/raw materials) · D construction/furniture importers · E electronics/auto/appliance distributors.
 
@@ -37,8 +37,8 @@ Segments (for routing and scripts): A bazaar wholesalers · B marketplace seller
 | F-09 | Push approved leads with a phone to the ERP with the Uzbek note template, idempotent `external_id`, business-hours window, `PUSH_DAILY_CAP` | Fake-ERP tests 200/404/500/timeout/replay; 404 trips the breaker and alerts the owner |
 | F-10 | Sync suppression (full nightly, delta hourly) and outcomes (nightly) from the ERP; verify HMAC rule and salt_id | Contract tests over recorded feed responses; resync on salt change |
 | F-11 | Compute per-source precision weekly; auto-push only for sources ≥60% over ≥15 pushes; pause sources <20% over ≥30 pushes with an alert | `/holat` shows precision; tests over synthetic outcomes |
-| F-12 | Telegram-only prospects (no phone) go to the on-duty manager via the owner bot as a card with a deep link; never auto-sent | Card template test; no Telegram write calls (AST test) |
-| F-13 | Owner commands: /lidlar /manbalar /chats /holat /xarajat /toxtat /yoq /import /unut /qidir | Each command has a handler test |
+| F-12 | Telegram-only prospects (no phone, score ≥60, username known) reach state review as tier 'warm' after three enrichment attempts and go to a manager via the owner bot as a card with a deep link; the manager's `/tel` turns an obtained phone into a push; never auto-sent | Card template test; `test_manager_handoff`; no Telegram write calls (AST test) |
+| F-13 | Owner commands: /lidlar /manbalar /chats /holat /xarajat /toxtat /yoq /import /unut /qidir /dnc /vazn /push tekshir /stir | Each command has a handler test; callback_data parser fence |
 | F-14 | Daily 09:00 digest and health alerts (collector_blocked, push_404, cost_cap, userbot_unauthorized, flood_breaker, no_signals_24h) | Health tests; dead-man ping configured |
 | F-15 | Retention and purge: raw evidence 180 d, intent posts 30 d, unanswered leads 90 d → company-tier only, DNC hashes forever; `/unut` purges a company/person with audit | Retention job tests; purge_log rows |
 
@@ -51,7 +51,7 @@ Segments (for routing and scripts): A bazaar wholesalers · B marketplace seller
 | N-03 | Legal: company-tier data free; person-tier limited to one decision maker with basis/source/date; pseudonymised model calls; retention as F-15; data hosted in Uzbekistan or an adequacy-list country; registration of the database at pd.gov.uz is the owner's task before go-live |
 | N-04 | Robustness: every external call has timeout, retry with backoff, breaker; the process survives Telegram flood waits; kill switches `COLLECTORS_ENABLED`, `USERBOT_ENABLED`, `CRM_PUSH_ENABLED`, runtime `/toxtat` |
 | N-05 | Observability: JSON logs with redaction, heartbeats per job, `/holat`, digest, usage_log priced per call |
-| N-06 | Latency: Telegram intent → owner card p90 < 3 minutes; approved push → ERP < 1 minute inside business hours |
+| N-06 | Latency: Telegram intent → owner card p90 < 5 minutes (event-driven: userbot NOTIFY → classify/score → review cards every 2 min in review hours); approved push → ERP < 1 minute inside business hours |
 | N-07 | Throughput: up to 200 observations/hour, 2,000 companies/month, 25 pushes/day without schema changes |
 | N-08 | Portability: single VPS (4 vCPU/8 GB), Docker Compose, nightly encrypted backups, restore drill monthly |
 | N-09 | Code quality: ruff + mypy on services, pytest with Postgres in CI, fixtures for every parser, no secrets in repo |
