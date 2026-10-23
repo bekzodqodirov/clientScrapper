@@ -34,15 +34,19 @@ posts into a group.
 | Command | Answer | Writes |
 |---|---|---|
 | `/lidlar` | Sends the next ≤ `REVIEW_BURST_MAX` pending review cards now (ignores `REVIEW_HOURS`: the owner asked) and «Navbatda yana N ta». `/lidlar holat` prints counts per `lead_candidates.state` and the oldest `review` age | `lead_reviews.state=asked`, `card_message_id`, `card_hash`, `expires_at` |
-| `/manbalar` | One line per `sources` row, paged by 8: `{✅/⏸/⛔} {title_uz} · oxirgi {age} · bugun {pages}/{budget} sahifa · ${cost} · aniqlik {p}% ({pushes_30d}) · {avto/qoʻlda}`; buttons per row `src:<key>:t` (on/off) and `src:<key>:i` (last 5 `collector_runs`, breaker, paused reason) | `sources.enabled`; `src:<key>:a` sets `config.auto_push_forbidden=true` (owner can only forbid auto-push, never grant it — F-11 computes it) |
+| `/manbalar` | One line per `sources` row, paged by 8 — schedulable rows (`cron IS NOT NULL`: `serp_layer`, `directories`, `maps`, …) first, then the attribution-only sub-source rows of 03 §2.1 (`search_brave`, `maps_2gis`, …): `{✅/⏸/⛔} {title_uz} · oxirgi {age} · bugun {pages}/{budget} sahifa · ${cost} · aniqlik {p}% ({pushes_30d}) · {avto/qoʻlda}`; buttons per row `src:<key>:t` (on/off) and `src:<key>:i` (last 5 `collector_runs`, breaker, paused reason) | `sources.enabled`; `src:<key>:a` sets `config.auto_push_forbidden=true` (owner can only forbid auto-push, never grant it — F-11 computes it; 05 §B.2 `source_precision_job` never flips `auto_push` on while the flag is set) |
 | `/chats` | MIYA `chats_keyboard` with one toggle: `{✅/❌} {👥/📢} {title} · {hit_7d} signal / {seen_7d} xabar`; `/chats qoʻsh @username` enqueues `chat_monitors(status='queued', priority=0)` (joined by `userbot/joiner.py`, still ≤ 3/day) | `chat_monitors.monitor_enabled`, `decided_by='owner'` |
 | `/holat` | §4.1 layout: processes, db, disk, backup, Anthropic, ERP (last push, last full/delta pull, breaker), per-source lines, queues, pushes today/cap, cost today/month, open problems each with its remedy line | — |
-| `/xarajat` | Today and month by `usage_log.provider` and `operation`, refusals count from `costs`, top 5 companies by spend (ids and names only), `% of DAILY_COST_CAP_USD` / `MONTHLY_COST_CAP_USD` | — |
+| `/xarajat` | Today and month by `usage_log.provider` and `operation`; refusals = the `usage_log` rows `costs.ask` persists on a refusal (`cost_usd=0, units=0, model='refused:<code>'`, 04 §8 — the counter is never in-process: the bot is another process than the worker), counted per code; top 5 companies by spend (ids and names only), `% of DAILY_COST_CAP_USD` / `MONTHLY_COST_CAP_USD` | — |
 | `/toxtat [sabab]` | Global pause at once, no confirmation (a safety action): collectors fetch nothing, no paid call, no push, no card, no join. The userbot keeps its connection and keeps storing prefilter hits (no egress, no cost). Reply: «⏸ Toʻxtatildi. Davom ettirish: /yoq» | `runtime_flags('paused')` §6 |
 | `/yoq` | Confirm card «Davom ettiraymi?» `ps:y` / `ps:n`; `/yoq crm` clears `sources.erp_sync.breaker_until` after confirm `ps:c` | `runtime_flags`, `sources` |
-| `/import` | Reply `/import` to an XLSX/CSV, or send it with that caption: `client_import.plan` → «{n} ta telefon: {new} yangi, {same} bor, {bad} notoʻgʻri» → `im:<plan_id>:y|n`; plan kept in memory 10 min (restart = send again) | `suppression(kind='client', key_type='phone_tail', source='manual_import')` |
+| `/import` | Reply `/import` to an XLSX/CSV, or send it with that caption: `client_import.plan` → «{n} ta telefon: {new} yangi, {same} bor, {bad} notoʻgʻri» → `im:<plan_id>:y|n`; plan kept in memory 10 min (restart = send again) | `suppression(kind='client', key_type='phone_tail', source='manual_import')` — clear tails (the future agent secret is unknown); a row is retired when a full pull brings the hash of the same tail (05 §B.2 step 5) |
 | `/unut <STIR \| +998… \| @user \| domen \| uuid \| nom>` | `purge.plan_company` → plan card (§5.4) → `pg:<purge_log_id>:y|n` → counts | `purge_log`, deletions, `suppression(legal|dnc)` |
 | `/qidir <soʻz>` | Resolves `+998…`/tail-9, `@username`, STIR, domain, or trigram name match (≤ 5) to a company card: company-tier fields, state, best score, last push + outcome label, and `🚫 Bostirilgan: {kind_uz} ({source}, {dd.mm.yyyy})` when `is_suppressed()` hits. Read-only, creates nothing | — |
+| `/dnc <+998… \| tail-9 \| @user>` | Own do-not-contact without a card (02 §2.8, 04 §7): the key is normalised (`phone_tail` / `username`), the matching company (if any) is shown, and a confirm card `dn:<plan_id>:y|n` precedes the write; answer «🔒 DNC yozildi — {key}» or «Allaqachon bor ({kind}, {dd.mm.yyyy})» | `suppression(kind='dnc', key_type ∈ {phone_tail, username}, source='bot', reason='owner_command')`; open `lead_candidates` of that company → `suppressed` |
+| `/vazn <key> <points>` | Scoring weight edit (02 §2.7): `key` must exist in the active `scoring_weights` version, `points` an integer within the group cap; answer shows old → new and the new version number; `/vazn` alone lists the active version | copies the active version into `version+1`, applies the change, sets `approved_by='owner:<id>'`, `approved_at=now()` (trigger `cs_scoring_weights_frozen` keeps older versions immutable) |
+| `/push tekshir <external_id>` | For a `push_log(status='unknown')` row (02 §2.10 rule 5, §4.2 `push_unconfirmed`): shows company, attempt, `sent_at`, and whether tonight's outcomes read already saw the id; confirm `pt:<push_log_id>:y|n` | `push_log.status='failed'`, `error='owner_marked_unconfirmed'` so the next attempt can be claimed; refused when the ERP already reported the `external_id` (then the row is promoted to `sent` instead) |
+| `/stir <candidate_id> <9 digits>` | Manual answer to the registry queue of the weekly digest (04 §3 E4, captcha path): validates 9 digits, refuses a STIR already held by another company (answers that company instead of merging), re-runs E4 for the candidate | `companies.stir`, `evidence(source_key='registry_lookup', url=NULL, excerpt='owner:/stir')`, candidate `next_enrich_at=now()` |
 | `/yordam` | The command list | — |
 
 Every handler has a test in `tests/test_bot_commands.py` (F-13) driven by MIYA's fake-bot
@@ -50,9 +54,11 @@ pattern (`tests/test_jarvis_cards.py::_owner_message`, `_Callback`).
 
 ### 1.3 Review card
 
-Rendered by `bot/cards.render_review(view: CandidateView) -> Card(text, keyboard, hash)`; pure,
-golden-tested. `view` is 05's `CandidateView`. HTML-escaped; quote verbatim from
-`evidence.excerpt`, ≤ 140 chars; whole card ≤ 3,500 chars.
+Rendered by `services/cards.render_review(view: CandidateView) -> Card(text, keyboard, hash)`;
+pure, golden-tested. `services/cards.py` owns every card (owner review card, the handoff variant,
+the manager card of §1.7, the digest of §1.8 — 07 §1.11/T-20); `bot/` only delivers what it
+returns. `view` is 05's `CandidateView`. HTML-escaped; quote verbatim from `evidence.excerpt`,
+≤ 140 chars; whole card ≤ 3,500 chars.
 
 ```
 🆕 Nomzod · {score}/100 · {segment_label_uz}
@@ -63,11 +69,13 @@ golden-tested. `view` is 05's `CandidateView`. HTML-escaped; quote verbatim from
 🔎 «{quote}» — {source_title_uz}, {dd.mm.yyyy}
 🔗 {evidence_url}
 🧮 hajm {v} · Xitoy {o} · firma {s} · yangilik {r} · aloqa {c} · tasdiq {k}{ · minus {negatives}}
-✔️ mijoz emas · DNC yoʻq · 30 kunda yuborilmagan
+✔️ mijoz emas · DNC yoʻq · 90 kunda yuborilmagan
 ```
 
-The last line is literal: a card exists only because every gate passed; the gate is re-run
-inside the push transaction (02 §2.10), never trusted from the card.
+The last line is literal: a card exists only because every gate passed — «90 kunda
+yuborilmagan» is gate 6 of 02 §2.9 / 04 §6 (no open push for this company in 90 days and none
+for this phone in 24 hours), not a 30-day rule; the gate is re-run inside the push transaction
+(02 §2.10), never trusted from the card.
 
 Keyboard (row 1, row 2, row 3):
 
@@ -77,9 +85,14 @@ Keyboard (row 1, row 2, row 3):
 [⋯ Boshqa]  →  [🙍 B2C] [🚚 Kargo/raqobatchi] [✏️ Telefon] [◀️ Orqaga]
 ```
 
-When the candidate has no usable phone, row 1 is `[👤 Menejerga] [✖️ Yoʻq]` (§1.7). After a
-tap the card is edited in place (same `card_message_id`), keyboard removed, one footer line
-appended:
+**Handoff variant.** A candidate reaches `review` without a usable phone through exactly one
+producer: `enrich_job` after attempt 3 with `score ≥ 60 AND contacts.telegram_username IS NOT
+NULL` sets `state='review'`, `tier='warm'`, `score_breakdown.gates.no_phone=true` (02 §2.9,
+04 §3 S4). For that row `review_cards_job` renders the handoff variant: the 📞 line becomes
+«📨 Faqat Telegram: @{telegram_username}» and row 1 is `[👤 Menejerga] [✖️ Yoʻq]` (§1.7). A
+`review` row with neither a phone nor `gates.no_phone` is a bug, and the renderer refuses it
+(`test_cards`). After a tap the card is edited in place (same `card_message_id`), keyboard
+removed, one footer line appended:
 
 | Tap | `lead_reviews.answer` | Candidate | Footer |
 |---|---|---|---|
@@ -93,8 +106,9 @@ appended:
 | ✏️ | `edit_phone` | stays `review`; the owner's next message within 5 min must be a phone; digits replaced on the same contact row (typo fix, `legal_basis`/`source_url` unchanged); card re-rendered | «✏️ Telefon tuzatildi» |
 | 👤 | `handoff` | `hold`, `hold_until=+30 d`, manager card sent (§1.7) | «👤 Menejerga yuborildi — {manager}» |
 
-Expiry: `review_cards_sweep` (every 20 min) marks `asked` rows past `expires_at` as `expired`,
-candidate → `hold` 7 d, re-asked at most twice (02 §2.9). A tap on an expired or already
+Expiry: the first step of every `review_cards_job` run (every 2 min, §1.6; this step also runs
+outside `REVIEW_HOURS`, only the sending does not) marks `asked` rows past `expires_at` as
+`expired`, candidate → `hold` 7 d, re-asked at most twice (02 §2.9). A tap on an expired or already
 answered card answers «Bu karta eskirgan — /lidlar» and nothing else (idempotent: the
 `UPDATE … WHERE state='asked'` row count decides).
 
@@ -134,15 +148,20 @@ ch:t:<monitor_id> · ch:p:<page> · ch:noop
 ps:<a>                    a ∈ y resume · n keep-paused · c clear-crm-breaker
 im:<plan_id>:<y|n>        import plan
 pg:<purge_log_id>:<y|n>   purge plan
+dn:<plan_id>:<y|n>        /dnc confirm (plan in memory 10 min, like /import)
+pt:<push_log_id>:<y|n>    /push tekshir confirm
 ```
+
+This section is the one home of the grammar (02 §2.9 points here; the letter codes above, not
+`rv:<review_id>:<answer>` words, are what the keyboards build).
 
 ```python
 # bot/callbacks.py
 @dataclass(frozen=True, slots=True)
 class Callback:
-    kind: Literal["rv", "mg", "mh", "src", "srcp", "ch", "chp", "chnoop", "ps", "im", "pg"]
+    kind: Literal["rv", "mg", "mh", "src", "srcp", "ch", "chp", "chnoop", "ps", "im", "pg", "dn", "pt"]
     action: str | None = None
-    ref: int | None = None          # review_id | monitor_id | plan_id | purge_log_id
+    ref: int | None = None          # review_id | monitor_id | plan_id | purge_log_id | push_log_id
     target: str | None = None       # uuid | source key
     page: int | None = None
 
@@ -157,6 +176,8 @@ _GRAMMAR: dict[str, re.Pattern[str]] = {
     "ps":  re.compile(r"^ps:(?P<action>[ync])$"),
     "im":  re.compile(r"^im:(?P<ref>\d{1,10}):(?P<action>[yn])$"),
     "pg":  re.compile(r"^pg:(?P<ref>\d{1,19}):(?P<action>[yn])$"),
+    "dn":  re.compile(r"^dn:(?P<ref>\d{1,10}):(?P<action>[yn])$"),
+    "pt":  re.compile(r"^pt:(?P<ref>\d{1,19}):(?P<action>[yn])$"),
 }
 
 def parse(data: str) -> Callback | None: ...   # first full match wins; never guesses; None → handler answers «Bu tugma eskirgan»
@@ -178,7 +199,7 @@ expects `None`. An unparsed `callback_data` is answered by nobody and the button
 | Setting | Default | Rule |
 |---|---|---|
 | `REVIEW_HOURS` | `09:00-18:00` Mon–Sat | `review_cards_job` sends only inside; `pending` rows wait |
-| `REVIEW_BURST_MAX` | 10 | cards per job run (every 20 min) |
+| `REVIEW_BURST_MAX` | 10 | cards per job run (the job runs every 2 min inside `REVIEW_HOURS`; most runs find nothing to send) |
 | `REVIEW_DAILY_CAP` | 40 | `asked` rows per Tashkent day; beyond it the digest says «Navbatda N ta» |
 | `REVIEW_EXPIRY_HOURS` | 72 | `expires_at` |
 | `QUIET_HOURS` | `21:00-08:00` | warnings and the recovery line are held (first tick after quiet hours says them); **critical** problems (§4.2) are said at any hour; cards never go out in quiet hours |
@@ -188,13 +209,23 @@ expects `None`. An unparsed `callback_data` is answered by nobody and the button
 Ordering inside a burst: score desc, then `created_at` asc. Cards are the only unsolicited
 question the bot asks; the join queue, merges and enrichment never ask (03, 04).
 
+**The Telegram path is event-driven** (01 N-06: «Telegram intent → owner card p90 < 5
+minutes»). The userbot's insert transaction ends with `NOTIFY cs_interaction, '<id>'` (02
+§2.12); `classify_job` and `score_job` `LISTEN` on it and run at once, their 15-minute sweep
+being only the fallback for a lost notification (04 §0); `review_cards_job` runs every 2 min
+inside `REVIEW_HOURS` and sends what is `pending`. The burst and daily caps above are unchanged
+— the 2-minute cadence changes latency, never volume. Every other source keeps its cron and
+reaches a card on the next job run.
+
 ### 1.7 Manager handoff — Telegram-only prospects
 
 The agent sends nothing to a prospect. A hot candidate without a phone goes to a human who
 writes from their own account. Mechanism: `lead_reviews(kind='manager')` (§6) delivered by the
 owner bot to one id from `MANAGER_TELEGRAM_IDS` — the manager with the fewest
 `kind='manager'` cards today (ties: list order). A manager who has not `/start`ed the bot cannot
-receive it; `make doctor` and the go-live checklist verify each id with `get_chat`.
+receive it; `make doctor` and the go-live checklist verify each id with `get_chat`. This card
+ships in v1 — T-20/T-21 with `tests/test_manager_handoff.py` (07); only an on-duty rota in place
+of the least-loaded rule is month-2 backlog (07 §4.1).
 
 ```
 📨 Telegram orqali nomzod · {score}/100 · {segment_label_uz}
@@ -210,7 +241,7 @@ receive it; `make doctor` and the go-live checklist verify each id with `get_cha
 
 | Tap | Effect |
 |---|---|
-| 📞 Bogʻlandim | `answer='contacted'`; candidate stays `hold`; digest counts it; the manager may then send `/tel <review_id> +998…` — stored as the company's person-tier phone with `legal_basis='pre_contract_request'`, `source_url=message_url`, `collected_at=now()`; candidate → `approved(approved_by='owner:<id> via handoff')` (the owner already approved this company) → normal push gate → ERP lead with phone |
+| 📞 Bogʻlandim | `answer='contacted'`; candidate stays `hold`; digest counts it; the manager may then send `/tel <review_id> +998…` — stored as the company's person-tier phone with `legal_basis='pre_contract_request'`, `source_url=message_url`, `collected_at=now()`; the new phone re-scores the candidate at once: `hold → scored → approved(approved_by='manager:<tg_id>')` (02 §2.9 — the owner's earlier `handoff` answer was the owner's approval; `approved_by` takes exactly `'owner:<id>'`, `'auto:<source>'` or `'manager:<tg_id>'`) → normal push gate → ERP lead with phone |
 | 🙅 Yozmang dedi | `answer='said_no'` → `suppression(dnc, tg_username, source='owner_bot', reason='manager_report')`; candidate `suppressed`; the owner's digest lists it |
 | ❌ Notoʻgʻri / B2C | `answer='wrong_or_b2c'` → `excluded(b2c)`; outcome fed to source precision as negative |
 | ⏭ Keyinroq | `expires_at += 24 h` |
@@ -242,13 +273,14 @@ second digest after a restart.
 
 | Step | Rule |
 |---|---|
-| Provisioning | A new +998 SIM owned by the company, registered to the account on an ordinary phone; profile: real-looking first name, photo, no links; 2FA password set the same day; ageing **2–4 weeks** of normal use (join 2–3 chats by hand, read daily) before the agent logs in; Telegram Premium optional (raises the chat cap to 1,000 and, per vendor claims, tolerance — UNVERIFIED; the agent caps itself at `USERBOT_MAX_CHATS=60`) |
+| Provisioning | A new +998 SIM owned by the company, registered to the account on an ordinary phone; profile: real-looking first name, photo, no links; 2FA password set the same day; ageing **≥ 30 days** of normal use (join 2–3 chats by hand, read daily) before the agent logs in and before its first join (03 §2.3, 07 §5.2 — one number everywhere); Telegram Premium optional (raises the chat cap to 1,000 and, per vendor claims, tolerance — UNVERIFIED; the agent caps itself at `USERBOT_MAX_CHATS=60`) |
 | api_id / api_hash | From my.telegram.org under the company account; a **separate** app from MIYA's; stored only in `.env` |
 | Login | `make userbot-login` → `tools/userbot_login.py` (MIYA verbatim): interactive phone, code, 2FA → prints `TELETHON_SESSION=<StringSession>`; paste into `.env`, `make reload`. The string is a full credential; a leak is handled by Settings → Devices → terminate, then a new login |
 | One client per session | `AuthKeyDuplicatedError` = two processes on one string; `make doctor` refuses to start when `USERBOT_ENABLED=true` and a second `userbot` container is running; never run the session on a phone and the server at once |
 | Runtime | `connect()` not `start()`; `is_user_authorized()` false → beat `{"enabled": true, "authorized": false, "error": code}` and idle (no login prompt in a container); `USERBOT_ENABLED=false` → beat `{"enabled": false}` and idle forever (the container never exits, so `unless-stopped` is safe) |
 | Join policy | `userbot/joiner.py`, daily at a random minute 10:00–20:00, `USERBOT_JOINS_PER_DAY=3`, public usernames only, no invite links, `≥ 90 s` between joins, cap 60 chats, nothing joined while `flood_until` or the global pause is set; the agent **never leaves** a chat — the owner leaves by hand from the phone; `/chats` off only stops reading |
-| `chat_monitors` defaults | groups and channels `monitor_enabled=true, decided_by='rule:default'`; private chats `false, decided_by='rule:private_off'` and never read (MIYA default flipped; `services/chats.default_monitor_enabled` is the one home) |
+| About reads | `userbot/about.py` (`read_about`) drains `chat_monitors(status='queued', priority 3)` rows enqueued by enrichment step E3 (04 §3 — E3 itself reads the public `https://t.me/s/<username>` page through `Fetcher`; the worker never imports `telethon`) and by the tout filter (03 §2.3): `GetFullChannelRequest` ≤ 20/day → `evidence` + `observations(kind='profile')`, `GetFullUserRequest` ≤ 50/day (cached 30 d) → `interactions.sender_bio`. With the joiner these are the only raw requests allowed (07 `RAW_ALLOWED`); nothing is read while `flood_until` or the global pause is set |
+| `chat_monitors` defaults | groups and channels `monitor_enabled=true, decided_by='rule:default'`; private chats `false, decided_by='rule:private_off'` and never read (MIYA default flipped; `services/chats.default_monitor_enabled` is the one home); `role='calibration'` rows (GSR's own `@gsrgroupchat`, 03 §2.3) are `monitor_enabled=false` and nothing is read or stored from them — the account may sit in the chat, its members are existing clients |
 | FloodWait | `flood_sleep_threshold=60`; a `FloodWaitError`/`FloodPremiumWaitError` > `USERBOT_FLOOD_BREAKER_SECONDS=300` sets `runtime_flags('flood_until') = now + USERBOT_FLOOD_BREAKER_HOURS (24)`, beats it, raises problem `flood_breaker`; while set: no joins, no backfill, no `GetFullUser`, no dialog sync; live `events.NewMessage` keeps flowing (it is a push from Telegram, not a request) |
 | Restriction | `UserDeactivatedBanError`, `AuthKeyUnregisteredError`, `SessionRevokedError`, `PhoneNumberBannedError`, `UserDeactivatedError` → beat `authorized=false`, problem `userbot_unauthorized` (critical), process idles with a 15-min re-check, no reconnect storm. Runbook §4.6 |
 | Never | `SendMessage`, `SendReaction`, `SetTyping`, `ReadHistory`, `GetParticipants`, `ImportChatInvite`, `LeaveChannel`, `DeleteHistory`, media download (v1). Fences: `tests/test_no_telegram_writes.py` (MIYA `WRITE_CALLS` + `RAW_REQUEST` scan over every module importing telethon), `test_join_only_in_joiner` (`JoinChannelRequest` appears only in `userbot/joiner.py`), `test_no_participants_calls` |
@@ -301,7 +333,7 @@ services:
     restart: unless-stopped
     mem_limit: 512m
     logging: *log
-    volumes: [ "./searxng:/etc/searxng:ro" ]   # settings.yml: json format on, limiter off, engines duckduckgo,yandex,bing
+    volumes: [ "./searxng:/etc/searxng:ro" ]   # settings.yml: json format on, limiter off, engines duckduckgo,startpage,mojeek,brave; Google/Bing disabled (03 §2.1)
     # no ports: reachable only as http://searxng:8080 inside the compose network
 volumes: { db_data: {} }
 ```
@@ -347,32 +379,52 @@ clientscrapper`, `CMD ["python", "-m", "clientscrapper.worker.main"]`. Image ≈
 
 ### 3.4 `.env.example` (complete; defaults as shown; blank = must be filled or feature off)
 
+Comments stand on their own lines — 07 §1.2 `test_env_example` refuses an inline comment on an
+assignment line. `POSTGRES_PASSWORD` carries the placeholder `CHANGE_ME` (not blank) because
+compose expands `${POSTGRES_PASSWORD:?required}` and `:?` treats empty as unset, which would fail
+`docker compose config` in the CI docker job (07 §2.1); `make doctor` refuses to start while the
+placeholder is still in place. Model prices and the Claude cap have **no** line here: prices are
+`MODEL_PRICES` in `usage.py`, the per-family cap is `FAMILY_CAPS["anthropic"] = 5.00` in code,
+and only the three per-role overrides below are env (04 §8).
+
 ```
 # --- Database ---
 POSTGRES_USER=clientscrapper
-POSTGRES_PASSWORD=
+# placeholder on purpose: compose requires a non-empty value; doctor refuses CHANGE_ME
+POSTGRES_PASSWORD=CHANGE_ME
 POSTGRES_DB=clientscrapper
-DATABASE_URL=postgresql+psycopg://clientscrapper:CHANGE_ME@db:5432/clientscrapper   # same password as above, literally
-DB_PORT=5433                           # host-side bind on 127.0.0.1 only
+# the same password as above, literally
+DATABASE_URL=postgresql+psycopg://clientscrapper:CHANGE_ME@db:5432/clientscrapper
+# host-side bind on 127.0.0.1 only
+DB_PORT=5433
 # --- Claude ---
 ANTHROPIC_API_KEY=
-EXTRACT_MODEL=claude-haiku-5-5         # ImportSignal / classify
-VERDICT_MODEL=claude-sonnet-5-5        # RelevanceVerdict
-BATCH_MODEL=claude-opus-5-5            # nightly company verdicts via Message Batches (−50 %)
-MODEL_PRICES=claude-haiku-5-5:0.10/0.50,claude-sonnet-5-5:2.00/10.00,claude-opus-5-5:4.00/20.00   # $/MTok in/out; an unlisted model is unpriced = refused by costs.ask
+# ImportSignal / classify
+EXTRACT_MODEL=claude-haiku-5-5
+# RelevanceVerdict
+VERDICT_MODEL=claude-sonnet-5-5
+# nightly company verdicts via Message Batches (-50 %)
+BATCH_MODEL=claude-opus-5-5
+# optional price overrides "in/out[/cache_read/cache_write]" in $/MTok (04 §8 parse_price);
+# blank = the code table MODEL_PRICES in usage.py; an unpriced model is refused by costs.ask
+EXTRACT_MODEL_PRICE=
+VERDICT_MODEL_PRICE=
+BATCH_MODEL_PRICE=
+# the Claude family cap is FAMILY_CAPS["anthropic"] in code (04 §8), not an env value
 DAILY_COST_CAP_USD=10
 MONTHLY_COST_CAP_USD=250
-CLAUDE_DAILY_CAP_USD=5                 # per-provider allocation; the rest per 03 §1.3 lives in sources.daily_cost_cap_usd
 SPEND_ALERT_PCT=80
 # --- Telegram: owner bot and managers ---
 ASSISTANT_BOT_TOKEN=
 OWNER_TELEGRAM_ID=
-MANAGER_TELEGRAM_IDS=                  # comma-separated; empty = Telegram-only prospects wait in hold
+# comma-separated; empty = Telegram-only prospects wait in hold
+MANAGER_TELEGRAM_IDS=
 # --- Telegram: reader account ---
 USERBOT_ENABLED=true
 TELETHON_API_ID=
 TELETHON_API_HASH=
-TELETHON_SESSION=                      # make userbot-login
+# make userbot-login
+TELETHON_SESSION=
 USERBOT_JOINS_PER_DAY=3
 USERBOT_MAX_CHATS=60
 USERBOT_FLOOD_BREAKER_SECONDS=300
@@ -380,27 +432,36 @@ USERBOT_FLOOD_BREAKER_HOURS=24
 # --- Collectors ---
 COLLECTORS_ENABLED=true
 COLLECTOR_RPS_DEFAULT=0.3
-COLLECTOR_DAILY_PAGE_BUDGET=3000       # sum over sources; per-source budgets in the sources table
-HH_USER_AGENT=                         # "<app name> (<contact e-mail>)" as hh.ru requires
+# sum over sources; per-source budgets in the sources table
+COLLECTOR_DAILY_PAGE_BUDGET=3000
+# "<app name> (<contact e-mail>)" as hh.ru requires
+HH_USER_AGENT=
 HH_APP_TOKEN=
 BRAVE_API_KEY=
 YANDEX_SEARCH_API_KEY=
 YANDEX_FOLDER_ID=
 GOOGLE_PLACES_API_KEY=
 APIFY_TOKEN=
-SEARXNG_URL=http://searxng:8080        # blank = SearXNG off
-PROXY_URL=                             # phase 2 (Uzum); blank = no proxy ever used
+# blank = SearXNG off; with the optional profile: http://searxng:8080
+SEARXNG_URL=
+# phase 2 (Uzum); blank = no proxy ever used
+PROXY_URL=
 IG_GRAPH_TOKEN=
 IG_BUSINESS_ACCOUNT_ID=
 TWOGIS_API_KEY=
 # --- ERP (fullprompt) ---
-CRM_PUSH_ENABLED=false                 # true only after make push-test succeeded
+# true only after make push-test succeeded
+CRM_PUSH_ENABLED=false
 CRM_BASE_URL=https://erp.example.uz
-CRM_PUSH_SOURCE=agent                  # other = fallback door (05 §B.3)
+# other = fallback door (05 §B.3)
+CRM_PUSH_SOURCE=agent
 CRM_AGENT_KEY=
 PUSH_DAILY_CAP=25
 PUSH_WINDOW=09:30-17:30
-PUSH_DAYS=1-6                          # ISO weekdays Mon–Sat
+# ISO weekdays Mon-Sat
+PUSH_DAYS=1-6
+# a number the owner controls; used by make push-test and the day-1 checklist (05 §B.1, 07 §5.6)
+TEST_PHONE=
 # --- Owner bot cadence ---
 REVIEW_HOURS=09:00-18:00
 REVIEW_BURST_MAX=10
@@ -417,9 +478,11 @@ DEADMAN_PING_URL=
 DEADMAN_PING_MINUTES=5
 # --- Backups ---
 BACKUP_DIR=/data/backups
-BACKUP_TIME=03:45                      # after erp_sync outcomes (03:00), before retention (04:15)
+# after erp_sync outcomes (03:00), before retention (04:15)
+BACKUP_TIME=03:45
 BACKUP_RETENTION_DAYS=14
-BACKUP_AGE_RECIPIENT=                  # make backup-key; blank = no backup is written at all
+# make backup-key; blank = no backup is written at all
+BACKUP_AGE_RECIPIENT=
 BACKUP_TO_TELEGRAM=true
 BACKUP_MAX_AGE_HOURS=30
 RESTORE_DRILL_ENABLED=true
@@ -433,9 +496,12 @@ LOG_LEVEL=INFO
 LOG_FORMAT=json
 ```
 
-`tests/test_env_example.py` (MIYA shape): every `Settings` field has a line in `.env.example`
-and vice versa; `tools/doctor.EXPECTED_ENV_KEYS` equals the file's keys; no value in the example
-looks like a real secret (`sk-ant-`, a 46-char Telegram token, an `age1` key, `1A…` session).
+`tests/test_env_example.py` (MIYA shape, 07 §1.2): every `Settings` field has a line in
+`.env.example` and vice versa; `tools/doctor.EXPECTED_ENV_KEYS` equals the file's keys; no
+assignment line carries an inline comment; `POSTGRES_PASSWORD` is non-empty; no value in the
+example looks like a real secret (`sk-ant-`, a 46-char Telegram token, an `age1` key, `1A…`
+session); `MODEL_PRICES` and `CLAUDE_DAILY_CAP_USD` appear nowhere (their homes are code,
+04 §8).
 
 ### 3.5 Secrets, server, time, disk
 
@@ -471,12 +537,14 @@ looks like a real secret (`sk-ant-`, a 46-char Telegram token, an `age1` key, `1
 ### 4.1 Health model (`services/health.py`, MIYA core verbatim)
 
 Heartbeats: `bot`, `worker`, `userbot`, `backup`, `restore_drill`, `job:<id>` for every
-scheduler job, `collector:<key>` per collector run. `gather()` adds: db ping, disk, evidence
-size, newest backup, last Anthropic success, ERP (last `push_log.sent`, `erp_sync.config`
-timestamps, breaker), queue depths, today's pushes/cards/spend, per-source rows. The alert
-ledger is `reminder_log` with kinds `alert:<key>` / `recovered:<key>` (MIYA names; 02's comment
-`health:<problem>` is to be aligned to these). Whichever of the worker's `health_job` (every 5
-min) or the bot's watchdog is alive speaks; neither repeats the other.
+scheduler job, `collector:<key>[.variant]` per collector run (03 §1.2 — e.g.
+`collector:serp_layer.brave`, `collector:erp_sync.full`; the component name is the same string
+in 02 §2.13, 03 and 05). `gather()` adds: db ping, disk, evidence size, newest backup, last
+Anthropic success, ERP (last `push_log.sent`, `erp_sync.config` timestamps, breaker), queue
+depths, today's pushes/cards/spend, per-source rows. The alert ledger is `reminder_log` with
+kinds `alert:<key>` / `recovered:<key>` (MIYA constants; 02 §2.13's column comment carries the
+same names). Whichever of the worker's `health_job` (every 5 min) or the bot's watchdog is
+alive speaks; neither repeats the other.
 
 ### 4.2 Problems (`PROBLEM_KEYS`, ordered as shown; each has Uzbek text with its remedy and a recovery line)
 
@@ -489,7 +557,9 @@ min) or the bot's watchdog is alive speaks; neither repeats the other.
 | `push_404` | critical | ERP 404 on push or feed (05) | «⛔ ERP kaliti yoki manba notoʻgʻri: 404. Kelgan arizalar → Reklama havolalari → Agent → kalit; `.env` CRM_AGENT_KEY; `make reload`; `/yoq crm`» |
 | `backup_failed` | critical | `backup` heartbeat `ok=false` | «⛔ Tungi zaxira yozilmadi: {error}» |
 | `restore_drill_failed` | critical | drill beat `ok=false` | «⛔ Zaxirani tiklash sinovi oʻtmadi — zaxiralar ishonchsiz» |
-| `suppression_stale` | warning → critical after 6 h | feed configured and last full pull > 36 h or `salt_id` mismatch (05) | «⚠️ ERP bostirish roʻyxati {age} yangilanmadi — push toʻxtatildi» |
+| `suppression_stale` | warning → critical after 6 h | `services/erp_feeds.suppression_fresh()` is false (the one home, 05 §B.2 / 03 §2.2): feed configured and last successful full pull > `FULL_MAX_AGE_H` = 26 h, or last delta > `DELTA_MAX_AGE_H` = 3 h, or `salt_id` mismatch; the push gate refuses meanwhile | «⚠️ ERP bostirish roʻyxati yangilanmadi: toʻliq {full_age} (chegara 26 soat) · farq {delta_age} (chegara 3 soat) — push toʻxtatildi» |
+| `suppression_selftest_failed` | warning | a full pull completed but the hash of a tail the agent knows is a client (the last `landed_client` outcome's `push_log.phone_tail`) is absent from the feed (04 §7, 05 §B.2); the pull is still applied | «⚠️ ERP roʻyxati oʻz-oʻzini tekshirishdan oʻtmadi — maʼlum mijoz raqami roʻyxatda yoʻq; kalit, salt va ERP feedini tekshiring» |
+| `suppression_stale_hit` | warning | the ERP answered a push with `outcome='dropped', reason='suppressed'` (05 §B.2 table: our list missed a client/lost number) → a full pull is scheduled for tonight | «⚠️ ERP {n} ta pushni «bostirilgan» deb qaytardi — roʻyxatimiz orqada; bugun kechasi toʻliq yuklab olinadi» |
 | `userbot_silent` | warning | userbot beat > `USERBOT_STALE_MINUTES`, not disabled | «⚠️ Telegram oʻquvchi {age} jim — `make userbot`» |
 | `flood_breaker` | warning | `runtime_flags.flood_until > now` | «⚠️ Telegram FloodWait ({seconds} s) — oʻquvchi {until} gacha qoʻshilmaydi/oʻqimaydi (jonli xabarlar davom etadi)» |
 | `collector_blocked` | warning | any `sources.breaker_until > now` with reason 403/429 | «⚠️ {title}: sayt bloklayapti (403/429) — {until} gacha toʻxtadi» |
@@ -499,17 +569,25 @@ min) or the bot's watchdog is alive speaks; neither repeats the other.
 | `no_signals_24h` | warning | userbot enabled, ≥ 1 chat on, zero `interactions` in 24 h | «⚠️ 24 soatda bitta ham Telegram signal yoʻq — chatlar oʻlikmi? `/chats`» |
 | `push_failing` | warning | 3 consecutive candidates failed on 5xx/transport | «⚠️ ERP javob bermayapti ({n} ta push muvaffaqiyatsiz)» |
 | `push_unconfirmed` | warning | `push_log.unknown` older than 48 h | «⚠️ {n} ta push tasdiqlanmagan — `/push tekshir`» |
-| `feed_contract` | warning | `FeedShapeError` / rule changed / runaway / bad request (05) | «⚠️ ERP feed shakli oʻzgardi ({code}) — dasturchi kerak» |
+| `feed_contract` | warning | one key for every contract break of 05 §B.2 / §B.6 — 05's `feed_bad_request`, `feed_rule_changed`, `feed_runaway` and `FeedShapeError` fold into it with `{code}` ∈ `bad_request` / `rule_changed` / `runaway` / `shape` | «⚠️ ERP feed shakli oʻzgardi ({code}) — dasturchi kerak» |
 | `suppression_shrunk` | warning | full pull < 90 % of previous count | «⚠️ ERP roʻyxati {pct}% ga qisqardi — oʻchirish toʻxtatildi» |
 | `review_backlog` | warning | ≥ 30 candidates in `review` older than 72 h | «⚠️ {n} ta karta 3 kundan beri kutmoqda — /lidlar» |
-| `anthropic_failing` | warning | ≥ 5 `API_FAILURES` in 1 h, or no success in 3 h with jobs pending | «⚠️ Anthropic javob bermayapti ({code})» |
+| `anthropic_failing` | warning | ≥ 5 `API_FAILURES` in 1 h | «⚠️ Anthropic javob bermayapti ({code})» |
+| `anthropic_silence` | warning | no successful Anthropic call for ≥ 3 h (MIYA `ANTHROPIC_SILENCE`) while `model_jobs(status='pending')` exist; while it holds, `costs.ask` refuses `anthropic` ops with code `anthropic_silence` (04 §8 step 6) — signals queue, nothing is lost | «⚠️ Anthropic {age} jim — tasnif navbatda ({n} ta); kalit va status.anthropic.com ni tekshiring» |
+| `batch_stuck` | warning | a `model_jobs` Message Batch older than 26 h without `processing_status='ended'` (04 §4.8; after 3 attempts the instant lane takes the jobs) | «⚠️ Tungi batch {age} tugamadi ({batch_id}) — `make worker` loglari; ertaga Sonnet oʻzi oladi» |
+| `pii_leak` | warning | a validator found a raw `+998\d{9}`, `@\w{5,}` or 14-digit run in a model output field (04 §4.7: field dropped, job flagged) — a stop-the-line bug per 07 R13 | «⚠️ Model javobida shaxsiy maʼlumot chiqdi ({n} ta, maydon tashlandi) — dasturchi kerak» |
 | `backup_unconfigured` / `backup_stale` | warning | no recipient / newest older than `BACKUP_MAX_AGE_HOURS` | «⚠️ Zaxira sozlanmagan — `make backup-key`» / «⚠️ Oxirgi zaxira {age}» |
 | `ig_token_expired` | warning | Graph API 190 | «⚠️ Instagram tokeni eskirdi — yangilang» |
 | `source_low_precision` | warning, once per source per week | `pushes_30d ≥ 30` and `precision_30d < 0.20` → `sources.paused_until = +7 d` | «⚠️ {title} aniqligi {pct}% — bir haftaga toʻxtatildi (`/manbalar` bilan yoqiladi)» |
 | `evidence_over_cap` | warning | retention had to delete under-age files | «⚠️ Dalil papkasi {gb} GB — eski fayllar muddatidan oldin oʻchirildi» |
 
-Critical problems ignore `QUIET_HOURS`. `TOLD_FIRST_ELSEWHERE = {cost_cap, push_404,
-flood_breaker}` (their own job says it at once; the sweep repeats after `ALERT_REPEAT_HOURS`).
+This table is the one list of keys: 04 §8 raises `spend_high` (its former `cost_80` /
+`cost_month_80` are gone), `cost_cap`, `anthropic_silence`, `batch_stuck`, `pii_leak`,
+`suppression_selftest_failed`, `suppression_stale_hit`; 05 raises `push_404`, `feed_contract`,
+`suppression_stale`, `suppression_shrunk`, `suppression_stale_hit`; `tests/test_health.py`
+fails on a key raised anywhere that is not a row here. Critical problems ignore `QUIET_HOURS`.
+`TOLD_FIRST_ELSEWHERE = {cost_cap, push_404, flood_breaker}` (their own job says it at once; the
+sweep repeats after `ALERT_REPEAT_HOURS`).
 Dead-man: the worker GETs `DEADMAN_PING_URL` every `DEADMAN_PING_MINUTES` from `heartbeat_job`
 (a healthchecks.io-style monitor with a 15-minute grace; the free tier is UNVERIFIED — check
 the plan before relying on it). This is the only alarm that does not depend on the bot.
@@ -582,35 +660,36 @@ the durable record.
 
 | Tier | Columns | Rule in code |
 |---|---|---|
-| Company (free) | `companies.*`, `company_aliases`, `company_ids`, `contacts(tier='company')`: switchboard `phone`, `info@` `email`, `telegram_username` of the @company channel, `instagram` of the business account; `signals`, `evidence.url/excerpt`, `lead_candidates.score*`, `outcomes` | stored for the life of the company; mirrored to Sheets/digest freely |
+| Company (free) | `companies.*`, `company_aliases`, `company_ids` (its `ID_TYPES` has no `tg_user`: a poster's personal Telegram id is person-tier and lives only in `contacts.telegram_id`, 02 §2.4), `contacts(tier='company')`: switchboard `phone`, `info@` `email`, `telegram_username` of the @company channel, `instagram` of the business account; `signals`, `evidence.url/excerpt`, `lead_candidates.score*`, `outcomes` | stored for the life of the company; mirrored to Sheets/digest freely. A person-shaped name never becomes `companies.display_name` (an OLX seller «Sardor» is `OLX sotuvchi <olx_user_id>` plus one person-tier contact, 03 §2.5 / 04 §1.6) |
 | Person (restricted) | `contacts(tier='person')`: `full_name`, `role`, personal `phone`, `telegram_id`, `telegram_username`, `instagram`, `email`; `interactions.sender_*`; `observations.parsed.person/phones`; `model_jobs.pseudonyms` | one live row per company (`ux_contacts_one_person`); `legal_basis`, `source_url`, `collected_at` NOT NULL by CHECK; never in Sheets, logs, digest; anonymised by R4/R5; purged on request |
-| Forbidden | passports, PINFL, birth dates, home addresses, member lists, profile photos, full chat logs, customs declaration rows, second/third personal numbers | no columns exist; `ck_contacts_no_pinfl`; `interactions` accepts only prefilter hits; `tests/test_schema_tiers.py` greps `db/models.py` for forbidden names (`pinfl`, `passport`, `birth`, `members`, `photo`) |
+| Forbidden | passports, PINFL, birth dates, home addresses, member lists, profile photos, full chat logs, customs declaration rows, second/third personal numbers | no columns exist; `ck_contacts_no_pinfl`; `interactions` accepts only prefilter hits; `tests/test_schema_tiers.py` greps every module of the `db/models/` package (02 §6 — a package, not one file) for forbidden names (`pinfl`, `passport`, `birth`, `members`, `photo`) |
 
-### 5.2 Pseudonymisation before any model call (`services/pseudonym.py`)
+### 5.2 Pseudonymisation before any model call (`services/pseudonyms.py`)
+
+The module, its names and the token order are 04 §4.2's; this section only states what the
+fences enforce. There is no `services/pseudonym.py`, `Masked`, `mask` or `unmask`:
 
 ```python
-@dataclass(frozen=True, slots=True)
-class Masked:
-    text: str
-    mapping: dict[str, str]        # "<PHONE_1>" -> "+998901234567"; stored in model_jobs.pseudonyms (30 d), never logged
-
-PHONE_RE = re.compile(r"(?<!\d)(?:\+?998|8)?[\s(-]*\d{2}[\s)-]*\d{3}[\s-]*\d{2}[\s-]*\d{2}(?!\d)")
-TG_RE    = re.compile(r"(?<![\w/])@[A-Za-z][A-Za-z0-9_]{4,31}\b|t\.me/(?!s/)([A-Za-z][A-Za-z0-9_]{4,31})")
-IG_RE    = re.compile(r"instagram\.com/([A-Za-z0-9_.]{2,30})")
-EMAIL_RE = re.compile(r"[^@\s]+@[^@\s]+\.[a-z]{2,}", re.I)
-
-def mask(text: str, *, known_names: Sequence[str] = ()) -> Masked      # phones→<PHONE_n>, handles→<TG_n>/<IG_n>, e-mails→<EMAIL_n>, known sender names→<NAME>; company names and goods untouched
-def unmask(text: str, mapping: Mapping[str, str]) -> str
-def assert_masked(text: str) -> None                                     # raises UnmaskedPayload when PHONE_RE/TG_RE/EMAIL_RE still match
+# services/pseudonyms.py — signatures as 04 §4.2
+class Pseudonymised: text: str; reverse: dict[str, str]     # {"<PHONE_1>": "+998901234567", "<TG_1>": "namuna_tekstil", "<NAME_1>": "Rustam"}; stored in model_jobs.pseudonyms (30 d), never logged
+def pseudonymise(text: str, *, names: Iterable[str] = (), prior: Pseudonymised | None = None) -> Pseudonymised
+def restore(text: str, reverse: Mapping[str, str]) -> str
+def assert_masked(text: str) -> None      # raises UnmaskedPayload when PHONE_RE / TG_RE / IG_RE / EMAIL_RE still match
 ```
 
-`services/extraction.extract()` and `services/batch.submit_pending()` accept only `Masked`
-and call `assert_masked` before building the request; the response is unmasked locally. Fences:
-`tests/test_pseudonym.py` (golden Uzbek/Russian/Cyrillic cases); `tests/conftest.py` installs
-an `httpx.MockTransport` on the Anthropic client for the whole suite that fails any test whose
-request body matches `PHONE_RE`/`TG_RE`; `tests/test_imports_fence.py` (AST) allows `import
-anthropic` only in `services/extraction.py`, `services/batch.py`, `services/costs.py`, and
-`import telethon` only in `userbot/`, `tools/userbot_login.py`.
+The regexes are **imported** from `collectors/keywords.py` (03 §1.4 owns `PHONE_RE`, `TG_RE`,
+`IG_RE`; `EMAIL_RE` lives beside them) and never redefined — one pattern, one home, so the
+collectors, the pseudonymiser and the log redactor of §4.5 agree on what a phone is.
+
+`services/extraction.call()` (instant lane) and `services/model_jobs.py` (`model_batch_submit`,
+the batch lane; there is no `services/batch.py`) accept only `Pseudonymised` and run
+`assert_masked` on every request before dispatch; the response is restored locally. Fences:
+`tests/test_pseudonyms.py` (round trip, idempotence, stable numbering across a bundle, golden
+Uzbek/Russian/Cyrillic cases); `tests/test_pseudonymised_requests.py` — `tests/conftest.py`
+installs an `httpx.MockTransport` on the Anthropic client for the whole suite that fails any
+test whose request body matches `PHONE_RE`/`TG_RE`; `tests/test_imports_fence.py` (AST) allows
+`import anthropic` only in `services/extraction.py`, `services/model_jobs.py`,
+`services/costs.py`, and `import telethon` only in `userbot/`, `tools/userbot_login.py`.
 
 ### 5.3 No outbound contact, ever
 
@@ -623,8 +702,10 @@ SMS, e-mail or telephony dependency exists in `requirements.txt` (test).
 
 ### 5.4 Retention and purge
 
-Retention is 02 §4 (`retention_job` 04:15, steps R1–R7, each its own `purge_log(retention)`
-row); 06 adds the evidence cap (§3.5). Purge:
+Retention is 02 §4 (`retention_job` 04:15, steps R1–R7 including R4b — a Google Places phone
+copied into `contacts` is cleared after 30 days unless the company has a `sent|unknown` push —
+and R3's scrubbing of a poster's personal handles on `intent_post` rows; each step its own
+`purge_log(retention)` row); 06 adds the evidence cap (§3.5). Purge:
 
 ```python
 # services/purge.py (MIYA plan→execute shape)
@@ -648,7 +729,11 @@ cannot be re-created by the next observation. The plan card shows counts, never 
 
 `services/suppression.is_suppressed()` (02 §2.8) orders hits by
 `KIND_RANK = legal 0 · dnc 1 · client 2 · lost 3 · bounced 4 · competitor 5 · manager_veto 6 · b2c 7 · cooldown 8`
-and returns the first. A hit stops a card, a manager card, a push and a Sheets row; the owner
+and returns the first. `KIND_RANK` is one constant in `services/suppression.py`; the SQL is
+rendered from it as `ORDER BY array_position(ARRAY['legal','dnc',…,'cooldown'], kind) LIMIT 1`
+(never `ORDER BY kind`, which would put `b2c`/`bounced` first), and
+`tests/test_suppression_precedence.py` pins the order against the constant, not a copy. A hit
+stops a card, a manager card, a push and a Sheets row; the owner
 has no button that overrides it (a candidate that became suppressed between card and tap gets
 «🚫 Bu raqam endi bostirilgan» and the card closes). Removal: `client`/`lost` rows belong to the
 ERP and disappear only when the feed stops listing them; `legal` rows are never removed;
@@ -674,14 +759,19 @@ outcomes and feed entries.
   Monthly bump PR (Dependabot or by hand) run through `make check` and a 24-hour canary.
 - The Docker base image tag is pinned and its digest recorded; `make update` never pulls `latest`.
 
-## 6. Schema touches requested from 02
+## 6. Schema this section relies on (all in 02 §5 `0001_initial`)
 
-| Table | Change | Why |
+Everything below is defined in 02 and ships in `0001` (25 tables / 23 `sources` rows / 26
+weights, 02 AC 1); nothing here waits for a `0002`. The table says where 06 reads or writes it:
+
+| Table | What 06 uses | Home in 02 |
 |---|---|---|
-| `runtime_flags` (new) | `key text PRIMARY KEY, value jsonb NOT NULL, updated_at timestamptz NOT NULL DEFAULT now(), updated_by text NOT NULL` | `/toxtat` must survive restarts and be read by all three processes; keys `paused` (`{"since","reason"}`), `flood_until`, `review_hours_override` |
-| `lead_reviews` | `kind text NOT NULL DEFAULT 'owner' CHECK (kind IN ('owner','manager'))`; `answer` CHECK widened with `handoff, contacted, said_no, wrong_or_b2c, no_reply`; `ux_lead_reviews_live` becomes `(candidate_id, kind)` | manager cards (§1.7) without a new table |
-| `reminder_log` | comment: kinds `alert:<key>`, `recovered:<key>`, `digest`, `review_expired`, `push_unconfirmed`, `source_paused` | §4.1 |
-| `chat_monitors` | `status text NOT NULL DEFAULT 'queued' CHECK (status IN ('queued','joined','gone','left'))`, `priority smallint NOT NULL DEFAULT 5` | already proposed by 03 §4; the joiner (§2) reads them |
+| `runtime_flags` | `key text PRIMARY KEY, value jsonb NOT NULL, updated_at, updated_by`; keys `paused` (`{"since","reason"}`), `flood_until`, `review_hours_override` — `/toxtat` and the flood breaker survive restarts and are read by bot, worker and userbot | 02 §2.13 |
+| `lead_reviews` | `kind IN ('owner','manager') DEFAULT 'owner'`; `answer` CHECK includes `handoff, contacted, said_no, wrong_or_b2c, no_reply`; `ux_lead_reviews_live (candidate_id, kind)` — manager cards (§1.7) without a new table | 02 §2.9 |
+| `reminder_log` | kinds `alert:<key>`, `recovered:<key>`, `digest`, `review_expired`, `push_unconfirmed`, `source_paused` (§4.1) | 02 §2.13 |
+| `chat_monitors` | `status IN ('queued','joined','gone','left') DEFAULT 'queued'`, `priority smallint DEFAULT 5`, `backfilled_at`, `role` incl. `calibration` — the joiner and `about.py` (§2) read them | 02 §2.12 |
+| `usage_log` | `model='refused:<code>'` rows with `cost_usd=0, units=0` for `/xarajat` (§1.2) | 02 §2.13 |
+| `lead_candidates` | `approved_by ∈ {'owner:<id>','auto:<source>','manager:<tg_id>'}`, `score_breakdown.gates.no_phone` (§1.3, §1.7) | 02 §2.9 |
 
 ## 7. Checklists
 
@@ -691,10 +781,10 @@ outcomes and feed entries.
 2. `make backup-key`; secret key stored off-server (two places); `BACKUP_AGE_RECIPIENT` set.
 3. `make doctor` green; `make up`; `make ps` shows db, worker, userbot, bot healthy; `/holat` from the owner account answers.
 4. BotFather: bot created, group joining disabled; owner and every manager `/start` the bot; `make doctor` shows each manager id reachable.
-5. Reader account: SIM aged ≥ 14 days, 2FA, `make userbot-login`, `make reload`, `/chats` lists the 3 seed chats within 24 h.
+5. Reader account: SIM aged ≥ 30 days (§2, 03 §2.3), 2FA, `make userbot-login`, `make reload`, `/chats` lists the 3 seed chats within 24 h.
 6. ERP (fullprompt `agent-feed` deployed): key minted, `agent_no_contact_reasons` matches the lost-reason label, routing rules A and B present; `make push-test` → 200; `CRM_PUSH_ENABLED=true`; first delta pull shows a non-zero suppression count in `/holat`.
 7. Fallback if `agent-feed` is not deployed: `CRM_PUSH_SOURCE=other`, `make import-clients FILE=clients.xlsx APPLY=1`, `PUSH_DAILY_CAP=10`.
-8. Billing: Anthropic monthly limit $150 and e-mail alert at $100; Google Cloud budget $5/month with hard cap; Brave $5 credit only; Apify prepaid ≤ $20.
+8. Billing: Anthropic monthly limit $150 and e-mail alert at $100; Google Cloud budget $5/month with hard cap; Brave $5 credit only (the code side is 33 queries/day and ≤ 1,000/month in `costs.ask`, 03 §1.3 / 04 §8 — past the credit the card is charged silently); Apify prepaid ≤ $20.
 9. `DEADMAN_PING_URL` configured and a test alert received on the owner's phone; `make backup` run once by hand and the file seen in Telegram; `make restore … DRY=1` on the file.
 10. Legal: pd.gov.uz registration filed (owner); `docs/huquqiy-memo.md` §4 checklist signed off; managers briefed on `docs/sotuv-playbook.md` §2 (own account, 10:00–17:00, opt-out line).
 11. Week 1 settings: `REVIEW_DAILY_CAP=20`, `PUSH_DAILY_CAP=10`, one manager in `MANAGER_TELEGRAM_IDS`; raise after the first weekly review.
@@ -714,7 +804,7 @@ outcomes and feed entries.
 
 ## Open questions
 
-1. `runtime_flags` and the `lead_reviews.kind` widening (§6): accepted into 02's `0001`, or a `0002` on day 2?
+1. ~~`runtime_flags` and the `lead_reviews.kind` widening (§6): accepted into 02's `0001`, or a `0002` on day 2?~~ Resolved: all of §6 is in `0001` (02 §5).
 2. Owner review of **every** candidate in week 1 (`REVIEW_DAILY_CAP=20`) versus auto-push from day 1 for `hh_vacancies`/`exhibitors` (company-tier only, no person data) — recommended: review everything until the first precision numbers exist.
 3. Manager-provided phones (`/tel`) use `legal_basis='pre_contract_request'`; is a phone the prospect typed to a manager in Telegram a pre-contract request under ЗРУ-547 Art. 18 (huquqiy-memo §5 q.1), or should it stay `public_source` with the chat URL?
 4. Telegram Premium for the reader account ($5/month): buy, or stay at the free 500-chat cap given `USERBOT_MAX_CHATS=60`? Recommended: skip until a FloodWait pattern appears.
@@ -725,14 +815,46 @@ outcomes and feed entries.
 
 ## Acceptance criteria
 
-- `tests/test_bot_commands.py`: every command of §1.2 has a handler test with the fake bot; a non-owner message produces no reply; a manager id reaches only the manager surface; the bot leaves a group it is added to.
+- `tests/test_bot_commands.py`: every command of §1.2 has a handler test with the fake bot — including `/dnc` (writes `suppression(dnc)` after `dn:` confirm), `/vazn` (new `scoring_weights` version, old one untouched), `/push tekshir` (`unknown → failed`, refused for an id the ERP already reported) and `/stir` (writes `companies.stir`, re-queues E4, refuses a STIR held elsewhere); a non-owner message produces no reply; a manager id reaches only the manager surface; the bot leaves a group it is added to.
 - `tests/test_bot_callbacks.py`: every `callback_data` built by `KEYBOARD_SAMPLES` parses, is ≤ 64 bytes and has a handler; 200 random strings and the listed near-misses parse to `None`; every handler key is producible.
 - `tests/test_cards.py`: review card, manager card and digest render from synthetic views to the §1.3/§1.7/§1.8 templates; quote ≤ 140, card ≤ 3,500, apostrophes are ʻ/ʼ, a card for a suppressed or phone-less candidate is refused or switches to `[👤 Menejerga]`; after-tap footers match the table; a tap on an answered card changes nothing.
-- `tests/test_manager_handoff.py`: least-loaded manager chosen; `/tel` writes a person-tier contact with `legal_basis`, `source_url`, `collected_at` and moves the candidate to `approved`; «Yozmang dedi» writes `suppression(dnc)`; no Telethon import in `bot/`.
+- `tests/test_manager_handoff.py`: least-loaded manager chosen; the handoff variant is rendered only for a `review` row with `gates.no_phone=true`; `/tel` writes a person-tier contact with `legal_basis`, `source_url`, `collected_at` and moves the candidate `hold → scored → approved` with `approved_by='manager:<tg_id>'`; «Yozmang dedi» writes `suppression(dnc)`; no Telethon import in `bot/`.
 - `tests/test_no_telegram_writes.py`, `test_join_only_in_joiner`, `test_imports_fence.py`, the `anthropic_guard` transport: green; a deliberately injected `send_message` in `userbot/main.py` and a raw phone in a prompt each turn the suite red (red proof documented in 07).
 - `tests/test_health.py`: `problems()` returns the §4.2 keys for synthetic statuses with the stated severities; `alerts_due` repeats after `ALERT_REPEAT_HOURS` only, recovers once, holds warnings in quiet hours and never critical ones; `TOLD_FIRST_ELSEWHERE` keys are not said first by the sweep.
 - `tests/test_backup.py`, `test_restore_drill.py`: no recipient → nothing written; a dump is produced and pruned on a scratch database; the drill compares counts and drops its database even on failure.
 - `tests/test_logs.py`: each `RedactPatterns` row and each `REDACTED_EXTRAS` name is proven on a real handler.
-- `tests/test_pseudonym.py`, `test_purge.py`, `test_suppression_precedence.py`, `test_pause.py`: golden masks; plan counts equal executed counts and the `purge_log` row holds only a hash; rank order; `/toxtat` stops collectors, pushes, cards and joins while the userbot keeps storing hits, and survives a worker restart.
+- `tests/test_pseudonyms.py`, `test_purge.py`, `test_suppression_precedence.py`, `test_pause.py`: golden masks; plan counts equal executed counts and the `purge_log` row holds only a hash; rank order equals `KIND_RANK` and the SQL's `array_position` array is rendered from it; `/toxtat` stops collectors, pushes, cards and joins while the userbot keeps storing hits, and survives a worker restart.
+- `tests/test_env_example.py` additionally: no inline comment on an assignment line, `POSTGRES_PASSWORD` non-empty, `TEST_PHONE` present, no `MODEL_PRICES`/`CLAUDE_DAILY_CAP_USD` line.
 - `tests/test_compose.py`, `test_dockerfile.py`, `test_env_example.py`, `test_requirements_pinned.py`: as specified in §3.
 - `make doctor` on a fresh VPS with a correct `.env` prints no ❌; `make up` starts four containers; `/holat` answers within 60 s; the dead-man monitor receives its first ping within 5 minutes; a forced `docker stop worker` produces «⛔ Rejalashtiruvchi … jim» within 15 minutes and «tiklandi» once after `docker start`.
+
+## Review pass changelog
+
+Items of the consistency review applied to this file (numbers are the review's):
+
+- **3** — §1.2 `/import`: clear `phone_tail` rows, `source='manual_import'`, retired when a full pull brings the same tail's hash (05 §B.2 step 5).
+- **4** — §6 restated as "schema this section relies on, all in 02 §5 `0001`" with the home of each item (incl. `backfilled_at`, `role`, `usage_log` refusal rows, `approved_by` values); Open Q1 resolved.
+- **6** — §5.5: `KIND_RANK` is one constant in `services/suppression.py`, SQL rendered as `array_position(...)`; AC pins the order against the constant.
+- **7** — §4.2 `suppression_stale`: condition is `services/erp_feeds.suppression_fresh()` (26 h full / 3 h delta / `salt_id`), alert text names the 26-hour and 3-hour limits.
+- **8** — §1.6: `review_cards_job` every 2 min inside `REVIEW_HOURS`, new paragraph on the event-driven chain (`NOTIFY cs_interaction` → classify/score wake → cards; N-06 p90 < 5 min); §1.3 expiry is the first step of the same job (there is no separate 20-minute sweep).
+- **9** — §1.3: the one producer of the phone-less card (02 §2.9 / 04 §3 S4) and the handoff variant's rendering rule; §1.7 `/tel` → `hold → scored → approved(approved_by='manager:<tg_id>')`; AC updated.
+- **10** — §2 new row "About reads": `userbot/about.py` drains `chat_monitors(status='queued', priority 3)`; E3 reads `t.me/s/<username>` through `Fetcher`; the worker never imports `telethon`.
+- **12** — §5.1: `company_ids` has no `tg_user` type; a person-shaped name never becomes `display_name`; §5.4 names R4b and R3's handle scrub.
+- **13** — §3.4: comments on their own lines, `POSTGRES_PASSWORD=CHANGE_ME`, `SEARXNG_URL=` blank, `TEST_PHONE=` added; test paragraph restated.
+- **14/15** — §3.4: `MODEL_PRICES` and `CLAUDE_DAILY_CAP_USD` removed; `EXTRACT_MODEL_PRICE`/`VERDICT_MODEL_PRICE`/`BATCH_MODEL_PRICE` are the only price lines (blank = `usage.py` table); the Claude cap is `FAMILY_CAPS["anthropic"]` in code (04 §8).
+- **17** — §4.1: heartbeat component `collector:<key>[.variant]`; the ledger kinds `alert:`/`recovered:` now point to 02 §2.13 instead of asking it to align.
+- **18** — §4.2: rows added for `suppression_selftest_failed`, `suppression_stale_hit`, `anthropic_silence`, `batch_stuck`, `pii_leak` (all warning); `anthropic_failing` narrowed to the failure streak so the two Anthropic keys do not overlap; `feed_contract` states that 05's `feed_bad_request`/`feed_rule_changed`/`feed_runaway` fold into it; closing note that this table is the one list of keys.
+- **19** — §1.2: rows for `/dnc`, `/vazn`, `/push tekshir`, `/stir` with their writes; §1.5 grammar gains the two confirm prefixes `dn:`/`pt:` they need; AC names their handler tests.
+- **24** — §2 ageing `≥ 30 days`; §7.1 step 5 `≥ 30 days`.
+- **27** — §1.3 gate line «90 kunda yuborilmagan», with the rule (90 d per company, 24 h per phone) named.
+- **29** — §5.2 rewritten to 04 §4.2's names (`services/pseudonyms.py`: `Pseudonymised`, `pseudonymise`, `restore`, `assert_masked`), regexes imported from `collectors/keywords.py`, `services/extraction.call()` and `services/model_jobs.py`, `tests/test_pseudonyms.py`; import-fence allow-list names `services/model_jobs.py`.
+- **30** — §1.2 `/xarajat` counts refusals from persisted `usage_log` rows (`model='refused:<code>'`), not a worker counter.
+- **31** — §7.1 step 8 names the code-side Brave caps (33/day, ≤ 1,000/month).
+- **33** — §1.2 `/manbalar`: `source_precision_job` never flips `auto_push` on while `auto_push_forbidden` is set.
+- **34** — §1.7: the manager card ships in T-20/T-21; only the on-duty rota is month 2.
+- **35** — §3.1 SearXNG comment: engines `duckduckgo,startpage,mojeek,brave`; Google/Bing disabled.
+- **37** — §1.3 renderer is `services/cards.py`; §5.1 `test_schema_tiers` greps the `db/models/` package; §1.5 declared the home of the callback grammar.
+- **38** — §2 `chat_monitors` defaults: `role='calibration'` rows (`@gsrgroupchat`) are `monitor_enabled=false`, nothing read or stored.
+- **1** (consequence) — §1.2 `/manbalar` lists schedulable parent rows first, attribution-only sub-source rows after.
+
+Not applied here (other files' homes): 2, 5, 11, 16, 20–23, 25, 26, 28, 32, 36 (06 §3.4's `searxng` tag was already marked UNVERIFIED).

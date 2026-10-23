@@ -286,8 +286,11 @@ Rules honoured: no transaction, so no pooled-helper trap (#714); ISO + `::timest
 no `name`, `phone`, `note`, `owner_id`, `quoted_amount` leaves the server. Duplicates (two clients on
 one phone) are not deduplicated — the agent upserts on `(kind, key_type, key)`. Deletions cannot be
 expressed as a delta; the full nightly pull is the truth, the hourly delta an optimisation.
-UNVERIFIED — `clients.updated_at` moves on a phone edit (`updatedAt()` helper has `$onUpdate`);
-if not, a phone added to an old client appears only in the full pull, which is acceptable.
+UNVERIFIED — (a) the `clients` table has **both** `created_at` and `updated_at`
+(`greatest(c.created_at, c.updated_at)` depends on it; day-1 check: `\d clients` on `gsr_ci`, or grep
+the `clients` table in fullprompt's schema — if `updated_at` is absent, use `created_at` alone and
+say so in `AGENT-FEED.md`); (b) `clients.updated_at` moves on a phone edit (`updatedAt()` helper has
+`$onUpdate`); if not, a phone added to an old client appears only in the full pull, which is acceptable.
 
 ### A.6 The two routes
 
@@ -384,9 +387,9 @@ mis-attribute a human submission to the agent — cosmetic, but cheap.
    answer always `{ok:true}`, 404 semantics, caps 3/phone/day and 200/source/day, replay fence.
 2. What the ERP does on landing for `agent` only: suppression belt → `dropped/suppressed`;
    contact clock measured, reminder off; routing by mapped `kub`.
-3. Feeds: both URLs, params, bodies, codes, hash rule, `salt_id`, cadence (full nightly, delta
-   hourly, outcomes nightly), «deletions only in full», duplicates, 1-year outcomes window, the
-   `other`+`utm_source=clientscrapper` clause.
+3. Feeds: both URLs, params, bodies, codes, hash rule, `salt_id`, cadence (full nightly 02:30,
+   delta hourly at :15, outcomes nightly 03:00, Tashkent — §B.2), «deletions only in full»,
+   duplicates, 1-year outcomes window, the `other`+`utm_source=clientscrapper` clause.
 4. Privacy stance: hashes not digits; what never leaves (name, phone, note, owner, money).
 5. Honest limits: a 9-digit space is enumerable by the secret holder; re-minting the key rotates
    `salt_id`; a lead revived out of lost drops out of suppression (correct); tails < 9 digits never
@@ -506,15 +509,15 @@ NAME_MAX = 120
 PAIR_VALUE_MAX = 300    # ERP capturePairs
 PUSH_DAYS = range(0, 6)                                # Mon–Sat
 PUSH_FROM, PUSH_TO = time(9, 30), time(17, 30)         # Asia/Tashkent (02 §2.10 item 2)
-ATTEMPT_DELAYS = {2: timedelta(minutes=5), 3: timedelta(minutes=30)}   # between push_log attempts
-BAND_KUB = {"1_3": "1", "3_10": "3", "truck": "30", "container": "20"} # lower bound when no stated m³
+ATTEMPT_DELAYS = {2: timedelta(minutes=5), 3: timedelta(minutes=30)}   # between push_log attempts (the HTTP tries INSIDE one attempt are with_backoff's, below)
+BAND_KUB = {"1_3": "1", "3_10": "3", "container": "28", "truck": "80"} # lower bound when no stated m³: managers read `kub`, so the low end of 04 §4.3 (20ft ≈ 28–33, fura ≈ 80–90)
 
 class PushPayload(BaseModel, frozen=True):
     external_id: str        # cs:<company_uuid>:<yyyymm>, Tashkent month at claim time
     name: str               # company display_name (2..120); never the person alone
     phone: str              # E.164 from contacts.phone; the ERP keeps the last 9
     note: str               # render_note(); ≤ NOTE_MAX
-    kub: str | None         # plain number string ("2", "1", "30"); omitted when unknown/<1
+    kub: str | None         # plain number string ("2", "1", "28", "80" — stated m³ or BAND_KUB); omitted when unknown/<1
     firma: str | None       # display_name + legal_form → leads.company (A.3) or a pair
     stir: str | None
     telegram: str | None    # '@company' or the decision maker's handle only with legal_basis
@@ -560,42 +563,60 @@ total ≤ 700 after sections are dropped in reverse priority order (BALL detail 
 → NIMA DEYISH shortened to 120 → HAJM per-month); the URL is never cut (if a URL exceeds 200 chars it
 is replaced by `evidence #<id>`); quote is a verbatim substring of `evidence.excerpt` (02 §2.6).
 
-**Gate and transport** (02 §2.10 items 1–7 are the law; this is the implementation reading):
+**Gate and transport** (02 §2.10 items 1–7 are the law for the gate; the attempt scheme and the
+outcome mapping below are owned HERE — 02 §2.10 rule 4 and 07 §1.6 point to this table):
 
 ```python
 TRANSIENT = (httpx.ConnectError, httpx.ReadTimeout, httpx.WriteTimeout, httpx.PoolTimeout, httpx.RemoteProtocolError)
 class ErpHttpError(Exception): status: int
+class ErpBadBody(Exception): status: int      # a 2xx whose body is not {"ok": true} — never retried, the lead may have landed
 def _retryable(exc: BaseException) -> bool:
     return isinstance(exc, TRANSIENT) or (isinstance(exc, ErpHttpError) and exc.status >= 500)
 
 async def _post(erp, source, payload) -> int:
     r = await erp.client.post(PUSH_PATH.format(source=source), json=payload.model_dump(exclude_none=True),
                               headers={h: erp.key for h in ERP_KEY_HEADERS}, timeout=20.0)
-    if 200 <= r.status_code < 300: return r.status_code
+    if 200 <= r.status_code < 300:
+        try:
+            if r.json().get("ok") is True: return r.status_code
+        except ValueError:
+            pass
+        raise ErpBadBody(r.status_code)
     raise ErpHttpError(r.status_code)
 
 # inside push_one, after the claim row (status='sending', attempt=n) is COMMITTED:
 status = await with_backoff(lambda: _post(erp, source, payload), attempts=3, base=1.0, cap=8.0, retry_on=_retryable)
 ```
 
-Re-sending after a `ReadTimeout` is safe **because of the ERP replay fence** (same `channel` +
-`external_id` → `dropped/replay`, no second lead); the test `test_push_timeout_resend_is_replay`
-pins it against the fake ERP. Outcome mapping:
+**Two levels, one scheme.** The three `with_backoff` tries above are HTTP tries *inside one
+`push_log` attempt* (one claim row, ≤ 15 s, delays 1 s → 2 s → 4 s capped at 8 s). A further
+**attempt** (`attempt+1`, identical `payload_sha256`) may be claimed only after `ATTEMPT_DELAYS[n+1]`
+— 5 min before attempt 2, 30 min before attempt 3 — so the worst case is 9 POSTs, and after attempt 3
+the candidate returns to `review`. Re-sending inside an attempt after a `ReadTimeout` is safe
+**because of the ERP replay fence** (same `channel` + `external_id` → `dropped/replay`, no second
+lead): a timeout on try 1 followed by `200 {ok:true}` on try 2 lands as **attempt 1 `sent`** with ONE
+intake in the ERP; the test `test_push_timeout_resend_is_replay` pins it against the fake ERP.
+Outcome mapping (the `push_log` CHECK of 02 §2.10 is `(status='sent' ⇒ 2xx) AND (2xx ⇒ status IN
+('sent','unknown'))`, so every 2xx row below is one of those two):
 
 | Result of the three tries | `push_log` | candidate | side effect |
 |---|---|---|---|
-| 2xx | `sent`, `http_status` | `pushed`, `pushed_at`, `external_id` | — |
-| 404 | `failed`, `error='http_404'` | stays `approved` | breaker: `sources.erp_sync.breaker_until = now+6h`, `breaker_reason='push_404'`; health problem `push_404`; owner alert (once per 6 h via `reminder_log`): «ERP kaliti yoki manba notoʻgʻri: /api/leads/in/{source} 404 qaytardi. Kelgan arizalar → Reklama havolalari → Agent → kalitni tekshiring.» |
+| 2xx with body `{"ok":true}` | `sent`, `http_status` | `pushed`, `pushed_at`, `external_id` | — |
+| 2xx with any other body (HTML, empty, bad JSON) | `unknown`, `http_status`, `error='http_2xx_badbody'` | stays `approved`, blocked by `ux_push_log_delivered` | not retried (the lead may have landed); the nightly outcomes read promotes `unknown` → `sent` when the `external_id` appears, else `push_unconfirmed` after 48 h |
+| 404 | `failed`, `error='http_404'` | stays `approved` | breaker: `sources.erp_sync.breaker_until = now+6h`, `breaker_reason='push_404'` (`/yoq crm` clears it by hand, 06 §1.2; it also expires); health problem `push_404`; owner alert once per 6 h — `reminder_log(kind='alert:push_404')`, recovery `recovered:push_404` (06 §4.1): «ERP kaliti yoki manba notoʻgʻri: /api/leads/in/{source} 404 qaytardi. Kelgan arizalar → Reklama havolalari → Agent → kalitni tekshiring.» |
 | other 4xx | `failed`, `error='http_4xx'` | → `review`, note «ERP rad etdi (HTTP n)» | owner alert |
 | 5xx / transport after 3 tries | `failed`, `error='http_5xx'|'timeout'|'conn'` | stays `approved`; next attempt allowed after `ATTEMPT_DELAYS[n+1]`; after attempt 3 → `review`, note «CRM javob bermadi» | health problem `push_failing` when 3 consecutive candidates fail |
 | `sending` row older than 10 min (crash) | `unknown` (reconcile job) | stays `approved` but blocked by `ux_push_log_delivered` | nightly outcomes promote `unknown` → `sent` when the `external_id` appears; `push_unconfirmed` after 48 h |
 
 Pre-flight refusals (no HTTP, no `push_log` row, result codes): `window` (outside
 Mon–Sat 09:30–17:30 Tashkent), `cap` (`count(sent|unknown today) ≥ PUSH_DAILY_CAP`), `disabled`
-(`CRM_PUSH_ENABLED=false`), `breaker`, `suppressed` (gate re-check inside the `FOR UPDATE`
-transaction), `stale` (`suppression_stale`: feed `salt_id` ≠ stored, or last full pull > 36 h and
-the feed is configured), `no_phone`, `phone_recent` (same tail `sent|unknown` < 24 h). A `cap` or
-`window` refusal is silent (the job runs again); every other refusal writes a `lead_reviews` note.
+(`CRM_PUSH_ENABLED=false`), `breaker` (`sources.erp_sync.breaker_until > now`), `suppressed` (gate
+re-check inside the `FOR UPDATE` transaction), `stale` (`suppression_stale`: `suppression_fresh()`
+of §B.2 is false — feed `salt_id` ≠ stored, last successful full pull > 26 h or last delta > 3 h —
+while the feed is configured), `no_phone`, `phone_recent` (same tail `sent|unknown` < 24 h),
+`company_recent` (a `sent|unknown` row for this company whose outcome is `open` or absent and younger
+than 90 d — the card's «90 kunda yuborilmagan» line, 02 §2.10 rule 2). A `cap` or `window` refusal is
+silent (the job runs again); every other refusal writes a `lead_reviews` note.
 
 `make push-test` (`tools/push_test.py`): builds a visibly synthetic payload
 (`name='TEST agent — oʻchiring'`, phone from `TEST_PHONE` env, `external_id='cs:00000000-0000-0000-0000-000000000000:<yyyymm>'`),
@@ -616,34 +637,55 @@ async def fetch_pages(erp, path, *, since: datetime | None, limit: int = 1000, m
 async def sync_suppression(session, erp, *, mode: Literal["full", "delta"], now) -> SyncReport
 async def sync_outcomes(session, erp, *, now) -> SyncReport
 async def source_precision(session, source_key: str, now) -> Precision
-async def source_precision_job(session_factory, now) -> None     # weekly; flips sources.auto_push both ways
+async def source_precision_job(session_factory, now) -> None     # weekly; flips sources.auto_push both ways — never ON while config.auto_push_forbidden
+
+FULL_MAX_AGE_H = 26      # one nightly full pull (30 2 * * *) plus slack
+DELTA_MAX_AGE_H = 3      # one hourly delta plus slack
+def suppression_fresh(cfg: SuppressionConfig | None, *, key: str, now: datetime) -> bool
+    # THE home of feed freshness — 02 §2.8, 02 §2.10 rule 2, 03 §2.2, 04's gate, 06 §4.2 and /holat all
+    # call it, nobody restates the numbers. Feed configured ⇒ last_full_at ≥ now − FULL_MAX_AGE_H
+    # AND last_delta_at ≥ now − DELTA_MAX_AGE_H AND cfg.salt_id == salt_id(key). False → health
+    # problem `suppression_stale` (warning, critical after 6 h; texts say «26 soat») and every push
+    # is refused `stale` (§B.1). Feed not configured ⇒ True (the XLSX fallback carries the gate, §B.3).
 ```
 
-**Suppression sync** (`erp_sync` collector calls it; cron: full `0 2 * * *`, delta `15 * * * *`
-Tashkent, delta skipped while a full pull runs):
+**Suppression sync** (`erp_sync` collector calls it; cron: full `30 2 * * *` — after the Yandex
+night run 02:10, before outcomes 03:00 — delta `15 * * * *`, Tashkent, delta skipped while a full
+pull runs):
 
 1. `GET /api/agent/suppression?limit=1000` (+`since=<last_delta_at - 10 min>` for delta) via
    `with_backoff(attempts=4, base=2, cap=60, retry_on=TRANSIENT|5xx|503-json)`. 404 → problem
    `push_404` (same misconfiguration as a push 404), owner alert, stop. 400 → bug: problem
-   `feed_bad_request`, stop.
+   `feed_contract` (code `bad_request`), stop.
 2. First page: assert `rule == "hmac-sha256(secret, last9digits) hex[0:20]"` (else
-   `feed_rule_changed`, stop) and compare `salt_id` with `sources.erp_sync.config.suppression.salt_id`:
-   different → if `mode == "delta"` abort and schedule a **full** pull now; if `full`, continue and
-   store the new `salt_id` only after the pull completed.
+   `feed_contract`, code `rule_changed`, stop) and compare `salt_id` with
+   `sources.erp_sync.config.suppression.salt_id`: different → if `mode == "delta"` abort and schedule
+   a **full** pull now; if `full`, continue and store the new `salt_id` only after the pull completed.
 3. Each entry → upsert `suppression (kind, 'phone_hash', h, salt_id, source='erp_feed', erp_at=at,
    last_seen_at=run_started)` on conflict `(kind, key_type, key)` update `last_seen_at, erp_at, salt_id`.
-   Follow `next` until `null` (`max_pages` guard → `feed_runaway`).
+   Follow `next` until `null` (`max_pages` guard → `feed_contract`, code `runaway`).
 4. Full pull only: `DELETE FROM suppression WHERE source='erp_feed' AND last_seen_at < run_started`
    **iff** the pull completed and `count ≥ 0.9 × previous count`; otherwise problem
    `suppression_shrunk`, nothing deleted. On a `salt_id` change, rows carrying the old `salt_id` are
    deleted by this same rule (they were not re-seen).
 5. Write `config.suppression = {salt_id, last_full_at|last_delta_at, count}`; heartbeat
-   `collector:erp_sync`. Also delete `manual_import` phone_tail rows once a full pull succeeded with
-   `count ≥ 0.9 × manual_import count` (the XLSX fallback retires itself).
+   `collector:erp_sync`. Full pull only, after step 4: retire the XLSX fallback **per row** — for
+   every `suppression` row with `source='manual_import'`, `key_type='phone_tail'`, compute
+   `hash_tail(settings.crm_agent_key, tail)` and delete the row when a `source='erp_feed'`,
+   `key_type='phone_hash'` row with that hash exists (the feed now carries the same tail under the
+   current key's `salt_id`). A tail the feed does **not** carry stays (fail closed), is counted by
+   `/holat` («qoʻlda kiritilgan: n») and is removed only by hand — whether a client the XLSX listed
+   and the ERP no longer does may be contacted is the owner's call, not the agent's.
+
+Health keys of this sync: the four feed failure codes — `bad_request`, `rule_changed`, `runaway` and
+`shape` (`FeedShapeError`, §B.6) — are ONE health key `feed_contract` (06 §4.2 «ERP feed shakli
+oʻzgardi ({code})»); the code travels in the problem's detail, never as a key of its own.
+`suppression_stale`, `suppression_shrunk` and `suppression_stale_hit` are keys of their own (06 §4.2).
 
 **The gate's hash**: `is_suppressed()` computes `phone_hash = hash_tail(settings.crm_agent_key, tail)`
 with the *current* key; after a re-mint the stored rows carry the old `salt_id` and cannot match →
-that is exactly why `suppression_stale` blocks pushes until the full pull ran (02 §2.8).
+that is exactly why `suppression_fresh()` is false and `suppression_stale` blocks pushes until the
+full pull ran (02 §2.8).
 
 **Outcomes sync** (cron `0 3 * * *` Tashkent):
 
@@ -659,11 +701,11 @@ that is exactly why `suppression_stale` blocks pushes until the full pull ran (0
 
 | Feed row | label | precision | side effect |
 |---|---|---|---|
-| `outcome='client'` | `landed_client` | neutral | `companies.state='client'`; `suppression(client, phone_tail, source='outcomes')` |
+| `outcome='client'` | `landed_client` | neutral | `companies.state='client'`; `suppression(client, phone_tail, source='outcomes')` written locally, now |
 | `outcome='dropped'`, `reason='capped'` | `dropped_capped` | neutral | candidate eligible next month |
 | `outcome='dropped'`, `reason='suppressed'` | `dropped_suppressed` | neutral | problem `suppression_stale_hit` → full pull tonight |
 | `outcome='dropped'`, other | `dropped_other` | neutral | owner digest line |
-| `stage_kind='won'` or `client_id` set | `won` | positive | `companies.state='client'`; `suppression(client)` |
+| `stage_kind='won'` or `client_id` set | `won` | positive | `companies.state='client'`; `suppression(client, phone_tail, source='outcomes')` written **locally, now** (tail = the phone the agent pushed) — the nightly feed brings the same tail as a hash a day later; 02 §2.11 points here |
 | `stage_kind='lost'`, `lost_reason ∈ agent_no_contact_reasons` | `lost_no_contact` | negative | `suppression(lost)` for the company's other keys (tg, instagram, domain, stir) — the feed brings the phone |
 | lost, reason ~ `narx|цена|qimmat|дорог` | `lost_price` | neutral | `suppression(cooldown 180 d, company_id)` |
 | lost, reason ~ `import qilmaydi|не импорт|xitoy emas` | `lost_not_importer` | negative | `suppression(cooldown 365 d, company_id)` |
@@ -680,16 +722,19 @@ that is exactly why `suppression_stale` blocks pushes until the full pull ran (0
 with `first_read_at ≥ now − 30 d`: `positives = count(precision_class='positive')`,
 `negatives = count('negative')`; `precision_30d = positives / (positives + negatives)` or NULL when the
 denominator is 0; `pushes_30d = count(push_log sent|unknown, sent_at ≥ now − 30 d)` for that source.
-`auto_push = pushes_30d ≥ 15 AND precision_30d ≥ 0.60`, flipped both ways weekly (Sunday 04:00); a
-flip is one digest line. `/holat` prints the three numbers per source.
+`auto_push = pushes_30d ≥ 15 AND precision_30d ≥ 0.60`, flipped both ways weekly (Sunday 04:00) —
+**except that the job never turns `auto_push` on while the owner has forbidden it** (`/manbalar` →
+`src:<key>:a` sets `config.auto_push_forbidden=true`, 06 §1.2): the UPDATE reads
+`SET auto_push = (pushes_30d >= 15 AND precision_30d >= 0.60) AND NOT coalesce(config->>'auto_push_forbidden','false')::bool`.
+A flip is one digest line. `/holat` prints the three numbers per source.
 
 ### B.3 Fallback while the `agent` door is not deployed
 
 | Item | Fallback | Switch-over |
 |---|---|---|
 | Door | `CRM_PUSH_SOURCE=other`; `CRM_AGENT_KEY` = the **«Boshqa»** door's secret (owner mints it on the same screen); body always carries `utm_source=clientscrapper`; `push_log.endpoint='/api/leads/in/other'`, `source_key_sent='other'` | set `CRM_PUSH_SOURCE=agent`, replace `CRM_AGENT_KEY`, restart `worker`. Candidates already `pushed` are **not** re-pushed (same `channel`, replay). |
-| Routing | the `other` door is also where unknown `?manba=` lands; a rule `manba=other` + keyword `clientscrapper` (the note's `utm_source: clientscrapper` line is in the text the keyword search reads) routes agent arrivals to the cargo managers | delete that rule after switch-over |
-| Suppression | `make import-clients FILE=clients.xlsx` (ERP **Mijozlar → XLSX**); `services/client_import.py` stores `suppression(kind='client', key_type='phone_tail', source='manual_import')` — clear tails, because the future agent secret is unknown and hashes would not match. Lost leads invisible; `/holat` says «yoʻqotilgan lidlar roʻyxati yoʻq». Weekly re-import. | first successful full pull retires `manual_import` rows (§B.2 step 5) |
+| Routing | the `other` door is also where unknown `?manba=` lands; a rule `manba=other` + keyword `clientscrapper` routes agent arrivals to the cargo managers. UNVERIFIED — that the ERP's keyword rule (`matchRoute`) searches the lead **note** (where the `utm_source: clientscrapper` line ends up) and not only name/phone; day-1 check with the rule in place: `make push-test` through the `other` door, confirm the test lead lands on a cargo manager. If the keyword does not read the note, route `manba=other` by members alone until switch-over and tell the owner that unknown `?manba=` arrivals share that pool. | delete that rule after switch-over |
+| Suppression | `make import-clients FILE=clients.xlsx` (ERP **Mijozlar → XLSX**); `services/client_import.py` stores `suppression(kind='client', key_type='phone_tail', source='manual_import')` — clear tails, because the future agent secret is unknown and hashes would not match. Lost leads invisible; `/holat` says «yoʻqotilgan lidlar roʻyxati yoʻq». Weekly re-import. | a full pull retires each `manual_import` row whose tail's hash it carries (§B.2 step 5); tails it does not carry stay until the owner removes them |
 | Outcomes | none; labels stay `pending`, precision NULL, `auto_push` impossible | first outcomes run reads the fallback months through the `other`+`utm_source` clause |
 | Reminder | the ERP's 15-min reminder **fires** for `other` arrivals — tell the owner; keep `PUSH_DAILY_CAP ≤ 10` during the fallback | — |
 
@@ -705,8 +750,10 @@ built with `ErpClient(base_url='http://erp.test', key=…, transport=…)`.
   `ok` → 200 `{"ok":true}`, writes intake `created`; `joined` → 200, intake `joined` with a prior
   `lead_id`; `client` → 200, intake `client` + `client_id`; `capped`/`suppressed` → 200, intake
   `dropped` with reason; `404` → 404; `500` → 500 `Internal`; `timeout` → records the intake **then**
-  raises `httpx.ReadTimeout` (the landed-but-unanswered case); `badjson` → 200 `'<html>'`. A second
-  POST with a known `external_id` → 200, no change (replay).
+  raises `httpx.ReadTimeout`, once per `external_id` (the landed-but-unanswered case: the in-attempt
+  resend is a replay → 200, so the push lands as attempt 1 `sent` and the fake holds ONE intake);
+  `badjson` → 200 `'<html>'` (→ `push_log.unknown`, `http_2xx_badbody`, §B.1). A second POST with a
+  known `external_id` → 200, no change (replay).
 - `GET /api/agent/suppression|outcomes`: key check as above; `limit` clamp; `since` filter;
   keyset `cursor` identical to §A.5's codec; `salt_id = sha256(secret)[:8]`; `rotate_secret(new)`
   changes it; mode `feed_500` / `feed_timeout` / `feed_rule_changed` per path.
@@ -715,13 +762,17 @@ Tests (pytest, async): `test_payload_sections_and_limits` (order, 160/700, URL n
 person name without `legal_basis`, `kub` rules, `utm_source` present, `exclude_none`),
 `test_external_id_month_tashkent`, `test_canonical_sha_stable`, `test_push_200_marks_pushed`,
 `test_push_404_trips_breaker_and_alerts_once`, `test_push_500_three_tries_then_failed_then_review_after_attempt_3`,
-`test_push_timeout_resend_is_replay` (two intakes never created), `test_push_unknown_promoted_by_outcomes`,
+`test_push_timeout_resend_is_replay` (attempt 1 `sent`, two intakes never created), `test_push_2xx_badbody_is_unknown`
+(never `sent`; promoted by outcomes), `test_push_unknown_promoted_by_outcomes`,
 `test_push_refused_outside_window_and_over_cap`, `test_push_refused_when_suppressed_or_stale`,
 `test_push_fallback_other_source_sends_both_headers`, `test_feed_salt_change_forces_full_pull`,
 `test_feed_full_pull_deletes_unseen_only_when_not_shrunk`, `test_feed_rule_mismatch_stops`,
 `test_feed_404_is_push_404`, `test_outcomes_labels_table` (parametrised over the table above),
 `test_outcomes_joined_and_client_rows`, `test_outcomes_contract_breach_on_phone_key`,
-`test_precision_and_autopush_flip`, `test_manual_import_retired_after_full_pull`. Recorded fixtures:
+`test_precision_and_autopush_flip` (both ways at the thresholds; never on while `auto_push_forbidden`),
+`test_manual_import_retired_after_full_pull` (import a tail, then a fake full pull carrying that tail's
+hash → the `manual_import` row is gone; a tail the pull does not carry stays),
+`test_suppression_fresh` (26 h / 3 h / `salt_id` edges; feed unconfigured → true). Recorded fixtures:
 `tests/fixtures/erp/{suppression_full.json,suppression_delta.json,outcomes.json}` are **captured
 from the real `agent-feed` branch** on a seeded `gsr_ci` on day 1 and committed (synthetic data).
 
@@ -732,14 +783,14 @@ PUSH (happy)                                  PUSH (404)
 owner ✅ → candidate approved                 push_one → claim(sending,1) → POST → 404
 crm_push_job (window open, cap ok)            push_log failed/http_404; breaker 6 h; problem push_404
  └ push_one: FOR UPDATE; gate ok              owner ← «ERP kaliti yoki manba notoʻgʻri …»
-   claim push_log(sending, attempt 1) COMMIT  next ticks: refused 'breaker' until owner re-mints/pastes key
+   claim push_log(sending, attempt 1) COMMIT  next ticks: refused 'breaker' until the key is pasted and /yoq crm clears it (or 6 h pass)
    POST /api/leads/in/agent  ← X-GSR-Key      /holat shows push_404 until a 2xx
    ERP: belt → client? → open? → create → route(kub) → notify manager (clock, no due)
    200 {ok:true} → sent; candidate pushed
 nightly: outcomes row external_id → label
 
 SUPPRESSION (full, salt changed)              OUTCOMES (nightly)
-02:00 GET ?limit=1000 → salt_id ≠ stored      03:00 GET ?cursor=… → rows
+02:30 GET ?limit=1000 → salt_id ≠ stored      03:00 GET ?cursor=… → rows
   continue (full); upsert pages with new salt   upsert outcomes; derive_label; side effects
   next=null → count ≥ 0.9×prev → DELETE unseen  unknown push_log → sent when external_id seen
   store salt_id; clear suppression_stale        save cursor; precision numbers refresh weekly
@@ -750,12 +801,12 @@ SUPPRESSION (full, salt changed)              OUTCOMES (nightly)
 | Failure | Agent behaviour | Owner sees |
 |---|---|---|
 | ERP down (conn/timeout) on push | 3 tries in ≤ 15 s; `failed`; attempt 2 after 5 min, 3 after 30 min; then `review` | `/holat` `push_failing`; digest line |
-| ERP down on feeds | `with_backoff` 4 tries; collector run `failed`; gate `suppression_stale` after 36 h without a full pull → pushes stop | alert «ERP roʻyxati 36 soatdan beri yangilanmadi — push toʻxtatildi» |
-| 404 on any call | breaker 6 h, `push_404`, alert once per 6 h | «kalit yoki manba notoʻgʻri» |
+| ERP down on feeds | `with_backoff` 4 tries; collector run `failed`; `suppression_fresh()` false (no full pull ≤ 26 h or no delta ≤ 3 h) → gate `suppression_stale` → pushes stop | alert «ERP roʻyxati 26 soatdan beri yangilanmadi — push toʻxtatildi» (06 §4.2 renders the real `{age}`) |
+| 404 on any call | breaker 6 h (`sources.erp_sync.breaker_until`; `/yoq crm` clears it), `push_404`, alert once per 6 h | «kalit yoki manba notoʻgʻri» |
 | Secret re-minted in the ERP | next feed call: `salt_id` differs → full pull; pushes 404 until `.env` updated | alert from the 404 |
 | ERP answers 200 but dropped (capped/suppressed) | learned next night; `dropped_suppressed` → full pull tonight; `dropped_capped` → retry next month | digest |
 | Timeout after the ERP landed the lead | `unknown`; resend is a replay; outcomes promote to `sent` | nothing |
-| Feed returns a `phone`/`name` key | `FeedShapeError`, run `failed`, problem `feed_contract` | alert (contract breach) |
+| Feed returns a `phone`/`name` key | `FeedShapeError`, run `failed`, problem `feed_contract` (code `shape`; same key as `bad_request`/`rule_changed`/`runaway`, §B.2) | alert (contract breach) |
 | Full pull shrinks > 10 % | no delete; `suppression_shrunk` | alert |
 | Label list renamed in the ERP without the setting | lost leads drop out of the feed | caught by the integration test's rename case; owner doc says «deactivate + create» |
 | Owner maps `kub` late | early arrivals route unwindowed (rule B) | none; stated in step 4 |
@@ -777,4 +828,22 @@ SUPPRESSION (full, salt changed)              OUTCOMES (nightly)
 ## Acceptance criteria
 
 - fullprompt `agent-feed`: `pnpm typecheck && pnpm lint && pnpm test` green locally and in CI on a fresh db; no migration; `GET /api/agent/suppression` and `/outcomes` answer 404 without a key, 400 on a bad cursor, 200 gzipped ≥ 1 KB with the documented bodies; an `agent` arrival on a client-book or «Qayta qilinmasin» phone writes `dropped/suppressed`, creates nothing and notifies nobody; an `agent` lead has `contact_clock_at` set and `contact_due_at NULL`, is never claimed by `remindUntouched`, and gets `contacted_at` from `stampFirstContacts`; `tiktok`/form arrivals behave exactly as before (control group); every new setting key is described in 4 locales; the seed adds exactly one row; `docs/AGENT-FEED.md` lets the Python side be built without reading TypeScript.
-- Agent: `make test` green with the fake ERP covering 200/404/500/timeout/replay/joined/client/badjson and both feeds; a 404 trips the breaker and alerts once; a timeout re-send never creates a second lead; `salt_id` change forces a full pull before any push; a shrunk full pull deletes nothing; outcomes labels match the table for every row kind; precision/auto-push flips both ways at the thresholds; the fallback (`other` + both headers + `utm_source`) passes the same push tests; `tests/test_no_telegram_writes.py` stays green (nothing here sends to a prospect); no secret in repo or logs (`RedactBodies` covers `X-GSR-Key`/`X-ERP-Key` headers and the payload's `phone`).
+- Agent: `make test` green with the fake ERP covering 200/404/500/timeout/replay/joined/client/badjson and both feeds; a 404 trips the breaker and alerts once; a timeout re-send never creates a second lead and lands as attempt 1 `sent`; a 2xx with an unreadable body lands as `unknown`, never `sent`; `salt_id` change forces a full pull before any push; `suppression_fresh()` refuses pushes at 26 h without a full pull or 3 h without a delta; a shrunk full pull deletes nothing; a full pull retires exactly the `manual_import` tails whose hash it carries; outcomes labels match the table for every row kind (`won` writes the local `suppression(client)` row); precision/auto-push flips both ways at the thresholds and never on while `auto_push_forbidden`; the fallback (`other` + both headers + `utm_source`) passes the same push tests; `tests/test_no_telegram_writes.py` stays green (nothing here sends to a prospect); no secret in repo or logs (`RedactBodies` covers `X-GSR-Key`/`X-ERP-Key` headers and the payload's `phone`).
+
+## Review pass changelog
+
+Items of the consistency review applied to this file (05 is the named home for most of them; the
+others point here):
+
+- **3** — §B.2 step 5 and §B.3 Suppression row: the XLSX fallback (`phone_tail`, `source='manual_import'`) is retired per row when a full pull carries `hash_tail(key, tail)`; the old bulk «count ≥ 0.9 × manual_import count» rule is gone; test description updated.
+- **7** — §B.2 declares `suppression_fresh()` with `FULL_MAX_AGE_H = 26` / `DELTA_MAX_AGE_H = 3` as the one home; §B.1 `stale`, §B.6 texts and the alert say 26 h / 3 h; full-pull cron `30 2 * * *` (§B.2, §B.5 02:30, §A.9 cadence); `test_suppression_fresh` added.
+- **16** — §B.1 states the two-level attempt scheme (three HTTP tries inside one attempt, `ATTEMPT_DELAYS` between attempts, 9 POSTs worst case), the timeout resend lands as attempt 1 `sent` with one intake, `_post` checks `{"ok":true}` and a 2xx with another body is `unknown` + `http_2xx_badbody` (matches 02's widened CHECK); §B.4 fake `timeout` fires once per `external_id`; `test_push_2xx_badbody_is_unknown`; acceptance criteria updated.
+- **17** — §B.1 404 row names the ledger kinds `alert:push_404` / `recovered:push_404` (heartbeat was already `collector:erp_sync`).
+- **18** — §B.2 steps 1–3 and §B.6: `feed_bad_request` / `feed_rule_changed` / `feed_runaway` fold into the one health key `feed_contract` with codes `bad_request` / `rule_changed` / `runaway` / `shape`; `suppression_stale_hit` named as its own key.
+- **21** — §B.1 404 row, §B.5 and §B.6 say `sources.erp_sync.breaker_until` and that `/yoq crm` clears it.
+- **27** — §B.1 pre-flight list gains `company_recent` (no open push for 90 d per company) beside `phone_recent` (24 h per phone), matching the card line «90 kunda yuborilmagan».
+- **28** — §B.1 `BAND_KUB = {"1_3":"1","3_10":"3","container":"28","truck":"80"}`; the `kub` field comment follows.
+- **32** — §B.2 outcomes table: `won` (and `client`) write `suppression(client, phone_tail, source='outcomes')` locally, now; 02 §2.11 points here.
+- **33** — §B.2 `source_precision_job` never turns `auto_push` on while `config.auto_push_forbidden` is true (`AND NOT coalesce(config->>'auto_push_forbidden','false')::bool`); test and acceptance updated.
+- **36** — §B.3 Routing row marks «keyword rule reads the note» UNVERIFIED with a day-1 `make push-test` check; §A.5 marks the existence of both `clients.created_at`/`updated_at` UNVERIFIED with a `\d clients` check.
+- Not touching this file (already consistent here, or homed elsewhere): 2, 11, 20, 22 (05 is the home and already says what the other files now point to); 1, 4–6, 8–10, 12–15, 19, 23–26, 29–31, 34, 35, 37, 38.

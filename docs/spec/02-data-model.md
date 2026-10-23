@@ -7,7 +7,7 @@ Scope: every table of the shared contract, its DDL, who writes and reads it, the
 | Rule | Detail |
 |---|---|
 | Database | One PG16 database, schema `public`. Extension `pg_trgm` (alias search). `gen_random_uuid()` is core since PG13 — no `pgcrypto`. |
-| Primary keys | `uuid` where the id leaves the system (`companies`, `contacts`, `lead_candidates`; `external_id` embeds the company uuid). `bigint GENERATED ALWAYS AS IDENTITY` for ledgers (`evidence`, `observations`, `signals`, `interactions`, logs). Natural keys: `sources.key`, `heartbeats.component`, `outcomes.external_id`. |
+| Primary keys | `uuid` where the id leaves the system (`companies`, `contacts`, `lead_candidates`; `external_id` embeds the company uuid). `bigint GENERATED ALWAYS AS IDENTITY` for ledgers (`evidence`, `observations`, `signals`, `interactions`, logs). Natural keys: `sources.key`, `heartbeats.component`, `runtime_flags.key`, `outcomes.external_id`. |
 | Time | Every timestamp is `timestamptz`; business day is Asia/Tashkent in code. `created_at` = MIYA `created_at_column()`; `updated_at` = `created_at_column(onupdate=sa.func.now())` **plus** trigger `cs_touch_updated_at`, because the bot, userbot and worker also write raw SQL (ORM `onupdate` fires only on ORM updates). |
 | Enumerations | **CHECK constraints**, never native enums. Allowed values are frozen tuples in `clientscrapper/db/enums.py` and rendered with `sql_list()` (MIYA `models.py` `_sql_list` / `SheetRow` pattern). A migration keeps its own frozen copy; `tests/test_enums_frozen.py` holds the two equal. `pg_enum()` stays in `base.py` unused. |
 | Names | `ix_<table>_<cols>` index, `ux_<table>_<what>` unique (partial) index, `uq_<table>_<cols>` unique constraint, `ck_<table>_<rule>` check, `fk_<table>_<col>` foreign key, `pk_<table>`. MIYA names every constraint explicitly; we do the same and additionally set `Base.metadata.naming_convention` so an autogenerate diff is empty. Inline column CHECKs written unnamed in this document are declared in the ORM as `CheckConstraint(..., name="ck_<table>_<column>")`. |
@@ -119,8 +119,8 @@ CREATE TABLE sources (
 );
 ```
 
-Seeded in `0001` (enabled=false): `telegram_monitor`, `instagram_discovery`, `olx_business`, `uzum_sellers`, `directories_goldenpages`, `directories_yellowpages`, `directories_glotr`, `directories_prom`, `hh_vacancies`, `exhibitors`, `maps_2gis`, `maps_google`, `brand_dealers`, `search_brave`, `search_yandex`, `search_searxng`, `registry_lookup`, `erp_sync`, `manual`. `erp_sync.config = {"suppression":{"salt_id":null,"last_full_at":null,"last_delta_at":null,"count":0},"outcomes":{"cursor":null,"last_at":null}}`.
-Auto-push rule stored here: `auto_push` may be true only when `pushes_30d >= 15 AND precision_30d >= 0.60` — `source_precision_job` flips it both ways weekly.
+Seeded in `0001` — **23 rows**, `enabled=false` unless stated. **Schedulable units** (the runner reads `enabled/paused_until/daily_page_budget/daily_cost_cap_usd` by `Collector.key`, 03 §1.2): `telegram_monitor`, `instagram_discovery`, `olx_business`, `uzum_sellers`, `directories` (family `directory`), `hh_vacancies`, `exhibitors`, `maps` (family `maps`), `brand_dealers`, `serp_layer` (family `search`), `registry_lookup`, `erp_sync`, `manual`, `enrich_site` (family `search`, `enabled=true`, `cron=NULL`: pages fetched by enrichment, 04 §3). **Attribution-only sub-sources** (`cron=NULL`, never scheduled; they exist so `evidence.source_key`, `observations.source_key`, `contacts.source_key` and `usage_log.source_key` can name the engine or directory that produced a row): `directories_goldenpages`, `directories_yellowpages`, `directories_glotr`, `directories_prom`, `maps_2gis`, `maps_google`, `search_brave`, `search_yandex`, `search_searxng`. `erp_sync.config = {"suppression":{"salt_id":null,"last_full_at":null,"last_delta_at":null,"count":0},"outcomes":{"cursor":null,"last_at":null}}`.
+Auto-push rule stored here: `auto_push` may be true only when `pushes_30d >= 15 AND precision_30d >= 0.60` — `source_precision_job` (05 §B.2) flips it both ways weekly, except that it never flips it **on** while `config.auto_push_forbidden` is true (the owner's `src:<key>:a` in 06 §1.2 can only forbid, never grant).
 W/R: 0001 seed, bot `/manbalar` (enabled, paused), worker (`last_run_at`, breaker, precision, auto_push, config cursors) / scheduler, collectors, gate, `/holat`.
 
 ### 2.2 `collector_runs` — one row per collector execution
@@ -141,8 +141,8 @@ CREATE TABLE collector_runs (
   new_companies    integer NOT NULL DEFAULT 0,
   new_signals      integer NOT NULL DEFAULT 0,
   cost_usd         numeric(12,6) NOT NULL DEFAULT 0,
-  error            text,                                      -- an error code, never a body
-  meta             jsonb NOT NULL DEFAULT '{}'::jsonb,
+  error            text,                                      -- an error code (timeout|host_blocked|budget|…), never a body; a host breaker ends the run status='failed', error='host_blocked' (there is no 'blocked' status)
+  meta             jsonb NOT NULL DEFAULT '{}'::jsonb,         -- runner extras: {unchanged, skipped_robots, note, truncated, variant} (03 §1.2); live smoke runs write note='smoke'
   CONSTRAINT ck_collector_runs_finished CHECK (finished_at IS NULL OR finished_at >= started_at)
 );
 CREATE INDEX ix_collector_runs_source_started ON collector_runs (source_key, started_at DESC);
@@ -170,6 +170,7 @@ CREATE TABLE evidence (
   lang             char(2),
   expires_at       timestamptz NOT NULL,  -- fetched_at + 180 d: the file goes, the row stays
   raw_deleted_at   timestamptz,
+  meta             jsonb NOT NULL DEFAULT '{}'::jsonb,   -- {etag, last_modified, final_url, status, truncated}: conditional-fetch inputs and fetch facts (03 §1.1)
   created_at       timestamptz NOT NULL DEFAULT now()
 );
 CREATE UNIQUE INDEX ux_evidence_url_sha      ON evidence (md5(url), sha256);
@@ -209,6 +210,8 @@ CREATE TABLE companies (
   state            text NOT NULL DEFAULT 'new' CHECK (state IN ('new','active','excluded','client','suppressed','merged','purged')),
   exclude_reason   text,
   merged_into      uuid REFERENCES companies(id) ON DELETE SET NULL,
+  dup_of           uuid REFERENCES companies(id) ON DELETE SET NULL,   -- resolver's 80–89 fuzzy band (04 §2.2): the «🔀 Birlashtir» proposal; cleared by merge or by the owner
+  dup_score        smallint CHECK (dup_score BETWEEN 0 AND 100),        -- no CHECK pairing it with dup_of: ON DELETE SET NULL clears dup_of alone
   verdict          jsonb,                                -- last RelevanceVerdict (model output only)
   verdict_at       timestamptz,
   first_seen_at    timestamptz NOT NULL DEFAULT now(),
@@ -224,6 +227,7 @@ CREATE UNIQUE INDEX ux_companies_domain  ON companies (website_domain) WHERE web
 CREATE INDEX ix_companies_name_key_trgm  ON companies USING gin (name_key gin_trgm_ops);
 CREATE INDEX ix_companies_state_signal   ON companies (state, last_signal_at DESC);
 CREATE INDEX ix_companies_merged_into    ON companies (merged_into);
+CREATE INDEX ix_companies_dup_of         ON companies (dup_of) WHERE dup_of IS NOT NULL;
 
 CREATE TABLE company_aliases (
   id          bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -240,7 +244,7 @@ CREATE INDEX ix_company_aliases_key      ON company_aliases (alias_key);
 CREATE TABLE company_ids (
   company_id  uuid NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
   id_type     text NOT NULL CHECK (id_type IN ('hh_employer','gis2_firm','google_place','uzum_shop','olx_user',
-                'tg_user','tg_chat','instagram','facebook','yandex_org','myorg','goldenpages','yellowpages',
+                'tg_chat','instagram','facebook','yandex_org','myorg','goldenpages','yellowpages',
                 'glotr','prom','exhibitor_slug')),
   id_value    text NOT NULL CHECK (length(id_value) BETWEEN 1 AND 200),
   source_key  text REFERENCES sources(key),
@@ -286,7 +290,7 @@ CREATE INDEX ix_contacts_tg_username ON contacts (telegram_username) WHERE teleg
 CREATE INDEX ix_contacts_tg_id       ON contacts (telegram_id) WHERE telegram_id IS NOT NULL;
 CREATE INDEX ix_contacts_instagram   ON contacts (instagram) WHERE instagram IS NOT NULL;
 ```
-Rules: `ux_contacts_one_person` is the "one person per company" law; a second decision maker replaces the first (old row anonymised, not deleted). Company-tier rows hold switchboard phones, `info@`, the @company handle. `google_place` id_value is the only thing kept from Places (policy). W/R: resolver (`services/companies.py`), enrichment, bot `edit_phone`, merge, retention / scorer, card, push, suppression gate.
+Rules: `ux_contacts_one_person` is the "one person per company" law; a second decision maker replaces the first (old row anonymised, not deleted). Company-tier rows hold switchboard phones, `info@`, the @company handle. `google_place` id_value is the only thing kept from Places for longer than 30 days (policy): a Places phone copied into `contacts` (`source_key='maps_google'`) is cleared by retention step R4b (§4) unless a push already used it. A poster's personal Telegram id is person-tier — `contacts.telegram_id`, never `company_ids` (`ID_TYPES` has no `tg_user`). W/R: resolver (`services/companies.py`), enrichment, bot `edit_phone` / `/stir`, merge, retention / scorer, card, push, suppression gate.
 
 ### 2.5 `observations` — one parsed finding, before resolution
 
@@ -343,6 +347,28 @@ CREATE INDEX ix_observations_name_key ON observations ((parsed->>'name_key'));
 }
 ```
 Validators: `name_key` recomputed from `company.name_raw`; `phones[].e164`/`kind` recomputed; `excerpt ≤ 600`; any 14-digit run anywhere → the field is dropped and `hints.pinfl_dropped=true`; `person` is kept only when `kind ∈ {intent_post, profile, vacancy, registry}` (a directory entry names a firm, not a person). W/R: collectors (via normaliser) / resolver (`resolve_job`), retention.
+
+
+#### Observation kinds across sections (mapping)
+
+03's `Observation.kind` is the collector-side vocabulary; `observations.parsed.kind` (this section) is the stored one. The runner maps them once, in `services/normalise.py`:
+
+| 03 `Observation.kind` | collector family | stored `parsed.kind` |
+|---|---|---|
+| `post` | telegram_monitor | `intent_post` |
+| `company` | instagram_discovery, telegram about (E3) | `profile` |
+| `company` | directories, maps, exhibitors (company card) | `directory_entry` |
+| `company` | brand_dealers | `dealer_page` |
+| `company` | registry lookups (E4) | `registry` |
+| `company` | olx_business / uzum_sellers seller profile | `seller` |
+| `listing` | olx_business, marketplaces, B2B catalogues | `listing` |
+| `vacancy` | hh_vacancies | `vacancy` |
+| `exhibitor` | exhibitors | `exhibitor` |
+| `place` | maps | `place` |
+| `serp_hit` | serp_layer | not an observation: it only enqueues a URL for the owning collector (`sources.config.queue`) and is kept as `evidence` with `source_key='search_*'` |
+| `suppression`, `outcome` | erp_sync | not observations: written straight to `suppression` / `outcomes` (05 §B.2) |
+
+Rows whose `source_key = 'maps_google'` get `expires_at = fetched_at + 30 d` instead of the default 180 d (Maps terms); R4b clears any phone copied from them that produced no push.
 
 ### 2.6 `model_jobs` — Claude calls, instant and Batch
 
@@ -445,9 +471,9 @@ CREATE INDEX ix_scoring_weights_approved ON scoring_weights (version) WHERE appr
 | vol_directory_wholesale | volume | 10 | 365 | wholesale rubric in a directory |
 | cn_origin | origin (20) | 20 | 365 | `Xitoy|Китай|China|1688|Taobao|Yiwu|Guangzhou|Urumqi` in own text / verdict `imports_from_china=likely` |
 | cn_sector_prior | origin | 10 | — | goods in a China-dominant sector |
-| ent_legal_confirmed | solidity (15) | 8 | — | STIR resolved in a registry |
+| ent_legal_confirmed | solidity (15) | 8 | — | a registry hit (enrichment E4) only — never a bare number parsed from a page (04 §1.5/§5.3) |
 | ent_age_2y_active | solidity | 4 | — | registry: registered ≥ 2 y, active |
-| ent_not_micro | solidity | 3 | — | >1 vacancy, branches, ≥20 SKUs, several phones |
+| ent_not_micro | solidity | 3 | — | >1 vacancy, branches, ≥20 SKUs, several phones, or a parsed STIR/legal block without a registry hit (04 §5.3) |
 | derived_fresh_7d / 30d / 90d | recency (10) | 10 / 7 / 4 | rolling | age of the newest volume/intent signal |
 | derived_contact_mobile | contact (10) | 6 | — | a mobile phone on a non-anonymised contact, `shared_phone=false` |
 | derived_contact_decision_maker | contact | 2 | — | person-tier contact with `is_decision_maker` |
@@ -492,11 +518,11 @@ CREATE INDEX ix_suppression_feed_seen ON suppression (last_seen_at) WHERE source
 CREATE INDEX ix_suppression_expiry    ON suppression (expires_at) WHERE expires_at IS NOT NULL;
 ```
 
-Kinds: `client`/`lost` from the ERP feed (hashed phones); `dnc` («yozmang», owner button), `bounced` (wrong number ×2 — the first time is `reason='wrong_number_1'` on a `cooldown` of 30 d, the second makes it permanent), `legal` (removal request), `competitor`, `manager_veto` («bu bizga kerak emas»), `b2c`, `cooldown` (lost for price: 180 d).
+Kinds: `client`/`lost` from the ERP feed (hashed phones, `source='erp_feed'`), from outcomes (`won`/`landed_client` → `client`, `lost_no_contact` → `lost`; clear `phone_tail`, `source='outcomes'`) or from the XLSX fallback (`make import-clients` / `/import`: clear `phone_tail`, `source='manual_import'`, 05 §B.3 — retired by the first successful full pull, 05 §B.2 step 5); `dnc` («yozmang», owner button), `bounced` (wrong number ×2 — the first time is `reason='wrong_number_1'` on a `cooldown` of 30 d, the second makes it permanent), `legal` (removal request), `competitor`, `manager_veto` («bu bizga kerak emas»), `b2c`, `cooldown` (lost for price: 180 d).
 
-Lookup (`services/suppression.is_suppressed(session, keys) -> Hit | None`): the gate builds `keys = {phone_tail, phone_hash(current secret), tg_username, tg_user_id, instagram, domain, stir, company_id}` and runs **one** query `WHERE (key_type, key) IN (…) AND (expires_at IS NULL OR expires_at > now()) ORDER BY kind LIMIT 1`. Checked before a card and again inside the push transaction.
+Lookup (`services/suppression.is_suppressed(session, keys) -> Hit | None`): the gate builds `keys = {phone_tail, phone_hash(current secret), tg_username, tg_user_id, instagram, domain, stir, company_id}` and runs **one** query `WHERE (key_type, key) IN (…) AND (expires_at IS NULL OR expires_at > now()) ORDER BY array_position(ARRAY['legal','dnc','client','lost','bounced','competitor','manager_veto','b2c','cooldown'], kind) LIMIT 1`. The array is rendered from the one constant `KIND_RANK` in `services/suppression.py` (`legal 0 · dnc 1 · client 2 · lost 3 · bounced 4 · competitor 5 · manager_veto 6 · b2c 7 · cooldown 8`, 06 §5.5): a permanent kind always beats a `cooldown`, so the gate and `/lidlar` report the lasting reason. Checked before a card and again inside the push transaction.
 
-Feed sync (`erp_sync` collector): hourly delta = upsert each entry as `(kind, 'phone_hash', h, salt_id, source='erp_feed', erp_at=at, last_seen_at=now())`; nightly full pull stamps `last_seen_at = run_started` on every entry, then `DELETE … WHERE source='erp_feed' AND last_seen_at < run_started` — only when the pull completed and returned ≥ 90 % of the previous count (otherwise health problem `suppression_shrunk`, no delete). A `salt_id` different from `erp_sync.config.suppression.salt_id` (re-minted secret) forces a full pull before any push (gate line `suppression_stale`). A prospect's «yozmang» reaches a manager's account, not the agent, so `dnc` rows are entered by people (owner bot button «🔒 DNC», `/dnc <phone|@user>`, `make import-clients`) or derived from outcomes (`lost_wrong_number`, `lost_no_contact`). W/R: erp_sync, `feedback_job`, bot, resolver (`competitor`), retention / gate, scorer, resolver.
+Feed sync (`erp_sync` collector, steps in 05 §B.2; cron full `30 2 * * *`, delta `15 * * * *` Tashkent): delta = upsert each entry as `(kind, 'phone_hash', h, salt_id, source='erp_feed', erp_at=at, last_seen_at=run_started)`; the full pull stamps `last_seen_at = run_started` on every entry, then `DELETE … WHERE source='erp_feed' AND last_seen_at < run_started` — only when the pull completed and returned ≥ 90 % of the previous count (otherwise health problem `suppression_shrunk`, no delete). Freshness has one home, `services/erp_feeds.suppression_fresh()` (`FULL_MAX_AGE_H = 26`, `DELTA_MAX_AGE_H = 3`): when it is false, or the feed's `salt_id` differs from `erp_sync.config.suppression.salt_id` (re-minted secret), health problem `suppression_stale` is raised and the push gate refuses every push until a full pull succeeded. A prospect's «yozmang» reaches a manager's account, not the agent, so `dnc` rows are entered by people (owner bot button «🔒 DNC», `/dnc <phone|@user>`, the manager card's «🙅 Yozmang dedi») or derived from outcomes (`lost_wrong_number` ×2 → `bounced`, `lost_no_contact` → `lost`). W/R: erp_sync, `feedback_job`, bot, resolver (`competitor`), retention / gate, scorer, resolver.
 
 ### 2.9 `lead_candidates`, `lead_reviews`
 
@@ -519,7 +545,7 @@ CREATE TABLE lead_candidates (
   enrich_attempts    smallint NOT NULL DEFAULT 0 CHECK (enrich_attempts BETWEEN 0 AND 3),
   next_enrich_at     timestamptz,
   external_id        text CHECK (external_id ~ '^cs:[0-9a-f-]{36}:[0-9]{6}$'),
-  approved_by        text,                   -- 'owner:<tg_id>' | 'auto:<source_key>'
+  approved_by        text,                   -- 'owner:<tg_id>' | 'auto:<source_key>' | 'manager:<tg_id>' (a manager's /tel after a handoff, 06 §1.7)
   approved_at        timestamptz,
   rejected_at        timestamptz,
   pushed_at          timestamptz,
@@ -545,13 +571,15 @@ CREATE INDEX ix_lead_candidates_suppressed  ON lead_candidates (suppressed_by);
 CREATE TABLE lead_reviews (
   id              bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   candidate_id    uuid NOT NULL REFERENCES lead_candidates(id) ON DELETE CASCADE,
+  kind            text NOT NULL DEFAULT 'owner' CHECK (kind IN ('owner','manager')),   -- 'manager' = the handoff card of 06 §1.7, same table, same machine
   state           text NOT NULL DEFAULT 'pending' CHECK (state IN ('pending','asked','approved','declined','expired','merged')),
   card_chat_id    bigint,
   card_message_id bigint,
   card_hash       char(64),                  -- sha256 of the rendered card; edit only when it changed
   asked_at        timestamptz,
   answered_at     timestamptz,
-  answer          text CHECK (answer IN ('push','decline','later','dnc','not_b2b','competitor','merge','edit_phone')),
+  answer          text CHECK (answer IN ('push','decline','later','dnc','not_b2b','competitor','merge','edit_phone','handoff',
+                                         'contacted','said_no','wrong_or_b2c','no_reply')),   -- the last five belong to the handoff flow (06 §1.3/§1.7)
   by_telegram_id  bigint,
   note            text CHECK (length(note) <= 500),
   expires_at      timestamptz,
@@ -559,7 +587,7 @@ CREATE TABLE lead_reviews (
   CONSTRAINT ck_lead_reviews_answered CHECK ((state IN ('approved','declined','merged')) = (answered_at IS NOT NULL)),
   CONSTRAINT ck_lead_reviews_asked    CHECK (state <> 'asked' OR (asked_at IS NOT NULL AND card_message_id IS NOT NULL AND expires_at IS NOT NULL))
 );
-CREATE UNIQUE INDEX ux_lead_reviews_live ON lead_reviews (candidate_id) WHERE state IN ('pending','asked');
+CREATE UNIQUE INDEX ux_lead_reviews_live ON lead_reviews (candidate_id, kind) WHERE state IN ('pending','asked');   -- one live owner card and one live manager card per candidate
 CREATE UNIQUE INDEX ux_lead_reviews_card ON lead_reviews (card_chat_id, card_message_id) WHERE card_message_id IS NOT NULL;
 CREATE INDEX ix_lead_reviews_expiry    ON lead_reviews (expires_at) WHERE state = 'asked';
 CREATE INDEX ix_lead_reviews_candidate ON lead_reviews (candidate_id);
@@ -570,16 +598,16 @@ CREATE INDEX ix_lead_reviews_candidate ON lead_reviews (candidate_id);
 | from | to | by |
 |---|---|---|
 | found | enriching, scored, excluded, suppressed | resolver creates `found` on the first resolved observation; `score_job` scores at once when a volume signal exists |
-| enriching | scored, hold, excluded, suppressed | `enrich_job` (≤ 3 attempts over 14 d; still no phone → `hold`, `exclude_reason` stays NULL) |
-| scored | review, enriching, hold, approved, excluded, suppressed | `review` when hot; `enriching` when warm; `hold` when cold; `approved(approved_by='auto:<source>')` when hot and `sources.auto_push` |
-| review | approved, rejected, hold, suppressed, excluded | owner answers (`push`→approved, `decline`→rejected, `later`→stays, `dnc`→suppressed + suppression(dnc), `not_b2b`→excluded(b2c), `competitor`→excluded + company flag, `merge`→excluded(merged)) |
+| enriching | scored, review, hold, excluded, suppressed | `enrich_job` (≤ 3 attempts over 14 d). After attempt 3 still no phone: `score ≥ 60 AND contacts.telegram_username IS NOT NULL` → `review` with `tier='warm'` and `score_breakdown.gates.no_phone=true` (the owner card renders the handoff variant `[👤 Menejerga]`, 06 §1.3); otherwise `hold`, `exclude_reason` stays NULL |
+| scored | review, enriching, hold, approved, excluded, suppressed | `review` when hot; `enriching` when warm; `hold` when cold; `approved(approved_by='auto:<source>')` when hot and `sources.auto_push`; `approved(approved_by='manager:<tg_id>')` when the re-score follows a manager's `/tel` phone (06 §1.7: `hold → scored → approved` — the owner's earlier `handoff` answer is the owner's approval) |
+| review | approved, rejected, hold, suppressed, excluded | owner answers (`push`→approved, `decline`→rejected, `later`→stays, `dnc`→suppressed + suppression(dnc), `not_b2b`→excluded(b2c), `competitor`→excluded + company flag, `merge`→excluded(merged), `handoff`→hold with `hold_until = now + 30 d` and a `lead_reviews(kind='manager', state='pending')` row) |
 | approved | pushed, review, suppressed | `crm_push_job`; three failed attempts → back to `review` with a note |
-| hold | scored, excluded, suppressed | a new signal re-scores; 365 d without a signal → row deleted (company kept, R6) |
+| hold | scored, excluded, suppressed | a new signal re-scores; a manager's `/tel` phone re-scores at once; manager answers `said_no` → suppressed + suppression(dnc), `wrong_or_b2c` → excluded(b2c); 365 d without a signal → row deleted (company kept, R6) |
 | pushed · rejected · excluded · suppressed | — | terminal for this row |
 
 A new candidate for the same company may be created only when no open one exists (`ux_lead_candidates_open`) **and**: after `pushed` — the outcome is terminal or absent for 90 d, a new signal is newer than `pushed_at`, and the month differs; after `rejected` — 180 d passed and a new signal arrived; after `suppressed` — the suppression row is gone; after `excluded` with `competitor|supplier_cn|liquidated` — never (owner can clear the company flag by hand).
 
-**Review state machine** (`services/reviews.py`, MIYA `approvals.py` shape + `merged`): `pending` (created by `review_cards_job`, not yet sent) → `asked` (card sent; `expires_at = asked_at + 72 h`) → `approved | declined | merged` (one tap) or `expired` (sweep; candidate → `hold`, `hold_until = now + 7 d`, re-asked at most twice, `reminder_log(kind='review_expired', ref=candidate_id)`). `later` keeps `asked` and adds 24 h; `edit_phone` keeps `asked`, updates the contact and re-renders. Callback data `rv:<review_id>:<answer>`; `tests/test_bot_callbacks.py` demands the parser accept every button the keyboard builds. W/R: `review_cards_job`, bot / bot, `/lidlar`, `/holat`.
+**Review state machine** (`services/reviews.py`, MIYA `approvals.py` shape + `merged`; one machine for both `kind`s): `pending` (created by `review_cards_job` — every 2 min inside `REVIEW_HOURS`, 06 §1.6 — from candidates in state `review`; a `kind='manager'` row is created by the owner's `handoff` answer) → `asked` (card sent; `expires_at = asked_at + 72 h`) → `approved | declined | merged` (one tap) or `expired` (sweep; owner card: candidate → `hold`, `hold_until = now + 7 d`, re-asked at most twice, `reminder_log(kind='review_expired', ref=candidate_id)`; manager card: digest line «Menejer javob bermadi»). `later` keeps `asked` and adds 24 h; `edit_phone` keeps `asked`, updates the contact and re-renders. Owner answers `push`/`handoff` → `approved`; `decline`/`dnc`/`not_b2b`/`competitor` → `declined`; `merge` → `merged`. Manager answers (06 §1.7): `contacted` → `approved` (the candidate stays `hold` until `/tel`); `said_no`/`wrong_or_b2c`/`no_reply` → `declined`. The callback-data grammar (`rv:<review_id>:<a>` with one-letter codes, `mh:*` for manager cards) is 06 §1.5's, not restated here; `tests/test_bot_callbacks.py` demands the parser accept every button the keyboards build. W/R: `review_cards_job`, bot / bot, `/lidlar`, `/holat`.
 
 ### 2.10 `push_log` — every attempt to hand a lead to the ERP
 
@@ -597,11 +625,12 @@ CREATE TABLE push_log (
   payload_sha256  char(64) NOT NULL,
   status          text NOT NULL DEFAULT 'sending' CHECK (status IN ('sending','sent','failed','unknown')),
   http_status     smallint,
-  error           text,                                 -- timeout|conn|http_5xx|http_404|http_4xx|breaker
+  error           text,                                 -- timeout|conn|http_5xx|http_404|http_4xx|http_2xx_badbody|breaker
   sent_at         timestamptz NOT NULL DEFAULT now(),
   finished_at     timestamptz,
   CONSTRAINT uq_push_log_external_attempt UNIQUE (external_id, attempt),
-  CONSTRAINT ck_push_log_sent CHECK ((status = 'sent') = (http_status BETWEEN 200 AND 299))
+  CONSTRAINT ck_push_log_sent CHECK ((status <> 'sent' OR http_status BETWEEN 200 AND 299)                                       -- sent ⇒ 2xx
+                                 AND (http_status IS NULL OR http_status NOT BETWEEN 200 AND 299 OR status IN ('sent','unknown')))   -- 2xx ⇒ sent | unknown (unparseable 2xx body: 'unknown', error='http_2xx_badbody')
 );
 CREATE UNIQUE INDEX ux_push_log_delivered ON push_log (external_id) WHERE status IN ('sent','unknown');
 CREATE INDEX ix_push_log_phone_sent   ON push_log (phone_tail, sent_at DESC);
@@ -613,9 +642,9 @@ CREATE INDEX ix_push_log_candidate    ON push_log (candidate_id);
 **Idempotency rules** (`services/crm_push.py`):
 
 1. `external_id = f"cs:{company_id}:{yyyymm}"`, month = Asia/Tashkent month at claim time.
-2. Gate, in one transaction with `SELECT … FOR UPDATE` on the candidate: `state='approved'`; `is_suppressed()` misses; no `sent|unknown` row for this `external_id` (the partial unique index is the real fence, the pre-check only gives a readable refusal); no `sent|unknown` row for `phone_tail` in the last 24 h; no `sent|unknown` row for `company_id` whose outcome is `open` or absent and younger than 90 d; `count(sent|unknown today) < PUSH_DAILY_CAP`; Mon–Sat 09:30–17:30 Tashkent; `CRM_PUSH_ENABLED`; breaker clear; `suppression_stale` clear.
+2. Gate, in one transaction with `SELECT … FOR UPDATE` on the candidate: `state='approved'`; `is_suppressed()` misses; no `sent|unknown` row for this `external_id` (the partial unique index is the real fence, the pre-check only gives a readable refusal); no `sent|unknown` row for `phone_tail` in the last 24 h; no `sent|unknown` row for `company_id` whose outcome is `open` or absent and younger than 90 d; `count(sent|unknown today) < PUSH_DAILY_CAP`; Mon–Sat 09:30–17:30 Tashkent; `CRM_PUSH_ENABLED`; `sources.erp_sync.breaker_until` clear (05 §B.1; `/yoq crm` clears it by hand); `suppression_fresh()` true and no `salt_id` mismatch (§2.8).
 3. Claim: `INSERT push_log (status='sending', attempt=n)` and **commit before the HTTP call**.
-4. Response: 2xx → `sent`, candidate → `pushed` (same transaction). 404 → `failed`, `error='http_404'`, trip breaker `crm_push`, health problem `push_404`, no retry. 5xx/timeout/connection → `failed`; the next scheduler tick retries with `attempt+1` after `with_backoff` delays (30 s, 5 min, 30 min); after attempt 3 the candidate returns to `review` with note «CRM javob bermadi». Other 4xx → `failed`, no retry, owner alert.
+4. Response (05 §B.1 owns the mapping table; the scheme has **two levels**). Inside one attempt the POST is retried up to three times by `with_backoff(attempts=3, base=1.0, cap=8.0)` on 5xx/timeout/connection — safe because the ERP's replay fence answers a repeated `external_id` with `{ok:true}` and no second lead. Then: 2xx → `sent`, candidate → `pushed` (same transaction); 2xx with an unparseable body → `unknown`, `error='http_2xx_badbody'` (the nightly outcomes read settles it). 404 → `failed`, `error='http_404'`, `sources.erp_sync.breaker_until = now + 6 h`, `breaker_reason='push_404'`, health problem `push_404`, no retry. Still failing after the three tries → `failed`; the next **attempt** (`attempt+1`, identical body) may be claimed only after `ATTEMPT_DELAYS = {2: 5 min, 3: 30 min}`; after attempt 3 the candidate returns to `review` with note «CRM javob bermadi» (≤ 9 POSTs worst case). Other 4xx → `failed`, no retry, owner alert.
 5. Reconcile: a `sending` row older than 10 min becomes `unknown` (the request may have landed). `unknown` blocks the unique index exactly like `sent`; the nightly outcomes read promotes it to `sent` when the ERP shows the `external_id`, and raises `push_unconfirmed` after 48 h without one. Owner command `/push tekshir <external_id>` marks it `failed` so a new attempt can be claimed.
 6. `payload_sha256 = sha256(canonical JSON: sorted keys, no spaces)`. A retry re-sends the identical body; a different body under the same `external_id` in the same month is refused (the ERP keeps the first anyway).
 7. ERP-side replay (`same channel + external_id`) answers `{ok:true}` and writes no ledger row — so an accidental double send is harmless but never done on purpose.
@@ -684,7 +713,7 @@ PRECISION = {"lost_price": "neutral", "lost_not_importer": "negative", "lost_sma
              "lost_wrong_number": "negative", "lost_competitor": "negative"}
 ```
 
-Side effects of a label change (same transaction as the upsert): `lost_wrong_number` → `suppression(bounced|cooldown)` on `push_log.phone_tail` (×2 rule); `lost_competitor` → `companies.is_competitor=true`; `lost_not_importer` → `suppression(cooldown, 365 d, company_id)`; `lost_price` → `suppression(cooldown, 180 d, company_id)`; `landed_client` → `companies.state='client'` + `suppression(client, phone_tail, source='outcomes')`. `source_precision_job`: `precision_30d = positives / (positives + negatives)` over outcomes whose `first_read_at` is within 30 d, ignoring `pending`/`neutral`, per `source_key`. W/R: `feedback_job` / `source_precision_job`, `/holat`, `tools/fit_weights.py`.
+Side effects of a label change (same transaction as the upsert): `lost_wrong_number` → `suppression(bounced|cooldown)` on `push_log.phone_tail` (×2 rule); `lost_competitor` → `companies.is_competitor=true`; `lost_not_importer` → `suppression(cooldown, 365 d, company_id)`; `lost_price` → `suppression(cooldown, 180 d, company_id)`; `won` and `landed_client` → `companies.state='client'` + a **local** `suppression(client, key_type='phone_tail', key=push_log.phone_tail, source='outcomes')` row at once — the ERP feed brings the hashed `phone_hash` row for the same phone a day later (05 §B.2), so the phone is never carded again even while the feed lags. `source_precision_job`: `precision_30d = positives / (positives + negatives)` over outcomes whose `first_read_at` is within 30 d, ignoring `pending`/`neutral`, per `source_key`. W/R: `feedback_job` / `source_precision_job`, `/holat`, `tools/fit_weights.py`.
 
 ### 2.12 `interactions`, `chat_monitors` — the Telegram reader
 
@@ -701,6 +730,7 @@ CREATE TABLE interactions (
   occurred_at         timestamptz NOT NULL,
   media_kind          text NOT NULL DEFAULT 'none' CHECK (media_kind IN ('none','photo','document','video','other')),
   reply_to_message_id bigint,
+  fwd_from_peer_id    bigint,                 -- forwarded-from channel/user id (tout rule: a forward from a channel other than the sender's own, 03 §2.3); NULL = not a forward
   prefilter_hit       text[] NOT NULL CONSTRAINT ck_interactions_prefilter_nonempty CHECK (cardinality(prefilter_hit) > 0),   -- {volume_kub, container, china, intent, wholesale, pricelist}
   processed_at        timestamptz,
   evidence_id         bigint REFERENCES evidence(id) ON DELETE SET NULL,
@@ -722,13 +752,15 @@ CREATE TABLE chat_monitors (
   chat_type             text NOT NULL CHECK (chat_type IN ('private','group','channel')),
   title                 text,
   username              text,
-  role                  text NOT NULL DEFAULT 'market' CHECK (role IN ('market','competitor','buyers','other')),
+  role                  text NOT NULL DEFAULT 'market' CHECK (role IN ('market','competitor','buyers','calibration','other')),   -- 'calibration' = GSR's own chat: monitor_enabled=false, nothing is read (03 §2.3)
+  status                text NOT NULL DEFAULT 'queued' CHECK (status IN ('queued','joined','gone','left')),   -- the joiner's queue (03 §2.3, 06 §1.2)
+  priority              smallint NOT NULL DEFAULT 5 CHECK (priority BETWEEN 0 AND 9),   -- 0 owner /chats qoʻsh · 1 linked discussion group · 2 companion group · 3 resolved username · 5 seed
   monitor_enabled       boolean NOT NULL DEFAULT true,         -- MIYA default flipped: groups/channels on, private off by rule
   decided_by            text CHECK (decided_by IN ('owner','rule:seed','rule:private_off','rule:default')),
   asked_at              timestamptz,
   joined_at             timestamptz,
   backfill_requested_at timestamptz,
-  backfill_done_at      timestamptz,
+  backfilled_at         timestamptz,                           -- set by telegram_monitor.backfill (03 §2.3)
   backfill_attempts     smallint NOT NULL DEFAULT 0,
   monitoring_since      timestamptz,
   last_seen_message_id  bigint,
@@ -738,30 +770,35 @@ CREATE TABLE chat_monitors (
   member_count          integer,
   flood_until           timestamptz,
   created_at            timestamptz NOT NULL DEFAULT now(),
-  updated_at            timestamptz NOT NULL DEFAULT now()
+  updated_at            timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT ck_chat_monitors_joined CHECK (status <> 'joined' OR joined_at IS NOT NULL)
 );
+CREATE INDEX ix_chat_monitors_queue ON chat_monitors (priority, created_at) WHERE status = 'queued';
 ```
-The "no full chat logs" rule is structural: the userbot inserts only messages whose text matched a prefilter pattern (`cardinality(prefilter_hit) > 0`); everything else only increments `seen_count`. `pricelist` hits are stored so the tout rule (≥ 3 price lists per sender in 60 d) can be counted; they are purged at 30 d like every unconverted row. Member lists and profile photos are never read. W/R: userbot / `telegram_monitor` collector (no network: it reads this table), retention, `/chats`.
+The "no full chat logs" rule is structural: the userbot inserts only messages whose text matched a prefilter pattern (`cardinality(prefilter_hit) > 0`); everything else only increments `seen_count`. `pricelist` hits are stored so the tout rule (≥ 3 price-list-shaped messages per sender in 7 d, 03 §2.3) can be counted; they are purged at 30 d like every unconverted row. Member lists and profile photos are never read. A channel's `about` text is not an interaction (it has no `prefilter_hit`): it is stored as `evidence` + `observations(kind='profile')` (03 §2.3). The userbot's insert transaction ends with `NOTIFY cs_interaction, '<id>'`; `classify_job` and `score_job` wake on it and the 15-min sweep is only the fallback (04 §0, 06 §1.6 — this is what makes N-06 reachable). W/R: userbot / `telegram_monitor` collector (no network: it reads this table), retention, `/chats`.
 
-### 2.13 `heartbeats`, `usage_log`, `reminder_log`
+### 2.13 `heartbeats`, `usage_log`, `reminder_log`, `runtime_flags`
 
 ```sql
 CREATE TABLE heartbeats (                                   -- MIYA verbatim
-  component    text PRIMARY KEY,                             -- bot|worker|userbot|backup|job:<id>|collector:<key>
+  component    text PRIMARY KEY,                             -- bot|worker|userbot|backup|job:<id>|collector:<key>[.variant] (erp_sync.full, erp_sync.delta, erp_sync.outcomes, telegram_monitor.join, telegram_monitor.backfill, serp_layer.night)
   last_seen_at timestamptz NOT NULL,
   detail       jsonb NOT NULL DEFAULT '{}'::jsonb
 );
 
 CREATE TABLE usage_log (                                    -- MIYA adapted: every paid call, not only Anthropic
   id                bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-  provider          text NOT NULL CHECK (provider IN ('anthropic','brave','yandex_search','google_places','apify','proxy','searxng','hh','other')),
-  model             text,                                    -- model id | apify actor | places SKU
-  operation         text NOT NULL CHECK (operation IN ('classify','verdict','company_verdict','draft','enrich_search',
-                      'serp','places','actor','proxy_bytes','other')),
+  provider          text NOT NULL CHECK (provider IN ('anthropic','brave','yandex_search','google_places','twogis','apify','proxy','searxng','hh','other')),
+  model             text,                                    -- model id | apify actor | places SKU | 'refused:<code>' on a refusal row (cost_usd=0, units=0; 04 §8)
+  operation         text NOT NULL CHECK (operation IN (     -- = the Operation literal of 04 §8, verbatim; costs.ask writes it
+                      'classify','verdict','company_verdict','draft','enrich_search',
+                      'serp_brave','serp_yandex_night','serp_searxng','serp_ddg',
+                      'places_text_ids','places_details_contact','twogis_api',
+                      'apify_olx','apify_2gis','apify_instagram','apify_uzum','proxy_uzum','model_reserve','serp_reserve','other')),
   input_tokens      integer, output_tokens integer, cache_read_tokens integer, cache_write_tokens integer,
   units             numeric(14,3),                            -- queries, results, MB for non-token providers
   batch             boolean NOT NULL DEFAULT false,
-  cost_usd          numeric(12,6) NOT NULL CHECK (cost_usd >= 0),  -- unknown price never reaches here: costs.ask refuses it
+  cost_usd          numeric(12,6) NOT NULL CHECK (cost_usd >= 0),  -- unknown price never reaches here: costs.ask refuses it (the refusal itself is a 0-cost row)
   source_key        text REFERENCES sources(key),
   company_id        uuid REFERENCES companies(id) ON DELETE SET NULL,
   model_job_id      bigint REFERENCES model_jobs(id) ON DELETE SET NULL,
@@ -776,13 +813,20 @@ CREATE INDEX ix_usage_log_collector_run    ON usage_log (collector_run_id);
 
 CREATE TABLE reminder_log (                                 -- MIYA verbatim
   id      bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-  kind    text NOT NULL,                                     -- health:<problem>|review_expired|push_unconfirmed|digest|source_paused
+  kind    text NOT NULL,                                     -- alert:<key>|recovered:<key> (health, MIYA constants, 06 §4.1)|review_expired|push_unconfirmed|digest|source_paused
   ref     text NOT NULL,
   sent_at timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX ix_reminder_log_kind_ref_sent ON reminder_log (kind, ref, sent_at);
+
+CREATE TABLE runtime_flags (                                -- switches that must survive a restart and be read by bot, worker and userbot (06 §6)
+  key        text PRIMARY KEY,                               -- 'paused' {"since","reason"} | 'flood_until' | 'review_hours_override'
+  value      jsonb NOT NULL,
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  updated_by text NOT NULL                                   -- 'owner:<tg_id>' | 'userbot' | 'worker:<job>'
+);
 ```
-`costs.ask(operation, provider, estimate)` sums `usage_log.cost_usd` for today (Tashkent) and the month against `DAILY_COST_CAP_USD`/`MONTHLY_COST_CAP_USD` and the per-provider allocation; refuses before the call. W/R: every paid caller, `health.beat` / `/xarajat`, `/holat`, health.
+The budget controller is 04 §8 and its signature is the only one: `costs.ask(session, *, operation, est_usd, call, price, now, …)` sums `usage_log.cost_usd` for today (Tashkent) and the month and refuses **before** the call in the order month → day → family → op; ahead of it the collector's `Budget.can_spend` (03 §1.2) checks the per-source budget `Budget.usd = sources.daily_cost_cap_usd − spend(source_key)`. A refusal is persisted here as a row with `cost_usd=0, units=0, model='refused:<code>'` — the bot is another process and cannot read a worker counter, so `/xarajat` and the digest count these rows. `runtime_flags` holds the switches the three processes share (`/toxtat` → `paused`, the userbot's `flood_until`); writers upsert with `updated_at = now()`. W/R: every paid caller, `health.beat`, bot (`/toxtat`, `/yoq`), userbot (`flood_until`) / `/xarajat`, `/holat`, health, `policy.paused()`.
 
 ### 2.14 `merge_log`, `purge_log`
 
@@ -851,6 +895,7 @@ CREATE TRIGGER trg_touch_updated_at BEFORE UPDATE ON contacts        FOR EACH RO
 CREATE TRIGGER trg_touch_updated_at BEFORE UPDATE ON lead_candidates FOR EACH ROW EXECUTE FUNCTION cs_touch_updated_at();
 CREATE TRIGGER trg_touch_updated_at BEFORE UPDATE ON chat_monitors   FOR EACH ROW EXECUTE FUNCTION cs_touch_updated_at();
 CREATE TRIGGER trg_touch_updated_at BEFORE UPDATE ON sheet_rows      FOR EACH ROW EXECUTE FUNCTION cs_touch_updated_at();
+CREATE TRIGGER trg_touch_updated_at BEFORE UPDATE ON runtime_flags   FOR EACH ROW EXECUTE FUNCTION cs_touch_updated_at();
 CREATE TRIGGER trg_append_only BEFORE DELETE ON push_log  FOR EACH ROW EXECUTE FUNCTION cs_append_only();
 CREATE TRIGGER trg_append_only BEFORE DELETE ON outcomes  FOR EACH ROW EXECUTE FUNCTION cs_append_only();
 CREATE TRIGGER trg_append_only BEFORE DELETE ON merge_log FOR EACH ROW EXECUTE FUNCTION cs_append_only();
@@ -871,7 +916,7 @@ CREATE TRIGGER trg_scoring_weights_frozen BEFORE UPDATE OR DELETE ON scoring_wei
 
 - Root `EVIDENCE_DIR=/data/evidence` (compose volume `evidence:/data/evidence`, uid 10001, mode 0750). Path `<yy>/<sha256>.gz`, `yy` = two-digit year of `fetched_at` in Tashkent, `sha256` = hash of the **raw** bytes before gzip (level 6). Written to `<path>.tmp` then `os.replace` — a crash never leaves a half file.
 - One file per distinct body: the same bytes at two URLs are two `evidence` rows and one file. Deletion only when no row with `raw_path IS NOT NULL` shares the `sha256`.
-- Cap 2 MB per body; larger bodies get `raw_path=NULL`, `excerpt` and `bytes` still recorded, `meta.truncated=true` on the run.
+- Cap 2 MB per body; larger bodies get `raw_path=NULL`, `excerpt` and `bytes` still recorded, `evidence.meta.truncated=true` on the row and the count in the run's `meta.truncated`.
 - Not part of `pg_dump` backups (MIYA `backup.py` unchanged). Losing the directory loses nothing a card or ERP note needs — `url`, `fetched_at`, `excerpt` live in the row. Optional `restic` to object storage is an ops choice (§9).
 - API: `services/evidence.store(session, *, source_key, url, body: bytes, content_type, fetched_at, source_ref, excerpt, title, lang, published_at, collector_run_id) -> Evidence`; `open_raw(evidence) -> bytes | None`; `purge_raw(evidence) -> bool`.
 
@@ -882,7 +927,8 @@ CREATE TRIGGER trg_scoring_weights_frozen BEFORE UPDATE OR DELETE ON scoring_wei
 | R1 raw evidence 180 d | file goes, row stays | `SELECT id, sha256, raw_path FROM evidence WHERE expires_at < now() AND raw_path IS NOT NULL LIMIT 5000` → for each: if `NOT EXISTS (SELECT 1 FROM evidence e2 WHERE e2.sha256 = sha256 AND e2.raw_path IS NOT NULL AND e2.id <> id)` unlink file → `UPDATE evidence SET raw_path = NULL, raw_deleted_at = now() WHERE id = …` |
 | R2a unconverted Telegram posts 30 d | delete | `DELETE FROM interactions WHERE occurred_at < now() - interval '30 days' AND (observation_id IS NULL OR observation_id IN (SELECT id FROM observations WHERE status = 'rejected'))` |
 | R2b converted Telegram posts 90 d | keep ids, drop text | `UPDATE interactions SET text = NULL, sender_bio = NULL, sender_name = NULL, text_purged_at = now() WHERE occurred_at < now() - interval '90 days' AND text IS NOT NULL` |
-| R3 observation scrub 30 d after resolution | person data out of `parsed` | `UPDATE observations SET parsed = (parsed - 'phones' - 'person') \|\| jsonb_build_object('scrubbed', true), scrubbed_at = now() WHERE scrubbed_at IS NULL AND coalesce(resolved_at, created_at) < now() - interval '30 days'` |
+| R3 observation scrub 30 d after resolution | person data out of `parsed` | `UPDATE observations SET parsed = (parsed - 'phones' - 'person') \|\| CASE WHEN parsed->>'kind' = 'intent_post' THEN jsonb_build_object('handles', (parsed->'handles') - 'tg_user_id' - 'telegram') ELSE '{}'::jsonb END \|\| jsonb_build_object('scrubbed', true), scrubbed_at = now() WHERE scrubbed_at IS NULL AND coalesce(resolved_at, created_at) < now() - interval '30 days'` — for an intent post the poster's personal `handles.telegram`/`tg_user_id` go too (a company channel lives in `companies.telegram_channel` by then) |
+| R4b Places phones 30 d | Maps terms: no caching beyond 30 d | `UPDATE contacts c SET phone = NULL, phone_kind = NULL WHERE c.source_key = 'maps_google' AND c.phone IS NOT NULL AND c.collected_at < now() - interval '30 days' AND NOT EXISTS (SELECT 1 FROM push_log p WHERE p.company_id = c.company_id AND p.status IN ('sent','unknown'))` — a phone the ERP already received stays (the lead exists there); both columns go together because of `ck_contacts_phone_kind` |
 | R4 unanswered leads 90 d | company-tier only | candidates `pushed` with `pushed_at < now() - 90 d` and outcome `label IN ('open_untouched','stale_open','dropped_capped','dropped_other')` or no outcome row → `services/contacts.anonymise(contact)`: `full_name, role, telegram_id, email, telegram_username, instagram := NULL; phone := NULL WHERE tier='person' AND phone_kind='mobile'; anonymised_at := now()` |
 | R5 excluded persons 30 d | company-tier only | person-tier contacts of companies whose open candidate is `excluded`/`rejected` for 30 d, or company `state='excluded'` → `anonymise(contact)` |
 | R6 ledgers | | `UPDATE push_log SET payload = NULL WHERE sent_at < now() - 90 d AND payload IS NOT NULL`; `UPDATE model_jobs SET request = NULL, pseudonyms = NULL WHERE status IN ('applied','failed','fallback') AND coalesce(applied_at, created_at) < now() - 30 d`; `DELETE FROM collector_runs WHERE started_at < now() - 180 d`; `DELETE FROM reminder_log WHERE sent_at < now() - 90 d`; `DELETE FROM lead_candidates WHERE state = 'hold' AND updated_at < now() - 365 d`; `DELETE FROM suppression WHERE kind = 'cooldown' AND expires_at < now() - 30 d` |
@@ -892,7 +938,7 @@ CREATE TRIGGER trg_scoring_weights_frozen BEFORE UPDATE OR DELETE ON scoring_wei
 ## 5. Alembic plan
 
 - `alembic/env.py` = MIYA's minus the pgvector `render_item`; imports `clientscrapper.db.models` to populate `Base.metadata`; `compare_type=True, compare_server_default=True`. `alembic.ini` as MIYA (ruff post-write hook, URL from settings). The compose `init` service runs `alembic upgrade head`; `worker`, `bot`, `userbot` `depends_on: init: condition: service_completed_successfully`.
-- **`0001_initial`** (`revision="0001_initial"`, `down_revision=None`): `upgrade()` in this order — extension `pg_trgm`; functions (`cs_phone_tail`, `cs_username_key`, `cs_domain_key`, `cs_touch_updated_at`, `cs_append_only`, `cs_scoring_weights_frozen`); tables exactly in the order of §2 (`sources, collector_runs, evidence, companies, company_aliases, company_ids, contacts, observations, model_jobs, signals, scoring_weights, suppression, lead_candidates, lead_reviews, push_log, outcomes, interactions, chat_monitors, heartbeats, usage_log, reminder_log, merge_log, purge_log, sheet_rows`); triggers; `op.bulk_insert` of the 19 `sources` rows and the 26 `scoring_weights` version-1 rows (`proposed_by='seed'`, `approved_by='seed'`, `approved_at=now()`). `downgrade()` drops in reverse, then functions, then the extension. The migration carries its own frozen tuples (CHECK lists) — `tests/test_enums_frozen.py` compares them with `db/enums.py`.
+- **`0001_initial`** (`revision="0001_initial"`, `down_revision=None`): `upgrade()` in this order — extension `pg_trgm`; functions (`cs_phone_tail`, `cs_username_key`, `cs_domain_key`, `cs_touch_updated_at`, `cs_append_only`, `cs_scoring_weights_frozen`); tables exactly in the order of §2 (`sources, collector_runs, evidence, companies, company_aliases, company_ids, contacts, observations, model_jobs, signals, scoring_weights, suppression, lead_candidates, lead_reviews, push_log, outcomes, interactions, chat_monitors, heartbeats, usage_log, reminder_log, runtime_flags, merge_log, purge_log, sheet_rows` — 25 tables; `runtime_flags`, `companies.dup_of/dup_score`, `lead_reviews.kind`, `chat_monitors.status/priority`, `evidence.meta`, `interactions.fwd_from_peer_id` are day-1 columns, not a `0002`); triggers; `op.bulk_insert` of the 23 `sources` rows (§2.1) and the 26 `scoring_weights` version-1 rows (`proposed_by='seed'`, `approved_by='seed'`, `approved_at=now()`). `downgrade()` drops in reverse, then functions, then the extension. The migration carries its own frozen tuples (CHECK lists) — `tests/test_enums_frozen.py` compares them with `db/enums.py`.
 - Later migrations: `000N_<slug>.py`, one concern each; widening a CHECK = `op.drop_constraint` + `op.create_check_constraint` with the new tuple, plus the tuple change in `enums.py` in the same commit; new source = a data migration inserting the `sources` row; new weight version = never a migration (runtime through `/vazn` or `fit_weights`).
 - `tests/test_migrations.py` (needs postgres; skips loudly, never silently): on an empty scratch database `upgrade head`, then `alembic.autogenerate.compare_metadata(ctx, Base.metadata) == []`, then `downgrade base` leaves zero tables in `public`, then `upgrade head` again.
 
@@ -907,9 +953,9 @@ clientscrapper/db/enums.py           frozen tuples + sql_list(); no native enums
                                      OBSERVATION_STATUSES, COMPANY_STATES, REGISTRY_STATUSES, VOLUME_BANDS, LEGAL_FORMS,
                                      CONTACT_TIERS, PHONE_KINDS, LEGAL_BASES, ID_TYPES, SIGNAL_KEYS, DERIVED_KEYS,
                                      WEIGHT_GROUPS, CANDIDATE_STATES, CANDIDATE_TIERS, EXCLUDE_REASONS, REVIEW_STATES,
-                                     REVIEW_ANSWERS, PUSH_STATUSES, PUSH_SOURCE_KEYS, LANDINGS, STAGE_KINDS,
+                                     REVIEW_KINDS, REVIEW_ANSWERS, PUSH_STATUSES, PUSH_SOURCE_KEYS, LANDINGS, STAGE_KINDS,
                                      CONTACT_KINDS, OUTCOME_LABELS, PRECISION_CLASSES, SUPPRESSION_KINDS,
-                                     SUPPRESSION_KEY_TYPES, SUPPRESSION_SOURCES, CHAT_TYPES, CHAT_ROLES, MEDIA_KINDS,
+                                     SUPPRESSION_KEY_TYPES, SUPPRESSION_SOURCES, CHAT_TYPES, CHAT_ROLES, CHAT_STATUSES, MEDIA_KINDS,
                                      PROVIDERS, OPERATIONS, JOB_KINDS, JOB_LANES, JOB_STATUSES, PURGE_SUBJECTS,
                                      PURGE_REASONS, SHEET_TABS, SHEET_ENTITY_KINDS, SHEET_ROW_STATES
 clientscrapper/db/models/__init__.py re-exports every model; the only import alembic/env.py needs
@@ -920,9 +966,9 @@ clientscrapper/db/models/signals.py     Signal, ScoringWeight
 clientscrapper/db/models/leads.py       LeadCandidate, LeadReview, PushLog, Outcome
 clientscrapper/db/models/suppression.py Suppression
 clientscrapper/db/models/telegram.py    Interaction, ChatMonitor
-clientscrapper/db/models/ops.py         Heartbeat, UsageLog, ReminderLog, ModelJob, MergeLog, PurgeLog, SheetRow
+clientscrapper/db/models/ops.py         Heartbeat, UsageLog, ReminderLog, RuntimeFlag, ModelJob, MergeLog, PurgeLog, SheetRow
 ```
-Model conventions (MIYA): `Mapped[...]` annotations; `relationship(lazy="raise")` everywhere; JSONB typed `dict[str, Any]`; `Decimal` for numeric; every index/constraint named in `__table_args__`; a comment says **why** the column exists. State transition dicts live in `services/candidates.py` and `services/reviews.py`, not in models. Raw SQL writers (userbot `already_stored` insert, `costs._record`, `health.beat`) are allowed; they rely on the triggers above, not on ORM hooks.
+Model conventions (MIYA): `Mapped[...]` annotations; `relationship(lazy="raise")` everywhere; JSONB typed `dict[str, Any]`; `Decimal` for numeric; every index/constraint named in `__table_args__`; a comment says **why** the column exists. State transition dicts live in `services/candidates.py` and `services/reviews.py`, not in models. Raw SQL writers (userbot `already_stored` insert + `NOTIFY cs_interaction`, `costs._record`, `health.beat`, `runtime_flags` upserts) are allowed; they rely on the triggers above, not on ORM hooks. `KIND_RANK` (§2.8) lives in `services/suppression.py`, not in a model.
 
 ## 7. MIYA table → clientScrapper table
 
@@ -941,7 +987,7 @@ Model conventions (MIYA): `Mapped[...]` annotations; `relationship(lazy="raise")
 | `question_log`, `recap_digests`, `daily_reports` | — | not ported (owner digest is computed, not stored) |
 | `outbox_messages`, `jarvis_*`, `reply_rules`, `escalations`, `owner_style_*`, `knowledge_entries` | — | **not ported** (no sender in v1) |
 | `debts`, `debt_payments`, `promises`, `transactions`, `transaction_evidence`, `events`, `tasks`, `claims`, `memories`, `passages`, `receipts` | — | not ported (domain) |
-| — | `sources`, `collector_runs`, `observations`, `company_ids`, `signals`, `scoring_weights`, `lead_candidates`, `push_log`, `outcomes`, `suppression`, `merge_log`, `purge_log` | **new** (`merge_log`/`purge_log` follow `people.merge_into` and `purge.PurgePlan` shapes) |
+| — | `sources`, `collector_runs`, `observations`, `company_ids`, `signals`, `scoring_weights`, `lead_candidates`, `push_log`, `outcomes`, `suppression`, `runtime_flags`, `merge_log`, `purge_log` | **new** (`merge_log`/`purge_log` follow `people.merge_into` and `purge.PurgePlan` shapes) |
 
 ## 8. Worked example — one company, observation → pushed lead → outcome (synthetic)
 
@@ -952,15 +998,15 @@ All values are invented: chat `@namuna_optom`, company «Namuna Tekstil Savdo MC
 | 1 | `evidence` | `id=7001, source_key='telegram_monitor', url='https://t.me/namuna_optom/18234', source_ref='tg:-1001000000001:18234', fetched_at='2026-10-20 07:41+05', published_at=same, sha256='3f9c…e1', content_type='text/plain', bytes=142, raw_path='26/3f9c…e1.gz', excerpt='Guangzhoudan 25 kub mato olib kelish kerak, kim qiladi? @namuna_tekstil', lang='uz', expires_at='2027-04-18 07:41+05'` |
 | 2 | `interactions` | `tg_chat_id=-1001000000001, tg_message_id=18234, sender_id=5100000001, sender_username='namuna_tekstil', sender_name='Rustam', sender_bio='Namuna Tekstil Savdo MChJ direktori', text='Guangzhoudan 25 kub …', occurred_at='2026-10-20 07:41+05', prefilter_hit='{volume_kub,china,intent}', processed_at='2026-10-20 07:41:40+05', evidence_id=7001, observation_id=9001` |
 | 3 | `observations` | `id=9001, evidence_id=7001, ordinal=0, source_key='telegram_monitor', status='resolved', parsed=<§2.5 JSON: kind intent_post, name_key 'namuna tekstil savdo', phones [+998900000001 mobile person], person {Rustam, direktor}, hints volume_m3 25 stated china_words true>, company_id='0f0e0d0c-…', contact_id='c0ffee00-…', resolved_at='2026-10-20 07:46+05'` |
-| 4 | `companies` | `id='0f0e0d0c-…', display_name='Namuna Tekstil Savdo MChJ', name_key='namuna tekstil savdo', legal_form='MChJ', stir='300000011' (after registry step), city='Toshkent', telegram_channel=NULL, registry_status='active', registered_on='2019-03-11', sectors='{textile}', goods='{mato,furnitura}', segment='D', volume_band='3_10', state='active', first_seen_at='2026-10-20 07:46+05', last_signal_at='2026-10-20 07:41+05', best_score=82` (+ `company_aliases` rows `'Namuna Tekstil Savdo MChJ'`, `'НАМУНА ТЕКСТИЛЬ САВДО'`; `company_ids` `('tg_user','5100000001')`) |
+| 4 | `companies` | `id='0f0e0d0c-…', display_name='Namuna Tekstil Savdo MChJ', name_key='namuna tekstil savdo', legal_form='MChJ', stir='300000011' (after registry step), city='Toshkent', telegram_channel=NULL, registry_status='active', registered_on='2019-03-11', sectors='{textile}', goods='{mato,furnitura}', segment='D', volume_band='3_10', state='active', first_seen_at='2026-10-20 07:46+05', last_signal_at='2026-10-20 07:41+05', best_score=82` (+ `company_aliases` rows `'Namuna Tekstil Savdo MChJ'`, `'НАМУНА ТЕКСТИЛЬ САВДО'`; **no** `company_ids` row — the poster's Telegram id `5100000001` is person-tier and sits in `contacts.telegram_id`, row 5) |
 | 5 | `contacts` | `id='c0ffee00-…', company_id='0f0e0d0c-…', tier='person', full_name='Rustam', role='direktor', phone='+998900000001', phone_tail='900000001' (generated), phone_kind='mobile', telegram_username='namuna_tekstil', telegram_id=5100000001, is_decision_maker=true, legal_basis='public_source', source_url='https://t.me/namuna_optom/18234', source_key='telegram_monitor', collected_at='2026-10-20 07:46+05'` |
 | 6 | `signals` | `(company 0f0e…, evidence 7001, key='vol_stated_3plus', value=25.000, quote='25 kub mato olib kelish kerak', observed_at='2026-10-20 07:41+05', expires_at=+180 d, source_key='telegram_monitor', model=NULL)`; `(…, key='cn_origin', quote='Guangzhoudan', …)`; `(…, evidence 7002 (registry page), key='ent_legal_confirmed', value=NULL, observed_at='2026-10-20 07:52+05', expires_at=NULL, source_key='registry_lookup')`; `(…, evidence 7002, key='ent_age_2y_active', value=7)` |
 | 7 | `lead_candidates` | `id='1ead0001-…', company_id='0f0e…', contact_id='c0ffee00-…', state: found (07:46) → scored (07:53) → review (07:55) → approved (09:12) → pushed (09:31); tier='hot', score=82, weights_version=1, primary_source_key='telegram_monitor', score_breakdown={"version":1,"groups":{"volume":{"cap":40,"raw":30,"used":30},"origin":{"cap":20,"raw":20,"used":20},"solidity":{"cap":15,"raw":12,"used":12},"recency":{"cap":10,"raw":10,"used":10},"contact":{"cap":10,"raw":10,"used":10},"corroboration":{"cap":5,"raw":0,"used":0}},"negatives":[],"total":82}, approved_by='owner:111111111', approved_at='2026-10-20 09:12+05', external_id='cs:0f0e0d0c-…:202610', pushed_at='2026-10-20 09:31+05'` |
 | 8 | `lead_reviews` | `id=501, candidate_id='1ead0001-…', state='approved', card_chat_id=111111111, card_message_id=4521, card_hash='9a…', asked_at='2026-10-20 07:55+05', expires_at='2026-10-23 07:55+05', answer='push', answered_at='2026-10-20 09:12+05', by_telegram_id=111111111` |
-| 9 | `push_log` | `external_id='cs:0f0e0d0c-…:202610', attempt=1, candidate_id='1ead0001-…', company_id='0f0e…', phone_tail='900000001', endpoint='/api/leads/in/agent', source_key_sent='agent', payload={external_id, name:'Rustam (direktor) — Namuna Tekstil Savdo MChJ', phone:'+998900000001', kub:'25', firma:'Namuna Tekstil Savdo MChJ', stir:'300000011', telegram:'@namuna_tekstil', imports:'mato, furnitura', score:'82', evidence:'https://t.me/namuna_optom/18234', utm_source:'clientscrapper', note:'NEGA TOPILDI: 20.10.2026 @namuna_optom: «Guangzhoudan 25 kub mato olib kelish kerak, kim qiladi?» …'}, payload_sha256='7b…', status='sent', http_status=200, sent_at='2026-10-20 09:31:02+05', finished_at='2026-10-20 09:31:03+05'` |
+| 9 | `push_log` | `external_id='cs:0f0e0d0c-…:202610', attempt=1, candidate_id='1ead0001-…', company_id='0f0e…', phone_tail='900000001', endpoint='/api/leads/in/agent', source_key_sent='agent', payload={external_id, name:'Namuna Tekstil Savdo MChJ', phone:'+998900000001', kub:'25', firma:'Namuna Tekstil Savdo MChJ', stir:'300000011', telegram:'@namuna_tekstil', imports:'mato, furnitura', score:'82', evidence:'https://t.me/namuna_optom/18234', utm_source:'clientscrapper', note:'NEGA TOPILDI: 20.10.2026 @namuna_optom: «Guangzhoudan 25 kub mato olib kelish kerak, kim qiladi?» … Masʼul: Rustam (direktor) …'} — `name` is the company only (05 §B.1); the person appears solely in the note's «Masʼul» line, and only because the contact carries `legal_basis`, payload_sha256='7b…', status='sent', http_status=200, sent_at='2026-10-20 09:31:02+05', finished_at='2026-10-20 09:31:03+05'` |
 | 10 | `outcomes` | night 1: `external_id='cs:0f0e…:202610', intake_id='a1b2…', landing='created', lead_id='d4e5…', stage_kind='open', contacted_at=NULL, label='open_untouched', precision_class='pending', erp_at='2026-10-20 09:31:03+05'` → night 2 upsert: `contacted_at='2026-10-20 11:04+05', contact_kind='call', label='contacted_open', precision_class='pending'` → 2026-11-06 upsert: `stage_kind='won', client_id='f6a7…', quoted_volume_m3=25.000, label='won', precision_class='positive', label_changed_at='2026-11-06 03:00+05'` |
 
-Follow-on rows the `won` label produces: `companies.state='client'`; the next nightly full pull of the suppression feed brings `suppression(kind='client', key_type='phone_hash', key=erp_phone_hash(secret,'900000001'), salt_id='<8 hex>', source='erp_feed')`, so the same phone is never carded again; `sources.telegram_monitor.positives_30d += 1`.
+Follow-on rows the `won` label produces (same transaction as the upsert, §2.11): `companies.state='client'`; a local `suppression(kind='client', key_type='phone_tail', key='900000001', source='outcomes')`; `sources.telegram_monitor.positives_30d += 1`. The next full pull of the suppression feed adds the ERP's own `suppression(kind='client', key_type='phone_hash', key=erp_phone_hash(secret,'900000001'), salt_id='<8 hex>', source='erp_feed')` — two rows, one phone, either one is a hit, so the phone is never carded again even if the feed lags a day.
 
 ## 9. Open questions
 
@@ -975,13 +1021,41 @@ Follow-on rows the `won` label produces: `companies.state='client'`; the next ni
 
 ## 10. Acceptance criteria
 
-1. `alembic upgrade head` on an empty PG16 creates 24 tables, 6 functions, 1 extension; `compare_metadata` returns `[]`; `downgrade base` then `upgrade head` both succeed (`tests/test_migrations.py`).
+1. `alembic upgrade head` on an empty PG16 creates 25 tables, 6 functions, 1 extension and seeds 23 `sources` rows and 26 `scoring_weights` rows; `compare_metadata` returns `[]`; `downgrade base` then `upgrade head` both succeed (`tests/test_migrations.py`).
 2. `tests/test_enums_frozen.py`: every CHECK tuple in `0001` equals its `db/enums.py` tuple; `SIGNAL_KEYS ∪ DERIVED_KEYS` equals the `scoring_weights` key CHECK; version 1 has one row per key, group caps sum to 100, and is approved.
 3. `tests/test_keys.py`: Python `phone_tail/username_key/domain_key` agree with `cs_*` SQL functions on ≥ 40 fixtures (Cyrillic, `t.me/`, `www.`, IDN, bots, short numbers).
-4. Constraint tests, each shown red by dropping the constraint in a string-edited copy: second live person-tier contact per company refused; person-tier row without `legal_basis/source_url/collected_at` refused; `full_name` containing a 14-digit run refused; two `sent|unknown` rows for one `external_id` refused; `pushed` candidate without `external_id` refused; `phone_hash` suppression without `salt_id` refused; `excerpt` > 600 refused; `interactions` row with empty `prefilter_hit` refused; `UPDATE scoring_weights SET points` on an approved version refused; `DELETE FROM push_log` refused.
+4. Constraint tests, each shown red by dropping the constraint in a string-edited copy: second live person-tier contact per company refused; person-tier row without `legal_basis/source_url/collected_at` refused; `full_name` containing a 14-digit run refused; two `sent|unknown` rows for one `external_id` refused; a `push_log` row with `http_status=200` and `status='failed'` refused while `status='unknown'` is accepted; a second live `kind='manager'` review for one candidate refused while a live `kind='owner'` one beside it is accepted; a `chat_monitors` row `status='joined'` with `joined_at` NULL refused; `pushed` candidate without `external_id` refused; `phone_hash` suppression without `salt_id` refused; `excerpt` > 600 refused; `interactions` row with empty `prefilter_hit` refused; `UPDATE scoring_weights SET points` on an approved version refused; `DELETE FROM push_log` refused.
 5. `tests/test_candidate_states.py` and `tests/test_review_states.py` enumerate `TRANSITIONS`; every illegal move raises; `ux_lead_candidates_open` refuses a second open candidate per company.
-6. `tests/test_push_idempotency.py` against a fake ERP: crash between claim and response leaves `sending` → reconciled to `unknown` → no second send; 404 trips the breaker; 5xx retries ≤ 3 with the same `payload_sha256`; a different body under the same `external_id` is refused.
-7. `tests/test_outcomes_labels.py`: `derive_label` table-driven over all 16 labels, including the 14-day and 30-day boundaries in Asia/Tashkent; side effects (`suppression(client)`, `bounced ×2`, `is_competitor`) asserted.
-8. `tests/test_retention.py` on fixtures aged by string-edited timestamps: R1 removes the file and keeps the row; R2a deletes an unconverted post at 31 d and keeps a converted one; R2b nulls text at 91 d; R3 scrubs `phones`/`person`; R4 anonymises the person-tier contact at 91 d after an untouched push and leaves the company-tier row; every step writes a `purge_log` row.
+6. `tests/test_push_idempotency.py` against a fake ERP: crash between claim and response leaves `sending` → reconciled to `unknown` → no second send; 404 trips `sources.erp_sync.breaker_until`; 5xx: three in-attempt tries, then `failed`, then ≤ 3 attempts with the same `payload_sha256` after the 05 §B.1 delays; a timeout on the first try followed by a 2xx on the resend lands as attempt 1 `sent` with one intake in the fake ERP; a 2xx with an unparseable body lands as `unknown`; a different body under the same `external_id` is refused.
+7. `tests/test_outcomes_labels.py`: `derive_label` table-driven over all 16 labels, including the 14-day and 30-day boundaries in Asia/Tashkent; side effects (`suppression(client, phone_tail, source='outcomes')` for both `won` and `landed_client`, `bounced ×2`, `is_competitor`) asserted.
+8. `tests/test_retention.py` on fixtures aged by string-edited timestamps: R1 removes the file and keeps the row; R2a deletes an unconverted post at 31 d and keeps a converted one; R2b nulls text at 91 d; R3 scrubs `phones`/`person` and, for `kind='intent_post'`, `handles.telegram`/`tg_user_id` (a `directory_entry`'s `handles.telegram` stays); R4b nulls a `maps_google` phone at 31 d when no push used it and keeps one a `sent` push used; R4 anonymises the person-tier contact at 91 d after an untouched push and leaves the company-tier row; every step writes a `purge_log` row.
 9. `tests/test_pii_columns.py` and `tests/test_fk_indexes.py` pass over `Base.metadata`; `tests/test_pseudonymised_requests.py` finds no raw phone or handle in `model_jobs.request`.
-10. `tests/fixtures/example_flow.sql` loads §8 rows 1–6; `tests/test_example_flow.py` drives score → review → approve → push (fake ERP) → outcomes upsert and ends with `outcomes.label='won'`, `companies.state='client'`, one `suppression(client)` row.
+10. `tests/fixtures/example_flow.sql` loads §8 rows 1–6; `tests/test_example_flow.py` drives score → review → approve → push (fake ERP) → outcomes upsert and ends with `outcomes.label='won'`, `companies.state='client'`, one local `suppression(client, phone_tail, source='outcomes')` row (no feed pull runs in the test).
+
+## Review pass changelog
+
+Review of 2026-10-23 (`REVIEW-2026-10-23.md`), items applied to this file:
+
+- **1** — §2.1 seeds the schedulable parents `serp_layer`, `directories`, `maps` (and `enrich_site`); sub-source rows stay as attribution keys; §5/AC 1 now say 23 `sources` rows.
+- **2/3** — §2.8 names the three origins of `client`/`lost` rows (feed hashes, outcomes tails, `manual_import` tails) and the retirement of the XLSX fallback by 05 §B.2 step 5; `make import-clients` no longer listed as a `dnc` entry route.
+- **4** — `0001` gains `runtime_flags` (§2.13, trigger in §2.16), `companies.dup_of/dup_score` + index, `lead_reviews.kind` + widened `answer` + `ux_lead_reviews_live (candidate_id, kind)`, `chat_monitors.status/priority` (+ `ck_chat_monitors_joined`, queue index), `evidence.meta`, `interactions.fwd_from_peer_id`, the `enrich_site` row; `backfill_done_at` renamed `backfilled_at` (03's name) rather than adding a duplicate; §5 order list, §6 enums/models, §7 mapping and AC 1 restated as 25 tables / 23 sources / 26 weights.
+- **5** — §2.13 `usage_log.operation` CHECK is 04 §8's `Operation` literal verbatim; `provider` gains `twogis`.
+- **6** — §2.8 lookup orders by `array_position(...)` rendered from `KIND_RANK` in `services/suppression.py`.
+- **7** — §2.8 points freshness to `services/erp_feeds.suppression_fresh()` (26 h / 3 h) and names the crons `30 2 * * *` / `15 * * * *`; §2.10 rule 2 gates on it.
+- **8** — §2.12 states the userbot's `NOTIFY cs_interaction` and the wake-on-notify jobs; §2.9 states `review_cards_job` every 2 min inside `REVIEW_HOURS`.
+- **9** — §2.9: `enriching → review` for the phone-less Telegram candidate (`tier='warm'`, `gates.no_phone=true`), `handoff` → `hold` + manager review row, `/tel` path `hold → scored → approved(manager:<tg_id>)`, `approved_by` comment widened; review machine covers both `kind`s and the manager answers.
+- **11** — §8 row 9 payload `name` is the company; the person is only the note's «Masʼul» line.
+- **12** — `tg_user` removed from `ID_TYPES` and from §8 row 4; R3 strips an intent post's `handles.telegram`/`tg_user_id`; new R4b clears unused `maps_google` phones after 30 d; §2.4 rule text and AC 8 updated.
+- **15** — §2.13 points to the single `costs.ask(session, *, operation, est_usd, call, price, now, …)` signature and the order `Budget.can_spend` → month → day → family → op; `Budget.usd` reads `sources.daily_cost_cap_usd`.
+- **16** — §2.10 rule 4 adopts 05 §B.1's two-level attempt scheme; `ck_push_log_sent` becomes `(sent ⇒ 2xx) AND (2xx ⇒ sent|unknown)`; `error` gains `http_2xx_badbody`; AC 4/6 updated.
+- **17** — §2.13 comments: `collector:<key>[.variant]` heartbeats, `alert:<key>` / `recovered:<key>` reminder kinds.
+- **21** — §2.10 rules 2 and 4 name `sources.erp_sync.breaker_until` (`/yoq crm` clears it) instead of a `crm_push` breaker.
+- **23** — §2.12 tout window 7 d; channel `about` text stored as `evidence` + `observations(kind='profile')`, never as an interaction.
+- **25** — §2.7 producers: `ent_legal_confirmed` only from a registry hit (E4); a parsed STIR/legal block feeds `ent_not_micro`.
+- **30** — §2.13: refusals persisted as `usage_log` rows with `cost_usd=0, units=0, model='refused:<code>'`.
+- **32** — §2.11 and §8: `won` writes `companies.state='client'` and a local `suppression(client, phone_tail, source='outcomes')` row at once; the feed's hashed row arrives later; AC 7/10 updated.
+- **33** — §2.1: `source_precision_job` never flips `auto_push` on while `config.auto_push_forbidden` is true.
+- **37** — §2.9 callback grammar points to 06 §1.5; §2.2 `collector_runs.meta` carries `unchanged/skipped_robots/note/truncated`, a host breaker ends a run `failed` + `error='host_blocked'`; §6 keeps `db/models/` as the package.
+- **38** — §2.12 `chat_monitors.role` gains `calibration` (`monitor_enabled=false`, nothing read).
+
+Not applied here (other files' homes): 10, 13, 14, 18, 19 (02's `/dnc`, `/vazn`, `/push tekshir`, `/stir` mentions already match 06 §1.2), 20 (02's `config.outcomes.{cursor,last_at}` already equals 05's), 22, 24, 26 (§8's 82 = 30+20+12+10+10+0 is consistent), 27 (02 already says 90 d / 24 h), 28, 29, 31, 34, 35, 36.
