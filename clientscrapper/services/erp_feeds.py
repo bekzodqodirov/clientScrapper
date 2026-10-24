@@ -1,6 +1,6 @@
 """The two ERP feeds the agent reads back (05 §B.2): the client and lost-lead
-phone hashes (``GET /api/agent/suppression``) and, from T-10, what became of
-each push (``GET /api/agent/outcomes``).
+phone hashes (``GET /api/agent/suppression``) and what became of each push
+(``GET /api/agent/outcomes``).
 
 One HTTP client for the ERP (``ErpClient``): both key headers with one value
 (the ERP reads ``X-GSR-Key`` only, 05 §A.2), gzip asked for, redirects never
@@ -17,6 +17,16 @@ only, aborted for a full pull when the key was re-minted (a new ``salt_id``).
 A delta runs AS the full pull when none has completed yet or the last one is
 older than ``FULL_DUE_AFTER``: one failed or missed night is caught up within
 the hour instead of holding every push until the next night.
+
+``sync_outcomes`` reads the outcomes feed by the cadence the ERP prescribes
+(05 §A.9, §B.2): no single walk is complete — evidence surfaces late, a row
+committed after a read can carry an ``at`` the read passed, a stage-kind flip
+moves no ``at`` — so ``cursor`` (the stored ``resume``) and ``recent`` (8 days)
+nightly, ``quarter`` (90 days) on Sunday, ``year`` (everything) on the 1st,
+and ``unknown`` for the pushes whose fate the push itself could not read. What
+each row means and does is ``services/outcomes``'s. ``reconcile_unconfirmed``
+is the 48-hour rule's detection (02 §2.10 rule 5; the re-push is T-28's), and
+``source_precision`` the per-source numbers 04 §7's auto-push reads.
 
 ``suppression_fresh`` is THE home of feed freshness (``FULL_MAX_AGE_H``,
 ``DELTA_MAX_AGE_H``): the push gate, 04's gate, 06 §4.2's
@@ -43,8 +53,9 @@ import hashlib
 import logging
 import re
 from collections.abc import AsyncGenerator, Mapping, Sequence
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime, timedelta
+from decimal import ROUND_HALF_EVEN, Decimal, InvalidOperation
 from typing import Annotated, Any, Final, Literal
 
 import httpx
@@ -55,8 +66,16 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from clientscrapper.config import Settings, settings
-from clientscrapper.db.models import Outcome, PushLog, RuntimeFlag, Source, Suppression
-from clientscrapper.services import costs, health, keys
+from clientscrapper.db import enums
+from clientscrapper.db.models import (
+    LeadCandidate,
+    Outcome,
+    PushLog,
+    RuntimeFlag,
+    Source,
+    Suppression,
+)
+from clientscrapper.services import costs, health, keys, outcomes
 from clientscrapper.services.http import VERSION
 from clientscrapper.services.retry import Sleep, is_transient_http, with_backoff
 
@@ -414,6 +433,72 @@ def parse_entry(d: Any) -> FeedEntry:
         raise FeedShapeError(
             f"a suppression entry is malformed: {_fields(exc)}"
         ) from None
+
+
+# numeric(12,3), the column quoted_volume_m3 lands in.
+VOLUME_STEP: Final = Decimal("0.001")
+VOLUME_MAX: Final = Decimal("1e9")
+
+
+def _instant_or_none(value: Any) -> datetime | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError("an instant must be a string")
+    return _instant_z(value)
+
+
+def _volume(value: Any) -> Decimal | None:
+    """The kub as the column holds it; a bool, a non-finite or an
+    overflowing number is a shape error, never a refused page."""
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        raise ValueError("quoted_volume_m3 must be a number")
+    try:
+        kub = Decimal(str(value))
+    except InvalidOperation:
+        raise ValueError("quoted_volume_m3 is not a number") from None
+    if not kub.is_finite() or abs(kub) >= VOLUME_MAX:
+        raise ValueError("quoted_volume_m3 is out of range")
+    return kub.quantize(VOLUME_STEP, rounding=ROUND_HALF_EVEN)
+
+
+def refuse_pii(rows: Sequence[Mapping[str, Any]]) -> None:
+    """``FeedShapeError`` when any row of a page carries a PII key — a foreign
+    row too: the keys are the ERP's own projection (05 §A.9), which no
+    sender chooses, so a PII key anywhere is the feed changing shape."""
+    leaked = sorted({k for row in rows for k in _pii_keys(row)})
+    if leaked:
+        raise FeedShapeError(f"an outcomes row carries {leaked}")
+
+
+def parse_outcome(d: Any) -> outcomes.FeedRow:
+    """One outcomes row (05 §A.9): the 15 fields all present (an absent one
+    → ``FeedShapeError``), unknown keys ignored, a PII key or a field of the
+    wrong form → ``FeedShapeError``. Only a row of ours comes here
+    (``outcomes.record_page`` decides that from the id first)."""
+    if not isinstance(d, dict):
+        raise FeedShapeError("an outcomes row is not an object")
+    refuse_pii([d])
+    missing = [name for name in outcomes.FIELDS if name not in d]
+    if missing:
+        raise FeedShapeError(f"an outcomes row misses {missing}")
+    try:
+        at = d["at"]
+        if not isinstance(at, str):
+            raise ValueError("at must be a string")
+        return outcomes.FeedRow.model_validate(
+            {
+                **d,
+                "closed_at": _instant_or_none(d["closed_at"]),
+                "contacted_at": _instant_or_none(d["contacted_at"]),
+                "quoted_volume_m3": _volume(d["quoted_volume_m3"]),
+                "at": _instant_z(at),
+            }
+        )
+    except (ValidationError, ValueError) as exc:
+        raise FeedShapeError(f"an outcomes row is malformed: {_fields(exc)}") from None
 
 
 def parse_page[P: (SuppressionPage, OutcomesPage)](
@@ -1083,6 +1168,511 @@ async def _retire_manual_import(
     return len(doomed)
 
 
+# --- the outcomes walks (05 §A.9, §B.2) ------------------------------------------------
+
+Walk = Literal["cursor", "recent", "quarter", "year", "unknown"]
+# What each walk asks for, beside limit (05 §B.2's table): the recent walk
+# re-reads a week and a day (a late call upload, a day-1 correction that
+# lowered `at`); the quarter walk the ERP's 90-day stamping horizon for
+# agent arrivals (05 §A.4); the year walk every row (the only read that sees
+# a stage-KIND flip on an old row).
+RECENT_SINCE: Final = timedelta(days=8)
+QUARTER_SINCE: Final = timedelta(days=90)
+# The unknown walk: pushes the push could not read the answer of, younger
+# than the 48-hour rule, re-read from their sent_at minus the overlap.
+UNKNOWN_WINDOW: Final = timedelta(hours=48)
+UNKNOWN_OVERLAP: Final = timedelta(minutes=10)
+# 02 §2.10 rule 5(c): a delivered push between 48 h and 30 d old that no walk
+# has shown is unconfirmed.
+UNCONFIRMED_AFTER: Final = timedelta(hours=48)
+UNCONFIRMED_HORIZON: Final = timedelta(days=30)
+# «That night's cursor and recent walks both completed»: within a day and
+# the hour a run may take.
+NIGHTLY_MAX_AGE: Final = timedelta(hours=25)
+UNCONFIRMED_PROBLEM: Final = "push_unconfirmed"
+# The walk a scheduled run stamps in config.outcomes (the unknown walk none).
+STAMPED_WALKS: Final[tuple[Walk, ...]] = ("cursor", "recent", "quarter", "year")
+# A Sunday or monthly walk that did not complete (the worker down at 03:20 /
+# 03:40, the run skipped already_running behind a long 03:00 one, a failed
+# walk) is made by the next nightly run: the quarter walk once its last
+# completion is older than a week and an hour (a normal Sunday 03:00 run
+# sees 6 d 23 h 40 min), the year walk once older than the longest month and
+# an hour. Never completed counts as due — the switch-over day runs the year
+# walk (05 §B.3).
+CATCH_UP_AFTER: Final[Mapping[Walk, timedelta]] = {
+    "quarter": timedelta(days=7, hours=1),
+    "year": timedelta(days=31, hours=1),
+}
+
+
+@dataclass(frozen=True, slots=True)
+class OutcomesConfig:
+    """``sources.erp_sync.config.outcomes`` (05 §B.2 step 6): the cursor walk's
+    stored ``resume`` (the ERP's opaque cursor, handed back verbatim) and when
+    each scheduled walk last completed (the agent's clock)."""
+
+    cursor: str | None = None
+    last_cursor_at: datetime | None = None
+    last_recent_at: datetime | None = None
+    last_quarter_at: datetime | None = None
+    last_year_at: datetime | None = None
+
+    @classmethod
+    def from_json(cls, raw: Any) -> OutcomesConfig:
+        if not isinstance(raw, Mapping):
+            return cls()
+        cursor = raw.get("cursor")
+        return cls(
+            cursor=cursor if isinstance(cursor, str) and cursor else None,
+            last_cursor_at=_stamp(raw.get("last_cursor_at")),
+            last_recent_at=_stamp(raw.get("last_recent_at")),
+            last_quarter_at=_stamp(raw.get("last_quarter_at")),
+            last_year_at=_stamp(raw.get("last_year_at")),
+        )
+
+    def to_json(self) -> dict[str, Any]:
+        def iso(at: datetime | None) -> str | None:
+            return at.isoformat() if at is not None else None
+
+        return {
+            "cursor": self.cursor,
+            "last_cursor_at": iso(self.last_cursor_at),
+            "last_recent_at": iso(self.last_recent_at),
+            "last_quarter_at": iso(self.last_quarter_at),
+            "last_year_at": iso(self.last_year_at),
+        }
+
+    def completed(self, walk: Walk, now: datetime) -> OutcomesConfig:
+        if walk == "cursor":
+            return replace(self, last_cursor_at=now)
+        if walk == "recent":
+            return replace(self, last_recent_at=now)
+        if walk == "quarter":
+            return replace(self, last_quarter_at=now)
+        if walk == "year":
+            return replace(self, last_year_at=now)
+        return self
+
+    def last_completed(self, walk: Walk) -> datetime | None:
+        return {
+            "cursor": self.last_cursor_at,
+            "recent": self.last_recent_at,
+            "quarter": self.last_quarter_at,
+            "year": self.last_year_at,
+        }.get(walk)
+
+    def catch_up(self, now: datetime) -> tuple[Walk, ...]:
+        """The Sunday and monthly walks the nightly run makes after its own
+        (``CATCH_UP_AFTER``), in that order."""
+        due: list[Walk] = []
+        for walk, after in CATCH_UP_AFTER.items():
+            last = self.last_completed(walk)
+            if last is None or now - last > after:
+                due.append(walk)
+        return tuple(due)
+
+    def nightly_done(self, now: datetime) -> bool:
+        """The last cursor walk completed within ``NIGHTLY_MAX_AGE`` and the
+        recent walk after it (the nightly run makes them in that order)."""
+        c, r = self.last_cursor_at, self.last_recent_at
+        return c is not None and r is not None and r >= c and now - c <= NIGHTLY_MAX_AGE
+
+
+async def outcomes_config(session: AsyncSession) -> OutcomesConfig:
+    raw = await session.scalar(
+        sa.select(Source.config["outcomes"])
+        .where(Source.key == ERP_SOURCE)
+        .execution_options(populate_existing=True)
+    )
+    return OutcomesConfig.from_json(raw)
+
+
+async def _store_outcomes_config(session: AsyncSession, cfg: OutcomesConfig) -> None:
+    """``config.outcomes`` replaced; ``config.suppression`` left as it stands."""
+    await session.execute(
+        sa.update(Source)
+        .where(Source.key == ERP_SOURCE)
+        .values(
+            config=sa.func.jsonb_set(
+                Source.config,
+                sa.text("'{outcomes}'"),
+                sa.cast(sa.bindparam("outcomes", cfg.to_json(), type_=JSONB), JSONB),
+                True,
+            )
+        )
+    )
+
+
+@dataclass(slots=True)
+class OutcomesReport:
+    """What one ``sync_outcomes`` did; it lands in ``collector_runs.meta``.
+    ``status='nothing'``: the unknown walk had no push to look for and made
+    no call; ``'not_configured'``: the feeds are not configured (the «Boshqa»
+    fallback) and no call was made."""
+
+    walk: Walk
+    status: Literal["ok", "nothing", "not_configured"] = "ok"
+    pages: int = 0
+    rows: int = 0
+    # Rows of ids the agent never pushed: counted, never stored (05 §A.13).
+    foreign: int = 0
+    stored: int = 0
+    changed: int = 0
+    promoted: int = 0
+    companies: int = 0
+    inserted: int = 0
+    updated: int = 0
+    deleted: int = 0
+    stale_hits: int = 0
+    labels: dict[str, int] = field(default_factory=dict)
+    since: str | None = None
+    from_cursor: bool = False
+    cursor_stored: bool = False
+    generated_at: str | None = None
+
+    def add(self, page: outcomes.PageResult) -> None:
+        self.pages += 1
+        self.rows += page.rows
+        self.foreign += page.foreign
+        self.stored += page.stored
+        self.changed += page.changed
+        self.promoted += page.promoted
+        self.companies += len(page.companies)
+        self.stale_hits += page.stale_hits
+        for label, n in page.labels.items():
+            self.labels[label] = self.labels.get(label, 0) + n
+        if page.effects is not None:
+            self.inserted += page.effects.inserted
+            self.updated += page.effects.updated
+            self.deleted += page.effects.deleted
+
+    def as_meta(self) -> dict[str, Any]:
+        return {k: v for k, v in asdict(self).items() if v is not None}
+
+
+def walk_params(
+    walk: Walk, cfg: OutcomesConfig, *, now: datetime, oldest_unknown: datetime | None
+) -> dict[str, str | int]:
+    """Exactly what a walk sends (05 §B.2's table), ``limit`` on every one:
+    the cursor walk the stored cursor (none the very first time: the whole
+    year); the others ``since`` or nothing — never a cursor."""
+    params: dict[str, str | int] = {"limit": OUTCOMES_LIMIT}
+    if walk == "cursor":
+        if cfg.cursor is not None:
+            params["cursor"] = cfg.cursor
+    elif walk == "recent":
+        params["since"] = fmt_since(now - RECENT_SINCE)
+    elif walk == "quarter":
+        params["since"] = fmt_since(now - QUARTER_SINCE)
+    elif walk == "unknown":
+        if oldest_unknown is None:
+            raise ValueError("the unknown walk needs the oldest unknown push")
+        params["since"] = fmt_since(oldest_unknown - UNKNOWN_OVERLAP)
+    return params
+
+
+async def oldest_unknown(session: AsyncSession, now: datetime) -> datetime | None:
+    """The ``sent_at`` of the oldest live ``unknown`` push younger than
+    ``UNKNOWN_WINDOW``; None when there is none."""
+    oldest: datetime | None = await session.scalar(
+        sa.select(sa.func.min(PushLog.sent_at)).where(
+            PushLog.status == "unknown",
+            PushLog.superseded_at.is_(None),
+            PushLog.sent_at > now - UNKNOWN_WINDOW,
+        )
+    )
+    return oldest
+
+
+async def sync_outcomes(
+    session: AsyncSession,
+    erp: ErpClient,
+    *,
+    walk: Walk,
+    now: datetime,
+    configured: bool | None = None,
+) -> OutcomesReport:
+    """One walk of the outcomes feed applied (05 §B.2). Each page is one
+    transaction: its rows recorded (``outcomes.record_page`` — foreign ids
+    skipped, labels, effects, ``unknown → sent``) and, on the cursor walk,
+    the page's ``resume`` stored as the cursor when it is not null. A walk
+    that fails keeps the pages it committed; a failure is recorded (the
+    breaker, ``feed_contract``) and raised.
+
+    No call at all unless ``feeds_configured()`` (``configured`` overrides
+    it, as for ``reconcile_unconfirmed``): during the «Boshqa» fallback every
+    GET would be a 404 and trip the push breaker (05 §B.3) — and the
+    10-minute ``unknown`` walk is called directly, outside the collector
+    that checks it (T-28's ``reconcile_job``)."""
+    on = feeds_configured() if configured is None else configured
+    if not on:
+        return OutcomesReport(walk=walk, status="not_configured")
+    cfg = await outcomes_config(session)
+    oldest = await oldest_unknown(session, now) if walk == "unknown" else None
+    if walk == "unknown" and oldest is None:
+        return OutcomesReport(walk=walk, status="nothing")
+    params = walk_params(walk, cfg, now=now, oldest_unknown=oldest)
+    report = OutcomesReport(
+        walk=walk, since=_as_str(params.get("since")), from_cursor="cursor" in params
+    )
+    try:
+        return await _walk_outcomes(session, erp, cfg, params, report, now)
+    except FeedError as exc:
+        await record_failure(session, exc, feed=FEED_OUTCOMES, now=now)
+        raise
+
+
+async def _walk_outcomes(
+    session: AsyncSession,
+    erp: ErpClient,
+    cfg: OutcomesConfig,
+    params: Mapping[str, str | int],
+    report: OutcomesReport,
+    now: datetime,
+) -> OutcomesReport:
+    walk = fetch_pages(erp, OUTCOMES_PATH, params=params, model=OutcomesPage)
+    async with contextlib.aclosing(walk):
+        async for page in walk:
+            if report.pages == 0:
+                report.generated_at = page.generated_at
+                await clear_breaker(session)
+            refuse_pii(page.rows)
+            result = await outcomes.record_page(
+                session, page.rows, parse=parse_outcome, now=now, hasher=erp.hash_tail
+            )
+            report.add(result)
+            if result.stale_hits:
+                await _raise_stale_hit(session, now, at_least=result.stale_hits)
+            if report.walk == "cursor" and page.resume is not None:
+                cfg = replace(cfg, cursor=page.resume)
+                await _store_outcomes_config(session, cfg)
+                report.cursor_stored = True
+            await session.commit()
+    if report.walk in STAMPED_WALKS:
+        cfg = cfg.completed(report.walk, now)
+        await _store_outcomes_config(session, cfg)
+    await refresh_precision(session, now)
+    await _clear_feed_contract(session, FEED_OUTCOMES)
+    await session.commit()
+    log.info(
+        "erp outcomes %s: %d pages, %d rows, %d foreign, %d labels changed",
+        report.walk,
+        report.pages,
+        report.rows,
+        report.foreign,
+        report.changed,
+        extra={"feed": FEED_OUTCOMES},
+    )
+    return report
+
+
+async def _raise_stale_hit(
+    session: AsyncSession, now: datetime, *, at_least: int
+) -> None:
+    """``suppression_stale_hit`` (06 §4.2): the ERP's belt refused pushes our
+    gate passed. ``n`` counts every refusal labelled since the last completed
+    full pull — that pull clears the problem (05 §B.2 step 5(a))."""
+    full_at = (await suppression_config(session)).last_full_at
+    since = [Outcome.label_changed_at > full_at] if full_at is not None else []
+    n = await session.scalar(
+        sa.select(sa.func.count(Outcome.external_id)).where(
+            Outcome.label == "dropped_suppressed", *since
+        )
+    )
+    await health.raise_problem(
+        session,
+        STALE_HIT_PROBLEM,
+        now=now,
+        by=WRITER,
+        detail={"n": max(n or 0, at_least)},
+    )
+
+
+# --- the 48-hour rule's detection (02 §2.10 rule 5(c)) ---------------------------------
+
+
+@dataclass(slots=True)
+class ReconcileReport:
+    """``checked=False`` with ``why`` when the rule may not run yet.
+    ``repushable`` are the push_log ids rule 5 may re-push once (a payload
+    kept, ``attempt < 3``, no earlier re-push of that id) — T-28's
+    ``push_one(repush_of=…)`` takes them; the rest are flagged only."""
+
+    checked: bool
+    why: str | None = None
+    unconfirmed: int = 0
+    repushable: list[int] = field(default_factory=list)
+
+    def as_meta(self) -> dict[str, Any]:
+        return {k: v for k, v in asdict(self).items() if v is not None}
+
+
+async def reconcile_unconfirmed(
+    session: AsyncSession,
+    erp: ErpClient,
+    *,
+    now: datetime,
+    configured: bool | None = None,
+) -> ReconcileReport:
+    """A ``sent`` or ``unknown`` push, nobody superseded, 48 h to 30 d old,
+    with no ``outcomes`` row: ``push_unconfirmed`` (with its count), cleared
+    when there is none. Only while the feeds are configured and that night's
+    cursor and recent walks both completed — a missing outcome means nothing
+    after a failed read. ``sent`` rows too: the «Boshqa» door answers 200 to
+    a landing that threw (05 §B.3). ``erp`` is the client T-28's re-push
+    posts through; the detection reads only the database."""
+    on = feeds_configured() if configured is None else configured
+    if not on:
+        return ReconcileReport(checked=False, why="feeds_not_configured")
+    if not (await outcomes_config(session)).nightly_done(now):
+        return ReconcileReport(checked=False, why="nightly_walks_incomplete")
+    seen = sa.exists().where(Outcome.external_id == PushLog.external_id)
+    rows = (
+        await session.execute(
+            sa.select(
+                PushLog.id,
+                PushLog.external_id,
+                PushLog.attempt,
+                # The body to re-send: retention nulls it after 90 d.
+                (sa.func.jsonb_typeof(PushLog.payload) == "object").label("kept"),
+            )
+            .where(
+                PushLog.status.in_(enums.PUSH_DELIVERED_STATUSES),
+                PushLog.superseded_at.is_(None),
+                PushLog.sent_at >= now - UNCONFIRMED_HORIZON,
+                PushLog.sent_at <= now - UNCONFIRMED_AFTER,
+                ~seen,
+            )
+            .order_by(PushLog.sent_at, PushLog.id)
+        )
+    ).all()
+    re_pushed: set[str] = set()
+    if rows:
+        re_pushed = set(
+            await session.scalars(
+                sa.select(PushLog.external_id).where(
+                    PushLog.external_id.in_(sorted({r.external_id for r in rows})),
+                    PushLog.superseded_at.is_not(None),
+                )
+            )
+        )
+    report = ReconcileReport(checked=True, unconfirmed=len(rows))
+    report.repushable = [
+        r.id for r in rows if r.kept and r.attempt < 3 and r.external_id not in re_pushed
+    ]
+    if rows:
+        await health.raise_problem(
+            session,
+            UNCONFIRMED_PROBLEM,
+            now=now,
+            by=WRITER,
+            detail={"n": len(rows), "repushable": len(report.repushable)},
+        )
+    else:
+        await health.clear_problem(session, UNCONFIRMED_PROBLEM)
+    await session.commit()
+    return report
+
+
+# --- source precision (05 §B.2, 02 §2.1) ---------------------------------------------
+
+PRECISION_WINDOW: Final = timedelta(days=30)
+PRECISION_STEP: Final = Decimal("0.0001")
+
+
+@dataclass(frozen=True, slots=True)
+class Precision:
+    """A source's 30-day numbers: outcomes first read in the window
+    (``positive`` / ``negative`` — pending and neutral are not evidence), and
+    its live delivered pushes sent in the window."""
+
+    source_key: str
+    positives: int = 0
+    negatives: int = 0
+    pushes: int = 0
+
+    @property
+    def precision_30d(self) -> Decimal | None:
+        judged = self.positives + self.negatives
+        if judged == 0:
+            return None
+        return (Decimal(self.positives) / Decimal(judged)).quantize(
+            PRECISION_STEP, rounding=ROUND_HALF_EVEN
+        )
+
+
+async def _precision_numbers(
+    session: AsyncSession, now: datetime
+) -> dict[str, Precision]:
+    since = now - PRECISION_WINDOW
+    judged = await session.execute(
+        sa.select(
+            Outcome.source_key,
+            sa.func.count().filter(Outcome.precision_class == "positive"),
+            sa.func.count().filter(Outcome.precision_class == "negative"),
+        )
+        .where(Outcome.first_read_at >= since, Outcome.source_key.is_not(None))
+        .group_by(Outcome.source_key)
+    )
+    pushed = await session.execute(
+        sa.select(LeadCandidate.primary_source_key, sa.func.count(PushLog.id))
+        .join(LeadCandidate, LeadCandidate.id == PushLog.candidate_id)
+        .where(
+            PushLog.status.in_(enums.PUSH_DELIVERED_STATUSES),
+            PushLog.superseded_at.is_(None),
+            PushLog.sent_at >= since,
+            LeadCandidate.primary_source_key.is_not(None),
+        )
+        .group_by(LeadCandidate.primary_source_key)
+    )
+    numbers: dict[str, Precision] = {}
+    for key, pos, neg in judged:
+        numbers[key] = Precision(key, positives=pos, negatives=neg)
+    for key, n in pushed:
+        numbers[key] = replace(numbers.get(key, Precision(key)), pushes=n)
+    return numbers
+
+
+async def source_precision(
+    session: AsyncSession, source_key: str, now: datetime
+) -> Precision:
+    """One source's numbers (05 §B.2); ``precision_30d`` is NULL (None) while
+    nothing was judged."""
+    return (await _precision_numbers(session, now)).get(source_key, Precision(source_key))
+
+
+async def refresh_precision(session: AsyncSession, now: datetime) -> list[Precision]:
+    """``sources.precision_30d / positives_30d / pushes_30d`` for every
+    source, in the caller's transaction; only rows whose numbers moved are
+    written. ``auto_push`` is the weekly ``source_precision_job``'s (T-36),
+    never this."""
+    numbers = await _precision_numbers(session, now)
+    moved: list[Precision] = []
+    for key, stored, positives, pushes in await session.execute(
+        sa.select(
+            Source.key, Source.precision_30d, Source.positives_30d, Source.pushes_30d
+        ).order_by(Source.key)
+    ):
+        now_is = numbers.get(key, Precision(key))
+        if (stored, positives, pushes) == (
+            now_is.precision_30d,
+            now_is.positives,
+            now_is.pushes,
+        ):
+            continue
+        await session.execute(
+            sa.update(Source)
+            .where(Source.key == key)
+            .values(
+                precision_30d=now_is.precision_30d,
+                positives_30d=now_is.positives,
+                pushes_30d=now_is.pushes,
+            )
+        )
+        moved.append(now_is)
+    return moved
+
+
 # --- what a failure writes ------------------------------------------------------------
 
 
@@ -1179,15 +1769,19 @@ async def _clear_feed_contract(session: AsyncSession, feed: FeedName) -> None:
 
 
 __all__ = [
+    "CATCH_UP_AFTER",
     "DELTA_MAX_AGE_H",
     "ERP_KEY_HEADERS",
     "FEED_RULE",
     "FULL_DUE_AFTER",
     "FULL_MAX_AGE_H",
     "MAX_PAGES",
+    "NIGHTLY_MAX_AGE",
     "OUTCOMES_LIMIT",
     "OUTCOMES_PATH",
     "PII_KEYS",
+    "QUARTER_SINCE",
+    "RECENT_SINCE",
     "SUPPRESSION_LIMIT",
     "SUPPRESSION_PATH",
     "ErpClient",
@@ -1196,7 +1790,11 @@ __all__ = [
     "FeedEntry",
     "FeedError",
     "FeedShapeError",
+    "OutcomesConfig",
     "OutcomesPage",
+    "OutcomesReport",
+    "Precision",
+    "ReconcileReport",
     "SuppressionConfig",
     "SuppressionPage",
     "SyncReport",
@@ -1205,8 +1803,16 @@ __all__ = [
     "fmt_since",
     "freshness",
     "hash_tail",
+    "outcomes_config",
     "parse_entry",
+    "parse_outcome",
+    "reconcile_unconfirmed",
+    "refresh_precision",
+    "refuse_pii",
     "salt_id",
+    "source_precision",
     "suppression_fresh",
+    "sync_outcomes",
     "sync_suppression",
+    "walk_params",
 ]

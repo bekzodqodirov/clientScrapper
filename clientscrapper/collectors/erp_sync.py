@@ -9,16 +9,28 @@ report in ``meta.suppression``. While the feeds are not configured (the
 «Boshqa» fallback, ``CRM_PUSH_SOURCE=other``) every run is skipped with
 ``feeds_not_configured`` and no feed is called (05 §B.3).
 
-Two cadences here (T-09); the outcomes walks join with T-10:
+Five cadences — the suppression pulls (T-09) and the outcomes walks (T-10):
 
 * ``delta`` — ``15 * * * *`` (the row's own ``cron``): additive; a new
   ``salt_id`` on its first page makes it a full pull at once, and so does a
   last full pull older than ``erp_feeds.FULL_DUE_AFTER`` (the catch-up of a
   failed or missed night);
-* ``full`` — ``30 2 * * *``: the only walk that deletes.
+* ``full`` — ``30 2 * * *``: the only walk that deletes;
+* ``outcomes`` — ``0 3 * * *``: the ``cursor`` walk, then the ``recent`` one,
+  then — both completed — the 48-hour rule (``reconcile_unconfirmed``), then
+  the catch-up of a Sunday or monthly walk that has not completed for too
+  long (``erp_feeds.CATCH_UP_AFTER``);
+* ``quarter`` — ``20 3 * * 0`` (Sunday, before ``source_precision_job`` at
+  04:00): the 90-day walk;
+* ``year`` — ``40 3 1 * *``: every row of the year (the only read that sees
+  a stage-kind flip on an old row).
 
-``JOBS`` is what the scheduler (worker/main.py, T-08) registers: id, cron and
-variant per cadence; each runs ``run_collector(ErpSync, variant=…)``.
+The variants are the slots the scheduler's table names (worker/main.py,
+T-08): ``JOBS`` is what it registers — id, cron and variant per cadence;
+each runs ``run_collector(ErpSync, variant=…)``, which beats
+``collector:erp_sync.<variant>``. The runner's one-running claim keeps two
+of them from overlapping (a walk that fires while another runs is skipped
+``already_running``).
 """
 
 from __future__ import annotations
@@ -38,9 +50,15 @@ if TYPE_CHECKING:
 
     from clientscrapper.services.http import Fetcher
 
-Variant = Literal["full", "delta"]
-VARIANTS: Final[tuple[Variant, ...]] = ("full", "delta")
+Variant = Literal["full", "delta", "outcomes", "quarter", "year"]
+VARIANTS: Final[tuple[Variant, ...]] = ("full", "delta", "outcomes", "quarter", "year")
 NOT_CONFIGURED: Final = "feeds_not_configured"
+# The walks each outcomes variant makes, in order (05 §B.2's table).
+OUTCOME_WALKS: Final[dict[str, tuple[erp_feeds.Walk, ...]]] = {
+    "outcomes": ("cursor", "recent"),
+    "quarter": ("quarter",),
+    "year": ("year",),
+}
 
 
 class ErpSync(Collector):
@@ -73,8 +91,12 @@ class ErpSync(Collector):
         now = self.started_at or datetime.now(settings.tz)
         erp = self.client()
         try:
+            if variant in OUTCOME_WALKS:
+                await self._outcomes(session, erp, OUTCOME_WALKS[variant], now)
+                return []
+            mode: erp_feeds.SyncMode = "full" if variant == "full" else "delta"
             report = await erp_feeds.sync_suppression(
-                session, erp, mode=variant, now=now, accept_shrink=self.accept_shrink
+                session, erp, mode=mode, now=now, accept_shrink=self.accept_shrink
             )
             self.run_meta["suppression"] = report.as_meta()
             if report.status == "salt_changed":
@@ -92,6 +114,33 @@ class ErpSync(Collector):
                 await erp.aclose()
         # The feeds write suppression rows, never observations (02 §2.5).
         return []
+
+    async def _outcomes(
+        self,
+        session: AsyncSession,
+        erp: erp_feeds.ErpClient,
+        walks: tuple[erp_feeds.Walk, ...],
+        now: datetime,
+    ) -> None:
+        """The walks in order (a failed one stops the run), their reports in
+        ``meta.outcomes``; after the nightly pair, the 48-hour rule, then the
+        overdue Sunday / monthly walks (after the rule, so a catch-up that
+        fails never holds it)."""
+        done: dict[str, object] = {}
+        self.run_meta["outcomes"] = done
+        for walk in walks:
+            report = await erp_feeds.sync_outcomes(session, erp, walk=walk, now=now)
+            done[walk] = report.as_meta()
+        if walks != OUTCOME_WALKS["outcomes"]:
+            return
+        reconcile = await erp_feeds.reconcile_unconfirmed(session, erp, now=now)
+        self.run_meta["reconcile"] = reconcile.as_meta()
+        late = (await erp_feeds.outcomes_config(session)).catch_up(now)
+        if late:
+            self.run_meta["catch_up"] = list(late)
+        for walk in late:
+            report = await erp_feeds.sync_outcomes(session, erp, walk=walk, now=now)
+            done[walk] = report.as_meta()
 
 
 def failure_note(exc: erp_feeds.FeedError) -> dict[str, object]:
@@ -137,10 +186,15 @@ class ErpJob:
 
 
 # 03 §3: the delta is the row's own cron (sources.cron); the full pull runs
-# after the Yandex night run (02:10) and before the outcomes walks (03:00).
+# after the Yandex night run (02:10) and before the outcomes walks (03:00);
+# the Sunday walk before source_precision_job (04:00), the monthly one after
+# both. Ids and variants are the scheduler table's slots (worker/main.py).
 JOBS: Final = (
     ErpJob("erp_sync_delta", "15 * * * *", "delta"),
     ErpJob("erp_sync_full", "30 2 * * *", "full"),
+    ErpJob("erp_sync_outcomes", "0 3 * * *", "outcomes", "T-10"),
+    ErpJob("erp_sync_quarter", "20 3 * * 0", "quarter", "T-10"),
+    ErpJob("erp_sync_year", "40 3 1 * *", "year", "T-10"),
 )
 
 

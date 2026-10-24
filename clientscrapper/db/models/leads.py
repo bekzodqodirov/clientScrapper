@@ -221,10 +221,14 @@ class PushLog(Base):
     payload_sha256: Mapped[str] = mapped_column(sa.CHAR(64))
     status: Mapped[str] = mapped_column(sa.Text, server_default="sending")
     http_status: Mapped[int | None] = mapped_column(sa.SmallInteger)
-    # timeout|conn|http_5xx|http_404|http_4xx|http_2xx_badbody|breaker
+    # timeout|conn|http_5xx|http_404|http_3xx|http_4xx|http_2xx_badbody|breaker
     error: Mapped[str | None] = mapped_column(sa.Text)
     sent_at: Mapped[datetime] = created_at_column()
     finished_at: Mapped[datetime | None] = mapped_column(sa.DateTime(timezone=True))
+    # 0002: set by rule 5's re-push or by /push tekshir on a delivered row — a
+    # 2xx row can never become 'failed' (ck_push_log_sent), so this is what
+    # frees ux_push_log_delivered for the attempt that re-sends it.
+    superseded_at: Mapped[datetime | None] = mapped_column(sa.DateTime(timezone=True))
 
     __table_args__ = (
         sa.CheckConstraint(
@@ -251,8 +255,10 @@ class PushLog(Base):
             "ux_push_log_delivered",
             "external_id",
             unique=True,
+            # 0002 narrowed it to the rows nobody superseded.
             postgresql_where=sa.text(
-                f"status IN ({sql_list(e.PUSH_DELIVERED_STATUSES)})"
+                f"status IN ({sql_list(e.PUSH_DELIVERED_STATUSES)}) "
+                "AND superseded_at IS NULL"
             ),
         ),
         sa.Index("ix_push_log_phone_sent", "phone_tail", sa.text("sent_at DESC")),
@@ -287,13 +293,19 @@ class Outcome(Base):
     # Copied from the candidate for per-source precision.
     source_key: Mapped[str | None] = mapped_column(sa.Text, sa.ForeignKey("sources.key"))
     landing: Mapped[str] = mapped_column(sa.Text)
-    # replay|capped|no_contact|suppressed|… (the ERP's free text)
+    # The feed's ``reason``: suppressed|capped|no_phone|no_contact for a
+    # dropped landing, NULL otherwise (a replay writes no ERP row). No CHECK:
+    # a reason the ERP adds later is ``dropped_other``, not a refused page.
     landing_reason: Mapped[str | None] = mapped_column(sa.Text)
     lead_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     client_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     stage_kind: Mapped[str | None] = mapped_column(sa.Text)
     stage_name: Mapped[str | None] = mapped_column(sa.Text)
+    # Only a LABEL (the owner's dictionary or agent_no_contact_reasons); a
+    # seller's free text arrives as NULL (05 §A.9).
     lost_reason: Mapped[str | None] = mapped_column(sa.Text)
+    # 0002: the ERP's own «lost with a reason agent_no_contact_reasons lists».
+    no_contact: Mapped[bool] = mapped_column(sa.Boolean, server_default=sa.false())
     closed_at: Mapped[datetime | None] = mapped_column(sa.DateTime(timezone=True))
     contacted_at: Mapped[datetime | None] = mapped_column(sa.DateTime(timezone=True))
     contact_kind: Mapped[str | None] = mapped_column(sa.Text)

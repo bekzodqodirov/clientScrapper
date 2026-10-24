@@ -148,7 +148,10 @@ async def test_a_backup_is_a_non_zero_encrypted_archive_that_restores(
     }
     assert restore.restore(result.path, identity, to=scratch) == restore.EXIT_OK
     assert restore_drill.count_rows(scratch) == expected
-    assert restore.schema_revision(scratch) == "0001_initial"
+    # The restored schema is the source's, whatever the head is today.
+    source_revision = restore.schema_revision(settings.database_url)
+    assert source_revision is not None
+    assert restore.schema_revision(scratch) == source_revision
     # A target that holds data is refused without --force …
     with pytest.raises(restore.RestoreError) as refused:
         restore.restore(result.path, identity, to=scratch)
