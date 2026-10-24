@@ -891,10 +891,11 @@ async def _finish_full(
     )
     # (a) the stale hits are covered by this pull.
     await health.clear_problem(session, STALE_HIT_PROBLEM)
-    # (b) the self-test.
+    # (b) the self-test and (c) the XLSX fallback read only what THIS walk
+    # carried: a shrunk pull deleted nothing, so the rows it did not see are
+    # still standing and would answer for an ERP that no longer holds them.
     report.selftest = await _self_test(session, erp, salt, now)
-    # (c) the XLSX fallback retires row by row.
-    report.retired_manual = await _retire_manual_import(session, erp, salt)
+    report.retired_manual = await _retire_manual_import(session, erp, salt, now)
 
 
 async def _self_test(
@@ -921,6 +922,7 @@ async def _self_test(
             Suppression.kind == "client",
             Suppression.key == erp.hash_tail(tail.strip()),
             Suppression.salt_id == salt,
+            Suppression.last_seen_at >= now,
         )
     )
     if present:
@@ -933,9 +935,13 @@ async def _self_test(
     return False
 
 
-async def _retire_manual_import(session: AsyncSession, erp: ErpClient, salt: str) -> int:
+async def _retire_manual_import(
+    session: AsyncSession, erp: ErpClient, salt: str, now: datetime
+) -> int:
     """Step 5(c): each ``manual_import`` tail whose hash this pull carries is
-    retired; a tail the feed does not carry stays (fail closed)."""
+    retired; a tail the feed does not carry stays (fail closed) — and so does
+    one only an unseen row of an earlier pull still answers for (a shrunk
+    pull deletes nothing; ``--accept-shrink`` would take that row later)."""
     rows = (
         await session.execute(
             sa.select(Suppression.id, Suppression.key).where(
@@ -958,6 +964,7 @@ async def _retire_manual_import(session: AsyncSession, erp: ErpClient, salt: str
                     Suppression.source == "erp_feed",
                     Suppression.key_type == "phone_hash",
                     Suppression.salt_id == salt,
+                    Suppression.last_seen_at >= now,
                     Suppression.key.in_(hashes[start : start + UPSERT_CHUNK]),
                 )
             )

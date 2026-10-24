@@ -639,7 +639,50 @@ async def test_manual_import_retired_after_full_pull(session, erp_row):
     assert left.all() == [tail(7)]
 
 
-async def _won_push(session: AsyncSession, tail9: str, label: str = "won") -> None:
+async def manual_tails(session: AsyncSession) -> list[str]:
+    left = await session.scalars(
+        sa.select(Suppression.key)
+        .where(Suppression.source == "manual_import")
+        .order_by(Suppression.key)
+    )
+    return list(left.all())
+
+
+async def test_a_shrunk_pull_retires_only_what_it_carried(session, erp_row):
+    # 05 §B.2 5(c) / §B.3: a tail retires when THIS pull carries its hash. A
+    # shrunk pull deleted nothing, so the rows it did not see are still there
+    # — they must not count, or a later --accept-shrink deletes the feed row
+    # and the tail is left with no suppression at all.
+    fake, erp = make(10)
+    await erp_feeds.sync_suppression(session, erp, mode="full", now=NOW)
+    for n in (0, 7):
+        session.add(
+            Suppression(
+                kind="client", key_type="phone_tail", key=tail(n), source="manual_import"
+            )
+        )
+    await session.commit()
+    del fake.entries[:5]  # the ERP no longer carries tails 0–4
+    later = NOW + timedelta(days=1)
+    report = await erp_feeds.sync_suppression(session, erp, mode="full", now=later)
+    assert (report.status, report.seen, report.retired_manual) == ("shrunk", 5, 1)
+    assert await manual_tails(session) == [tail(0)]
+    # The owner accepts the shrink: the stale feed rows go, tail 0 stays guarded.
+    report = await erp_feeds.sync_suppression(
+        session, erp, mode="full", now=later + timedelta(hours=1), accept_shrink=True
+    )
+    assert (report.status, report.deleted, report.retired_manual) == ("ok", 5, 0)
+    assert await manual_tails(session) == [tail(0)]
+    assert h(0) not in await feed_rows(session)
+
+
+async def _won_push(
+    session: AsyncSession,
+    tail9: str,
+    label: str = "won",
+    *,
+    changed_at: datetime | None = None,
+) -> None:
     company = await session.scalar(
         sa.text(
             "INSERT INTO companies (display_name, name_key) VALUES ('Namuna Savdo', "
@@ -663,10 +706,10 @@ async def _won_push(session: AsyncSession, tail9: str, label: str = "won") -> No
     await session.execute(
         sa.text(
             "INSERT INTO outcomes (external_id, intake_id, landing, erp_at, label, "
-            "precision_class, raw) VALUES (:e, gen_random_uuid(), 'created', now(), "
-            ":label, 'positive', '{}')"
+            "precision_class, raw, label_changed_at) VALUES (:e, gen_random_uuid(), "
+            "'created', now(), :label, 'positive', '{}', coalesce(:changed, now()))"
         ),
-        {"e": external, "label": label},
+        {"e": external, "label": label, "changed": changed_at},
     )
     await session.commit()
 
@@ -696,6 +739,47 @@ async def test_the_self_test_warns_when_a_known_client_is_absent(session, erp_ro
     )
     assert report.selftest is True
     assert "suppression_selftest_failed" not in await raised(session)
+
+
+async def test_a_shrunk_pull_s_self_test_reads_only_what_it_carried(session, erp_row):
+    fake, erp = make(10)
+    await _won_push(session, tail(2))
+    first = await erp_feeds.sync_suppression(session, erp, mode="full", now=NOW)
+    assert first.selftest is True
+    del fake.entries[:5]
+    report = await erp_feeds.sync_suppression(
+        session, erp, mode="full", now=NOW + timedelta(days=1)
+    )
+    # The won client's hash is still a row (nothing deleted), but not in the feed.
+    assert h(2) in await feed_rows(session)
+    assert (report.status, report.selftest) == ("shrunk", False)
+    assert "suppression_selftest_failed" in await raised(session)
+
+
+async def test_the_self_test_wants_the_client_kind(session, erp_row):
+    # The won phone is in the feed only as a «Qayta qilinmasin» lead: the ERP
+    # does not hold it as a client — the self-test says so.
+    fake, erp = make(2)
+    fake.add_entry(tail(5), "lost", at=NOW.astimezone(UTC))
+    await _won_push(session, tail(5))
+    report = await erp_feeds.sync_suppression(session, erp, mode="full", now=NOW)
+    assert report.selftest is False
+
+
+async def test_the_self_test_reads_the_newest_known_client(session, erp_row):
+    fake, erp = make(2)  # tails 0 and 1 are in the feed, 5 is not
+    old = NOW - timedelta(days=3)
+    await _won_push(session, tail(5), changed_at=old)
+    await _won_push(session, tail(1), changed_at=old + timedelta(days=1))
+    assert (
+        await erp_feeds.sync_suppression(session, erp, mode="full", now=NOW)
+    ).selftest is True
+    await _won_push(session, tail(5), changed_at=old + timedelta(days=2))
+    assert (
+        await erp_feeds.sync_suppression(
+            session, erp, mode="full", now=NOW + timedelta(hours=1)
+        )
+    ).selftest is False
 
 
 async def test_no_known_client_yet_is_no_self_test(session, erp_row):

@@ -315,6 +315,30 @@ async def test_an_orphan_s_retry_joins_it():
     assert len(fake.leads) == 1
 
 
+async def test_the_join_reads_the_lead_s_phone_as_the_erp_does():
+    # inbound.ts inboundMatch: right(digits(leads.phone), 9) = the arrival's
+    # nine, an OPEN stage, updated_at > now − 30 d (strict). Checked on a real
+    # agent-feed ERP (review, 2026-10-24): a lead stored «+998 90 000 60 13»
+    # and a POST of «+998 90 000 6013» → joined.
+    clock = [NOW]
+    fake = FakeErp(SECRET, clock=lambda: clock[0])
+    formatted = fake.add_lead("+998 90 000 60 13", at=NOW - timedelta(days=29))
+    await post(fake, body(eid="cs:j:1", phone="+998 90 000 6013"))
+    assert (fake.intakes["cs:j:1"].outcome, fake.intakes["cs:j:1"].lead_id) == (
+        "joined",
+        formatted.id,
+    )
+    # The lead the ERP creates keeps the phone as it was sent.
+    await post(fake, body(eid="cs:j:2", phone=" +998 (90) 000-60-14 "))
+    created = fake.lead_of("cs:j:2")
+    assert created is not None and created.phone == "+998 (90) 000-60-14"
+    # Exactly 30 days without a touch: no longer joined (> since, strict).
+    stale = fake.add_lead("998900006015", at=NOW - timedelta(days=30))
+    await post(fake, body(eid="cs:j:3", phone="900006015"))
+    assert fake.intakes["cs:j:3"].outcome == "created"
+    assert fake.lead_of("cs:j:3") is not stale
+
+
 async def test_an_orphan_moved_to_lost_makes_the_retry_a_second_lead():
     fake = FakeErp(SECRET)
     fake.modes[EID] = "orphan"
@@ -439,6 +463,23 @@ async def test_the_landed_note_is_the_erp_s():
 async def get(fake: FakeErp, path: str, **params: str):
     async with client_for(fake) as c:
         return await c.get(path, params=params, headers={"X-GSR-Key": SECRET})
+
+
+async def test_the_outcomes_window_is_a_calendar_year():
+    # agent-feed.ts: i.created_at > now() - interval '1 year' — 366 days back
+    # across a 29 February, 365 otherwise, never a fixed 365.
+    now = datetime(2028, 3, 1, 0, 0, tzinfo=UTC)
+    clock = [now - timedelta(days=366) + timedelta(hours=12)]
+    fake = FakeErp(SECRET, clock=lambda: clock[0])
+    await post(fake, body(eid="cs:y:1"))
+    clock[0] = now - timedelta(days=366)
+    await post(fake, body(eid="cs:y:2", phone="+998 90 000 00 42"))
+    clock[0] = now
+    assert [r["external_id"] for r in outcomes(fake)] == ["cs:y:1"]
+    # 29 February a year on is 28 February (postgres clamps the day).
+    assert fake_erp.year_before(datetime(2028, 2, 29, 5, tzinfo=UTC)) == datetime(
+        2027, 2, 28, 5, tzinfo=UTC
+    )
 
 
 async def test_the_cursor_is_checked_before_since():

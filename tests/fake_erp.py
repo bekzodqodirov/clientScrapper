@@ -61,8 +61,6 @@ PHONE_CAP_PER_DAY = 3
 SOURCE_CAP_PER_DAY = 200
 CAP_WINDOW = timedelta(hours=24)
 JOIN_WINDOW = timedelta(days=30)
-# postgres `now() - interval '1 year'`
-OUTCOMES_WINDOW = timedelta(days=365)
 NAME_MAX = 120
 NOTE_MAX = 1000
 COMPANY_MAX = 200
@@ -311,6 +309,17 @@ def ms_text(at: datetime) -> str:
     """``new Date(…).toISOString()``: milliseconds (cut, never rounded) and ``Z``."""
     at = at.astimezone(UTC)
     return f"{at:%Y-%m-%dT%H:%M:%S}.{at.microsecond // 1000:03d}Z"
+
+
+def year_before(at: datetime) -> datetime:
+    """postgres ``now() - interval '1 year'`` (the outcomes window, in UTC):
+    the same instant a calendar year back — 366 days across a 29 February —
+    and 29 February itself to 28 February."""
+    at = at.astimezone(UTC)
+    try:
+        return at.replace(year=at.year - 1)
+    except ValueError:
+        return at.replace(year=at.year - 1, day=28)
 
 
 def hash_tail(secret: str, tail9: str) -> str:
@@ -850,7 +859,9 @@ class FakeErp:
         when = self.clock()
         lead = FakeLead(
             id=str(uuid.uuid4()),
-            phone=fields.phone_digits,
+            # As sent (``storableText(arrival.phone ?? '')``): the card keeps the
+            # spelling; every reader takes its digits.
+            phone=storable_text(fields.phone or ""),
             name=fields.name or f"{source} · {fields.phone_digits or ''}".strip(),
             source=source,
             created_at=when,
@@ -915,14 +926,16 @@ class FakeErp:
         self._record(source, body, fields, eid, "created", lead_id=lead.id)
 
     def _open_leads(self, phone: str | None, now: datetime) -> list[FakeLead]:
+        """``inboundMatch``: ``right(digits(leads.phone), 9) = <the arrival's
+        nine>`` on an open stage, ``updated_at > now − 30 d`` (strict)."""
         if not phone:
             return []
         return [
             lead
             for lead in self.leads.values()
-            if lead.phone == phone
+            if _NOT_DIGIT.sub("", lead.phone or "")[-9:] == phone
             and lead.stage_kind == "open"
-            and now - lead.updated_at <= JOIN_WINDOW
+            and now - lead.updated_at < JOIN_WINDOW
         ]
 
     def _join(
@@ -1058,7 +1071,7 @@ class FakeErp:
                 or (intake.source == OTHER and utm == "clientscrapper")
             ):
                 continue
-            if intake.created_at <= now - OUTCOMES_WINDOW:
+            if intake.created_at <= year_before(now):
                 continue
             lead = self.leads.get(intake.lead_id) if intake.lead_id else None
             reason = (
