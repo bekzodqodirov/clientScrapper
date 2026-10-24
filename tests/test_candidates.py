@@ -767,6 +767,37 @@ async def test_9_1_through_score_job_52_enriching_then_70_review(session):
     SCHEMA.validate(cand.score_breakdown)
 
 
+async def test_a_resolution_that_brings_only_a_phone_still_rescores(session):
+    """A directory card naming the poster's handle and a phone adds no signal,
+    but the phone changes the score: the hook marks the candidate stale."""
+    await store(session, post(POST_91, person_telegram="namuna_tekstil"))
+    await session.commit()
+    await companies.resolve_batch(now=NOW)
+    await candidates.score_batch(now=NOW)
+    card = post(
+        "",
+        kind="company",
+        source="directories_yellowpages",
+        telegram="namuna_tekstil",
+        phones=["+998 90 000 00 41"],
+    )
+    await store(session, card)
+    await session.commit()
+    later = NOW + timedelta(hours=2)
+    await companies.resolve_batch(now=later)
+    assert (await the_candidate(session)).last_scored_at is None
+    assert (await session.scalar(sa.select(sa.func.count()).select_from(Signal))) == 2
+    report = await candidates.score_batch(now=later)
+    cand = await the_candidate(session)
+    # 52 + a mobile 6: still warm, still enriching
+    assert (report.scored, cand.state, cand.score, cand.last_scored_at) == (
+        1,
+        "enriching",
+        58,
+        later,
+    )
+
+
 async def test_a_stated_director_adds_the_decision_maker_points(session):
     """04 §9.1's poster is «Namuna Tekstil Savdo MChJ direktori», and the
     resolver marks a direktor a decision maker (04 §2.4): the score is then
