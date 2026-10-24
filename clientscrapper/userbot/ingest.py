@@ -40,7 +40,7 @@ from clientscrapper.userbot import prefilter, tg
 
 log = logging.getLogger(__name__)
 
-NOTIFY_CHANNEL: Final = "cs_interaction"
+NOTIFY_CHANNEL: Final = chats.INTERACTION_CHANNEL
 TEXT_MAX: Final = 4000
 # 03 §2.3: an edit re-runs the prefilter, ten times per message at most.
 MAX_EDITS: Final = 10
@@ -229,10 +229,13 @@ async def handle_edit(
     """A message was edited: the prefilter runs again (≤ MAX_EDITS times).
 
     * not stored, now a hit → stored and notified, as a new message would be;
-    * stored, not yet processed, still a hit → its text and hits follow the
-      edit (the classifier has not read it yet);
-    * anything else stays as it was: a processed row is evidence of what was
-      said, and an edit that is no hit is not kept (no full chat logs).
+    * stored, not yet processed nor observed, still a hit → its text and hits
+      follow the edit (neither the collector nor the classifier has read it);
+    * anything else stays as it was: a processed row — or one the
+      telegram_monitor collector already turned into evidence and an
+      observation (``evidence_id``), which quote the text as it was — is
+      evidence of what was said, and an edit that is no hit is not kept (no
+      full chat logs).
     An edit is not a new message: ``seen_count`` does not move."""
     item = incoming_of(message)
     if item is None:
@@ -259,7 +262,12 @@ async def handle_edit(
             return "unchanged"
         await chats.note_hit(session, item.tg_chat_id)
         return "stored"
-    if not hits or stored.processed_at is not None or stored.text_purged_at is not None:
+    if (
+        not hits
+        or stored.processed_at is not None
+        or stored.evidence_id is not None
+        or stored.text_purged_at is not None
+    ):
         return "unchanged"
     if stored.text == item.text and list(stored.prefilter_hit) == list(hits):
         return "unchanged"

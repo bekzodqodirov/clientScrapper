@@ -153,7 +153,7 @@ async def store_about(
         source_ref=f"tg:{monitor.tg_chat_id}",
         excerpt=about.text or about.pinned or monitor.title or monitor.username,
         title=monitor.title,
-        meta={"kind": "telegram_about"},
+        meta={"kind": chats.ABOUT_EVIDENCE_KIND},
     )
     mentioned = companion_handles("\n".join(t for t in (about.text, about.pinned) if t))
     companions = [name for name in mentioned if name != monitor.username]

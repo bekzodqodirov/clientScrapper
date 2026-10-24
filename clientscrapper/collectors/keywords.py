@@ -551,6 +551,12 @@ def price_count(text: str) -> int:
     return sum(1 for _ in PRICE_RE.finditer(text))
 
 
+def pricelist_shaped(text: str) -> bool:
+    """03 §2.3's price-list shape, which the tout rule counts per sender:
+    PRICELIST_MIN_PRICES prices or more, or longer than PRICELIST_MIN_CHARS."""
+    return price_count(text) >= PRICELIST_MIN_PRICES or len(text) > PRICELIST_MIN_CHARS
+
+
 # The normaliser validates operator codes (services/keys.phone_e164 / phone_kind).
 PHONE_RE = re.compile(
     r"(?<!\d)(?:\+?998[\s\-]?)?\(?(\d{2})\)?[\s\-]?(\d{3})[\s\-]?(\d{2})[\s\-]?(\d{2})(?!\d)"

@@ -22,6 +22,7 @@ from apscheduler.events import JobExecutionEvent
 from clientscrapper.collectors import erp_sync
 from clientscrapper.collectors.base import Collector, Observation
 from clientscrapper.collectors.runner import run_collector
+from clientscrapper.collectors.telegram_monitor import TelegramMonitor
 from clientscrapper.config import settings
 from clientscrapper.db import models as m
 from clientscrapper.services import companies, costs, crontab, erp_feeds, health
@@ -86,6 +87,8 @@ BUILT = {
     "erp_sync_year",
     # T-17: the resolver.
     "resolve",
+    # T-14: the Telegram collector, woken by NOTIFY cs_interaction too.
+    "telegram_monitor",
 }
 # The ERP slots and the ErpSync variant each runs (03 §3, 05 §B.2).
 ERP_VARIANTS = {
@@ -149,6 +152,32 @@ async def test_each_erp_slot_runs_erpsync_with_its_variant(monkeypatch):
         await worker.shared_fetcher().aclose()
         worker._shared.fetcher = None
     assert ran == [(erp_sync.ErpSync, v) for v in ERP_VARIANTS.values()]
+
+
+async def test_the_telegram_slot_runs_the_telegram_collector(monkeypatch):
+    """T-14 fills the slot T-08 left: run_collector(TelegramMonitor), no
+    variant, primary on sources.telegram_monitor.cron, woken by the reader's
+    NOTIFY (04 §0)."""
+    ran: list[tuple[type, str | None]] = []
+
+    async def record(cls, *, fetcher, now, variant=None, **kw):
+        ran.append((cls, variant))
+
+    monkeypatch.setattr(worker, "run_collector", record)
+    [slot] = [s for s in worker.job_table() if s.id == "telegram_monitor"]
+    assert (slot.source_key, slot.variant, slot.primary, slot.wakes_on) == (
+        "telegram_monitor",
+        None,
+        True,
+        "cs_interaction",
+    )
+    assert slot.job is not None
+    try:
+        await slot.job()
+    finally:
+        await worker.shared_fetcher().aclose()
+        worker._shared.fetcher = None
+    assert ran == [(TelegramMonitor, None)]
 
 
 def test_the_resolver_is_the_resolve_slot_s_job():

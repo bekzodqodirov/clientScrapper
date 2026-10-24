@@ -41,6 +41,15 @@ from clientscrapper.services.keys import username_key
 log = logging.getLogger(__name__)
 
 SOURCE_KEY: Final = "telegram_monitor"
+# The reader's insert transaction ends with ``NOTIFY cs_interaction, '<id>'``
+# (02 §2.12); the worker's telegram_monitor, classify and score jobs wake on
+# it (04 §0). The one home of the channel's name: the reader, the collector
+# and the worker all read it here.
+INTERACTION_CHANNEL: Final = "cs_interaction"
+# ``evidence.meta.kind`` of a chat's weekly about (03 §2.3): the reader stores
+# it (userbot/about.py), the telegram_monitor collector makes the profile
+# observation of it.
+ABOUT_EVIDENCE_KIND: Final = "telegram_about"
 
 # 02 §2.12 priority column: 0 owner /chats qoʻsh · 1 linked discussion group ·
 # 2 companion group · 3 resolved username · 5 seed.
@@ -59,6 +68,18 @@ _CHANNEL_MARK: Final = 10**12
 def channel_peer_id(channel_id: int) -> int:
     """The marked peer id of a channel or supergroup given its bare id."""
     return -(_CHANNEL_MARK + channel_id) if channel_id > 0 else channel_id
+
+
+def is_channel_peer(peer_id: int) -> bool:
+    """A marked peer id that names a channel or a supergroup (not a user, whose
+    id is positive, nor a basic group, ``-<id>`` under the mark)."""
+    return peer_id < -_CHANNEL_MARK
+
+
+def bare_channel_id(peer_id: int) -> int:
+    """The bare id of a marked channel or supergroup id (``t.me/c/<bare>/…``);
+    any other id as its absolute value."""
+    return -peer_id - _CHANNEL_MARK if is_channel_peer(peer_id) else abs(peer_id)
 
 
 @dataclass(frozen=True, slots=True)

@@ -413,6 +413,44 @@ async def test_an_edit_updates_an_unprocessed_hit_and_leaves_a_processed_one(ses
     assert rows[91].text == HIT
 
 
+async def test_an_edit_leaves_a_hit_the_collector_already_observed(session):
+    """The telegram_monitor collector stored the text as evidence and quotes
+    it in an observation: an edit landing after that would make the row say
+    something its evidence does not (T-14)."""
+    await _monitor(session, GROUP)
+    await session.commit()
+    msg = message(GROUP, 92, HIT, date=NOW, sender=POSTER)
+    assert await ingest.handle_message(session, msg, now=NOW) == "stored"
+    await session.commit()
+    proof = m.Evidence(
+        source_key="telegram_monitor",
+        url="https://t.me/namuna_optom/92",
+        fetched_at=NOW,
+        sha256="0" * 64,
+        content_type="text/plain",
+        bytes=len(HIT.encode()),
+        excerpt=HIT,
+        expires_at=NOW + timedelta(days=180),
+    )
+    session.add(proof)
+    await session.flush()
+    await session.execute(
+        sa.update(m.Interaction)
+        .where(m.Interaction.tg_message_id == 92)
+        .values(evidence_id=proof.id)
+    )
+    await session.commit()
+    newer = "Хитойдан 5 куб товар керак, ким олиб келади?"
+    edit = message(GROUP, 92, newer, date=NOW, sender=POSTER)
+    assert (
+        await ingest.handle_edit(session, edit, now=NOW, edits=ingest.EditCounter())
+        == "unchanged"
+    )
+    await session.commit()
+    [row] = [r for r in await _rows(session) if r.tg_message_id == 92]
+    assert row.text == HIT
+
+
 def test_the_edit_memory_forgets_the_oldest_message():
     edits = ingest.EditCounter(limit=2, memory=2)
     assert edits.allow(1, 1) and edits.allow(1, 1)
