@@ -518,11 +518,11 @@ CREATE INDEX ix_suppression_feed_seen ON suppression (last_seen_at) WHERE source
 CREATE INDEX ix_suppression_expiry    ON suppression (expires_at) WHERE expires_at IS NOT NULL;
 ```
 
-Kinds: `client`/`lost` from the ERP feed (hashed phones, `source='erp_feed'`), from outcomes (`won`/`landed_client` → `client`, `lost_no_contact` → `lost`; clear `phone_tail`, `source='outcomes'`) or from the XLSX fallback (`make import-clients` / `/import`: clear `phone_tail`, `source='manual_import'`, 05 §B.3 — retired by the first successful full pull, 05 §B.2 step 5); `dnc` («yozmang», owner button), `bounced` (wrong number ×2 — the first time is `reason='wrong_number_1'` on a `cooldown` of 30 d, the second makes it permanent), `legal` (removal request), `competitor`, `manager_veto` («bu bizga kerak emas»), `b2c`, `cooldown` (lost for price: 180 d).
+Kinds: `client`/`lost` from the ERP feed (hashed phones, `source='erp_feed'`), from outcomes (`won`/`landed_client`/`dropped_suppressed` → `client`, `lost_no_contact` → `lost`; clear `phone_tail` and, for `lost`, the company's other keys; `source='outcomes'`, `reason='outcome:<external_id>'` or `'erp_belt:<external_id>'` — recomputed from the company's current labels, so a label that changes retracts its rows, §2.11) or from the XLSX fallback (`make import-clients` / `/import`: clear `phone_tail`, `source='manual_import'`, 05 §B.3 — retired by the first successful full pull, 05 §B.2 step 5); `dnc` («yozmang», owner button), `bounced` (wrong number ×2 — the first time is `reason='wrong_number_1'` on a `cooldown` of 30 d, the second makes it permanent), `legal` (removal request), `competitor`, `manager_veto` («bu bizga kerak emas»), `b2c`, `cooldown` (lost for price: 180 d).
 
 Lookup (`services/suppression.is_suppressed(session, keys) -> Hit | None`): the gate builds `keys = {phone_tail, phone_hash(current secret), tg_username, tg_user_id, instagram, domain, stir, company_id}` and runs **one** query `WHERE (key_type, key) IN (…) AND (expires_at IS NULL OR expires_at > now()) ORDER BY array_position(ARRAY['legal','dnc','client','lost','bounced','competitor','manager_veto','b2c','cooldown'], kind) LIMIT 1`. The array is rendered from the one constant `KIND_RANK` in `services/suppression.py` (`legal 0 · dnc 1 · client 2 · lost 3 · bounced 4 · competitor 5 · manager_veto 6 · b2c 7 · cooldown 8`, 06 §5.5): a permanent kind always beats a `cooldown`, so the gate and `/lidlar` report the lasting reason. Checked before a card and again inside the push transaction.
 
-Feed sync (`erp_sync` collector, steps in 05 §B.2; cron full `30 2 * * *`, delta `15 * * * *` Tashkent): delta = upsert each entry as `(kind, 'phone_hash', h, salt_id, source='erp_feed', erp_at=at, last_seen_at=run_started)`; the full pull stamps `last_seen_at = run_started` on every entry, then `DELETE … WHERE source='erp_feed' AND last_seen_at < run_started` — only when the pull completed and returned ≥ 90 % of the previous count (otherwise health problem `suppression_shrunk`, no delete). Freshness has one home, `services/erp_feeds.suppression_fresh()` (`FULL_MAX_AGE_H = 26`, `DELTA_MAX_AGE_H = 3`): when it is false, or the feed's `salt_id` differs from `erp_sync.config.suppression.salt_id` (re-minted secret), health problem `suppression_stale` is raised and the push gate refuses every push until a full pull succeeded. A prospect's «yozmang» reaches a manager's account, not the agent, so `dnc` rows are entered by people (owner bot button «🔒 DNC», `/dnc <phone|@user>`, the manager card's «🙅 Yozmang dedi») or derived from outcomes (`lost_wrong_number` ×2 → `bounced`, `lost_no_contact` → `lost`). W/R: erp_sync, `feedback_job`, bot, resolver (`competitor`), retention / gate, scorer, resolver.
+Feed sync (`erp_sync` collector, steps in 05 §B.2; cron full `30 2 * * *`, delta `15 * * * *` Tashkent; neither runs during the «Boshqa» fallback, 05 §B.3): delta (`since` = the previous delta's ERP `generated_at` − 10 min) = upsert each entry as `(kind, 'phone_hash', h, salt_id, source='erp_feed', erp_at=at, last_seen_at=run_started)` — a delta never retires anything (the ERP cannot express a deletion, 05 §A.7); the full pull (`limit=5000`, **neither `since` nor `cursor`** — the only walk allowed to delete) stamps `last_seen_at = run_started` on every entry, then `DELETE … WHERE source='erp_feed' AND last_seen_at < run_started` — only when the pull completed and saw ≥ 90 % of the distinct `(kind, h)` the previous **completed full pull** saw (otherwise health problem `suppression_shrunk`, no delete; the owner's `--accept-shrink` overrides once). The feed carries nine-digit tails only: a client card of 7–8 digits is refused by the ERP's belt and comes back as `dropped_suppressed`, which leaves a local `phone_tail` row (§2.11). Freshness has one home, `services/erp_feeds.suppression_fresh()` (`FULL_MAX_AGE_H = 26`, `DELTA_MAX_AGE_H = 3`): when it is false, or the feed's `salt_id` differs from `erp_sync.config.suppression.salt_id` (re-minted secret), health problem `suppression_stale` is raised and the push gate refuses every push until a full pull succeeded. A prospect's «yozmang» reaches a manager's account, not the agent, so `dnc` rows are entered by people (owner bot button «🔒 DNC», `/dnc <phone|@user>`, the manager card's «🙅 Yozmang dedi») or derived from outcomes (`lost_wrong_number` ×2 → `bounced`, `lost_no_contact` → `lost`). W/R: erp_sync (feeds and outcomes walks, `services/outcomes.apply_effects`), bot, resolver (`competitor`), retention / gate, scorer, resolver.
 
 ### 2.9 `lead_candidates`, `lead_reviews`
 
@@ -628,11 +628,12 @@ CREATE TABLE push_log (
   error           text,                                 -- timeout|conn|http_5xx|http_404|http_4xx|http_2xx_badbody|breaker
   sent_at         timestamptz NOT NULL DEFAULT now(),
   finished_at     timestamptz,
+  superseded_at   timestamptz,                          -- 0002_erp_contract: set by rule 5's re-push or by /push tekshir; frees ux_push_log_delivered without rewriting status/http_status
   CONSTRAINT uq_push_log_external_attempt UNIQUE (external_id, attempt),
   CONSTRAINT ck_push_log_sent CHECK ((status <> 'sent' OR http_status BETWEEN 200 AND 299)                                       -- sent ⇒ 2xx
                                  AND (http_status IS NULL OR http_status NOT BETWEEN 200 AND 299 OR status IN ('sent','unknown')))   -- 2xx ⇒ sent | unknown (unparseable 2xx body: 'unknown', error='http_2xx_badbody')
 );
-CREATE UNIQUE INDEX ux_push_log_delivered ON push_log (external_id) WHERE status IN ('sent','unknown');
+CREATE UNIQUE INDEX ux_push_log_delivered ON push_log (external_id) WHERE status IN ('sent','unknown') AND superseded_at IS NULL;   -- predicate widened by 0002_erp_contract (0001 has no superseded_at clause)
 CREATE INDEX ix_push_log_phone_sent   ON push_log (phone_tail, sent_at DESC);
 CREATE INDEX ix_push_log_company_sent ON push_log (company_id, sent_at DESC);
 CREATE INDEX ix_push_log_day          ON push_log (sent_at) WHERE status IN ('sent','unknown');
@@ -642,34 +643,35 @@ CREATE INDEX ix_push_log_candidate    ON push_log (candidate_id);
 **Idempotency rules** (`services/crm_push.py`):
 
 1. `external_id = f"cs:{company_id}:{yyyymm}"`, month = Asia/Tashkent month at claim time.
-2. Gate, in one transaction with `SELECT … FOR UPDATE` on the candidate: `state='approved'`; `is_suppressed()` misses; no `sent|unknown` row for this `external_id` (the partial unique index is the real fence, the pre-check only gives a readable refusal); no `sent|unknown` row for `phone_tail` in the last 24 h; no `sent|unknown` row for `company_id` whose outcome is `open` or absent and younger than 90 d; `count(sent|unknown today) < PUSH_DAILY_CAP`; Mon–Sat 09:30–17:30 Tashkent; `CRM_PUSH_ENABLED`; `sources.erp_sync.breaker_until` clear (05 §B.1; `/yoq crm` clears it by hand); `suppression_fresh()` true and no `salt_id` mismatch (§2.8).
+2. Gate, in one transaction with `SELECT … FOR UPDATE` on the candidate: `state='approved'`; `is_suppressed()` misses; no `sent|unknown` row with `superseded_at IS NULL` for this `external_id` (the partial unique index is the real fence, the pre-check only gives a readable refusal); no `sent|unknown` row for `phone_tail` in the last 24 h; no `sent|unknown` row for `company_id` whose outcome is `open` or absent and younger than 90 d; `count(sent|unknown today) < PUSH_DAILY_CAP` (these three count only rows with `superseded_at IS NULL` and a different `external_id` — a rule-5 re-push is the same push, not a second one); Mon–Sat 09:30–17:30 Tashkent; `CRM_PUSH_ENABLED`; `sources.erp_sync.breaker_until` clear (05 §B.1; `/yoq crm` clears it by hand); `suppression_fresh()` true and no `salt_id` mismatch (§2.8).
 3. Claim: `INSERT push_log (status='sending', attempt=n)` and **commit before the HTTP call**.
-4. Response (05 §B.1 owns the mapping table; the scheme has **two levels**). Inside one attempt the POST is retried up to three times by `with_backoff(attempts=3, base=1.0, cap=8.0)` on 5xx/timeout/connection — safe because the ERP's replay fence answers a repeated `external_id` with `{ok:true}` and no second lead. Then: 2xx → `sent`, candidate → `pushed` (same transaction); 2xx with an unparseable body → `unknown`, `error='http_2xx_badbody'` (the nightly outcomes read settles it). 404 → `failed`, `error='http_404'`, `sources.erp_sync.breaker_until = now + 6 h`, `breaker_reason='push_404'`, health problem `push_404`, no retry. Still failing after the three tries → `failed`; the next **attempt** (`attempt+1`, identical body) may be claimed only after `ATTEMPT_DELAYS = {2: 5 min, 3: 30 min}`; after attempt 3 the candidate returns to `review` with note «CRM javob bermadi» (≤ 9 POSTs worst case). Other 4xx → `failed`, no retry, owner alert.
-5. Reconcile: a `sending` row older than 10 min becomes `unknown` (the request may have landed). `unknown` blocks the unique index exactly like `sent`; the nightly outcomes read promotes it to `sent` when the ERP shows the `external_id`, and raises `push_unconfirmed` after 48 h without one. Owner command `/push tekshir <external_id>` marks it `failed` so a new attempt can be claimed.
+4. Response (05 §B.1 owns the mapping table; the scheme has **two levels**). Inside one attempt the POST is retried up to three times by `with_backoff(attempts=3, base=1.0, cap=8.0)` **only when the ERP certainly did not land it**: the connection never opened (connect error, connect or pool timeout), or the ERP answered 5xx (its 503 `{"error":"unavailable"}` = nothing recorded, 05 §A.2). A read/write timeout, a read/write error or a protocol error ends the attempt as `unknown`, `error='timeout'`, with **no resend** — the first request may still be running (the ERP chains a second delivery behind it, but that one can time out too). Then: 2xx `{ok:true}` → `sent`, candidate → `pushed` (same transaction); 2xx with an unparseable body → `unknown`, `error='http_2xx_badbody'` (rule 5 settles it). 404 → `failed`, `error='http_404'`, `sources.erp_sync.breaker_until = now + 6 h`, `breaker_reason='push_404'`, health problem `push_404`, no retry. Still failing after the three tries → `failed`; the next **attempt** (`attempt+1`, identical body) may be claimed only after `ATTEMPT_DELAYS = {2: 5 min, 3: 30 min}`; after attempt 3 the candidate returns to `review` with note «CRM javob bermadi» (≤ 9 POSTs worst case). Other 4xx → `failed`, no retry, owner alert.
+5. Reconcile (`reconcile_job` every 10 min + the nightly outcomes walks, 05 §B.2): (a) a `sending` row older than 10 min becomes `unknown` (the request may have landed); (b) `unknown` blocks the unique index exactly like `sent`; any outcomes walk that shows its `external_id` — the 10-minute `unknown` walk (`since` = its `sent_at` − 10 min) or a nightly one — turns it `sent` (`http_status` stays as it was; the CHECK allows a NULL) and its candidate `approved → pushed`; (c) **the 48-hour rule**, run only when the feeds are configured and that night's `cursor` and `recent` walks both completed: a row with `status IN ('sent','unknown')`, `superseded_at IS NULL`, `sent_at` between now − 30 d and now − 48 h and **no `outcomes` row** — `sent` rows too, because the «Boshqa» fallback door answers 200 to a landing that threw (05 §B.3) and a pre-`aefbf278` build did the same on the agent door — raises `push_unconfirmed` (count) and, **at most once per `external_id`** (no superseded row for it yet), when `payload IS NOT NULL` and `attempt < 3`: `superseded_at = now()` on the row and `push_one(repush_of=row.id)` claims `attempt + 1` with the identical payload through the ordinary gate (suppression, freshness, breaker, window, `CRM_PUSH_ENABLED`; its `state='approved'` check reads `state IN ('approved','pushed')` for a re-push of the candidate's own `external_id` — a `sent` row's candidate is already `pushed`, which stays terminal). The ERP lands it (the first one was lost) or replays it (it was recorded but the feed cannot see it) — either is its answer. No outcome after another 48 h → no second re-push: an `approved` candidate goes to `review` with note «CRM tasdiqlamadi», a `pushed` one stays, and `push_unconfirmed` stays until `/push tekshir`; a row with `attempt = 3` or no payload is only flagged; (d) owner command `/push tekshir <external_id>` (06 §1.2) sets `superseded_at` on the delivered row — a 2xx row can never become `failed` under `ck_push_log_sent` — and runs the same `push_one(repush_of=…)` at once (refused when `attempt = 3`, when the payload is gone, or when the ERP already reported the id).
 6. `payload_sha256 = sha256(canonical JSON: sorted keys, no spaces)`. A retry re-sends the identical body; a different body under the same `external_id` in the same month is refused (the ERP keeps the first anyway).
-7. ERP-side replay (`same channel + external_id`) answers `{ok:true}` and writes no ledger row — so an accidental double send is harmless but never done on purpose.
+7. ERP-side replay (`same channel + external_id`, once the first delivery FINISHED, whatever its outcome) answers `{ok:true}` and writes no ledger row; a second delivery that arrives while the first is still running waits for it inside the ERP's one process and is then that replay (05 §A.2). So an accidental double send is harmless, but the agent never sends one on purpose (rule 4: no resend after a read timeout).
 
-### 2.11 `outcomes` — what the ERP did with each push (snapshot, upserted nightly)
+### 2.11 `outcomes` — what the ERP did with each push (snapshot, upserted by the outcomes walks)
 
 ```sql
 CREATE TABLE outcomes (
   external_id      text PRIMARY KEY,
-  intake_id        uuid NOT NULL,                         -- ERP lead_intakes.id
+  intake_id        uuid NOT NULL,                         -- ERP lead_intakes.id (a uuid: the ERP's outcomes cursor is keyed on it, 05 §A.6)
   candidate_id     uuid REFERENCES lead_candidates(id) ON DELETE SET NULL,
   company_id       uuid REFERENCES companies(id) ON DELETE SET NULL,
   source_key       text REFERENCES sources(key),          -- copied from the candidate for precision
-  landing          text NOT NULL CHECK (landing IN ('created','joined','client','dropped')),
-  landing_reason   text,                                  -- replay|capped|no_contact|suppressed|… (ERP free text)
+  landing          text NOT NULL CHECK (landing IN ('created','joined','client','dropped')),   -- the feed's `outcome`
+  landing_reason   text,                                  -- the feed's `reason`: suppressed|capped|no_phone|no_contact for dropped, NULL otherwise (a replay writes no ERP row, so never 'replay')
   lead_id          uuid,
   client_id        uuid,
   stage_kind       text CHECK (stage_kind IN ('open','won','lost')),
   stage_name       text,
-  lost_reason      text,
+  lost_reason      text,                                  -- only a LABEL (the owner's dictionary or agent_no_contact_reasons), ≤ 200; a seller's free text arrives as NULL (05 §A.9)
+  no_contact       boolean NOT NULL DEFAULT false,        -- 0002_erp_contract: the ERP's own «lost with a listed no-contact reason»
   closed_at        timestamptz,
   contacted_at     timestamptz,
   contact_kind     text CHECK (contact_kind IN ('call','telegram','note','stage','followup')),
   quoted_volume_m3 numeric(12,3),
-  erp_at           timestamptz NOT NULL,                  -- the feed row's `at`
+  erp_at           timestamptz NOT NULL,                  -- the feed row's `at` (milliseconds)
   label            text NOT NULL CHECK (label IN ('won','contacted_open','open_untouched','stale_open',
                      'lost_no_contact','lost_price','lost_not_importer','lost_small','lost_wrong_number',
                      'lost_competitor','lost_other','landed_client','landed_joined',
@@ -678,7 +680,7 @@ CREATE TABLE outcomes (
   label_changed_at timestamptz NOT NULL DEFAULT now(),
   first_read_at    timestamptz NOT NULL DEFAULT now(),
   read_at          timestamptz NOT NULL DEFAULT now(),
-  raw              jsonb NOT NULL                          -- the feed row verbatim (contract: no name/phone/note in it)
+  raw              jsonb NOT NULL                          -- the feed row verbatim: exactly the 15 fields of 05 §A.9, no name/phone/note
 );
 CREATE INDEX ix_outcomes_source_first_read ON outcomes (source_key, first_read_at);
 CREATE INDEX ix_outcomes_company ON outcomes (company_id);
@@ -686,34 +688,77 @@ CREATE INDEX ix_outcomes_label   ON outcomes (label);
 CREATE INDEX ix_outcomes_candidate ON outcomes (candidate_id);
 ```
 
-**Label derivation** (`services/outcomes.derive_label`, pure; patterns are one dict `LOST_REASON_PATTERNS`, lower-cased `re.search`, flag `u`; `NO_CONTACT_REASONS` mirrors the ERP setting `agent_no_contact_reasons`, `;`-split, trimmed, lower-cased):
+Rows are written only for an `external_id` the agent pushed (a `push_log` row exists); the feed's
+other rows — the permanent «Boshqa» clause lets any holder of that key post `cs:` ids — are counted as
+`foreign` and dropped (05 §B.2). `candidate_id`, `company_id`, `source_key` come from that
+`push_log` row.
+
+**Label derivation** (`services/outcomes.derive_label`, pure; patterns are one dict
+`LOST_REASON_PATTERNS`, lower-cased `re.search`, flag `u`). There is **no `NO_CONTACT_REASONS`
+mirror**: the ERP answers `no_contact` itself, so the agent keeps no copy of the setting.
 
 ```python
-def derive_label(row: FeedRow, now: datetime) -> tuple[Label, PrecisionClass]:
-    if row.landing == "client":                          return "landed_client", "neutral"      # + suppression(client) for push_log.phone_tail
-    if row.landing == "dropped":
+def derive_label(row: FeedRow, *, pushed_at: datetime, now: datetime) -> tuple[Label, PrecisionClass]:
+    # pushed_at = sent_at of the push_log row that delivered this external_id (never row.at: `at`
+    # moves on any touch of the lead — a board re-order, an owner change, a joined landing)
+    if row.outcome == "client":                          return "landed_client", "neutral"      # fallback door only (05 §A.3)
+    if row.outcome == "dropped":
         if row.reason == "capped":                       return "dropped_capped", "neutral"     # eligible again next month
-        if row.reason == "suppressed":                   return "dropped_suppressed", "neutral" # our list was stale -> full pull
-        return "dropped_other", "neutral"
-    if row.stage_kind == "won" or row.client_id:         return "won", "positive"
+        if row.reason == "suppressed":                   return "dropped_suppressed", "neutral" # the ERP belt refused this phone
+        return "dropped_other", "neutral"                                                       # no_phone | no_contact | anything new
+    if row.stage_kind == "won":                          return "won", "positive"               # NOT client_id: it stays set on a lead revived from won
     if row.stage_kind == "lost":
-        r = (row.lost_reason or "").strip().lower()
-        if r in NO_CONTACT_REASONS:                      return "lost_no_contact", "negative"   # + suppression(lost) — also arrives via the feed
+        if row.no_contact:                               return "lost_no_contact", "negative"
+        r = " ".join((row.lost_reason or "").split()).lower()     # a label or "" (free text never leaves the ERP)
         for label, pat in LOST_REASON_PATTERNS.items():  # lost_price: narx|цена|qimmat|дорог ; lost_not_importer: import qilmaydi|не импорт|xitoy emas
             if pat.search(r):                            # lost_small: hajm|kichik|мал ; lost_wrong_number: raqam|номер|noto.g.ri
                 return label, PRECISION[label]           # lost_competitor: kargo|cargo|konkurent|конкурент
         return "lost_other", "neutral"
-    if row.landing == "joined" and row.stage_kind == "open" and not row.contacted_at:
-                                                         return "landed_joined", "neutral"
+    # open, or no stage (a lead the ERP removed): the contact decides
     if row.contacted_at:
         return "contacted_open", ("positive" if now - row.contacted_at >= timedelta(days=14) else "pending")
-    return ("stale_open", "neutral") if now - row.at >= timedelta(days=30) else ("open_untouched", "pending")
+    if row.outcome == "joined":                          return "landed_joined", "neutral"
+    return ("stale_open", "neutral") if now - pushed_at >= timedelta(days=30) else ("open_untouched", "pending")
 
 PRECISION = {"lost_price": "neutral", "lost_not_importer": "negative", "lost_small": "negative",
              "lost_wrong_number": "negative", "lost_competitor": "negative"}
 ```
 
-Side effects of a label change (same transaction as the upsert): `lost_wrong_number` → `suppression(bounced|cooldown)` on `push_log.phone_tail` (×2 rule); `lost_competitor` → `companies.is_competitor=true`; `lost_not_importer` → `suppression(cooldown, 365 d, company_id)`; `lost_price` → `suppression(cooldown, 180 d, company_id)`; `won` and `landed_client` → `companies.state='client'` + a **local** `suppression(client, key_type='phone_tail', key=push_log.phone_tail, source='outcomes')` row at once — the ERP feed brings the hashed `phone_hash` row for the same phone a day later (05 §B.2), so the phone is never carded again even while the feed lags. `source_precision_job`: `precision_30d = positives / (positives + negatives)` over outcomes whose `first_read_at` is within 30 d, ignoring `pending`/`neutral`, per `source_key`. W/R: `feedback_job` / `source_precision_job`, `/holat`, `tools/fit_weights.py`.
+What the inputs mean (05 §A.4, §A.9): `contacted_at` is stamped for an agent arrival for 90 days
+after it arrived, so `stale_open` (30 d) really means «nobody the ERP can see called»; for a
+fallback (`other`) push the look-back is 7 days, so after day 7 it means «unknown». A `joined` push
+into a conversation contacted in the last 24 h never gets a `contacted_at` (it lands
+`landed_joined`). A `joined` row may also be the agent's own orphan lead (a 503 half-way, then the
+retry joined it, 05 §A.2) — nothing here reads `joined` as «a person already had this company».
+Before the owner keeps a lost-reason dictionary every `lost_reason` is NULL, so lost rows are
+`lost_no_contact` or `lost_other`; the regex classes match dictionary labels only.
+
+**Side effects are derived, not appended** (`services/outcomes.apply_effects(session, company_id)`,
+same transaction as the upsert, run for every company a page touched). The desired set is computed
+from the company's CURRENT labels over all its `outcomes` rows; the company's
+`suppression(source='outcomes')` rows (found by `reason LIKE 'outcome:%' OR reason LIKE 'erp_belt:%'`
+with an `external_id` of that company) that are not in the set are deleted, missing ones inserted:
+
+| Label | Desired rows / flags |
+|---|---|
+| `won`, `landed_client` | `suppression(client, phone_tail = push_log.phone_tail, reason='outcome:<external_id>')`; `companies.state='client'` — the ERP feed brings the hashed `phone_hash` row for the same phone a day later (05 §B.2), so the phone is never carded again even while the feed lags |
+| `dropped_suppressed` | `suppression(client, phone_tail, reason='erp_belt:<external_id>')` — the ERP refused this phone: a stale feed copy, or a 7–8-digit card the feed can never carry (05 §A.8); no `companies.state` change (the belt does not say client or lost); health problem `suppression_stale_hit`, cleared by the next completed full pull |
+| `lost_no_contact` | `suppression(lost, …)` on the pushed `phone_tail` and the company's `tg_username`, `instagram`, `domain`, `stir`, `reason='outcome:<external_id>'` (the ERP suppresses by phone only) |
+| `lost_price` / `lost_not_importer` | `suppression(cooldown, company_id, expires_at = label_changed_at + 180 d / 365 d)` |
+| `lost_wrong_number` | `suppression(bounced)` or `suppression(cooldown)` on `push_log.phone_tail` (×2 rule, §2.8) |
+| `lost_competitor` | `companies.is_competitor = true` |
+
+**Retractions** follow from the recompute: a lead revived out of `lost` in the ERP (it also leaves the
+ERP's suppression set at the next full pull, 05 §A.13), a reason changed to another label, or a lead
+moved from won back to open drops the rows that label justified — the ERP's decision to work it
+again is the truth for its own labels. `companies.state` returns from `client` to its previous state
+(`active` unless excluded) only when no `client` row for the company remains from any source. Kept
+stricter **on purpose**, never retracted by an outcome: `bounced` (a wrong number is a fact about
+the number), `companies.is_competitor` (the owner clears it by hand), every row a person wrote
+(`dnc`, `legal`, `manager_veto`, `b2c`) and every `erp_feed` / `manual_import` row (their own syncs
+own them). `source_precision_job`: `precision_30d = positives / (positives + negatives)` over outcomes
+whose `first_read_at` is within 30 d, ignoring `pending`/`neutral`, per `source_key`. W/R: `erp_sync`
+outcomes walks / `source_precision_job`, `/holat`, `tools/fit_weights.py`.
 
 ### 2.12 `interactions`, `chat_monitors` — the Telegram reader
 
@@ -940,6 +985,7 @@ CREATE TRIGGER trg_scoring_weights_frozen BEFORE UPDATE OR DELETE ON scoring_wei
 - `alembic/env.py` = MIYA's minus the pgvector `render_item`; imports `clientscrapper.db.models` to populate `Base.metadata`; `compare_type=True, compare_server_default=True`. `alembic.ini` as MIYA (ruff post-write hook, URL from settings). The compose `init` service runs `alembic upgrade head`; `worker`, `bot`, `userbot` `depends_on: init: condition: service_completed_successfully`.
 - **`0001_initial`** (`revision="0001_initial"`, `down_revision=None`): `upgrade()` in this order — extension `pg_trgm`; functions (`cs_phone_tail`, `cs_username_key`, `cs_domain_key`, `cs_touch_updated_at`, `cs_append_only`, `cs_scoring_weights_frozen`); tables exactly in the order of §2 (`sources, collector_runs, evidence, companies, company_aliases, company_ids, contacts, observations, model_jobs, signals, scoring_weights, suppression, lead_candidates, lead_reviews, push_log, outcomes, interactions, chat_monitors, heartbeats, usage_log, reminder_log, runtime_flags, merge_log, purge_log, sheet_rows` — 25 tables; `runtime_flags`, `companies.dup_of/dup_score`, `lead_reviews.kind`, `chat_monitors.status/priority`, `evidence.meta`, `interactions.fwd_from_peer_id` are day-1 columns, not a `0002`); triggers; `op.bulk_insert` of the 23 `sources` rows (§2.1) and the 26 `scoring_weights` version-1 rows (`proposed_by='seed'`, `approved_by='seed'`, `approved_at=now()`). `downgrade()` drops in reverse, then functions, then the extension. The migration carries its own frozen tuples (CHECK lists) — `tests/test_enums_frozen.py` compares them with `db/enums.py`.
 - Later migrations: `000N_<slug>.py`, one concern each; widening a CHECK = `op.drop_constraint` + `op.create_check_constraint` with the new tuple, plus the tuple change in `enums.py` in the same commit; new source = a data migration inserting the `sources` row; new weight version = never a migration (runtime through `/vazn` or `fit_weights`).
+- **`0002_erp_contract`** (T-10, the first task that needs it; 05 §B.2, 2026-10-24 «T-07 as built»): `outcomes.no_contact boolean NOT NULL DEFAULT false`; `push_log.superseded_at timestamptz`; `ux_push_log_delivered` dropped and recreated `WHERE status IN ('sent','unknown') AND superseded_at IS NULL`. Additive only; `0001_initial` is not edited (T-02 shipped it). The DDL blocks of §2.10/§2.11 show the state after `0002`, marked in their comments; `test_migrations`/`compare_metadata` run against head.
 - `tests/test_migrations.py` (needs postgres; skips loudly, never silently): on an empty scratch database `upgrade head`, then `alembic.autogenerate.compare_metadata(ctx, Base.metadata) == []`, then `downgrade base` leaves zero tables in `public`, then `upgrade head` again.
 
 ## 6. SQLAlchemy layout
@@ -1014,7 +1060,7 @@ Follow-on rows the `won` label produces (same transaction as the upsert, §2.11)
 2. The agent's own DNC phones are stored as plain `phone_tail` (needed for lookups without the ERP secret). The legal memo prefers hashes; a peppered hash needs one more secret (`SUPPRESSION_PEPPER`) outside the agreed env list. Decide: (a) plain tail-9 in v1 — recommended, the table never leaves the server; (b) peppered hash.
 3. `outcomes` is a snapshot. Keep a history table (one row per label change) for weight fitting, or is `label_changed_at` enough for v1?
 4. `lost_price` cooldown 180 d and `lost_not_importer` 365 d — owner to confirm the two windows.
-5. ERP feed id types (`intake_id`, `lead_id`, `client_id`) are assumed uuid strings — UNVERIFIED until `/api/agent/outcomes` ships on `agent-feed`.
+5. ~~ERP feed id types~~ — resolved (2026-10-24): `intake_id`, `lead_id`, `client_id` are uuid strings (`agent-feed.ts` casts each `::text`; the outcomes cursor refuses a non-uuid id; captured in `tests/fixtures/erp/outcomes.json`).
 6. Evidence directory backup: excluded from `pg_dump` backups by design; is a weekly `restic` copy wanted (≈ 1–3 GB/year)?
 7. Is the Sheets mirror (`sheet_rows`) part of v1 or dropped from `0001`?
 8. May `MANAGER_TELEGRAM_IDS` answer review cards (`lead_reviews.by_telegram_id` ≠ owner), or owner only in v1?
@@ -1026,8 +1072,8 @@ Follow-on rows the `won` label produces (same transaction as the upsert, §2.11)
 3. `tests/test_keys.py`: Python `phone_tail/username_key/domain_key` agree with `cs_*` SQL functions on ≥ 40 fixtures (Cyrillic, `t.me/`, `www.`, IDN, bots, short numbers).
 4. Constraint tests, each shown red by dropping the constraint in a string-edited copy: second live person-tier contact per company refused; person-tier row without `legal_basis/source_url/collected_at` refused; `full_name` containing a 14-digit run refused; two `sent|unknown` rows for one `external_id` refused; a `push_log` row with `http_status=200` and `status='failed'` refused while `status='unknown'` is accepted; a second live `kind='manager'` review for one candidate refused while a live `kind='owner'` one beside it is accepted; a `chat_monitors` row `status='joined'` with `joined_at` NULL refused; `pushed` candidate without `external_id` refused; `phone_hash` suppression without `salt_id` refused; `excerpt` > 600 refused; `interactions` row with empty `prefilter_hit` refused; `UPDATE scoring_weights SET points` on an approved version refused; `DELETE FROM push_log` refused.
 5. `tests/test_candidate_states.py` and `tests/test_review_states.py` enumerate `TRANSITIONS`; every illegal move raises; `ux_lead_candidates_open` refuses a second open candidate per company.
-6. `tests/test_push_idempotency.py` against a fake ERP: crash between claim and response leaves `sending` → reconciled to `unknown` → no second send; 404 trips `sources.erp_sync.breaker_until`; 5xx: three in-attempt tries, then `failed`, then ≤ 3 attempts with the same `payload_sha256` after the 05 §B.1 delays; a timeout on the first try followed by a 2xx on the resend lands as attempt 1 `sent` with one intake in the fake ERP; a 2xx with an unparseable body lands as `unknown`; a different body under the same `external_id` is refused.
-7. `tests/test_outcomes_labels.py`: `derive_label` table-driven over all 16 labels, including the 14-day and 30-day boundaries in Asia/Tashkent; side effects (`suppression(client, phone_tail, source='outcomes')` for both `won` and `landed_client`, `bounced ×2`, `is_competitor`) asserted.
+6. `tests/test_push_idempotency.py` against a fake ERP: crash between claim and response leaves `sending` → reconciled to `unknown` → no second send; 404 trips `sources.erp_sync.breaker_until`; 5xx: three in-attempt tries, then `failed`, then ≤ 3 attempts with the same `payload_sha256` after the 05 §B.1 delays; a read timeout lands as `unknown` with ONE POST (no resend inside the attempt) and the fake's late landing then promotes it to `sent`; a 503 is retried inside the attempt and lands once; a 2xx with an unparseable body lands as `unknown`; a `sent` row with no outcome after 48 h is superseded and re-pushed exactly once (rule 5) and a second 48 h re-pushes nothing; `/push tekshir` on a 2xx row supersedes it (never `failed`); a different body under the same `external_id` is refused.
+7. `tests/test_outcomes_labels.py`: `derive_label` table-driven over all 16 labels, including the 14-day boundary on `contacted_at` and the 30-day boundary on `pushed_at` (not `at`) in Asia/Tashkent, `no_contact` deciding `lost_no_contact`, `stage_kind='won'` deciding `won` (a revived lead with `client_id` set is not won), every `dropped` reason; `apply_effects` (`suppression(client, phone_tail, source='outcomes')` for `won`, `landed_client` and `dropped_suppressed`, `lost` rows on every key for `lost_no_contact`, `bounced ×2`, `is_competitor`) asserted, and the retractions: a revived lost lead, a won lead moved back to open and a changed label each remove exactly the rows their old label justified, while `bounced`, `is_competitor` and person-written rows stay; a feed row whose `external_id` has no `push_log` row writes nothing.
 8. `tests/test_retention.py` on fixtures aged by string-edited timestamps: R1 removes the file and keeps the row; R2a deletes an unconverted post at 31 d and keeps a converted one; R2b nulls text at 91 d; R3 scrubs `phones`/`person` and, for `kind='intent_post'`, `handles.telegram`/`tg_user_id` (a `directory_entry`'s `handles.telegram` stays); R4b nulls a `maps_google` phone at 31 d when no push used it and keeps one a `sent` push used; R4 anonymises the person-tier contact at 91 d after an untouched push and leaves the company-tier row; every step writes a `purge_log` row.
 9. `tests/test_pii_columns.py` and `tests/test_fk_indexes.py` pass over `Base.metadata`; `tests/test_pseudonymised_requests.py` finds no raw phone or handle in `model_jobs.request`.
 10. `tests/fixtures/example_flow.sql` loads §8 rows 1–6; `tests/test_example_flow.py` drives score → review → approve → push (fake ERP) → outcomes upsert and ends with `outcomes.label='won'`, `companies.state='client'`, one local `suppression(client, phone_tail, source='outcomes')` row (no feed pull runs in the test).
@@ -1059,3 +1105,12 @@ Review of 2026-10-23 (`REVIEW-2026-10-23.md`), items applied to this file:
 - **38** — §2.12 `chat_monitors.role` gains `calibration` (`monitor_enabled=false`, nothing read).
 
 Not applied here (other files' homes): 10, 13, 14, 18, 19 (02's `/dnc`, `/vazn`, `/push tekshir`, `/stir` mentions already match 06 §1.2), 20 (02's `config.outcomes.{cursor,last_at}` already equals 05's), 22, 24, 26 (§8's 82 = 30+20+12+10+10+0 is consistent), 27 (02 already says 90 d / 24 h), 28, 29, 31, 34, 35, 36.
+
+**T-07 as built (2026-10-24)** — the ERP side shipped on fullprompt `agent-feed` at `23fe1736` (05 Part A); this file now matches what it sends:
+
+- §2.11 `outcomes`: new column `no_contact` (the ERP's own answer); `landing_reason` is `suppressed|capped|no_phone|no_contact` (never `replay`); `lost_reason` holds a label only; `raw` = the 15 fields. Rows only for `external_id`s the agent pushed (`foreign` rows dropped).
+- §2.11 `derive_label`: takes `pushed_at` (the delivering `push_log.sent_at`) — `stale_open` no longer ages on `at`; `won` from `stage_kind` only (not `client_id`); `lost_no_contact` from `no_contact` (the `NO_CONTACT_REASONS` mirror is gone); contact checked before `landed_joined`; the 90-day / 7-day contact horizons and the orphan `joined` stated.
+- §2.11 side effects are recomputed per company from current labels (`apply_effects`), which gives retractions — a revived lost lead, a won lead moved back to open, a changed label — and lists what stays stricter on purpose (`bounced`, `is_competitor`, person-written rows, feed and import rows). `dropped_suppressed` now leaves a local `phone_tail` row (the 7–8-digit card the feed cannot carry).
+- §2.8: the `client` kind's third outcomes origin (`dropped_suppressed`), the `reason` tags; feed sync = full pull from nothing (`limit=5000`, no `since`/`cursor`) as the only deleting walk, ≥ 90 % against the previous full pull's own count, delta anchored on the ERP's `generated_at`; no feed call during the fallback.
+- §2.10: `push_log.superseded_at` and the narrowed `ux_push_log_delivered`; rule 2 ignores superseded and same-`external_id` rows; rule 4 retries in an attempt only when nothing reached the ERP or it answered 5xx (503 = nothing recorded), a read timeout is `unknown` with no resend; rule 5 adds the 10-minute `unknown` walk, the 48-hour rule over `sent` and `unknown` rows with one re-push, and `/push tekshir` superseding instead of `failed` (which `ck_push_log_sent` forbids on a 2xx row — a latent clash in the previous text); rule 7 states the ERP's in-flight chain.
+- §5: migration `0002_erp_contract` (T-10) carries the two columns and the index; `0001` untouched. §9 Q5 resolved (uuid strings). AC 6 and 7 restated.
