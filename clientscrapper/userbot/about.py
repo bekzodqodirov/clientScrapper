@@ -11,7 +11,9 @@ to read, within the day's caps, and keeps what was read:
   ``https://t.me/s/<username>`` under ``telegram_monitor`` (03 §2.3), from
   which T-14's collector makes the ``profile`` observation. Read for the
   queued rows E3 found (priority 3) first, then for the chats the reader sits
-  in; ≤ ABOUT_CHANNELS_PER_DAY (20) a day;
+  in; ≤ ABOUT_CHANNELS_PER_DAY (20) a day. The companion groups it names
+  (``companion_handles`` — not every @mention: a bare one is usually the
+  admin's own account) wait for resolution at priority 2;
 * a poster's bio goes into ``interactions.sender_bio`` (≤ 300 characters,
   person-tier, cleared by retention at 90 d) for the tout filter; ≤ 50 a day,
   and a bio read in the last 30 days is copied rather than read again. An
@@ -33,9 +35,14 @@ from typing import Any, Final
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from clientscrapper.collectors.keywords import (
+    COMPANION_HANDLE_STEMS,
+    COMPANION_RE,
+    TG_RE,
+)
 from clientscrapper.db.models import ChatMonitor, Evidence, Interaction
 from clientscrapper.services import chats, evidence
-from clientscrapper.services.normalise import telegram_handles
+from clientscrapper.services.normalise import telegram_key
 from clientscrapper.services.text import storable
 from clientscrapper.userbot import limits, tg
 
@@ -91,6 +98,26 @@ async def read_about(client: Any, target: Any, *, kind: str) -> About:
     raise ValueError(f"unknown about kind: {kind!r}")
 
 
+def companion_handles(text: str) -> list[str]:
+    """The handles ``text`` names as a companion «xaridorlar/buyers» group
+    (03 §2.3), in order: a ``TG_RE`` mention introduced by a group word
+    (``COMPANION_RE``) between it and the previous mention or the line start
+    — «Xaridorlar guruhi: @…» — or whose own name says so («@…_xaridorlar»).
+    «Murojaat uchun: @…» names a person, usually the admin, and is not one."""
+    found: list[str] = []
+    previous = 0
+    for match in TG_RE.finditer(text):
+        start = max(previous, text.rfind("\n", 0, match.start()) + 1)
+        previous = match.end()
+        name = telegram_key(match.group(0))
+        if name is None or name in found:
+            continue
+        said = COMPANION_RE.search(text[start : match.start()]) is not None
+        if said or any(stem in name for stem in COMPANION_HANDLE_STEMS):
+            found.append(name)
+    return found
+
+
 def about_body(monitor: ChatMonitor, about: About, *, read_at: datetime) -> bytes:
     """The evidence bytes: what the channel says, as JSON for T-14's parser."""
     payload = {
@@ -128,7 +155,7 @@ async def store_about(
         title=monitor.title,
         meta={"kind": "telegram_about"},
     )
-    mentioned = telegram_handles("\n".join(t for t in (about.text, about.pinned) if t))
+    mentioned = companion_handles("\n".join(t for t in (about.text, about.pinned) if t))
     companions = [name for name in mentioned if name != monitor.username]
     for name in companions[:COMPANIONS_PER_CHAT]:
         await chats.enqueue_username(

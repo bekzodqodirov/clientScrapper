@@ -13,7 +13,7 @@ from typing import Any, Final
 
 from telethon import errors
 from telethon import utils as tg_utils
-from telethon.tl.types import Channel, Chat, User
+from telethon.tl.types import Channel, Chat, InputPeerChannel, User
 
 from clientscrapper.services.chats import DialogInfo
 from clientscrapper.services.keys import username_key
@@ -110,6 +110,20 @@ def chat_type_of(entity: object) -> str:
 def peer_id(entity: object) -> int:
     """The marked peer id (``-100…`` for channels), as a message's chat_id."""
     return int(tg_utils.get_peer_id(entity))
+
+
+def access_hash_of(entity: object) -> int | None:
+    """The access hash Telegram gave this account for a channel (or a user)."""
+    value = getattr(entity, "access_hash", None)
+    return value if isinstance(value, int) else None
+
+
+def input_channel(tg_chat_id: int, access_hash: int) -> InputPeerChannel:
+    """A channel or supergroup by its marked id and access hash: how a chat
+    with no public username is found again after a restart, when the session
+    string has cached nothing (StringSession keeps the auth key only)."""
+    bare, _ = tg_utils.resolve_id(tg_chat_id)
+    return InputPeerChannel(channel_id=bare, access_hash=access_hash)
 
 
 def dialog_of(entity: object) -> DialogInfo:

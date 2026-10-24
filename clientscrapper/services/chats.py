@@ -23,6 +23,7 @@ Telethon-free: the worker and the owner bot use this module too (06 §5.2 — no
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
@@ -94,7 +95,19 @@ BACKFILL_MAX_ATTEMPTS: Final = 3
 BACKFILL_AFTER: Final = timedelta(hours=24)
 
 PENDING_FLAG: Final = "tg_pending"
+# How to find a linked discussion group with no public username again (see
+# remember_linked): {"<tg_chat_id>": {"access_hash", "parent", "at"}}.
+LINKED_FLAG: Final = "tg_linked"
 UPDATED_BY: Final = "userbot"
+# A name that resolved to nothing is not tried again for this long; then once
+# more (a seed may be registered later, a channel may come back).
+UNRESOLVABLE_KEEP: Final = timedelta(days=30)
+# The resolve's reason for a name that is a person, a bot or a private chat:
+# remembered as a hash only — a person's handle has no place in the reader's
+# queue (06 §5.1).
+NOT_A_CHAT: Final = "not_a_public_chat"
+# 03 §2.3: a channel silent this long is not queued.
+SILENT_AFTER: Final = timedelta(days=90)
 
 
 @dataclass(frozen=True, slots=True)
@@ -293,6 +306,35 @@ async def sync_dialogs(
             updated += 1
     await session.flush()
     return created, updated
+
+
+async def mark_left(
+    session: AsyncSession, listed: Iterable[int], *, listed_at: datetime
+) -> int:
+    """The chats the account sat in and a complete dialog list no longer
+    shows: the owner left them by hand (06 §2 — the agent never leaves).
+    They become ``left`` — not read, not backfilled, off the 60-chat cap —
+    and a re-join puts them back (``sync_dialogs``). A chat with a message
+    seen since the list was asked for is still the account's. Call it only
+    after the whole list was read; an empty list changes nothing. Returns how
+    many rows were marked."""
+    ids = set(listed)
+    if not ids:
+        return 0
+    result = await session.execute(
+        sa.update(ChatMonitor)
+        .where(
+            ChatMonitor.status == "joined",
+            ChatMonitor.tg_chat_id.not_in(ids),
+            sa.or_(
+                ChatMonitor.last_seen_at.is_(None),
+                ChatMonitor.last_seen_at < listed_at,
+            ),
+        )
+        .values(status="left")
+        .execution_options(synchronize_session=False)
+    )
+    return int(getattr(result, "rowcount", 0) or 0)
 
 
 async def enqueue_chat(
@@ -510,6 +552,83 @@ async def _locked_flag(session: AsyncSession, key: str) -> RuntimeFlag:
     return row
 
 
+async def remember_linked(
+    session: AsyncSession,
+    tg_chat_id: int,
+    *,
+    access_hash: int,
+    parent: str | None,
+    now: datetime,
+) -> None:
+    """How to find a queued linked discussion group again. One with no public
+    username is found only by its id and the access hash Telegram gave this
+    account, which arrive with the parent's full channel and live in
+    Telethon's memory: the session string keeps no entities, so a restart
+    would leave the row queued for ever. Kept until the group is joined or
+    gone (``forget_linked``)."""
+    flag = await _locked_flag(session, LINKED_FLAG)
+    value = dict(flag.value) if isinstance(flag.value, Mapping) else {}
+    value[str(tg_chat_id)] = {
+        "access_hash": int(access_hash),
+        "parent": parent,
+        "at": now.isoformat(),
+    }
+    flag.value = value
+    flag.updated_by = UPDATED_BY
+    await session.flush()
+
+
+async def linked_access_hash(session: AsyncSession, tg_chat_id: int) -> int | None:
+    """The access hash remembered for a queued linked group, else None."""
+    flag = await session.get(RuntimeFlag, LINKED_FLAG, populate_existing=True)
+    value = flag.value if flag is not None else None
+    item = value.get(str(tg_chat_id)) if isinstance(value, Mapping) else None
+    found = item.get("access_hash") if isinstance(item, Mapping) else None
+    return found if isinstance(found, int) else None
+
+
+async def forget_linked(session: AsyncSession, tg_chat_id: int) -> None:
+    """The linked group was joined or is gone: nothing more to find."""
+    flag = await session.get(RuntimeFlag, LINKED_FLAG, populate_existing=True)
+    if flag is None or not isinstance(flag.value, Mapping):
+        return
+    if str(tg_chat_id) not in flag.value:
+        return
+    flag = await _locked_flag(session, LINKED_FLAG)
+    value = dict(flag.value) if isinstance(flag.value, Mapping) else {}
+    value.pop(str(tg_chat_id), None)
+    flag.value = value
+    flag.updated_by = UPDATED_BY
+    await session.flush()
+
+
+def _hashed(username: str) -> str:
+    """How a name that is not a chat is remembered: never as itself."""
+    return "#" + hashlib.sha256(f"{PENDING_FLAG}:{username}".encode()).hexdigest()[:20]
+
+
+def _is_unresolvable(username: str, gone: Mapping[str, Any]) -> bool:
+    return username in gone or _hashed(username) in gone
+
+
+def _fresh_unresolvable(gone: Mapping[str, Any], *, now: datetime) -> dict[str, Any]:
+    """The unresolvable names still inside UNRESOLVABLE_KEEP."""
+    kept: dict[str, Any] = {}
+    for key, item in gone.items():
+        at = item.get("at") if isinstance(item, Mapping) else None
+        try:
+            when = datetime.fromisoformat(at) if isinstance(at, str) else None
+        except ValueError:
+            when = None
+        if (
+            when is not None
+            and when.tzinfo is not None
+            and now - when < UNRESOLVABLE_KEEP
+        ):
+            kept[key] = item
+    return kept
+
+
 def _pending_state(value: Any) -> tuple[dict[str, Any], dict[str, Any]]:
     value = value if isinstance(value, Mapping) else {}
     names = value.get("names")
@@ -528,18 +647,28 @@ async def enqueue_username(
     role: str = "market",
     now: datetime,
     by: str,
+    last_post_at: datetime | None = None,
 ) -> bool:
     """Put a username in line for resolution (the joiner resolves ≤ 20 a day).
     True when it was added. A name already a chat, already waiting, or known
-    to resolve to nothing is not added again; the calibration chat never is."""
+    to resolve to nothing is not added again; the calibration chat never is.
+
+    ``last_post_at`` is the newest post date of the channel's public page
+    ``https://t.me/s/<username>``, read by the caller through ``Fetcher``
+    (03 §2.3 — the reader fetches no page): a channel silent more than
+    SILENT_AFTER (90 days) is not queued. None = no page was read (E3 queues
+    a name whose page is empty, 04 §3)."""
     username = username_key(raw)
     if username is None or username in CALIBRATION_USERNAMES or role not in CHAT_ROLES:
+        return False
+    if last_post_at is not None and now - last_post_at > SILENT_AFTER:
         return False
     if await by_username(session, username) is not None:
         return False
     flag = await _locked_flag(session, PENDING_FLAG)
     names, gone = _pending_state(flag.value)
-    if username in gone:
+    gone = _fresh_unresolvable(gone, now=now)
+    if _is_unresolvable(username, gone):
         return False
     current = names.get(username)
     if isinstance(current, Mapping) and int(current.get("priority", 9)) <= priority:
@@ -557,13 +686,18 @@ async def enqueue_username(
 
 
 async def pending_usernames(
-    session: AsyncSession, *, seeds: Iterable[Seed] = SEEDS, limit: int
+    session: AsyncSession,
+    *,
+    seeds: Iterable[Seed] = SEEDS,
+    limit: int,
+    now: datetime,
 ) -> list[Pending]:
     """What waits to be resolved, best priority first: the queued usernames,
     then the seeds no row knows yet, in their order. Names already a chat or
-    known to resolve to nothing are left out."""
+    known (within UNRESOLVABLE_KEEP) to resolve to nothing are left out."""
     flag = await session.get(RuntimeFlag, PENDING_FLAG, populate_existing=True)
     names, gone = _pending_state(flag.value if flag is not None else None)
+    gone = _fresh_unresolvable(gone, now=now)
     order: list[tuple[int, int, Pending]] = []
     for index, (username, item) in enumerate(names.items()):
         if isinstance(item, Mapping):
@@ -590,7 +724,11 @@ async def pending_usernames(
             )
         )
     )
-    found = [p for _, _, p in order if p.username not in known and p.username not in gone]
+    found = [
+        p
+        for _, _, p in order
+        if p.username not in known and not _is_unresolvable(p.username, gone)
+    ]
     return found[:limit]
 
 
@@ -602,13 +740,16 @@ async def forget_pending(
     unresolvable: str | None = None,
 ) -> None:
     """A waiting username is done: resolved into a row, or (``unresolvable``
-    names why) never to be tried again — a seed that is not a chat is
-    remembered here, or it would cost a resolve every day."""
+    names why) not to be tried again for UNRESOLVABLE_KEEP — a seed that is
+    not a chat is remembered here, or it would cost a resolve every day. A
+    name that is a person (NOT_A_CHAT) is remembered by its hash only."""
     flag = await _locked_flag(session, PENDING_FLAG)
     names, gone = _pending_state(flag.value)
+    gone = _fresh_unresolvable(gone, now=now)
     names.pop(username, None)
     if unresolvable is not None:
-        gone[username] = {"reason": unresolvable, "at": now.isoformat()}
+        key = _hashed(username) if unresolvable == NOT_A_CHAT else username
+        gone[key] = {"reason": unresolvable, "at": now.isoformat()}
     flag.value = {"names": names, "unresolvable": gone}
     flag.updated_by = UPDATED_BY
     await session.flush()

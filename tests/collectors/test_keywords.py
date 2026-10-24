@@ -634,6 +634,37 @@ CASES: dict[str, tuple[re.Pattern[str], Extract, Cases]] = {
             ),
         },
     ),
+    "COMPANION_RE": (
+        kw.COMPANION_RE,
+        _whole,
+        {
+            "uz-Latn": (
+                [
+                    ("Xaridorlar guruhi: @namuna", "Xaridorlar"),
+                    ("Bizning guruhimiz", "guruhimiz"),
+                    ("Muhokama chati", "Muhokama"),
+                    ("Buyers chat", "Buyers"),
+                ],
+                ["Murojaat uchun", "Admin bilan bogʻlaning", "Optom narxlarda"],
+            ),
+            "uz-Cyrl": (
+                [
+                    ("Харидорлар гуруҳи", "Харидорлар"),
+                    ("Гуруҳимизга қўшилинг", "Гуруҳимизга"),
+                    ("Муҳокама учун", "Муҳокама"),
+                ],
+                ["Мурожаат учун", "Админ", "Оптом нархларда"],
+            ),
+            "ru": (
+                [
+                    ("Группа покупателей", "Группа"),
+                    ("Для покупателей", "покупателей"),
+                    ("Наш чат", "чат"),
+                ],
+                ["По вопросам пишите", "Менеджер", "Оптовые цены"],
+            ),
+        },
+    ),
     "GEO_RE": (
         kw.GEO_RE,
         _whole,

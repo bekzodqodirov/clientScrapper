@@ -23,8 +23,9 @@ from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
 
+from telethon import errors
 from telethon import utils as tg_utils
-from telethon.tl.types import Channel, ChatPhotoEmpty, PeerChannel, User
+from telethon.tl.types import Channel, ChatPhotoEmpty, InputPeerChannel, PeerChannel, User
 
 EPOCH = datetime(2026, 1, 1, tzinfo=UTC)
 
@@ -144,10 +145,18 @@ class Call:
 
 
 class FakeTelegramClient:
-    """See the module docstring. ``entities`` maps a username or a peer id to
-    an entity; ``full`` maps a username or peer id to a GetFullChannel answer;
-    ``bios`` a user id or username to an about text; ``history`` a peer id to
-    the messages ``iter_messages`` yields newest first."""
+    """See the module docstring.
+
+    ``entities`` maps a username or a peer id to an entity (a peer id stands
+    for Telethon's in-memory cache, which a restarted client does not have);
+    an ``InputPeerChannel`` finds a channel by id and access hash whatever is
+    cached, as do the ``reachable`` channels. ``full`` maps a username or peer
+    id to a GetFullChannel answer; ``bios`` a user id or username to an about
+    text; ``history`` a peer id to the messages ``iter_messages`` yields
+    newest first. ``authorized`` is Telegram's answer each time it is asked
+    whether the account is signed in (the last one repeats): ``get_me`` asks
+    on every call and answers None for «no»; ``is_user_authorized`` asks once
+    and keeps the answer, as Telethon's ``client._authorized`` does."""
 
     def __init__(
         self,
@@ -160,8 +169,14 @@ class FakeTelegramClient:
         history: dict[int, list[Any]] | None = None,
         dialogs: Iterable[Any] = (),
         pinned: dict[Any, Any] | None = None,
+        reachable: Iterable[Any] = (),
     ) -> None:
-        self._authorized = list(authorized)
+        self._answers = list(authorized)
+        self._authorized: bool | None = None
+        # Questions Telegram leaves unanswered, in turn (a timeout, a 500):
+        # get_me raises each; is_user_authorized swallows it and keeps False,
+        # as Telethon does with any RPCError on its GetState.
+        self.unanswered: list[BaseException] = []
         self.me = me if me is not None else user(5100000001, first_name="Namuna")
         self.entities = dict(entities or {})
         self.full = dict(full or {})
@@ -169,6 +184,9 @@ class FakeTelegramClient:
         self.history = dict(history or {})
         self.dialogs = list(dialogs)
         self.pinned = dict(pinned or {})
+        # Channels Telegram finds by id and access hash though nothing is
+        # cached (the restarted client of a test).
+        self.reachable = list(reachable)
         self.calls: list[Call] = []
         self.handlers: list[tuple[Any, Any]] = []
         self.connected = False
@@ -178,8 +196,12 @@ class FakeTelegramClient:
     def _record(self, name: str, target: Any = None, **kwargs: Any) -> None:
         self.calls.append(Call(name, target, kwargs))
         for key in ((name, target), (name, None)):
-            if key in self.fail:
-                raise self.fail[key]
+            try:
+                planted = self.fail.get(key)
+            except TypeError:  # an InputPeer target is not hashable
+                continue
+            if planted is not None:
+                raise planted
 
     def named(self, name: str) -> list[Call]:
         return [c for c in self.calls if c.name == name]
@@ -197,15 +219,32 @@ class FakeTelegramClient:
         self.calls.append(Call("disconnect", None))
         self.connected = False
 
+    def _ask(self) -> bool:
+        if self.unanswered:
+            raise self.unanswered.pop(0)
+        if len(self._answers) > 1:
+            return self._answers.pop(0)
+        return self._answers[0]
+
     async def is_user_authorized(self) -> bool:
         self._record("is_user_authorized")
-        if len(self._authorized) > 1:
-            return self._authorized.pop(0)
-        return self._authorized[0]
+        # Telethon asks Telegram only while it has no answer, and keeps it
+        # (users.py: ``if self._authorized is None``); connect() never resets.
+        if self._authorized is None:
+            try:
+                self._authorized = self._ask()
+            except errors.RPCError:
+                self._authorized = False
+        return self._authorized
 
     async def get_me(self) -> Any:
-        self._record("get_me")
-        return self.me
+        # users.getUsers([self]) on every call; Telethon answers None for the
+        # 401 family (a planted UnauthorizedError included) and raises the rest.
+        try:
+            self._record("get_me")
+        except errors.UnauthorizedError:
+            return None
+        return self.me if self._ask() else None
 
     async def catch_up(self) -> None:
         self._record("catch_up")
@@ -224,6 +263,8 @@ class FakeTelegramClient:
 
     async def _dialogs(self) -> AsyncIterator[Any]:
         for entity in self.dialogs:
+            if isinstance(entity, BaseException):
+                raise entity
             yield SimpleNamespace(entity=entity)
 
     def iter_dialogs(self) -> AsyncIterator[Any]:
@@ -232,6 +273,15 @@ class FakeTelegramClient:
 
     async def get_entity(self, target: Any) -> Any:
         self._record("get_entity", target)
+        if isinstance(target, InputPeerChannel):
+            for entity in [*self.entities.values(), *self.reachable]:
+                if (
+                    isinstance(entity, Channel)
+                    and entity.id == target.channel_id
+                    and entity.access_hash == target.access_hash
+                ):
+                    return entity
+            raise errors.ChannelInvalidError(request=None)
         if target not in self.entities:
             raise ValueError(f"Could not find the input entity for {target!r}")
         return self.entities[target]

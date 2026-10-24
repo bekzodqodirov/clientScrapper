@@ -420,3 +420,26 @@ def test_the_edit_memory_forgets_the_oldest_message():
     assert edits.allow(1, 2) and edits.allow(1, 3)
     # (1, 1) was pushed out by two newer messages: it starts again.
     assert edits.allow(1, 1)
+
+
+@pytest.mark.parametrize(
+    ("overrides", "entity"),
+    [
+        ({"monitor_enabled": False}, GROUP),
+        ({"role": "calibration"}, GROUP),
+        ({"status": "left"}, GROUP),
+        ({}, user(5200000011, username="namuna_11")),
+    ],
+    ids=["off", "calibration", "left", "private"],
+)
+async def test_an_edit_in_a_chat_that_is_not_read_stores_nothing(
+    session, overrides, entity
+):
+    await _monitor(session, entity, **overrides)
+    await session.commit()
+    edits = ingest.EditCounter()
+    edited = message(entity, 70, HIT, date=NOW, sender=POSTER)
+    assert await ingest.handle_edit(session, edited, now=NOW, edits=edits) == "ignored"
+    await session.commit()
+    assert await _rows(session) == []
+    assert (await _counts(session, entity))[:2] == (0, 0)

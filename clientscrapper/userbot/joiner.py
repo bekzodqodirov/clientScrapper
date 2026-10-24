@@ -12,13 +12,18 @@ scheduler runs ``join_daily``:
    joined by ``join_one`` — ``JoinChannelRequest`` then
    ``GetFullChannelRequest`` and nothing else — with ≥ 90 s between joins.
    The full channel names the linked discussion group, queued at priority 1
-   (the surface of a competitor's channel, 03 §2.3), and its ``about``, kept as
-   weekly evidence whose companion-group mentions wait at priority 2.
+   (the surface of a competitor's channel, 03 §2.3) with the access hash that
+   finds it again after a restart (``chats.remember_linked``), and its
+   ``about``, kept as weekly evidence whose companion-group mentions wait at
+   priority 2.
 
 Each join is counted in ``runtime_flags('userbot_quota')`` before the request
 goes out, so neither a crash nor a restart can make a fourth. Nothing is
-joined while the flood breaker or the owner's pause holds. The agent never
-leaves a chat: the owner leaves by hand, and ``/chats`` off only stops reading.
+joined while the flood breaker or the owner's pause holds, and a stop
+(SIGTERM) ends the run: a gap cut short is never followed by a join. A queued
+chat Telegram cannot find any more is ``gone``, not retried daily. The agent
+never leaves a chat: the owner leaves by hand, and ``/chats`` off only stops
+reading.
 """
 
 from __future__ import annotations
@@ -44,6 +49,12 @@ log = logging.getLogger(__name__)
 SessionFactory = Callable[[], AbstractAsyncContextManager[AsyncSession]]
 Sleep = Callable[[float], Awaitable[None]]
 Clock = Callable[[], datetime]
+Stopped = Callable[[], bool]
+
+
+def _never() -> bool:
+    return False
+
 
 JOIN_GAP_SECONDS: Final = 90
 JOIN_WINDOW: Final = (time(10, 0), time(20, 0))
@@ -80,11 +91,12 @@ class JoinReport:
 @dataclass(frozen=True, slots=True)
 class Joined:
     """What joining one chat taught: the chat, its linked discussion group
-    and its about."""
+    (and the access hash that finds that group again) and its about."""
 
     dialog: chats.DialogInfo
     linked: chats.DialogInfo | None
     about: about.About
+    linked_access_hash: int | None = None
 
 
 async def join_one(client: Any, entity: Any) -> Joined:
@@ -97,11 +109,13 @@ async def join_one(client: Any, entity: Any) -> Joined:
     info = full.full_chat
     linked_id = getattr(info, "linked_chat_id", None)
     linked = None
+    linked_hash = None
     if linked_id:
         peer = chats.channel_peer_id(int(linked_id))
         for chat in getattr(full, "chats", None) or ():
             if tg.peer_id(chat) == peer:
                 linked = tg.dialog_of(chat)
+                linked_hash = tg.access_hash_of(chat)
                 break
     dialog = tg.dialog_of(entity)
     members = getattr(info, "participants_count", None)
@@ -119,6 +133,7 @@ async def join_one(client: Any, entity: Any) -> Joined:
             member_count=members if isinstance(members, int) else None,
             linked_chat_id=linked_id,
         ),
+        linked_access_hash=linked_hash,
     )
 
 
@@ -132,20 +147,26 @@ async def _flood(
 
 
 async def resolve_daily(
-    client: Any, session_factory: SessionFactory, *, now: datetime
+    client: Any,
+    session_factory: SessionFactory,
+    *,
+    now: datetime,
+    stopped: Stopped = _never,
 ) -> int:
     """Waiting usernames → queued rows, ≤ RESOLVES_PER_DAY a day. A name that
-    is not a public group or channel is remembered as such and never tried
-    again. Returns how many were queued."""
+    is not a public group or channel is remembered as such (a person's only
+    as a hash) and not tried again for a month. Returns how many were queued."""
     async with session_factory() as session:
         if await limits.blocked(session, now=now):
             return 0
         seeds = chats.seeds_from(await chats.source_config(session))
         waiting = await chats.pending_usernames(
-            session, seeds=seeds, limit=limits.RESOLVES_PER_DAY
+            session, seeds=seeds, limit=limits.RESOLVES_PER_DAY, now=now
         )
     queued = 0
     for pending in waiting:
+        if stopped():
+            break
         async with session_factory() as session:
             if not await limits.take(session, "resolves", now=now):
                 break
@@ -162,7 +183,7 @@ async def resolve_daily(
         else:
             dialog = tg.dialog_of(entity)
             if dialog.chat_type == "private" or not dialog.username:
-                reason = "not_a_public_chat"
+                reason = chats.NOT_A_CHAT
         async with session_factory() as session:
             if reason is None:
                 await chats.enqueue_chat(
@@ -177,12 +198,21 @@ async def resolve_daily(
 
 async def _queued_target(
     session_factory: SessionFactory, *, tried: set[int]
-) -> tuple[int, str | int] | None:
+) -> tuple[int, Any] | None:
+    """The best queued row not tried in this run, and what finds it: its
+    public username, else the remembered access hash (a linked group with no
+    username), else the bare id (found only while Telethon's memory has it)."""
     async with session_factory() as session:
         rows = await chats.queued(session, limit=len(tried) + 1)
         for row in rows:
-            if row.id not in tried:
-                return row.id, row.username or row.tg_chat_id
+            if row.id in tried:
+                continue
+            if row.username:
+                return row.id, row.username
+            access_hash = await chats.linked_access_hash(session, row.tg_chat_id)
+            if access_hash is not None:
+                return row.id, tg.input_channel(row.tg_chat_id, access_hash)
+            return row.id, row.tg_chat_id
     return None
 
 
@@ -194,14 +224,27 @@ async def _apply(
         if monitor is None:
             return False
         chats.mark_joined(monitor, now=now, dialog=joined.dialog)
+        await chats.forget_linked(session, monitor.tg_chat_id)
         linked = False
         if joined.linked is not None:
-            linked = (
-                await chats.enqueue_chat(
-                    session, joined.linked, priority=chats.PRIORITY_LINKED, now=now
-                )
-                is not None
+            row = await chats.enqueue_chat(
+                session, joined.linked, priority=chats.PRIORITY_LINKED, now=now
             )
+            linked = row is not None
+            waiting = row or await chats.get_monitor(session, joined.linked.tg_chat_id)
+            if (
+                waiting is not None
+                and waiting.status == "queued"
+                and not waiting.username
+                and joined.linked_access_hash is not None
+            ):
+                await chats.remember_linked(
+                    session,
+                    waiting.tg_chat_id,
+                    access_hash=joined.linked_access_hash,
+                    parent=monitor.username,
+                    now=now,
+                )
         await about.store_about(session, monitor, joined.about, now=now)
         return linked
 
@@ -212,15 +255,24 @@ async def join_daily(
     *,
     clock: Clock,
     sleep: Sleep = asyncio.sleep,
+    stopped: Stopped = _never,
 ) -> JoinReport:
     """The day's join run (see the module docstring). ``clock`` is read again
-    after every pause, so the 90 s gaps and the day's cap use the real time."""
+    after every pause, so the 90 s gaps and the day's cap use the real time.
+    ``stopped`` answers True once the process is stopping: the reader's
+    ``sleep`` returns early then, and a join right after it would break the
+    90 s gap, so the run ends instead (``skipped='stopped'``)."""
     report = JoinReport()
     now = clock()
-    report.resolved = await resolve_daily(client, session_factory, now=now)
+    report.resolved = await resolve_daily(
+        client, session_factory, now=now, stopped=stopped
+    )
     tried: set[int] = set()
     first = True
     while True:
+        if stopped():
+            report.skipped = "stopped"
+            return report
         now = clock()
         async with session_factory() as session:
             report.skipped = await limits.blocked(session, now=now)
@@ -239,17 +291,18 @@ async def join_daily(
         monitor_id, name = target
         tried.add(monitor_id)
         try:
-            # A read: it resolves a username or finds a cached id; a linked
-            # group the session no longer knows stays queued, no join spent.
+            # A read: it resolves a username, or finds a linked group by its
+            # remembered access hash (or Telethon's memory); no join spent.
             entity = await client.get_entity(name)
         except tg.FLOOD_ERRORS as exc:
             await _flood(session_factory, exc, now=now, where="join")
             return report
-        except tg.GONE_ERRORS:
+        except (*tg.GONE_ERRORS, ValueError):
+            # ValueError: Telegram, or the session, knows no such chat — a
+            # bare id is never found again after a restart. Gone, not a daily
+            # retry for ever.
             await _mark_gone(session_factory, monitor_id)
             report.gone += 1
-            continue
-        except ValueError:
             continue
         if tg.chat_type_of(entity) == "private":
             await _mark_gone(session_factory, monitor_id)
@@ -257,6 +310,10 @@ async def join_daily(
             continue
         if not first:
             await sleep(JOIN_GAP_SECONDS)
+            if stopped():
+                # The gap was cut short by a stop: no join after it.
+                report.skipped = "stopped"
+                return report
             now = clock()
         async with session_factory() as session:
             if not await limits.take(session, "joins", now=now):
@@ -286,3 +343,4 @@ async def _mark_gone(session_factory: SessionFactory, monitor_id: int) -> None:
         monitor = await session.get(ChatMonitor, monitor_id)
         if monitor is not None:
             chats.mark_gone(monitor)
+            await chats.forget_linked(session, monitor.tg_chat_id)

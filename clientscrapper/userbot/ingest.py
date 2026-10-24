@@ -12,7 +12,11 @@ there is one rule for what is kept:
 * every inserted row is followed, in the same transaction, by
   ``NOTIFY cs_interaction, '<id>'`` — the event-driven path of 04 §0 that the
   worker's classify and score jobs wake on (01 N-06);
-* an edit re-runs the prefilter at most ``MAX_EDITS`` times per message.
+* an edit re-runs the prefilter at most ``MAX_EDITS`` times per message;
+* the backfill counts into a ``Tally`` and writes it once per chat: a message
+  the live handler already counted is not counted again, and the backfill's
+  long transaction never holds the chat's row while it inserts (an edit that
+  inserts and then counts would deadlock with it).
 
 Nothing here makes a Telegram request: every value comes from the update.
 """
@@ -94,6 +98,27 @@ def incoming_of(message: object) -> Incoming | None:
     )
 
 
+@dataclass(slots=True)
+class Tally:
+    """A backfill's counts for one chat, written by one ``count_seen`` at the
+    end. ``live_since`` is the chat's ``monitoring_since``: a message from then
+    on reached the live handler, which counted it in ``seen_count`` (02:
+    «every message seen» — once)."""
+
+    live_since: datetime | None = None
+    seen: int = 0
+    stored: int = 0
+    newest: int | None = None
+
+    def add(self, item: Incoming, *, stored: bool) -> None:
+        if self.live_since is None or item.occurred_at < self.live_since:
+            self.seen += 1
+        if stored:
+            self.stored += 1
+        if self.newest is None or item.tg_message_id > self.newest:
+            self.newest = item.tg_message_id
+
+
 async def store_hit(
     session: AsyncSession, item: Incoming, hits: tuple[str, ...]
 ) -> int | None:
@@ -141,9 +166,14 @@ async def monitor_for(
 
 
 async def handle_message(
-    session: AsyncSession, message: object, *, now: datetime
+    session: AsyncSession,
+    message: object,
+    *,
+    now: datetime,
+    tally: Tally | None = None,
 ) -> Outcome:
-    """One new message (live or backfilled). The caller commits."""
+    """One new message (live or backfilled). The caller commits. With a
+    ``tally`` (the backfill) the counts go there instead of to the row."""
     item = incoming_of(message)
     if item is None:
         return "ignored"
@@ -152,11 +182,17 @@ async def handle_message(
         return "ignored"
     hits = prefilter.hits(item.text, chat_type=monitor.chat_type)
     if not hits:
+        if tally is not None:
+            tally.add(item, stored=False)
+            return "seen"
         await chats.count_seen(
             session, item.tg_chat_id, message_id=item.tg_message_id, now=now
         )
         return "seen"
     row_id = await store_hit(session, item, hits)
+    if tally is not None:
+        tally.add(item, stored=row_id is not None)
+        return "stored" if row_id is not None else "duplicate"
     await chats.count_seen(
         session,
         item.tg_chat_id,

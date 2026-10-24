@@ -11,6 +11,8 @@ own resolves are capped at 20 a day.
 
 from __future__ import annotations
 
+import asyncio
+import json
 from datetime import timedelta
 
 import pytest
@@ -316,10 +318,11 @@ async def test_resolves_are_capped_at_twenty_a_day_and_non_chats_never_retried(r
     flag = await session.get(m.RuntimeFlag, chats.PENDING_FLAG, populate_existing=True)
     assert flag is not None
     assert sorted(flag.value["names"]) == names[20:]
-    assert {k: v["reason"] for k, v in flag.value["unresolvable"].items()} == {
-        names[1]: "not_a_public_chat",
-        names[2]: "unknown",
-    }
+    gone = flag.value["unresolvable"]
+    assert sorted(v["reason"] for v in gone.values()) == ["not_a_public_chat", "unknown"]
+    assert gone[names[2]] == {"reason": "unknown", "at": T0.isoformat()}
+    # The person's handle is remembered only as a hash (06 §5.1).
+    assert names[1] not in json.dumps(flag.value)
     rows = await _monitors(session)
     assert len(rows) == 18
     assert {r.priority for r in rows.values()} == {3}
@@ -388,3 +391,162 @@ def test_the_join_is_due_once_a_day_after_its_minute():
     assert not joiner.join_due(day.replace(minute=31), at=at, last_day=day.date())
     # After 20:00 the day's join is skipped, not run late.
     assert not joiner.join_due(day.replace(hour=20, minute=5), at=at, last_day=None)
+
+
+# --- review fixes -----------------------------------------------------------------------
+
+
+async def test_a_stop_during_the_gap_ends_the_run_without_another_join(reader):
+    session = reader
+    await _queue(session, *NAMES[1:4])
+    client = _client()
+    clock = FakeClock(T0)
+    stopping = asyncio.Event()
+
+    async def cut_short(seconds: float) -> None:
+        # SIGTERM arrives in the 90 s gap; the reader's wait returns at once.
+        clock.sleeps.append(seconds)
+        stopping.set()
+
+    report = await joiner.join_daily(
+        client, session_scope, clock=clock.now, sleep=cut_short, stopped=stopping.is_set
+    )
+
+    assert [c.target for c in client.named("JoinChannelRequest")] == [NAMES[1]]
+    assert (len(report.joined), report.skipped) == (1, "stopped")
+    assert clock.sleeps == [90]
+    assert await limits.used(session, "joins", now=T0) == 1
+
+
+LONELY = channel(3950, title="Namuna Kanal 2 muhokama", megagroup=True)  # no username
+
+
+async def test_a_usernameless_linked_group_is_joined_after_a_restart(reader, monkeypatch):
+    session = reader
+    monkeypatch.setattr(settings, "userbot_joins_per_day", 1)
+    await _queue(session, NAMES[1])
+    full = {NAMES[1]: full_channel(about="Xitoydan optom", linked=LONELY)}
+    first = FakeTelegramClient(entities=dict(CHANNELS), full=full)
+    clock = FakeClock(T0)
+    day1 = await joiner.join_daily(
+        first, session_scope, clock=clock.now, sleep=clock.sleep
+    )
+    assert (len(day1.joined), day1.queued_linked) == (1, 1)
+    linked = await chats.get_monitor(session, tg.peer_id(LONELY))
+    assert linked is not None and (linked.status, linked.username) == ("queued", None)
+    assert (
+        await chats.linked_access_hash(session, tg.peer_id(LONELY)) == LONELY.access_hash
+    )
+
+    # The next day, after a restart: the new client has cached nothing (no
+    # peer-id key), but Telegram finds the group by its id and access hash.
+    restarted = FakeTelegramClient(entities={}, reachable=[LONELY])
+    clock.advance(timedelta(days=1).total_seconds())
+    day2 = await joiner.join_daily(
+        restarted, session_scope, clock=clock.now, sleep=clock.sleep
+    )
+
+    assert day2.joined == [linked.id]
+    [lookup] = restarted.named("get_entity")
+    assert (lookup.target.channel_id, lookup.target.access_hash) == (
+        LONELY.id,
+        LONELY.access_hash,
+    )
+    assert [c.target for c in restarted.named("JoinChannelRequest")] == [
+        tg.peer_id(LONELY)
+    ]
+    row = await chats.get_monitor(session, tg.peer_id(LONELY))
+    assert row is not None and row.status == "joined"
+    assert await chats.linked_access_hash(session, tg.peer_id(LONELY)) is None
+
+
+async def test_a_queued_chat_nobody_can_find_is_gone_not_retried_daily(reader):
+    session = reader
+    # A usernameless row with nothing remembered to find it by (queued before
+    # a restart, say): the bare id finds nothing in a fresh session.
+    row = await chats.enqueue_chat(
+        session, tg.dialog_of(LONELY), priority=chats.PRIORITY_LINKED, now=T0
+    )
+    assert row is not None
+    await session.commit()
+    client = FakeTelegramClient()
+    clock = FakeClock(T0)
+    report = await joiner.join_daily(
+        client, session_scope, clock=clock.now, sleep=clock.sleep
+    )
+    assert (report.gone, report.joined) == (1, [])
+    gone = await session.get(m.ChatMonitor, row.id, populate_existing=True)
+    assert gone is not None and gone.status == "gone"
+    clock.advance(timedelta(days=1).total_seconds())
+    await joiner.join_daily(client, session_scope, clock=clock.now, sleep=clock.sleep)
+    assert [c.target for c in client.named("get_entity")] == [tg.peer_id(LONELY)]
+
+
+async def test_an_admins_handle_in_an_about_is_not_queued(reader):
+    session = reader
+    await _queue(session, NAMES[1])
+    full = {
+        NAMES[1]: full_channel(
+            about=(
+                "Optom kiyim. Murojaat uchun: @namuna_admin9\n"
+                "Xaridorlar guruhi: @namuna_guruh2, admin @namuna_admin8"
+            )
+        )
+    }
+    client = FakeTelegramClient(entities=dict(CHANNELS), full=full)
+    clock = FakeClock(T0)
+    await joiner.join_daily(client, session_scope, clock=clock.now, sleep=clock.sleep)
+    flag = await session.get(m.RuntimeFlag, chats.PENDING_FLAG, populate_existing=True)
+    assert flag is not None
+    assert list(flag.value["names"]) == ["namuna_guruh2"]
+
+
+async def test_nothing_is_resolved_while_the_owner_has_paused(reader):
+    session = reader
+    assert await chats.enqueue_username(
+        session, "namuna_nom99", priority=chats.PRIORITY_RESOLVED, now=T0, by="test"
+    )
+    session.add(
+        m.RuntimeFlag(key="paused", value={"since": T0.isoformat()}, updated_by="owner:1")
+    )
+    await session.commit()
+    client = FakeTelegramClient(
+        entities={"namuna_nom99": channel(4999, title="Namuna", username="namuna_nom99")}
+    )
+    assert await joiner.resolve_daily(client, session_scope, now=T0) == 0
+    assert client.calls == []
+    assert await limits.used(session, "resolves", now=T0) == 0
+
+
+async def test_a_resolve_that_is_a_person_keeps_no_handle_and_is_forgotten_in_a_month(
+    reader,
+):
+    session = reader
+    assert await chats.enqueue_username(
+        session, "namuna_shaxs1", priority=chats.PRIORITY_COMPANION, now=T0, by="test"
+    )
+    await session.commit()
+    client = FakeTelegramClient(
+        entities={"namuna_shaxs1": user(5300000009, username="namuna_shaxs1")}
+    )
+    assert await joiner.resolve_daily(client, session_scope, now=T0) == 0
+    flag = await session.get(m.RuntimeFlag, chats.PENDING_FLAG, populate_existing=True)
+    assert flag is not None
+    assert "namuna_shaxs1" not in json.dumps(flag.value)
+    [(key, item)] = flag.value["unresolvable"].items()
+    assert key.startswith("#") and item == {
+        "reason": "not_a_public_chat",
+        "at": T0.isoformat(),
+    }
+    # Not asked again within the month; a month on, the memory has expired.
+    later = T0 + timedelta(days=29)
+    assert not await chats.enqueue_username(
+        session, "namuna_shaxs1", priority=chats.PRIORITY_COMPANION, now=later, by="t"
+    )
+    month = T0 + timedelta(days=31)
+    assert await chats.enqueue_username(
+        session, "namuna_shaxs1", priority=chats.PRIORITY_COMPANION, now=month, by="t"
+    )
+    await session.commit()
+    flag = await session.get(m.RuntimeFlag, chats.PENDING_FLAG, populate_existing=True)
+    assert flag is not None and flag.value["unresolvable"] == {}

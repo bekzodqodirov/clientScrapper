@@ -7,15 +7,19 @@ history (07 ``HISTORY_ALLOWED``) — filtered **client-side** by the prefilter
 (a server ``search=`` is one keyword at a time and misses the Latin/Cyrillic
 variants). Only the hits are stored, through ``ingest.handle_message``, so a
 backfilled hit is stored and notified exactly as a live one; the rest only
-count in ``seen_count``. Then ``chat_monitors.backfilled_at``.
+count in ``seen_count`` — those older than the chat's ``monitoring_since``,
+since the live handler counted the newer ones — in one UPDATE at the end of
+the chat (``ingest.Tally``). Then ``chat_monitors.backfilled_at``.
 
 The window is also bounded in time: a message older than ``BACKFILL_MAX_AGE``
 (30 days) ends the read. Retention deletes an unconverted post at 30 days
 (02 §4 R2a), so an older one would be stored only to be deleted that night.
 
 No backfill while the flood breaker or the owner's pause holds; a flood wait
-ends the night (past 300 s it trips the breaker); a chat that keeps failing
-is left alone after ``chats.BACKFILL_MAX_ATTEMPTS`` nights.
+ends the night (past 300 s it trips the breaker); a stop ends it between
+chats; a chat that keeps failing is left alone after
+``chats.BACKFILL_MAX_ATTEMPTS`` nights; a restricted account is not a chat's
+failure and goes up to the supervisor.
 """
 
 from __future__ import annotations
@@ -36,6 +40,12 @@ from clientscrapper.userbot import ingest, limits, tg
 log = logging.getLogger(__name__)
 
 SessionFactory = Callable[[], AbstractAsyncContextManager[AsyncSession]]
+Stopped = Callable[[], bool]
+
+
+def _never() -> bool:
+    return False
+
 
 BACKFILL_LIMIT: Final = 500
 BACKFILL_MAX_AGE: Final = timedelta(days=30)
@@ -56,16 +66,27 @@ async def backfill_chat(
     caller commits (one transaction per chat)."""
     result = ChatBackfill()
     floor = now - BACKFILL_MAX_AGE
+    tally = ingest.Tally(live_since=monitor.monitoring_since)
     async for message in client.iter_messages(monitor.tg_chat_id, limit=BACKFILL_LIMIT):
         date = getattr(message, "date", None)
         if isinstance(date, datetime) and date < floor:
             break
-        outcome = await ingest.handle_message(session, message, now=now)
+        outcome = await ingest.handle_message(session, message, now=now, tally=tally)
         if outcome == "ignored":
             continue
         result.seen += 1
         result.stored += 1 if outcome == "stored" else 0
         result.oldest_read = date if isinstance(date, datetime) else result.oldest_read
+    # The chat's row is touched only now, after the last insert.
+    if tally.newest is not None:
+        await chats.count_seen(
+            session,
+            monitor.tg_chat_id,
+            message_id=tally.newest,
+            now=now,
+            seen=tally.seen,
+            stored=tally.stored,
+        )
     chats.mark_backfilled(monitor, now=now)
     return result
 
@@ -80,7 +101,11 @@ class NightReport:
 
 
 async def backfill_nightly(
-    client: Any, session_factory: SessionFactory, *, now: datetime
+    client: Any,
+    session_factory: SessionFactory,
+    *,
+    now: datetime,
+    stopped: Stopped = _never,
 ) -> NightReport:
     """The night's pass over every chat that is due (≤ CHATS_PER_NIGHT)."""
     report = NightReport()
@@ -93,6 +118,9 @@ async def backfill_nightly(
             for m in await chats.backfill_due(session, now=now, limit=CHATS_PER_NIGHT)
         ]
     for monitor_id in due:
+        if stopped():
+            report.skipped = "stopped"
+            return report
         try:
             async with session_factory() as session:
                 monitor = await session.get(ChatMonitor, monitor_id)

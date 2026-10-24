@@ -151,14 +151,14 @@ async def test_waiting_usernames_are_deduplicated_and_ordered(session):
         session, "namuna_known", priority=0, now=NOW, by=by
     )
     seeds = (chats.Seed("namuna_seed1"), chats.Seed("namuna_known"))
-    got = await chats.pending_usernames(session, seeds=seeds, limit=10)
+    got = await chats.pending_usernames(session, seeds=seeds, limit=10, now=NOW)
     assert [(p.username, p.priority) for p in got] == [
         ("namuna_a1", 1),
         ("namuna_b2", 2),
         ("namuna_seed1", 5),
     ]
     await chats.forget_pending(session, "namuna_b2", now=NOW, unresolvable="unknown")
-    got = await chats.pending_usernames(session, seeds=seeds, limit=10)
+    got = await chats.pending_usernames(session, seeds=seeds, limit=10, now=NOW)
     assert [p.username for p in got] == ["namuna_a1", "namuna_seed1"]
     assert not await chats.enqueue_username(
         session, "namuna_b2", priority=0, now=NOW, by=by
@@ -231,3 +231,72 @@ async def test_the_breaker_is_set_past_300_seconds_and_never_shortened(session):
     assert kept == NOW + timedelta(hours=25)
     assert await limits.blocked(session, now=NOW + timedelta(hours=24)) == "flood"
     assert await limits.blocked(session, now=NOW + timedelta(hours=25)) is None
+
+
+# --- review fixes -----------------------------------------------------------------------
+
+
+async def _joined_rows(session) -> dict[str, str]:
+    rows = await session.execute(
+        sa.select(m.ChatMonitor.username, m.ChatMonitor.status).execution_options(
+            populate_existing=True
+        )
+    )
+    return {str(name): str(status) for name, status in rows}
+
+
+async def test_chats_left_by_hand_are_left_and_free_the_cap(session):
+    dialogs = [
+        chats.DialogInfo(-1000000007100 - n, "group", f"Namuna L{n}", f"namuna_left{n}")
+        for n in range(3)
+    ]
+    await chats.sync_dialogs(session, dialogs, now=NOW)
+    assert await chats.joined_count(session) == 3
+    # A message from the third arrives after the next list was asked for:
+    # the account is still there, whatever the list said.
+    later = NOW + timedelta(days=1)
+    await chats.count_seen(
+        session, dialogs[2].tg_chat_id, message_id=5, now=later + timedelta(seconds=5)
+    )
+    listed = [dialogs[0].tg_chat_id]
+    assert await chats.mark_left(session, listed, listed_at=later) == 1
+    assert await _joined_rows(session) == {
+        "namuna_left0": "joined",
+        "namuna_left1": "left",
+        "namuna_left2": "joined",
+    }
+    assert await chats.joined_count(session) == 2
+    left = await chats.get_monitor(session, dialogs[1].tg_chat_id)
+    assert left is not None and not chats.readable(left)
+    # An empty list says nothing; a re-join is joined again.
+    assert await chats.mark_left(session, [], listed_at=later) == 0
+    await chats.sync_dialogs(session, [dialogs[1]], now=later)
+    assert (await _joined_rows(session))["namuna_left1"] == "joined"
+
+
+async def test_the_chat_cap_counts_groups_and_channels_not_private_dialogs(session):
+    await chats.sync_dialogs(
+        session,
+        [
+            chats.DialogInfo(-1000000007200, "group", "Namuna G", "namuna_g200"),
+            chats.DialogInfo(-1000000007201, "channel", "Namuna K", "namuna_k201"),
+            chats.DialogInfo(5500000201, "private", "Namuna Mijoz", None),
+            chats.DialogInfo(5500000202, "private", "Namuna Mijoz 2", None),
+        ],
+        now=NOW,
+    )
+    assert await chats.joined_count(session) == 2
+
+
+async def test_a_channel_silent_for_ninety_days_is_not_queued(session):
+    by = "test"
+    stale = NOW - timedelta(days=91)
+    fresh = NOW - timedelta(days=89)
+    assert not await chats.enqueue_username(
+        session, "namuna_jim1", priority=3, now=NOW, by=by, last_post_at=stale
+    )
+    assert await chats.enqueue_username(
+        session, "namuna_tirik1", priority=3, now=NOW, by=by, last_post_at=fresh
+    )
+    got = await chats.pending_usernames(session, seeds=(), limit=10, now=NOW)
+    assert [p.username for p in got] == ["namuna_tirik1"]
