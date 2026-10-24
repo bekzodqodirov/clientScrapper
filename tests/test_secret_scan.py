@@ -48,7 +48,7 @@ def rules(path: str, text: str) -> list[str]:
     return [f.rule for f in scanner.scan_text(path, text)]
 
 
-@pytest.mark.parametrize(("rule", "value"), PLANTED.items())
+@pytest.mark.parametrize(("rule", "value"), PLANTED.items(), ids=list(PLANTED))
 def test_each_credential_shape_is_refused_and_never_printed(rule, value):
     findings = scanner.scan_text("clientscrapper/x.py", f'KEY = "{value}"\n')
     assert [f.rule for f in findings] == [rule]
