@@ -16,7 +16,7 @@ Telegram split into ``.partNN`` pieces of ≤ 45 MB (``split_for_telegram``)
 that ``tools/restore.py`` joins back. MIYA's legacy ``.sql.age`` format is
 gone: this project never wrote one.
 
-Three changes:
+Four changes:
 
 * The dump flows through this process on its way to ``age`` instead of an OS
   pipe between the two, so the bytes can be counted. A run whose pg_dump
@@ -26,7 +26,10 @@ Three changes:
   → non-zero .age»). The bytes stay in memory one chunk at a time.
 * ``age`` writes into a ``.partial`` this process created owner-only, so the
   ciphertext is never readable by another user, not even while it is written
-  (``age -o`` would create it with the umask's mode).
+  (``age -o`` would create it with the umask's mode). The ``.partial`` is the
+  run's own (``<name>.<pid>-<random>.partial``, ``O_EXCL``): two runs at the
+  same second — two schedulers, a catch-up beside the cron, ``make backup`` —
+  each write and rename a whole file, never one file between them.
 * The row counts the weekly drill compares with (``count_tables``) are taken
   in the dump's own snapshot: a repeatable-read transaction exports it and
   ``pg_dump --snapshot`` reads the same one, so a resolve run or a feed delta
@@ -40,6 +43,8 @@ import contextlib
 import logging
 import os
 import re
+import secrets
+import time
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -59,6 +64,10 @@ BACKUP_SUFFIX: Final = ".dump.age"
 _STAMP_RE: Final = re.compile(r"(\d{8}-\d{6})")
 _STAMP_FORMAT: Final = "%Y%m%d-%H%M%S"
 PG_DUMP_TIMEOUT_SECONDS: Final = 1800
+PARTIAL_SUFFIX: Final = ".partial"
+# A .partial older than this belongs to no live run (its pipeline is killed
+# at PG_DUMP_TIMEOUT_SECONDS).
+PARTIAL_STALE_SECONDS: Final = 2 * PG_DUMP_TIMEOUT_SECONDS
 # pg_dump's custom-format archive starts with these bytes.
 DUMP_MAGIC: Final = b"PGDMP"
 # Where the age identity (the private key) lives: inside the app containers
@@ -225,7 +234,13 @@ async def create_backup(
         return BackupResult(error=f"backup directory unusable: {type(exc).__name__}")
 
     target = folder / backup_name(now)
-    partial = target.with_name(target.name + ".partial")
+    sweep_partials(folder)
+    # A name of its own per run (pid + random), created O_EXCL: two runs in
+    # the same second (two schedulers, a catch-up beside the cron, a manual
+    # `make backup`) never write into one file. Each renames a whole file.
+    partial = target.with_name(
+        f"{target.name}.{os.getpid()}-{secrets.token_hex(4)}{PARTIAL_SUFFIX}"
+    )
     url = database_url or settings.database_url
     snapshot: psycopg.AsyncConnection[Any] | None = None
     counts: dict[str, int] = {}
@@ -252,8 +267,13 @@ async def create_backup(
 
     # Renamed only after both processes succeeded, so a crashed run never
     # leaves behind a file that looks like a usable backup.
-    partial.replace(target)
-    size = target.stat().st_size
+    try:
+        partial.replace(target)
+        size = target.stat().st_size
+    except OSError as exc:
+        partial.unlink(missing_ok=True)
+        log.error("backup not put in place", extra={"error": type(exc).__name__})
+        return BackupResult(error=f"rename: {type(exc).__name__}", dump_bytes=0)
     result = BackupResult(path=target, size=size, dump_bytes=result.dump_bytes)
     result.counts = counts
     result.pruned = prune_old(now=now, directory=folder)
@@ -277,7 +297,7 @@ async def _dump_and_encrypt(
     dsn, dump_env = libpq_dsn_and_env(url)
     try:
         # Owner-only from its first byte; age writes to it as its stdout.
-        sink = os.open(partial, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        sink = os.open(partial, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     except OSError as exc:
         log.error("backup file not created", extra={"error": type(exc).__name__})
         return BackupResult(error=f"backup file: {type(exc).__name__}")
@@ -367,6 +387,27 @@ async def _run_pipeline(
         log.error("pg_dump produced no archive", extra={"bytes": total})
         return BackupResult(error="empty_dump", dump_bytes=total)
     return BackupResult(dump_bytes=total)
+
+
+def sweep_partials(folder: Path, *, now: float | None = None) -> int:
+    """Delete the ``.partial`` files a killed run left (ciphertext, but never
+    a backup): any older than ``PARTIAL_STALE_SECONDS``, past every live
+    run's timeout. Returns how many. Never raises."""
+    moment = time.time() if now is None else now
+    removed = 0
+    try:
+        pattern = f"{BACKUP_PREFIX}*{BACKUP_SUFFIX}.*{PARTIAL_SUFFIX}"
+        leftovers = list(folder.glob(pattern))
+    except OSError:
+        return 0
+    for path in leftovers:
+        try:
+            if moment - path.stat().st_mtime > PARTIAL_STALE_SECONDS:
+                path.unlink()
+                removed += 1
+        except OSError:
+            continue
+    return removed
 
 
 def backup_stamp(path: Path) -> datetime | None:

@@ -41,6 +41,15 @@ COUNTED_TABLES: Final = (
 )
 _NAME: Final = re.compile(r"[a-z_][a-z0-9_]{0,62}")
 _DROP: Final = "DROP DATABASE IF EXISTS {} WITH (FORCE)"
+# One drill at a time across processes (a session advisory lock in the main
+# database): the scratch database has one fixed name, so that a drill killed
+# half-way leaves nothing the next one does not drop, and two at once would
+# DROP … WITH (FORCE) each other's.
+DRILL_LOCK: Final = "cs:restore_drill"
+
+
+class DrillBusy(Exception):
+    """Another process is running the drill."""
 
 
 @dataclass(slots=True)
@@ -118,19 +127,29 @@ def drill_sync(file: Path, identity: Path, url: str, database: str) -> dict[str,
     a ``finally``, so a failed restore leaves no scratch database behind."""
     if not _NAME.fullmatch(database):
         raise ValueError(f"not a database name: {database!r}")
+    import psycopg
+
     target = with_database(url, database)
-    _admin(url, _DROP, database)
-    _admin(url, "CREATE DATABASE {}", database)
-    try:
-        _restore(file, identity, target)
-        return count_rows(target)
-    finally:
+    # The lock lives as long as this connection: a killed drill releases it.
+    with psycopg.connect(_libpq(url), autocommit=True, connect_timeout=10) as lock:
+        row = lock.execute(
+            "SELECT pg_try_advisory_lock(hashtext(%s))", (DRILL_LOCK,)
+        ).fetchone()
+        if row is None or row[0] is not True:
+            raise DrillBusy(DRILL_LOCK)
+        _admin(url, _DROP, database)
+        _admin(url, "CREATE DATABASE {}", database)
         try:
-            _admin(url, _DROP, database)
-        except Exception as exc:
-            log.error(
-                "the drill database was not dropped", extra={"error": type(exc).__name__}
-            )
+            _restore(file, identity, target)
+            return count_rows(target)
+        finally:
+            try:
+                _admin(url, _DROP, database)
+            except Exception as exc:
+                log.error(
+                    "the drill database was not dropped",
+                    extra={"error": type(exc).__name__},
+                )
 
 
 def close_enough(got: int | None, want: int) -> bool:
@@ -179,6 +198,10 @@ async def run(
             )
         else:
             result.ok = True
+    except DrillBusy:
+        # Its beat is the other drill's to write.
+        log.info("restore drill skipped: another one is running")
+        return DrillResult(ok=True, skipped="busy", path=str(newest))
     except Exception as exc:
         result.error = f"{type(exc).__name__}: {exc}"[:300]
         log.warning("restore drill failed", extra={"error": type(exc).__name__})

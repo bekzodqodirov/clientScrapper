@@ -554,7 +554,14 @@ Anthropic success, ERP (last `push_log.sent`, `erp_sync.config` timestamps, brea
 depths, today's pushes/cards/spend, per-source rows. The alert ledger is `reminder_log` with
 kinds `alert:<key>` / `recovered:<key>` (MIYA constants; 02 §2.13's column comment carries the
 same names). Whichever of the worker's `health_job` (every 5 min) or the bot's watchdog is
-alive speaks; neither repeats the other.
+alive speaks; neither repeats the other. One scheduler at a time: the worker schedules only while it
+holds the session-level advisory lock `cs:worker` on a connection of its own (`worker.Leadership`);
+a second worker process stands by — alive, logging, beating nothing — and takes over when the
+leader's connection goes; a leader that finds the lock taken by another (its connection dropped)
+pauses its scheduler until the lock is its own again; a database that cannot be asked is no other
+leader, so the worker runs and can say `db_down`. The startup catch-up hands a missed backup and
+missed nightly outcomes walks (`erp_feeds.NIGHTLY_MAX_AGE`) to the scheduler's own jobs
+(`next_run_time = now`), so `max_instances=1` keeps them from running beside their cron.
 
 ### 4.2 Problems (`PROBLEM_KEYS`, ordered as shown; each has Uzbek text with its remedy and a recovery line)
 
@@ -618,7 +625,10 @@ outside watcher watches the worker).
 ### 4.4 Backups
 
 - `backup_job` at `BACKUP_TIME`: `pg_dump -Fc | age -r $BACKUP_AGE_RECIPIENT -o
-  /data/backups/clientscrapper-<yyyymmdd-hhmmss>.dump.age` (plaintext only inside the pipe),
+  /data/backups/clientscrapper-<yyyymmdd-hhmmss>.dump.age` (plaintext only inside the pipe; age
+  writes into a `.<pid>-<random>.partial` of its own, created `O_EXCL` 0600 and renamed only when
+  whole, so two runs in one second never share a file; a `.partial` older than twice the dump
+  timeout is a killed run's and is swept),
   prune older than `BACKUP_RETENTION_DAYS`, then send the file to the owner's Telegram as a
   document (`BACKUP_TO_TELEGRAM`, split into ≤ 45 MB `.partNN` pieces, ciphertext), beat
   `backup` with `{ok, size, sent, path}` and `backup_counts` with row counts of
@@ -628,7 +638,10 @@ outside watcher watches the worker).
   off the server. Losing the key loses every backup.
 - `restore_drill` weekly (`RESTORE_DRILL_DAY` 05:00): restore the newest file into
   `clientscrapper_restore_drill`, compare counts with `backup_counts`, drop the scratch db, beat
-  `restore_drill`. Monthly the owner also runs the real procedure on a scratch VPS or laptop:
+  `restore_drill`. One drill at a time (advisory lock `cs:restore_drill`): a second one skips
+  `busy` and writes no beat. A restore (the drill and `make restore`) never puts plaintext on a
+  disk: the file is decrypted twice — once to check all of it authenticates to a pg_dump archive
+  before the target is touched, then straight into `pg_restore`'s stdin (`--list` too). Monthly the owner also runs the real procedure on a scratch VPS or laptop:
   `docker compose up -d db` → `make restore FILE=… DRY=1` → `make restore FILE=…` → `make up`
   (`FORCE=1` only on a non-empty database).
 - Not in the dump: `EVIDENCE_DIR` (cards and ERP notes need only `evidence.url/excerpt`, which

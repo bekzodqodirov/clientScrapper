@@ -423,3 +423,132 @@ async def test_the_drill_writes_nothing_past_the_log_redactors(
     # Only the JSON log lines (redacted) may appear, if a handler is installed.
     assert out == ""
     assert [line for line in err.splitlines() if not line.startswith("{")] == []
+
+
+# --- two writers at once, and no plaintext on disk (seam review 2026-10-24) -------------
+
+
+async def test_two_backups_in_the_same_second_each_write_a_whole_file(
+    session, keys, tmp_path, scratch
+):
+    """Two schedulers (or a catch-up beside the cron) at the same second used
+    one ``.partial`` opened O_TRUNC: one run renamed a file the other was
+    still writing, the other raised at its rename."""
+    import asyncio
+
+    await _seed(session)
+    recipient, identity = keys
+    folder = tmp_path / "backups"
+    first, second = await asyncio.gather(
+        backup.create_backup(recipient=recipient, directory=folder, now=NOW),
+        backup.create_backup(recipient=recipient, directory=folder, now=NOW),
+    )
+    assert first.ok and second.ok, (first.error, second.error)
+    assert first.path == second.path
+    assert [p.name for p in folder.iterdir()] == [first.path.name]
+    assert restore.restore(first.path, identity, to=scratch) == restore.EXIT_OK
+    assert restore_drill.count_rows(scratch)["suppression"] == 3
+
+
+def test_a_partial_a_killed_run_left_is_swept_and_a_live_one_is_not(tmp_path):
+    old = tmp_path / "clientscrapper-20261023-034500.dump.age.41-0a1b2c3d.partial"
+    live = tmp_path / "clientscrapper-20261024-034500.dump.age.42-0a1b2c3e.partial"
+    other = tmp_path / "notes.partial"
+    for path in (old, live, other):
+        path.write_bytes(b"x")
+    now = live.stat().st_mtime
+    os.utime(old, (now - backup.PARTIAL_STALE_SECONDS - 1,) * 2)
+    os.utime(other, (now - backup.PARTIAL_STALE_SECONDS - 1,) * 2)
+    assert backup.sweep_partials(tmp_path, now=now) == 1
+    assert sorted(p.name for p in tmp_path.iterdir()) == sorted([live.name, other.name])
+
+
+def _spy_pg_restore(folder: Path, seen: Path) -> None:
+    """A pg_restore that records what lies in TMPDIR and its arguments while
+    it runs, then is the real one."""
+    real = shutil.which("pg_restore")
+    assert real is not None
+    folder.mkdir()
+    spy = folder / "pg_restore"
+    spy.write_text(
+        "#!/bin/sh\n"
+        f'ls -A "$TMPDIR" >> "{seen}"\n'
+        f'echo "args: $*" >> "{seen}"\n'
+        f'exec "{real}" "$@"\n',
+        encoding="utf-8",
+    )
+    spy.chmod(0o755)
+
+
+async def test_a_restore_puts_no_plaintext_on_disk(
+    session, keys, tmp_path, scratch, monkeypatch
+):
+    """06 §4.4: plaintext only inside the pipe. The drill runs in the
+    long-lived worker, whose /tmp survives restarts: a decrypted dump a
+    SIGKILL left there would be the whole phone book in clear."""
+    import tempfile
+
+    await _seed(session)
+    recipient, identity = keys
+    result = await backup.create_backup(recipient=recipient, directory=tmp_path, now=NOW)
+    assert result.path is not None
+    tmp = tmp_path / "tmp"
+    tmp.mkdir()
+    seen = tmp_path / "seen.txt"
+    _spy_pg_restore(tmp_path / "bin", seen)
+    monkeypatch.setenv("TMPDIR", str(tmp))
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp))
+    monkeypatch.setenv("PATH", f"{tmp_path / 'bin'}{os.pathsep}{os.environ['PATH']}")
+    assert restore.restore(result.path, identity, to=scratch) == restore.EXIT_OK
+    nowhere = "postgresql+psycopg://none:none@127.0.0.1:1/none"
+    assert restore.restore(result.path, identity, to=nowhere, dry_run=True) == 0
+    lines = seen.read_text().splitlines()
+    # Two runs (the restore, the dry run's --list): nothing in TMPDIR while
+    # pg_restore ran, and no file named to it — the archive is its stdin.
+    assert [line for line in lines if not line.startswith("args: ")] == []
+    args = [line for line in lines if line.startswith("args: ")]
+    assert len(args) == 2
+    assert not any(".dump" in line for line in args)
+    assert list(tmp.iterdir()) == []
+    assert restore_drill.count_rows(scratch)["suppression"] == 3
+
+
+async def test_a_truncated_backup_is_refused_before_the_target_is_touched(
+    session, keys, tmp_path, scratch
+):
+    await _seed(session)
+    recipient, identity = keys
+    result = await backup.create_backup(recipient=recipient, directory=tmp_path, now=NOW)
+    assert result.path is not None
+    assert restore.restore(result.path, identity, to=scratch) == restore.EXIT_OK
+    cut = tmp_path / "clientscrapper-20261024-034501.dump.age"
+    sealed = result.path.read_bytes()
+    cut.write_bytes(sealed[: len(sealed) * 2 // 3])
+    with pytest.raises(restore.RestoreError) as refused:
+        restore.restore(cut, identity, to=scratch, force=True)
+    assert "age could not decrypt" in str(refused.value)
+    # Nothing was dropped: the earlier restore stands whole.
+    assert restore_drill.count_rows(scratch)["suppression"] == 3
+
+
+async def test_a_second_drill_at_once_stands_aside(session, keys, tmp_path):
+    """The scratch database has one name; a second drill would DROP … WITH
+    (FORCE) the first's. It skips while the lock is held, and writes no beat."""
+    import psycopg
+
+    recipient, identity = keys
+    folder = tmp_path / "backups"
+    await backup.create_backup(recipient=recipient, directory=folder, now=NOW)
+    drill_db = f"{_db_name()}_drill"
+    dsn = _url(_db_name()).replace("postgresql+psycopg://", "postgresql://")
+    with psycopg.connect(dsn, autocommit=True) as holder:
+        holder.execute(
+            "SELECT pg_advisory_lock(hashtext(%s))", (restore_drill.DRILL_LOCK,)
+        )
+        busy = await restore_drill.run(
+            identity=identity, database=drill_db, directory=folder
+        )
+        assert (busy.ok, busy.skipped) == (True, "busy")
+        assert not _exists(drill_db)
+    done = await restore_drill.run(identity=identity, database=drill_db, directory=folder)
+    assert done.ok and done.skipped is None, done.error

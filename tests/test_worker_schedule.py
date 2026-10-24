@@ -627,6 +627,182 @@ async def test_catch_up_runs_a_missed_backup(monkeypatch):
     assert calls == [NOW]
 
 
+async def test_a_busy_drill_writes_no_beat(session, monkeypatch):
+    from clientscrapper.services import restore_drill
+
+    async def busy(**kw):
+        return restore_drill.DrillResult(ok=True, skipped="busy")
+
+    monkeypatch.setattr(restore_drill, "run", busy)
+    result = await worker.restore_drill_job()
+    assert result is not None and result.skipped == "busy"
+    assert "restore_drill" not in await health.beats(session)
+
+
+def _scheduler_with(*job_ids: str) -> tuple[object, list[str]]:
+    """A scheduler (started, paused) holding stand-ins for ``job_ids``."""
+    ran: list[str] = []
+    scheduler = worker.AsyncIOScheduler(timezone=TZ)
+    for job_id in job_ids:
+
+        async def job(job_id: str = job_id) -> None:
+            ran.append(job_id)
+
+        scheduler.add_job(job, "cron", hour=3, minute=45, id=job_id, max_instances=1)
+    return scheduler, ran
+
+
+async def test_catch_up_hands_the_backup_to_its_scheduler_job(monkeypatch):
+    """The backup goes through the scheduler's own job, so max_instances=1
+    keeps it from running beside the 03:45 cron."""
+    called: list[datetime] = []
+
+    async def direct(*, now):
+        called.append(now)
+
+    monkeypatch.setattr(worker, "backup_job", direct)
+    monkeypatch.setattr(settings, "backup_age_recipient", "age1namuna")
+    scheduler, ran = _scheduler_with("backup")
+    scheduler.start(paused=True)
+    try:
+        moment = datetime.now(TZ)
+        await worker.catch_up(now=moment, scheduler=scheduler)
+        assert called == []
+        job = scheduler.get_job("backup")
+        assert job is not None and job.next_run_time <= moment + timedelta(seconds=1)
+        scheduler.resume()
+        await asyncio.sleep(0.2)
+        assert ran == ["backup"]
+    finally:
+        scheduler.shutdown(wait=False)
+
+
+async def test_catch_up_runs_the_nightly_outcomes_walks_it_missed(session, monkeypatch):
+    monkeypatch.setattr(settings, "backup_age_recipient", "")
+    monkeypatch.setattr(settings, "crm_push_source", "agent")
+    monkeypatch.setattr(settings, "crm_agent_key", "namuna-agent-key")
+    scheduler, ran = _scheduler_with(worker.OUTCOMES_JOB)
+    scheduler.start(paused=True)
+    try:
+        moment = datetime.now(TZ)
+        await worker.catch_up(now=moment, scheduler=scheduler)  # never walked
+        job = scheduler.get_job(worker.OUTCOMES_JOB)
+        assert job is not None and job.next_run_time <= moment + timedelta(seconds=1)
+        # Walked last night: nothing to catch up.
+        done = erp_feeds.OutcomesConfig(
+            last_cursor_at=moment - timedelta(hours=9),
+            last_recent_at=moment - timedelta(hours=9),
+        )
+        await erp_feeds._store_outcomes_config(session, done)
+        await session.commit()
+        job.modify(next_run_time=moment + timedelta(days=1))
+        await worker.catch_up(now=moment, scheduler=scheduler)
+        job = scheduler.get_job(worker.OUTCOMES_JOB)
+        assert job is not None and job.next_run_time > moment + timedelta(hours=1)
+        # The feeds off (the «Boshqa» fallback): never.
+        monkeypatch.setattr(settings, "crm_push_source", "other")
+        await session.execute(
+            sa.update(m.Source)
+            .where(m.Source.key == "erp_sync")
+            .values(config=m.Source.config.op("-")("outcomes"))
+        )
+        await session.commit()
+        await worker.catch_up(now=moment, scheduler=scheduler)
+        job = scheduler.get_job(worker.OUTCOMES_JOB)
+        assert job is not None and job.next_run_time > moment + timedelta(hours=1)
+    finally:
+        scheduler.shutdown(wait=False)
+        await session.execute(
+            sa.update(m.Source)
+            .where(m.Source.key == "erp_sync")
+            .values(config=m.Source.config.op("-")("outcomes"))
+        )
+        await session.commit()
+
+
+# --- one scheduler at a time ------------------------------------------------------------
+
+
+async def test_only_one_worker_holds_the_scheduler_lock(session):
+    first, second = worker.Leadership(), worker.Leadership()
+    try:
+        assert await first.acquire() is True
+        assert await first.acquire() is True  # held: still ours
+        assert await second.acquire() is False
+        await first.release()
+        assert await first.held() is False
+        assert await second.acquire() is True
+        assert await first.acquire() is False
+    finally:
+        await first.release()
+        await second.release()
+
+
+async def test_a_standby_waits_and_takes_over_when_the_leader_goes(session, monkeypatch):
+    monkeypatch.setattr(worker, "LEADER_RETRY", timedelta(milliseconds=50))
+    leader, standby = worker.Leadership(), worker.Leadership()
+    stop = asyncio.Event()
+    try:
+        assert await leader.acquire()
+        waiting = asyncio.ensure_future(worker.wait_for_leadership(standby, stop))
+        await asyncio.sleep(0.2)
+        assert not waiting.done()  # stands by while the leader lives
+        await leader.release()  # the leader's process is gone
+        assert await asyncio.wait_for(waiting, 5) is True
+        # Stopped while standing by: False, and nothing scheduled.
+        other = worker.Leadership()
+        stop.set()
+        assert await worker.wait_for_leadership(other, stop) is False
+    finally:
+        await leader.release()
+        await standby.release()
+
+
+async def test_a_worker_that_loses_the_lock_pauses_its_scheduler(session, monkeypatch):
+    monkeypatch.setattr(worker, "LEADER_CHECK", timedelta(milliseconds=50))
+    monkeypatch.setattr(worker, "LEADER_RETRY", timedelta(milliseconds=50))
+
+    class Scheduler:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        def pause(self) -> None:
+            self.calls.append("pause")
+
+        def resume(self) -> None:
+            self.calls.append("resume")
+
+    mine, theirs = worker.Leadership(), worker.Leadership()
+    scheduler = Scheduler()
+    stop = asyncio.Event()
+    try:
+        assert await mine.acquire()
+        keeping = asyncio.ensure_future(worker.keep_leadership(mine, scheduler, stop))
+        await asyncio.sleep(0.2)
+        assert scheduler.calls == []
+        # A database restart drops this connection; the other takes the lock.
+        await mine.release()
+        assert await theirs.acquire()
+        await asyncio.sleep(0.3)
+        assert scheduler.calls == ["pause"]
+        await theirs.release()
+        await asyncio.sleep(0.3)
+        assert scheduler.calls == ["pause", "resume"]
+        stop.set()
+        await asyncio.wait_for(keeping, 5)
+    finally:
+        stop.set()
+        await mine.release()
+        await theirs.release()
+
+
+async def test_a_database_that_cannot_be_asked_is_no_other_leader(monkeypatch):
+    """The lock lives in the database: unreachable, nobody else can hold it,
+    so the worker runs — or health_job could not say «Baza javob bermayapti»."""
+    nowhere = worker.Leadership("postgresql+psycopg://none:none@127.0.0.1:1/none")
+    assert await worker.wait_for_leadership(nowhere, asyncio.Event()) is True
+
+
 class _Exhibitors(Collector):
     key = "exhibitors"
     family = "exhibitor"

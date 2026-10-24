@@ -45,8 +45,10 @@ due. Nothing in this process sends a message to anyone else, ever.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import functools
 import logging
+import re
 import sys
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
@@ -80,7 +82,11 @@ from clientscrapper.services import (
     restore_drill,
 )
 from clientscrapper.services import http as http_layer
-from clientscrapper.services.lifecycle import idle_until_stopped, run_main
+from clientscrapper.services.lifecycle import (
+    install_stop_signals,
+    remove_stop_signals,
+    run_main,
+)
 
 log = logging.getLogger(__name__)
 
@@ -174,6 +180,8 @@ def _collector(
 
 # The notes the table carries for the ERP cadences (03 §3, 05 §B.2).
 _ERP_NOTES: Final[Mapping[str, str]] = {"outcomes": "cursor + recent walks"}
+# The nightly outcomes cadence (cursor + recent walks), the one catch_up moves.
+OUTCOMES_JOB: Final = next(j.id for j in erp_sync.JOBS if j.variant == "outcomes")
 
 
 def _erp_sync_slot(erp: erp_sync.ErpJob) -> JobSlot:
@@ -636,7 +644,8 @@ async def restore_drill_job() -> restore_drill.DrillResult | None:
             counts = detail.get("counts")
             expected = dict(counts) if isinstance(counts, dict) else None
     result = await restore_drill.run(expected=expected)
-    if result.skipped == "no_backup":
+    if result.skipped in ("no_backup", "busy"):
+        # Nothing to prove yet / another process is proving it and beats.
         return result
     async with session_scope() as session:
         await health.beat(session, health.RESTORE_DRILL_COMPONENT, detail=result.detail())
@@ -671,12 +680,30 @@ def backup_is_missing(now: datetime, directory: Path | None = None) -> bool:
     return newest is None or newest < due
 
 
-async def catch_up(*, now: datetime | None = None) -> None:
+def _run_now(scheduler: AsyncIOScheduler | None, job_id: str, now: datetime) -> bool:
+    """Move a registered job's next run to ``now``: it runs as the scheduler's
+    own job, so ``max_instances=1`` keeps it from running beside its cron
+    (a catch-up started at 03:44:59 and the 03:45 run). False when there is
+    no such job to move."""
+    job = scheduler.get_job(job_id) if scheduler is not None else None
+    if job is None:
+        return False
+    job.modify(next_run_time=now)
+    return True
+
+
+async def catch_up(
+    *, now: datetime | None = None, scheduler: AsyncIOScheduler | None = None
+) -> None:
     """Run what the scheduler missed while the worker was down. The jobstore
-    is in memory, so a deploy spanning BACKUP_TIME loses that night's backup.
-    Every branch is guarded: a startup path that can raise is a crash loop
-    under ``restart: unless-stopped``. (The digest's catch-up is T-35's.)"""
+    is in memory, so a deploy spanning BACKUP_TIME loses that night's backup,
+    and one spanning 03:00 that night's outcomes walks (the next delta does
+    not make them). Through ``scheduler`` the job is moved to now rather than
+    called here. Every branch is guarded: a startup path that can raise is a
+    crash loop under ``restart: unless-stopped``. (The digest's catch-up is
+    T-35's.)"""
     now = now or datetime.now(settings.tz)
+    await _catch_up_outcomes(now, scheduler)
     if not settings.backup_age_recipient:
         return
     try:
@@ -687,9 +714,29 @@ async def catch_up(*, now: datetime | None = None) -> None:
     if missing:
         log.info("catch-up: no backup since the last scheduled time; running one")
         try:
-            await backup_job(now=now)
+            if not _run_now(scheduler, "backup", now):
+                await backup_job(now=now)
         except Exception as exc:
             log.error("catch-up backup failed", extra={"error": type(exc).__name__})
+
+
+async def _catch_up_outcomes(now: datetime, scheduler: AsyncIOScheduler | None) -> None:
+    """The nightly cursor + recent walks (05 §B.2) when the last ones are
+    older than ``erp_feeds.NIGHTLY_MAX_AGE`` — the run then also makes any
+    Sunday or monthly walk that is due. Only with the feeds configured and a
+    scheduler to hand the job to."""
+    if scheduler is None or not erp_feeds.feeds_configured():
+        return
+    try:
+        async with session_scope() as session:
+            cfg = await erp_feeds.outcomes_config(session)
+        if not cfg.nightly_done(now) and _run_now(scheduler, OUTCOMES_JOB, now):
+            log.info("catch-up: the nightly outcomes walks are due; running them")
+    except Exception as exc:
+        log.error(
+            "catch-up of the outcomes walks failed",
+            extra={"error": type(exc).__name__},
+        )
 
 
 async def source_crons() -> dict[str, str | None]:
@@ -697,6 +744,130 @@ async def source_crons() -> dict[str, str | None]:
     async with session_scope() as session:
         rows = await session.execute(sa.select(Source.key, Source.cron))
         return {str(key): cron for key, cron in rows.all()}
+
+
+# --- one scheduler at a time -------------------------------------------------------
+
+# A second worker process (a scaled service, an old container still up beside
+# a new one) would fire every job twice: two backups into one file, two
+# drills dropping each other's database, two feed walks. The scheduler runs
+# only in the process holding this session-level advisory lock; the others
+# stand by — alive, logging, beating nothing (the leader beats «worker») —
+# and take over when its connection goes.
+LEADER_LOCK: Final = "cs:worker"
+LEADER_RETRY: Final = timedelta(seconds=60)
+LEADER_CHECK: Final = timedelta(seconds=60)
+
+
+class Leadership:
+    """The ``LEADER_LOCK`` advisory lock on a connection of its own, held for
+    the process's life (a session lock goes with its connection: a killed
+    worker frees it at once)."""
+
+    def __init__(self, database_url: str | None = None) -> None:
+        url = database_url or settings.database_url
+        self._dsn = re.sub(r"^postgresql\+\w+://", "postgresql://", url)
+        self._conn: Any = None
+
+    async def acquire(self) -> bool:
+        """True when this process holds the lock now; False when another
+        does. Raises when the database cannot be asked."""
+        if await self.held():
+            return True
+        import psycopg
+
+        conn = await psycopg.AsyncConnection.connect(
+            self._dsn, autocommit=True, connect_timeout=10
+        )
+        try:
+            asked = await conn.execute(
+                "SELECT pg_try_advisory_lock(hashtext(%s))", (LEADER_LOCK,)
+            )
+            got = await asked.fetchone()
+        except BaseException:
+            await conn.close()
+            raise
+        if got is not None and got[0] is True:
+            self._conn = conn
+            return True
+        await conn.close()
+        return False
+
+    async def held(self) -> bool:
+        """The lock's connection still answers (a database restart drops it,
+        and the lock with it)."""
+        conn = self._conn
+        if conn is None or conn.closed:
+            self._conn = None
+            return False
+        try:
+            await conn.execute("SELECT 1")
+        except Exception:
+            await self.release()
+            return False
+        return True
+
+    async def release(self) -> None:
+        conn, self._conn = self._conn, None
+        if conn is not None:
+            with contextlib.suppress(Exception):
+                await conn.close()
+
+
+async def _wait(stop: asyncio.Event, delay: timedelta) -> bool:
+    """Sleep ``delay`` unless ``stop`` is set first; True when stopped."""
+    try:
+        await asyncio.wait_for(stop.wait(), timeout=delay.total_seconds())
+    except TimeoutError:
+        return False
+    return True
+
+
+async def wait_for_leadership(leader: Leadership, stop: asyncio.Event) -> bool:
+    """Return True once this process may schedule, False if stopped first.
+    A database that cannot be asked is no other leader (the lock lives in
+    it): the worker then runs, so health_job can say «Baza javob
+    bermayapti», and :func:`keep_leadership` takes the lock later."""
+    told = False
+    while not stop.is_set():
+        try:
+            if await leader.acquire():
+                if told:
+                    log.info("scheduler lock taken: this worker now schedules")
+                return True
+        except Exception as exc:
+            log.warning(
+                "scheduler lock not asked; running without it for now",
+                extra={"error": type(exc).__name__},
+            )
+            return True
+        if not told:
+            log.warning("another worker holds the scheduler lock; standing by")
+            told = True
+        if await _wait(stop, LEADER_RETRY):
+            return False
+    return False
+
+
+async def keep_leadership(
+    leader: Leadership, scheduler: AsyncIOScheduler, stop: asyncio.Event
+) -> None:
+    """Until ``stop``: every ``LEADER_CHECK`` make sure the lock is still
+    this process's. Lost to another process (this one's connection went and
+    the other took it), the scheduler pauses until it is ours again."""
+    while not await _wait(stop, LEADER_CHECK):
+        try:
+            if await leader.acquire():
+                continue
+        except Exception as exc:
+            log.warning("scheduler lock not asked", extra={"error": type(exc).__name__})
+            continue
+        log.error("scheduler lock held by another worker: pausing this one")
+        scheduler.pause()
+        if not await wait_for_leadership(leader, stop):
+            return
+        scheduler.resume()
+        log.info("scheduler resumed")
 
 
 # --- the process ---------------------------------------------------------------------
@@ -741,6 +912,15 @@ async def backup_now(*, now: datetime | None = None) -> int:
 async def run() -> None:
     setup_logging("worker")
     wire()
+    stop = asyncio.Event()
+    installed = install_stop_signals(stop)
+    leader = Leadership()
+    if not await wait_for_leadership(leader, stop):
+        await leader.release()
+        await engine.dispose()
+        remove_stop_signals(installed)
+        log.info("worker stopped before it led")
+        return
     try:
         crons = await source_crons()
     except Exception as exc:
@@ -773,16 +953,18 @@ async def run() -> None:
     except Exception as exc:
         log.error("startup heartbeat failed", extra={"error": type(exc).__name__})
     try:
-        await catch_up()
+        await catch_up(scheduler=scheduler)
     except Exception as exc:
         log.error("startup catch-up failed", extra={"error": type(exc).__name__})
     try:
-        await idle_until_stopped()
+        await keep_leadership(leader, scheduler, stop)
     finally:
         scheduler.shutdown(wait=False)
         if _shared.fetcher is not None:
             await _shared.fetcher.aclose()
+        await leader.release()
         await engine.dispose()
+        remove_stop_signals(installed)
         log.info("worker stopped")
 
 
