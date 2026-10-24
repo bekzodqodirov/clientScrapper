@@ -517,6 +517,16 @@ async def test_a_truncated_backup_is_refused_before_the_target_is_touched(
     session, keys, tmp_path, scratch
 ):
     await _seed(session)
+    # Enough rows that the archive's data runs past its table of contents:
+    # a cut inside the TOC fails pg_restore before it runs anything at all.
+    await session.execute(
+        sa.text(
+            "INSERT INTO suppression (kind, key_type, key, source, reason) "
+            "SELECT 'dnc', 'phone_tail', lpad(g::text, 9, '1'), 'owner_bot', "
+            "'owner_command' FROM generate_series(1000, 40999) AS g"
+        )
+    )
+    await session.commit()
     recipient, identity = keys
     result = await backup.create_backup(recipient=recipient, directory=tmp_path, now=NOW)
     assert result.path is not None
@@ -531,12 +541,12 @@ async def test_a_truncated_backup_is_refused_before_the_target_is_touched(
         )
     cut = tmp_path / "clientscrapper-20261024-034501.dump.age"
     sealed = result.path.read_bytes()
-    cut.write_bytes(sealed[: len(sealed) * 2 // 3])
+    cut.write_bytes(sealed[:-300])  # the last chunk lost
     with pytest.raises(restore.RestoreError) as refused:
         restore.restore(cut, identity, to=scratch, force=True)
     assert "age could not decrypt" in str(refused.value)
     # Nothing was dropped: the target is as it was, the extra row included.
-    assert restore_drill.count_rows(scratch)["suppression"] == 4
+    assert restore_drill.count_rows(scratch)["suppression"] == 40_004
 
 
 async def test_a_second_drill_at_once_stands_aside(session, keys, tmp_path):
