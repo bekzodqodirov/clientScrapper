@@ -4,6 +4,9 @@
 name: clientscrapper
 # A VPS that runs for a year must not fill its disk with container logs.
 x-logging: &log { driver: json-file, options: { max-size: "10m", max-file: "3" } }
+# An app container's healthcheck timing: one read of one heartbeat row a
+# minute; three misses in a row after the threshold mark it unhealthy.
+x-beat: &beat { interval: 60s, timeout: 20s, retries: 3, start_period: 120s }
 x-app: &app
   build: .
   # unless-stopped, not on-failure: on-failure containers are NOT restored
@@ -45,9 +48,28 @@ services:
     volumes: [ "./data:/data", "./secrets:/secrets" ]
     command: ["sh", "-c", "mkdir -p /data/evidence /data/backups /data/imports && { chown -R 10001:10001 /data /secrets || echo 'chown skipped'; } && su -s /bin/sh clientscrapper -c 'alembic upgrade head'"]
     restart: "no"
-  worker:  { <<: *app, mem_limit: 2g,   cpus: 2.0, command: ["python", "-m", "clientscrapper.worker.main"] }
-  userbot: { <<: *app, mem_limit: 768m, cpus: 0.5, command: ["python", "-m", "clientscrapper.userbot.main"] }
-  bot:     { <<: *app, mem_limit: 512m, cpus: 0.5, command: ["python", "-m", "clientscrapper.bot.main"] }
+  # Docker's «healthy» for an app container is «running, and a fresh
+  # heartbeat» (06 §4.1): tools/healthcheck.py asks health.judge, the same
+  # rule the health job alerts on, so `make ps` and the owner's alert agree.
+  # The first beat comes within a minute of start; start_period covers it.
+  worker:
+    <<: *app
+    mem_limit: 2g
+    cpus: 2.0
+    command: ["python", "-m", "clientscrapper.worker.main"]
+    healthcheck: { <<: *beat, test: ["CMD", "python", "-m", "clientscrapper.tools.healthcheck", "worker"] }
+  userbot:
+    <<: *app
+    mem_limit: 768m
+    cpus: 0.5
+    command: ["python", "-m", "clientscrapper.userbot.main"]
+    healthcheck: { <<: *beat, test: ["CMD", "python", "-m", "clientscrapper.tools.healthcheck", "userbot"] }
+  bot:
+    <<: *app
+    mem_limit: 512m
+    cpus: 0.5
+    command: ["python", "-m", "clientscrapper.bot.main"]
+    healthcheck: { <<: *beat, test: ["CMD", "python", "-m", "clientscrapper.tools.healthcheck", "bot"] }
   searxng:                         # optional: docker compose --profile searxng up -d
     image: searxng/searxng:2026.10.1      # UNVERIFIED tag — pin the current one on day 1
     profiles: ["searxng"]

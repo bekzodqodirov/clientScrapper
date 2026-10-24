@@ -246,7 +246,7 @@ class _Group:
 async def global_pause(session: AsyncSession) -> bool:
     """``policy.paused()``: ``/toxtat`` set ``runtime_flags('paused')``."""
     row = await session.get(RuntimeFlag, "paused", populate_existing=True)
-    return row is not None and row.value not in (None, False)
+    return row is not None and health.flag_set(row.value)
 
 
 async def skip_reason(session: AsyncSession, source: Source, now: datetime) -> str | None:
