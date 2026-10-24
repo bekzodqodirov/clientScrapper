@@ -27,8 +27,10 @@ rest of the run is kept. The ``collector_runs`` row
 carries the 02 §2.2 counters; ``unchanged``, ``skipped_robots``, ``note`` and
 the rest go into ``meta``.
 
-Endings: ``ok``; ``partial`` when a page/dollar budget, a cost cap or the
-deadline stopped the run; ``failed`` + ``error='host_blocked'`` when a host
+Endings: ``ok``; ``partial`` when a page/dollar budget, a cost cap (or any
+``costs.ask`` refusal, ``meta.refused`` naming its code — through the Fetcher
+or from a paid call the collector made itself, ``costs.ModelUnavailable``) or
+the deadline stopped the run; ``failed`` + ``error='host_blocked'`` when a host
 breaker tripped — the source is paused 6 h (``paused_until`` for the runner,
 ``breaker_until`` for the health problem ``collector_blocked``, both with
 reason ``host_blocked:<host>``); ``failed`` + the error class for anything
@@ -91,19 +93,22 @@ CANCELLED: Final = "cancelled"
 _REFUSED: Final = (IntegrityError, DataError, ValueError)
 
 SessionFactory = Callable[[], AsyncSession]
-GateFactory = Callable[[AsyncSession, int, datetime], CostGate]
+GateFactory = Callable[[AsyncSession, int], CostGate]
 
 
-def ask_gate(session: AsyncSession, run_id: int, now: datetime) -> CostGate:
-    """The run's cost gate: ``costs.ask`` with the run's session, clock and
+def ask_gate(session: AsyncSession, run_id: int) -> CostGate:
+    """The run's cost gate: ``costs.ask`` with the run's session and
     ``collector_run_id`` bound (04 §8); the Fetcher supplies the rest per call
-    (operation, estimate, call, price, the sub-source it was made for).
+    (operation, estimate, call, price, the sub-source it was made for, and
+    ``now`` — its wall clock at that request, never the run's start: a run
+    started at 23:50 that pays at 00:50 spends the new day's cap, and a
+    Yandex call at 10:29 is outside its window however early the run began).
 
-    ``functools.partial(costs.ask, session, now=…, collector_run_id=…)`` in
-    effect, spelled out because mypy does not hold a partial to a Protocol:
-    written as a call, both signatures are checked, so a change to either
-    side of the seam is a type error (tests/collectors/test_cost_gate.py
-    runs it against the database)."""
+    ``functools.partial(costs.ask, session, collector_run_id=…)`` in effect,
+    spelled out because mypy does not hold a partial to a Protocol: written
+    as a call, both signatures are checked, so a change to either side of the
+    seam is a type error (tests/collectors/test_cost_gate.py runs it against
+    the database)."""
 
     async def gate(
         *,
@@ -112,6 +117,7 @@ def ask_gate(session: AsyncSession, run_id: int, now: datetime) -> CostGate:
         call: Callable[[], Awaitable[FetchResult]],
         price: Callable[[FetchResult], Priced],
         source_key: str,
+        now: datetime,
     ) -> FetchResult:
         return await costs.ask(
             session,
@@ -430,14 +436,25 @@ async def write_observations(
     return written
 
 
+def _stopped_by(exc: costs.ModelUnavailable) -> tuple[str, str]:
+    """(meta.exhausted, meta.refused) for a refusal the collector met outside
+    the Fetcher: the same words the Fetcher's own refusals carry."""
+    if isinstance(exc, costs.CostCapReached):
+        return ("cost_cap" if costs.is_cap(exc.code) else "refused"), exc.code
+    # ModelUnavailable's message is a code, never text (costs.py).
+    return "model_unavailable", str(exc) or type(exc).__name__
+
+
 def _meta(
     *,
     variant: str | None,
     fetcher: Fetcher,
     written: _Written,
     note: str | None = None,
+    stopped: tuple[str, str] | None = None,
 ) -> dict[str, Any]:
     stats = fetcher.stats
+    exhausted, refused = stopped or (stats.exhausted, stats.refused)
     meta: dict[str, Any] = {
         "unchanged": stats.unchanged,
         "skipped_robots": stats.skipped_robots,
@@ -454,7 +471,8 @@ def _meta(
         "duplicates": written.duplicates,
         "serp_hits": written.serp_hits,
         "dropped": dict(written.dropped),
-        "exhausted": stats.exhausted,
+        "exhausted": exhausted,
+        "refused": refused,
         "blocked_hosts": list(stats.blocked_hosts),
         "problem": BLOCKED_PROBLEM if stats.blocked_hosts else None,
         "sources": written.by_source,
@@ -541,9 +559,10 @@ async def run_collector(
 ) -> RunReport:
     """One run of ``collector_cls`` at ``now``; see the module docstring.
     ``clock`` gives the finish time (default: the real clock, never before
-    ``now``). ``cost_gate_for(session, run_id, now)`` binds ``costs.ask``
-    (``ask_gate``); ``None`` leaves the run without a gate, so a paid call
-    is refused (``UnmeteredCall``) before anything is sent."""
+    ``now``). ``cost_gate_for(session, run_id)`` binds ``costs.ask``
+    (``ask_gate``; the Fetcher passes each request's own ``now``); ``None``
+    leaves the run without a gate, so a paid call is refused
+    (``UnmeteredCall``) before anything is sent."""
     key = collector_cls.key
     component = health.collector_component(key, variant)
     version = f"{key}@{collector_cls.version}"
@@ -595,13 +614,16 @@ async def run_collector(
         await session.commit()
 
         ledger = RunLedger(session_factory, evidence_root)
-        gate = cost_gate_for(session, run_id, now) if cost_gate_for is not None else None
+        gate = cost_gate_for(session, run_id) if cost_gate_for is not None else None
         run_fetcher = fetcher.bind(hooks=ledger, cost_gate=gate)
         try:
             collector = collector_cls(run_fetcher, serp)
             collector.variant = variant
 
             status, error = "ok", None
+            # A paid call the collector made itself (services/extraction's
+            # classify, T-27) rather than through the Fetcher: what stopped it.
+            stopped: tuple[str, str] | None = None
             try:
                 observations = await collector.collect(session, budget)
             except HostPaused:
@@ -612,6 +634,12 @@ async def run_collector(
                 )
             except BudgetExhausted:
                 observations, status = list(collector.found), "partial"
+            except costs.ModelUnavailable as exc:
+                # A cap (or a model that did not answer) is a budget stop, not
+                # a failure: the collector keeps its free part (04 §8, 06 §4.2
+                # cost_cap). CostCapReached is one; its code names the rung.
+                observations, status = list(collector.found), "partial"
+                stopped = _stopped_by(exc)
             except Exception as exc:
                 await session.rollback()
                 observations, status, error = [], "failed", type(exc).__name__
@@ -660,7 +688,9 @@ async def run_collector(
                 "new_signals": 0,
                 "cost_usd": stats.cost_usd,
             }
-            meta = _meta(variant=variant, fetcher=run_fetcher, written=written)
+            meta = _meta(
+                variant=variant, fetcher=run_fetcher, written=written, stopped=stopped
+            )
             end = finished()
             await session.execute(
                 sa.update(CollectorRun)

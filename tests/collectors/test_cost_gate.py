@@ -89,7 +89,7 @@ async def test_a_paid_fetch_through_the_real_ask_is_made_once_and_recorded(
     now = clock.now()
     run_id = await run_row(session, now)
     site = brave(clock)
-    fetcher = fetcher_for(site, cost_gate=ask_gate(session, run_id, now))
+    fetcher = fetcher_for(site, cost_gate=ask_gate(session, run_id))
     b = budget(usd="1")
 
     result = await fetcher.get(
@@ -140,7 +140,7 @@ async def test_at_a_cap_the_real_ask_refuses_and_nothing_is_sent(
     )
     await session.commit()
     site = brave(clock)
-    fetcher = fetcher_for(site, cost_gate=ask_gate(session, run_id, now))
+    fetcher = fetcher_for(site, cost_gate=ask_gate(session, run_id))
     b = budget(usd="1")
 
     with pytest.raises(BudgetExhausted) as caught:
@@ -177,7 +177,7 @@ async def test_a_request_ask_cannot_take_fails_the_fetch_and_writes_nothing(
     now = clock.now()
     run_id = await run_row(session, now)
     site = brave(clock)
-    fetcher = fetcher_for(site, cost_gate=ask_gate(session, run_id, now))
+    fetcher = fetcher_for(site, cost_gate=ask_gate(session, run_id))
     with pytest.raises(ValueError):
         await fetcher.get(
             BRAVE,

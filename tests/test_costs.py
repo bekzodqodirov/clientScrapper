@@ -1003,6 +1003,64 @@ async def test_an_undelivered_cost_cap_is_not_marked(session):
     assert len(owner.told) == 2 and await alert_rows(session) == []
 
 
+class SlowOwner(Owner):
+    """A notify() that takes a while, as a Telegram send does: the window in
+    which every other refusal at the cap could decide it is due as well."""
+
+    async def __call__(self, text: str) -> bool:
+        self.told.append(text)
+        await asyncio.sleep(0.05)
+        return self.delivered
+
+
+async def test_refusals_at_the_cap_that_land_together_tell_the_owner_once(session):
+    # 07 §1.9: cost_cap fires once per Tashkent day, however many processes
+    # (or ops in one process: the refusal memory is per op) hit it at once.
+    owner = SlowOwner()
+    costs.set_cap_notifier(owner)
+    await seed(session, "10.00", at=NOW.replace(hour=9))
+
+    async def refused(operation: str, est: str) -> str:
+        async with SessionLocal() as own:
+            try:
+                await costs.ask(
+                    own,
+                    operation=operation,  # type: ignore[arg-type]
+                    est_usd=D(est),
+                    call=Calls(),
+                    price=lambda _: Priced(D(est), units=D(1)),
+                    now=NOW,
+                )
+            except CostCapReached as exc:
+                return exc.code
+            finally:
+                await own.rollback()
+            return "passed"
+
+    codes = await asyncio.gather(
+        refused("classify", "0.001"),
+        refused("serp_brave", "0.005"),
+        refused("places_details_contact", "0.020"),
+        refused("verdict", "0.01"),
+    )
+    assert codes == ["cost_cap_daily"] * 4
+    assert len(owner.told) == 1
+    assert await alert_rows(session) == [("alert:cost_cap", "cost_cap", NOW)]
+
+
+async def test_a_cost_cap_health_already_told_is_not_told_again_by_ask(session):
+    # fire_spend_alerts (health_job) and ask share the claim of alert:cost_cap.
+    owner = Owner()
+    costs.set_cap_notifier(owner)
+    await seed(session, "10.00", at=NOW.replace(hour=9))
+    fired = await costs.fire_spend_alerts(session, now=NOW, notify=owner)
+    assert "cost_cap" in fired
+    with pytest.raises(CostCapReached):
+        await classify(session, now=NOW.replace(hour=15))
+    told_cap = [t for t in owner.told if t.startswith("💸")]
+    assert len(told_cap) == 1
+
+
 async def test_spend_high_fires_once_per_tashkent_day(session):
     owner = Owner()
     await seed(session, "8.50", at=NOW.replace(hour=9))

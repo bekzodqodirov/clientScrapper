@@ -11,7 +11,7 @@ from __future__ import annotations
 import ast
 import hashlib
 import logging
-from datetime import timedelta
+from datetime import datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -652,20 +652,23 @@ def Priced(cost: str | None) -> usage.Priced:
 
 
 class Gate:
-    """Stands in for functools.partial(costs.ask, session, now=…); the real
-    one runs in tests/collectors/test_cost_gate.py. It refuses the way ask
-    does, with ``CostCapReached``; ``bug`` raises what ask raises for a
-    request it cannot take (an operation that is not callable)."""
+    """Stands in for functools.partial(costs.ask, session, collector_run_id=…);
+    the real one runs in tests/collectors/test_cost_gate.py. It refuses the
+    way ask does, with ``CostCapReached``; ``bug`` raises what ask raises for
+    a request it cannot take (an operation that is not callable). ``nows``
+    keeps the clock each request was judged at."""
 
     def __init__(self, refuse: bool = False, bug: bool = False) -> None:
         self.refuse = refuse
         self.bug = bug
         self.calls: list[dict] = []
+        self.nows: list[datetime] = []
 
-    async def __call__(self, *, operation, est_usd, call, price, source_key):
+    async def __call__(self, *, operation, est_usd, call, price, source_key, now):
         self.calls.append(
             {"operation": operation, "est_usd": est_usd, "source_key": source_key}
         )
+        self.nows.append(now)
         if self.refuse:
             raise CostCapReached("cost_cap_op:serp_brave", operation)
         if self.bug:
@@ -729,6 +732,27 @@ async def test_a_paid_call_clears_the_budget_then_the_gate_then_goes(clock):
         Decimal("0.004"),
         Decimal("0.004"),
     )
+
+
+async def test_each_paid_request_is_judged_at_its_own_minute(clock):
+    # The gate is costs.ask: the Tashkent day and OP_WINDOWS are read off the
+    # now it is given, so it must be the request's wall clock, not a stamp
+    # taken when the run (or the Fetcher) started.
+    site = brave_site(clock)
+    gate = Gate()
+    fetcher = fetcher_for(site, cost_gate=gate)
+    paid = PaidCall("serp_brave", Decimal("0.005"), lambda r: Priced("0.005"))
+    b = budget(usd="1")
+    first = clock.now()
+    await fetcher.get(
+        BRAVE, source="search_brave", budget=b, obey_robots=False, paid=paid
+    )
+    clock.advance(3600)
+    await fetcher.get(
+        BRAVE, source="search_brave", budget=b, obey_robots=False, paid=paid
+    )
+    assert gate.nows[0] == first
+    assert gate.nows[1] == clock.now() and gate.nows[1] - first >= timedelta(hours=1)
 
 
 async def test_the_source_budget_refuses_before_the_gate_is_asked(clock):

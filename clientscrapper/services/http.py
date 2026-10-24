@@ -51,7 +51,7 @@ import httpx
 
 from clientscrapper.collectors.keywords import CAPTCHA_MARKERS, EMAIL_RE
 from clientscrapper.config import settings
-from clientscrapper.services.costs import CostCapReached
+from clientscrapper.services.costs import CostCapReached, is_cap
 from clientscrapper.services.retry import is_transient_http, with_backoff
 from clientscrapper.services.robots import RobotsRules, parse_robots
 from clientscrapper.services.urlsafe import scrub_url as scrub_url  # re-exported
@@ -136,7 +136,10 @@ BACKOFF_BASE: Final = 2.0
 BACKOFF_CAP: Final = 60.0
 REDIRECT_CODES: Final = frozenset({301, 302, 303, 307, 308})
 
-ExhaustReason = Literal["pages", "usd", "deadline", "cost_cap"]
+# "cost_cap": costs.ask refused at a cap; "refused": it refused for another
+# reason (unpriced, op_window:<op>, anthropic_silence) — the code itself is
+# BudgetExhausted.detail and FetchStats.refused.
+ExhaustReason = Literal["pages", "usd", "deadline", "cost_cap", "refused"]
 
 
 # --- errors ---------------------------------------------------------------------
@@ -262,8 +265,11 @@ class PaidCall:
 
 
 class CostGate(Protocol):
-    """``functools.partial(costs.ask, session, now=…, collector_run_id=…)``
-    (``collectors/runner.ask_gate``). It refuses by raising
+    """``functools.partial(costs.ask, session, collector_run_id=…)``
+    (``collectors/runner.ask_gate``). ``now`` is the Fetcher's own wall clock
+    at this request, never the run's start: a run that crosses midnight or
+    the end of an op window is judged and stamped at the minute it pays (04
+    §8: the Tashkent day, ``OP_WINDOWS``). It refuses by raising
     ``costs.CostCapReached`` before anything is sent; any other exception it
     raises before the call is a programming error and propagates as such."""
 
@@ -275,6 +281,7 @@ class CostGate(Protocol):
         call: Callable[[], Awaitable[FetchResult]],
         price: Callable[[FetchResult], Priced],
         source_key: str,
+        now: datetime,
     ) -> Awaitable[FetchResult]: ...
 
 
@@ -293,6 +300,8 @@ class FetchStats:
     cost_usd: Decimal = Decimal("0")
     blocked_hosts: list[str] = field(default_factory=list)
     exhausted: ExhaustReason | None = None
+    # The costs.ask refusal code behind exhausted="cost_cap"/"refused".
+    refused: str | None = None
 
 
 @dataclass(slots=True)
@@ -701,14 +710,18 @@ class Fetcher:
                 call=guarded,
                 price=price,
                 source_key=source,
+                now=self._wall(),
             )
         except Exception as exc:
             if not dispatched:
                 if isinstance(exc, CostCapReached):
-                    # The gate refused before anything was sent (a cap): a
-                    # budget stop, not a failure — the run ends partial (04 §8).
-                    self.stats.exhausted = "cost_cap"
-                    raise BudgetExhausted("cost_cap", exc.code) from exc
+                    # The gate refused before anything was sent: a budget stop,
+                    # not a failure — the run ends partial (04 §8), and says
+                    # which rung (a window is not a cap).
+                    reason: ExhaustReason = "cost_cap" if is_cap(exc.code) else "refused"
+                    self.stats.exhausted = reason
+                    self.stats.refused = exc.code
+                    raise BudgetExhausted(reason, exc.code) from exc
                 # ask refusing a bad request (an operation that is not
                 # callable, a float estimate, a naive now) is a bug: nothing
                 # was sent or claimed, so it is neither a budget stop nor spend.

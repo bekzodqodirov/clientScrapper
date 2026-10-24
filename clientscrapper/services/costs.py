@@ -95,6 +95,16 @@ ANTHROPIC_SILENCE: Final = "anthropic_silence"
 REFUSED_PREFIX: Final = "refused:"
 # The refusals that are the 06 §4.2 problem ``cost_cap``, told first by ``ask``.
 CAP_ALERT_CODES: Final = frozenset({CAP_DAILY, CAP_MONTHLY})
+# Every rung that is a cap (money or count) starts so; the others —
+# unpriced, op_window, anthropic_silence — refuse a call for another reason.
+CAP_PREFIX: Final = "cost_cap"
+
+
+def is_cap(code: str) -> bool:
+    """Is this refusal code a budget cap (as opposed to an unpriced call, an op
+    outside its window, or the Anthropic API reported down)?"""
+    return code.startswith(CAP_PREFIX)
+
 
 # Health keys this module raises (rows of 06 §4.2 PROBLEM_KEYS) and the alert
 # ledger's kind prefix (MIYA ``health.ALERT_KIND``; health.py reuses it).
@@ -118,6 +128,10 @@ SERP_OVERFLOW_FLAG: Final = "serp_paid_overflow"
 # pg_advisory_xact_lock key naming the spend ledger: every ask's read-decide-
 # claim step is serialised on it (milliseconds; never held across a call).
 LEDGER_LOCK: Final = 0x63730006
+# The class key of an alert's claim lock, ``pg_advisory_xact_lock(ALERT_LOCK,
+# hashtext('alert:<key>'))``: «is it due, then claim it» is one step, so
+# refusals at a cap that land together tell the owner once (07 §1.9).
+ALERT_LOCK: Final = 0x63730008
 
 # Ops whose cap or price is a count: their claim reserves one unit before the
 # call and the settled row keeps at least it.
@@ -1028,11 +1042,60 @@ def mark_alerted(session: AsyncSession, key: str, now: datetime) -> None:
     session.add(ReminderLog(kind=ALERT_KIND + key, ref=key, sent_at=now))
 
 
+async def claim_alert(session: AsyncSession, key: str, now: datetime) -> int | None:
+    """Claim ``alert:<key>`` for ``now``'s business day: the id of the
+    ``reminder_log`` row written, or None when one already stands. The check
+    and the write hold ``pg_advisory_xact_lock(ALERT_LOCK, hashtext(kind))``
+    until the caller's transaction ends, so of two claims at once one wins —
+    the alert is said once, not once per process that saw the cap. Commit
+    before notifying: the lock must not be held across a network call."""
+    kind = ALERT_KIND + key
+    await session.execute(
+        sa.select(sa.func.pg_advisory_xact_lock(ALERT_LOCK, sa.func.hashtext(kind)))
+    )
+    if not await alert_due(session, key, now):
+        return None
+    row = ReminderLog(kind=kind, ref=key, sent_at=now)
+    session.add(row)
+    await session.flush()
+    return row.id
+
+
+async def _say_once(key: str, text: str, now: datetime, notify: CapNotifier) -> bool:
+    """Claim, then tell; a claim whose message did not arrive is taken back,
+    so the next refusal (or health run) tries again. Each step is its own
+    transaction: the claim is committed before ``notify`` is awaited."""
+    async with _own_session() as own:
+        claim = await claim_alert(own, key, now)
+    if claim is None:
+        return False
+    delivered = False
+    try:
+        delivered = await notify(text)
+    finally:
+        if not delivered:
+            try:
+                async with _own_session() as own:
+                    await own.execute(
+                        sa.delete(ReminderLog).where(ReminderLog.id == claim)
+                    )
+            except Exception as exc:
+                # The claim stays: the alert is not said again today — the
+                # quiet direction, and /holat still shows the cap.
+                log.warning(
+                    "alert claim not released",
+                    extra={"key": key, "error": type(exc).__name__},
+                )
+    return delivered
+
+
 async def fire_spend_alerts(
     session: AsyncSession, *, now: datetime, notify: CapNotifier
 ) -> list[str]:
     """Say each holding spend alert at most once per business day; returns the
-    keys delivered now (health_job calls this; ``ask`` tells cost_cap itself)."""
+    keys delivered now (health_job calls this; ``ask`` tells cost_cap itself,
+    and the two share the claim, so cost_cap is said once whichever is
+    first). ``session`` reads the ledger; each claim is its own transaction."""
     alerts = spend_alerts(
         await snapshot(session, now),
         daily_cap=settings.daily_cost_cap_usd,
@@ -1041,31 +1104,25 @@ async def fire_spend_alerts(
     )
     fired: list[str] = []
     for alert in alerts:
-        if await alert_due(session, alert.key, now) and await notify(alert.text):
-            mark_alerted(session, alert.key, now)
+        if await _say_once(alert.key, alert.text, now, notify):
             fired.append(alert.key)
-    await session.flush()
     return fired
 
 
 async def _tell_cost_cap(code: str, now: datetime) -> None:
     """The first refusal at a cap tells the owner at once (06 §4.2
-    TOLD_FIRST_ELSEWHERE); once per business day, marked only if delivered."""
+    TOLD_FIRST_ELSEWHERE); once per business day — claimed before it is said
+    (``claim_alert``), kept only if delivered."""
     notify = _hooks.notify_cap
     if notify is None:
         return
+    text = cost_cap_text(
+        code,
+        daily_cap=settings.daily_cost_cap_usd,
+        monthly_cap=settings.monthly_cost_cap_usd,
+    )
     try:
-        async with _own_session() as own:
-            if not await alert_due(own, COST_CAP_KEY, now):
-                return
-        text = cost_cap_text(
-            code,
-            daily_cap=settings.daily_cost_cap_usd,
-            monthly_cap=settings.monthly_cost_cap_usd,
-        )
-        if await notify(text):
-            async with _own_session() as own:
-                mark_alerted(own, COST_CAP_KEY, now)
+        await _say_once(COST_CAP_KEY, text, now, notify)
     except Exception as exc:
         log.warning("cost_cap alert not told", extra={"error": type(exc).__name__})
 
@@ -1227,6 +1284,7 @@ async def report(
 
 __all__ = [
     "ALERT_KIND",
+    "ALERT_LOCK",
     "ALLOCATIONS",
     "ANTHROPIC_SILENCE",
     "CALLABLE",
@@ -1236,6 +1294,7 @@ __all__ = [
     "CAP_MONTHLY",
     "CAP_MONTH_OP",
     "CAP_OP",
+    "CAP_PREFIX",
     "COST_CAP_KEY",
     "DAILY_UNIT_CAPS",
     "FAMILY",
@@ -1272,12 +1331,14 @@ __all__ = [
     "UsageLines",
     "alert_due",
     "ask",
+    "claim_alert",
     "clear_refusals",
     "cost_cap_text",
     "day_end",
     "day_start",
     "decide",
     "fire_spend_alerts",
+    "is_cap",
     "mark_alerted",
     "month_end",
     "month_start",

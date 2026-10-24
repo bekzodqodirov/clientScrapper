@@ -36,7 +36,7 @@ from clientscrapper.db.models import Observation as ObservationRow
 from clientscrapper.db.session import SessionLocal
 from clientscrapper.services import costs, http, usage
 from clientscrapper.services.http import BREAKER_PAUSE, PaidCall, RobotsDisallowed
-from tests.fakes import ALLOW_ALL, FakeClock, Site, fetcher_for
+from tests.fakes import ALLOW_ALL, TASHKENT, FakeClock, Site, fetcher_for
 
 EX = "https://www.goldenpages.example.uz"
 HTML = {"content-type": "text/html; charset=utf-8"}
@@ -624,12 +624,14 @@ async def test_the_cost_gate_is_bound_to_the_run_and_its_cost_recorded(
         .values(daily_cost_cap_usd=Decimal("0.1"))
     )
     await session.commit()
-    bound: list[tuple[int, datetime]] = []
+    bound: list[int] = []
+    asked_at: list[datetime] = []
 
-    def gate_for(gate_session, run_id, now):
-        bound.append((run_id, now))
+    def gate_for(gate_session, run_id):
+        bound.append(run_id)
 
-        async def gate(*, operation, est_usd, call, price, source_key):
+        async def gate(*, operation, est_usd, call, price, source_key, now):
+            asked_at.append(now)
             result = await call()
             price(result)
             return result
@@ -642,7 +644,7 @@ async def test_the_cost_gate_is_bound_to_the_run_and_its_cost_recorded(
     )
     report = await run(Paying, fetcher_for(site), clock, tmp_path, cost_gate_for=gate_for)
     [row] = await runs(session)
-    assert bound == [(row.id, clock.now())]
+    assert (bound, asked_at) == ([row.id], [clock.now()])
     assert (report.status, row.cost_usd) == ("ok", Decimal("0.004000"))
 
 
@@ -712,7 +714,166 @@ async def test_by_default_a_run_at_the_daily_cap_ends_partial_and_sends_nothing(
         "partial",
         "cost_cap",
     )
+    assert row.meta["refused"] == "cost_cap_daily"
     assert site.seen == []
+
+
+class LateBrave(Directory):
+    """Waits an hour on its own clock (pacing, a slow page), then pays."""
+
+    paths = ()
+    api_row = False
+    wait = 3600.0
+    url = "https://api.search.brave.com/res/v1/web/search"
+    paid = PaidCall("serp_brave", Decimal("0.005"), lambda r: _Priced("0.004"))
+    sub_source = "search_brave"
+
+    async def collect(self, session, budget):
+        await self.fetcher._sleep(self.wait)  # FakeClock.sleep: time moves on
+        await self.fetcher.get(
+            self.url,
+            source=self.sub_source,
+            budget=budget,
+            obey_robots=False,
+            paid=self.paid,
+        )
+        return []
+
+
+class LateYandex(LateBrave):
+    wait = 30 * 60.0
+    url = "https://searchapi.api.cloud.yandex.net/v2/web/searchAsync"
+    paid = PaidCall(
+        "serp_yandex_night",
+        Decimal("0"),
+        lambda r: usage.Priced(cost_usd=Decimal("0"), units=Decimal(1)),
+    )
+    sub_source = "search_yandex"
+
+
+async def _cap_directories(cap: str) -> None:
+    async with SessionLocal() as s:
+        await s.execute(
+            sa.update(Source)
+            .where(Source.key == "directories")
+            .values(daily_cost_cap_usd=Decimal(cap))
+        )
+        await s.commit()
+
+
+async def test_a_run_that_crosses_midnight_pays_from_the_new_days_cap(
+    session, directories, tmp_path
+):
+    # Started 23:50 on a day whose $10 is spent; it pays at 00:50. The new
+    # Tashkent day has its whole cap, and the row is that day's (04 §8).
+    late = FakeClock(datetime(2026, 10, 24, 23, 50, tzinfo=TASHKENT))
+    await _cap_directories("0.1")
+    session.add(
+        UsageLog(
+            provider="other",
+            operation="other",
+            cost_usd=Decimal("10"),
+            created_at=datetime(2026, 10, 24, 23, 0, tzinfo=TASHKENT),
+        )
+    )
+    await session.commit()
+    site = Site(late, {LateBrave.url: httpx.Response(200, json={})})
+    costs.clear_refusals()
+    try:
+        report = await run(LateBrave, fetcher_for(site), late, tmp_path)
+    finally:
+        costs.clear_refusals()
+    paid_at = datetime(2026, 10, 25, 0, 50, tzinfo=TASHKENT)
+    assert late.now() == paid_at
+    assert report.status == "ok" and len(site.seen) == 1
+    [row] = await session.scalars(
+        sa.select(UsageLog).where(UsageLog.operation == "serp_brave")
+    )
+    assert (row.created_at, row.model, row.cost_usd) == (
+        paid_at,
+        None,
+        Decimal("0.004000"),
+    )
+    assert (await costs.read_ledger(session, paid_at)).day_usd == Decimal("0.004")
+
+
+async def test_a_run_that_outlives_the_yandex_window_is_refused_at_the_call(
+    session, directories, tmp_path
+):
+    # The window is [02:00, 10:00) Tashkent; a run started 09:59 that asks at
+    # 10:29 asks outside it, however early the run began.
+    late = FakeClock(datetime(2026, 10, 24, 9, 59, tzinfo=TASHKENT))
+    site = Site(late, {LateYandex.url: httpx.Response(200, json={})})
+    costs.clear_refusals()
+    try:
+        report = await run(LateYandex, fetcher_for(site), late, tmp_path)
+    finally:
+        costs.clear_refusals()
+    assert report.status == "partial" and site.seen == []
+    [row] = await runs(session)
+    assert (row.meta["exhausted"], row.meta["refused"]) == (
+        "refused",
+        "op_window:serp_yandex_night",
+    )
+    [refusal] = await session.scalars(
+        sa.select(UsageLog).where(UsageLog.operation == "serp_yandex_night")
+    )
+    assert (refusal.model, refusal.created_at) == (
+        "refused:op_window:serp_yandex_night",
+        datetime(2026, 10, 24, 10, 29, tzinfo=TASHKENT),
+    )
+
+
+class Classifying(Directory):
+    """Page 1, then a classify through costs.ask itself (T-27's shape: one
+    model call per seller, services/extraction), not through the Fetcher."""
+
+    paths = ("/katalog/1",)
+    api_row = False
+
+    async def collect(self, session, budget):
+        await super().collect(session, budget)
+        await costs.ask(
+            session,
+            operation="classify",
+            est_usd=Decimal("0.001"),
+            call=self._never,
+            price=lambda r: usage.Priced(cost_usd=Decimal("0.001")),
+            now=self.fetcher._wall(),
+        )
+        return self.found
+
+    @staticmethod
+    async def _never() -> None:
+        raise AssertionError("a refused call must not be made")
+
+
+async def test_a_cap_met_inside_collect_ends_partial_and_keeps_what_was_found(
+    session, directories, clock, tmp_path
+):
+    session.add(
+        UsageLog(
+            provider="anthropic",
+            operation="verdict",
+            cost_usd=Decimal("5.00"),
+            created_at=clock.now(),
+        )
+    )
+    await session.commit()
+    costs.clear_refusals()
+    try:
+        report = await run(
+            Classifying, fetcher_for(directory_site(clock)), clock, tmp_path
+        )
+    finally:
+        costs.clear_refusals()
+    assert (report.status, report.error) == ("partial", None)
+    [row] = await runs(session)
+    assert (row.status, row.error, row.new_observations) == ("partial", None, 2)
+    assert (row.meta["exhausted"], row.meta["refused"]) == (
+        "cost_cap",
+        "cost_cap_family:anthropic",
+    )
 
 
 # --- skips and failures ----------------------------------------------------------------
