@@ -3,18 +3,28 @@ robots, rates), the file and one README line with the file's sha256 are
 written, cookies and credentials never reach the stored headers, person-tier
 pages are scrubbed.
 
-No network: ``tests/fakes.Site`` answers. Files go to ``tmp_path``.
+No network: ``tests/fakes.Site`` answers. Files go to ``tmp_path``. The paid
+mode runs the real ``costs.ask`` on Postgres.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+from decimal import Decimal
 
 import httpx
 import pytest
+import sqlalchemy as sa
 
-from clientscrapper.services.http import USER_AGENT, RobotsDisallowed, UnmeteredCall
+from clientscrapper.db.models import UsageLog
+from clientscrapper.services import costs
+from clientscrapper.services.http import (
+    USER_AGENT,
+    BudgetExhausted,
+    RobotsDisallowed,
+    UnmeteredCall,
+)
 from clientscrapper.tools import record_fixture as rf
 from tests.fakes import ALLOW_ALL, FakeClock, Site, fetcher_for
 
@@ -245,6 +255,111 @@ async def test_a_metered_host_is_refused(clock, tmp_path):
             json_mode=True,
         )
     assert fake.seen == [] and list(tmp_path.iterdir()) == []
+
+
+async def test_a_documented_api_is_recorded_as_its_collector_reads_it(clock, tmp_path):
+    # hh's collector skips robots.txt at api.hh.ru (03 §1.1); so does the
+    # recorder, or a robots.txt written for browsers keeps T-23's fixture away.
+    hh = "https://api.hh.ru"
+    answer = httpx.Response(
+        200, headers={"content-type": "application/json"}, content=b'{"items": []}'
+    )
+    fake = Site(
+        clock,
+        {
+            f"{hh}/robots.txt": httpx.Response(200, text="User-agent: *\nDisallow: /\n"),
+            f"{hh}/vacancies": answer,
+        },
+    )
+    done = await rf.record(
+        f"{hh}/vacancies?text=ВЭД&area=97",
+        key="hh_vacancies",
+        name="search",
+        fetcher=fetcher_for(fake),
+        now=clock.now(),
+        root=tmp_path,
+        json_mode=True,
+    )
+    assert done.path.read_bytes() == b'{"items": []}'
+    assert fake.paths() == ["/vacancies"]
+
+
+BRAVE = "https://api.search.brave.com/res/v1/web/search"
+
+
+@pytest.fixture
+def no_refusals():
+    costs.clear_refusals()
+    yield
+    costs.clear_refusals()
+
+
+async def test_a_paid_recording_goes_through_costs_ask(
+    session, clock, tmp_path, no_refusals
+):
+    fake = Site(clock, {BRAVE: httpx.Response(200, json={"web": {"results": []}})})
+    fetcher = fetcher_for(fake, cost_gate=rf.ask_gate(session))
+    done = await rf.record(
+        f"{BRAVE}?q=optom&country=UZ",
+        key="serp_layer",
+        name="brave",
+        fetcher=fetcher,
+        now=clock.now(),
+        root=tmp_path,
+        json_mode=True,
+        paid=rf.paid_call("serp_brave", Decimal("0.005")),
+    )
+    assert done.path.name == "brave.json" and len(fake.seen) == 1
+    [row] = (await session.scalars(sa.select(UsageLog))).all()
+    assert (row.operation, row.source_key, row.cost_usd, row.created_at) == (
+        "serp_brave",
+        "serp_layer",
+        Decimal("0.005000"),
+        clock.now(),
+    )
+
+
+async def test_a_paid_recording_at_the_cap_sends_and_writes_nothing(
+    session, clock, tmp_path, no_refusals
+):
+    session.add(
+        UsageLog(
+            provider="other",
+            operation="other",
+            cost_usd=Decimal("10"),
+            created_at=clock.now(),
+        )
+    )
+    await session.commit()
+    fake = Site(clock, {BRAVE: httpx.Response(200, json={})})
+    with pytest.raises(BudgetExhausted) as refused:
+        await rf.record(
+            BRAVE,
+            key="serp_layer",
+            name="brave",
+            fetcher=fetcher_for(fake, cost_gate=rf.ask_gate(session)),
+            now=clock.now(),
+            root=tmp_path,
+            paid=rf.paid_call("serp_brave", Decimal("0.005")),
+        )
+    assert refused.value.detail == "cost_cap_daily"
+    assert fake.seen == [] and list(tmp_path.iterdir()) == []
+
+
+def test_paid_takes_a_callable_operation_and_an_estimate():
+    with pytest.raises(ValueError):
+        rf.paid_call("model_reserve", Decimal("0.01"))  # a pool, not a call
+    with pytest.raises(ValueError):
+        rf.paid_call("serp_brave", Decimal("NaN"))
+    args = rf.parse_args(
+        ["https://x.example.uz", "--key", "serp_layer", "--name", "b",
+         "--paid", "serp_brave", "--est", "0.005"]
+    )  # fmt: skip
+    assert (args.paid, args.est) == ("serp_brave", Decimal("0.005"))
+    with pytest.raises(SystemExit):
+        rf.parse_args(
+            ["https://x.example.uz", "--key", "k1x", "--name", "n", "--paid", "x"]
+        )
 
 
 @pytest.mark.parametrize(("key", "name"), [("Directories", "a"), ("directories", "../a")])

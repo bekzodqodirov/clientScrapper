@@ -29,6 +29,7 @@ import pytest
 
 from tests.ast_tools import (
     PACKAGE,
+    attr_chain,
     dotted_name,
     imported_modules,
     imports,
@@ -121,6 +122,35 @@ OTHER_HTTP_CLIENTS = (
 )
 
 
+def fetcher_private_names(tree: ast.Module | None = None) -> frozenset[str]:
+    """Every private name of services/http.Fetcher: the attributes it sets on
+    ``self`` (``_client``, ``_proxy_client``, ``_transport`` …) and its own
+    ``_methods`` (``_send``, ``_request`` …). Through any of them a collector
+    holds a bare client past robots.txt, the User-Agent, pacing, the breaker,
+    the page budget and evidence capture. Derived, so a renamed attribute is
+    still fenced."""
+    tree = tree if tree is not None else tree_of(PACKAGE / "services" / "http.py")
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.ClassDef) and node.name == "Fetcher"):
+            continue
+        for inner in ast.walk(node):
+            if isinstance(inner, ast.FunctionDef | ast.AsyncFunctionDef):
+                if inner.name.startswith("_") and not inner.name.startswith("__"):
+                    names.add(inner.name)
+            elif (
+                isinstance(inner, ast.Attribute)
+                and isinstance(inner.ctx, ast.Store)
+                and attr_chain(inner)[0] == "self"
+                and inner.attr.startswith("_")
+            ):
+                names.add(inner.attr)
+    return frozenset(names)
+
+
+FETCHER_PRIVATE = fetcher_private_names()
+
+
 def _collector_offences(tree: ast.Module, module: str = "") -> list[str]:
     offending = [
         f"imports {name}"
@@ -128,15 +158,36 @@ def _collector_offences(tree: ast.Module, module: str = "") -> list[str]:
         if is_under(name, COLLECTOR_FORBIDDEN)
     ]
     owner = owners(tree)
+    aliases = module_aliases(tree, module=module)
     for node in ast.walk(tree):
+        function = owner.get(id(node))
+        where = function.name if function else "<module>"
         if (
             isinstance(node, ast.Call)
             and isinstance(node.func, ast.Attribute)
             and node.func.attr in RAW_CALLS
         ):
-            function = owner.get(id(node))
-            where = function.name if function else "<module>"
             offending.append(f"{where}: {node.func.attr}()")
+        if not isinstance(node, ast.Attribute):
+            continue
+        if node.attr in FETCHER_PRIVATE:
+            offending.append(f"{where}: .{node.attr} (Fetcher's own)")
+            continue
+        # A forbidden module reached as an attribute of an imported one
+        # («http.httpx.AsyncClient» after «from clientscrapper.services
+        # import http»): the import walk sees only the allowed module. Only
+        # chains that start at an import: «stats.requests» is a counter.
+        chain = attr_chain(node)
+        resolved = resolve_attribute(node, aliases)
+        if resolved is None:
+            continue
+        path = [*resolved[0].split("."), resolved[1]]
+        start = len(aliases[chain[0]].split("."))
+        for j in range(start, len(path)):
+            root = is_under(".".join(path[j:]), COLLECTOR_FORBIDDEN)
+            if root is not None and ".".join(path[j : j + root.count(".") + 1]) == root:
+                offending.append(f"{where}: {'.'.join(chain)} (reaches {root})")
+                break
     return offending
 
 
@@ -290,6 +341,32 @@ def test_the_import_detector_catches_each_shape():
         "    return await asyncio.open_connection(host, 443)\n"
     )
     assert offences(raw) == ["peek: open_connection()"]
+    # The Fetcher's own client, and httpx reached through an allowed module.
+    private = (
+        "class Olx:\n"
+        "    async def collect(self, session, budget):\n"
+        "        return await self.fetcher._client.get('https://www.olx.uz/api/v1/')\n"
+        "    async def raw(self):\n"
+        "        f = self.fetcher\n"
+        "        return await f._send('GET', 'https://www.olx.uz/', host='x')\n"
+    )
+    assert sorted(offences(private)) == [
+        "collect: ._client (Fetcher's own)",
+        "raw: ._send (Fetcher's own)",
+    ]
+    through = (
+        "from clientscrapper.services import http\n"
+        "import clientscrapper.services.http as h2\n"
+        "async def collect(session, budget):\n"
+        "    await http.httpx.AsyncClient().get('https://www.olx.uz/')\n"
+        "    return h2.socket.create_connection\n"
+    )
+    assert sorted(offences(through)) == [
+        "collect: h2.socket (reaches socket)",
+        "collect: h2.socket.create_connection (reaches socket)",
+        "collect: http.httpx (reaches httpx)",
+        "collect: http.httpx.AsyncClient (reaches httpx)",
+    ]
     # What a collector does use stays allowed.
     fine = (
         "from urllib.parse import urljoin\n"
@@ -299,6 +376,21 @@ def test_the_import_detector_catches_each_shape():
         "from clientscrapper.services import extraction\n"
     )
     assert offences(fine) == []
+    public = (
+        "async def collect(self, session, budget):\n"
+        "    r = await self.fetcher.get('https://x.example.uz/', source='s',"
+        " budget=budget)\n"
+        "    s = self.fetcher.stats\n"
+        "    return s.pages, s.requests, r.fetched_at, http.BudgetExhausted\n"
+    )
+    assert offences(public) == []
+
+
+def test_the_fetcher_private_names_are_derived_from_fetcher():
+    assert {"_client", "_proxy_client", "_transport", "_send", "_request"} <= (
+        FETCHER_PRIVATE
+    )
+    assert not {"get", "post_json", "bind", "stats", "__init__"} & FETCHER_PRIVATE
 
     assert _telethon_outside_the_reader(
         "services/enrich.py", ast.parse("from telethon import TelegramClient\n"), ""

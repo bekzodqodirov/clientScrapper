@@ -21,11 +21,17 @@ the process without ``ask`` deciding first. A *paid site* is any of:
 * a Fetcher request with ``proxy=`` anything but a literal False (03 §1.1:
   the Uzum proxy is paid) — Fetcher itself passes the flag through.
 
-Each paid site must sit in an allow-listed module, and its function must
-contain a call to ``costs.ask`` or be reached only from functions that do —
-called, passed as ``call=…``, or wrapped in ``partial`` (a call-graph walk
-within the module). A paid site at module level, or in a function that a
-module-level table can reach, is a door from anywhere and fails.
+* a URL of the Anthropic API (``*.anthropic.com``): a raw POST to the
+  Messages API is a model call that bypasses the SDK fence, so it belongs to
+  the two model modules and behind ``ask`` like the SDK call.
+
+Each paid site must sit in an allow-listed module and be reached only through
+the ``call=`` of a ``costs.ask``: the site itself inside that argument (a
+lambda, a ``partial``), or in a function referenced only from inside such an
+argument or from functions that are themselves (a call-graph walk within the
+module). A function that merely calls ``ask`` somewhere does not guard a
+request it makes beside it. A paid site at module level, or in a function
+that a module-level table can reach, is a door from anywhere and fails.
 
 ``obey_robots=False`` is allowed only at documented JSON APIs with a key
 (03 §1.1: Brave, Yandex, Places, 2GIS, hh, Graph, Apify): in an allow-listed
@@ -58,7 +64,7 @@ from tests.ast_tools import (
     modules,
     owners,
     parents,
-    reached_only_from,
+    references,
     rel,
     texts,
     tree_of,
@@ -84,11 +90,18 @@ PAID_HOSTS = (
     "graph.facebook.com",
     "catalog.api.2gis.com",
 )
+# The Messages API itself (and any other anthropic.com host): its home is the
+# two model modules, like the SDK call's.
+ANTHROPIC_HOSTS = ("anthropic.com",)
 # Documented APIs with a key, where robots.txt does not apply (03 §1.1). The
 # Yandex poll host is free but is the same documented API.
 ROBOTS_API_HOSTS = (*PAID_HOSTS, "api.hh.ru", "operation.api.cloud.yandex.net")
 ROBOTS_MODULES = URL_MODULES | {"collectors/hh_vacancies.py"}
 FETCHER = "services/http.py"
+# The fixture recorder skips robots.txt exactly where Fetcher would let it
+# (tests/collectors/test_http.py pins the expression).
+RECORDER = "tools/record_fixture.py"
+RECORDER_OPTOUT = "host_of(url) not in ROBOTS_OPTOUT_HOSTS"
 
 ANTHROPIC_SPEND = {"create", "parse", "stream"}
 NO_ASK = "not behind costs.ask"
@@ -110,6 +123,8 @@ PAID_URL = _url_pattern(PAID_HOSTS)
 API_URL = _url_pattern(ROBOTS_API_HOSTS)
 PAID_HOST = _host_pattern(PAID_HOSTS)
 API_HOST = _host_pattern(ROBOTS_API_HOSTS)
+ANTHROPIC_URL = _url_pattern(ANTHROPIC_HOSTS)
+ANTHROPIC_HOST = _host_pattern(ANTHROPIC_HOSTS)
 
 
 @dataclass(frozen=True, slots=True)
@@ -287,10 +302,34 @@ def _is_off(value: ast.expr) -> bool:
     return isinstance(value, ast.Constant) and value.value in (False, None)
 
 
-def paid_sites(m: Module, b: Bindings) -> list[Site]:
+def url_sites(
+    m: Module, b: Bindings, pattern: re.Pattern[str], *, kind: str = "url"
+) -> list[Site]:
+    """Where a URL of ``pattern``'s hosts is used: a literal, a URL name, or a
+    host name a URL is built on."""
     urls, hosts = b.urls.get(m.dotted, set()), b.hosts.get(m.dotted, set())
     aliases, parent = _aliases(m), parents(m.tree)
     defining = _definition_ids(m.tree, urls | hosts)
+    sites: list[Site] = []
+    for node in ast.walk(m.tree):
+        if id(node) in defining:
+            continue
+        # A URL name counts wherever it is read; a host name only where a URL
+        # is built on it.
+        building = not isinstance(parent.get(id(node)), CLASSIFYING)
+        url = bound_name(node, urls, aliases, b.urls)
+        host = bound_name(node, hosts, aliases, b.hosts) if building else None
+        if name := url or host:
+            sites.append(Site(kind, node, name))
+    for text in texts(m.tree):
+        if id(text.node) not in defining and (hit := pattern.search(text.value)):
+            sites.append(Site(kind, text.node, hit.group(0)))
+    return sites
+
+
+def paid_sites(m: Module, b: Bindings, model: Bindings | None = None) -> list[Site]:
+    """Every paid site of ``m``: SDK calls, the paid proxy, paid-host URLs
+    (``b``) and Anthropic URLs (``model``, kind ``anthropic_url``)."""
     expansions = _expansions(m.tree)
     sites: list[Site] = []
     for node in ast.walk(m.tree):
@@ -301,18 +340,9 @@ def paid_sites(m: Module, b: Bindings) -> list[Site]:
             for kw in node.keywords:
                 if kw.arg == "proxy" and not _is_off(kw.value):
                     sites.append(Site("proxy", node, f"proxy={ast.unparse(kw.value)}"))
-        if id(node) in defining:
-            continue
-        # A URL name counts wherever it is read; a host name only where a URL
-        # is built on it.
-        building = not isinstance(parent.get(id(node)), CLASSIFYING)
-        url = bound_name(node, urls, aliases, b.urls)
-        host = bound_name(node, hosts, aliases, b.hosts) if building else None
-        if name := url or host:
-            sites.append(Site("url", node, name))
-    for text in texts(m.tree):
-        if id(text.node) not in defining and (hit := PAID_URL.search(text.value)):
-            sites.append(Site("url", text.node, hit.group(0)))
+    sites += url_sites(m, b, PAID_URL)
+    if model is not None:
+        sites += url_sites(m, model, ANTHROPIC_URL, kind="anthropic_url")
     return sites
 
 
@@ -334,11 +364,10 @@ def _ask_aliases(m: Module) -> tuple[set[str], set[str]]:
     return module_names, ask_names
 
 
-def _asks(m: Module) -> set[int]:
-    """Ids of the functions that call costs.ask themselves (innermost)."""
+def _ask_calls(m: Module) -> list[ast.Call]:
+    """Every call of costs.ask in ``m``, under any name it was imported as."""
     module_names, ask_names = _ask_aliases(m)
-    owner = owners(m.tree)
-    found: set[int] = set()
+    found: list[ast.Call] = []
     for node in ast.walk(m.tree):
         if not isinstance(node, ast.Call):
             continue
@@ -349,9 +378,55 @@ def _asks(m: Module) -> set[int]:
             and func.attr == "ask"
             and (chain[0] in module_names or chain == [*COSTS.split("."), "ask"])
         )
-        if is_ask and (function := owner.get(id(node))) is not None:
-            found.add(id(function))
+        if is_ask:
+            found.append(node)
     return found
+
+
+def doors(m: Module) -> set[int]:
+    """Ids of every node inside the ``call=`` argument of a costs.ask call:
+    the one place a paid request may be made (or named, to be made later)."""
+    inside: set[int] = set()
+    for ask_call in _ask_calls(m):
+        for kw in ask_call.keywords:
+            if kw.arg == "call":
+                inside.update(id(n) for n in ast.walk(kw.value))
+    return inside
+
+
+def _reached_through_a_door(
+    tree: ast.AST, function: Function, door: set[int], seen: frozenset[int]
+) -> bool:
+    """Referenced at least once, and only from inside a door or from
+    functions that are themselves reached only through one."""
+    if id(function) in seen:
+        return False
+    seen = seen | {id(function)}
+    owner = owners(tree)
+    refs = [
+        r for r in references(tree, function.name) if owner.get(id(r)) is not function
+    ]
+    if not refs:
+        return False
+    for ref in refs:
+        if id(ref) in door:
+            continue
+        caller = owner.get(id(ref))
+        if caller is None or not _reached_through_a_door(tree, caller, door, seen):
+            return False
+    return True
+
+
+def behind_ask(m: Module, node: ast.AST, door: set[int] | None = None) -> bool:
+    """A paid site that only ``costs.ask`` can make: inside a ``call=``
+    argument, or in a function reached only through one."""
+    door = doors(m) if door is None else door
+    if id(node) in door:
+        return True
+    function = _where(m, node)
+    return function is not None and _reached_through_a_door(
+        m.tree, function, door, frozenset()
+    )
 
 
 def _where(m: Module, node: ast.AST) -> Function | None:
@@ -361,14 +436,11 @@ def _where(m: Module, node: ast.AST) -> Function | None:
 def offences(mods: list[Module]) -> list[str]:
     paid = bindings(mods, PAID_URL, PAID_HOST)
     api = bindings(mods, API_URL, API_HOST)
+    model = bindings(mods, ANTHROPIC_URL, ANTHROPIC_HOST)
     found: list[str] = []
     for m in mods:
-        asking = _asks(m)
-
-        def asks(f: Function, asking: set[int] = asking) -> bool:
-            return id(f) in asking
-
-        for site in paid_sites(m, paid):
+        door = doors(m)
+        for site in paid_sites(m, paid, model):
             if site.kind == "proxy" and m.rel == FETCHER:
                 continue  # Fetcher passes its caller's flag through
             function = _where(m, site.node)
@@ -379,8 +451,7 @@ def offences(mods: list[Module]) -> list[str]:
                 continue
             if site.kind == "anthropic_api":
                 continue
-            guarded = function is not None and reached_only_from(m.tree, function, asks)
-            if not guarded:
+            if not behind_ask(m, site.node, door):
                 found.append(f"{m.rel}:{name}: {site.what} {NO_ASK}")
         if m.rel == FETCHER:
             continue
@@ -390,6 +461,8 @@ def offences(mods: list[Module]) -> list[str]:
             for kw in node.keywords:
                 keeps = isinstance(kw.value, ast.Constant) and kw.value.value is True
                 if kw.arg != "obey_robots" or keeps:
+                    continue
+                if m.rel == RECORDER and ast.unparse(kw.value) == RECORDER_OPTOUT:
                     continue
                 function = _where(m, node)
                 name = function.name if function else "<module>"
@@ -663,6 +736,55 @@ def test_the_detector_catches_each_shape():
     serp_url = {"services/serp.py": GUARDED_SERP.replace("BRAVE_URL", "URL")}
     host_of = "import httpx\ndef host_of(url):\n    return httpx.URL(url).host\n"
     assert found("services/http.py", host_of, serp_url) == []
+    # The seam review's shape: ask is called (with a call that does nothing)
+    # and the real request goes out beside it, in the same function.
+    beside = (
+        "from clientscrapper.services import costs\n"
+        "async def classify(session, client, now):\n"
+        "    await costs.ask(session, operation='classify', est_usd=1,\n"
+        "                    call=lambda: None, price=lambda r: r, now=now)\n"
+        "    return await client.messages.create(model='m')\n"
+    )
+    assert found(x, beside) == [f"{x}:classify: client.messages.create {NO_ASK}"]
+    # A helper handed to ask and also called directly by the same function.
+    twice = (
+        "from clientscrapper.services import costs\n"
+        "async def verdict(session, client, now):\n"
+        "    async def _call():\n"
+        "        return await client.messages.create(model='m')\n"
+        "    await _call()\n"
+        "    return await costs.ask(session, operation='verdict', est_usd=1,\n"
+        "                           call=_call, price=lambda r: r, now=now)\n"
+    )
+    assert found(x, twice) == [f"{x}:_call: client.messages.create {NO_ASK}"]
+    # A raw POST to the Messages API: the model lanes' call, wherever it is.
+    raw = (
+        "API = 'https://api.anthropic.com/v1/messages'\n"
+        "async def _probe_model(client):\n"
+        "    await client.post(API, json={})\n"
+    )
+    assert found("services/http.py", raw) == [
+        "services/http.py:_probe_model: API outside "
+        "['services/extraction.py', 'services/model_jobs.py']"
+    ]
+    inline = (
+        "async def _probe(client):\n"
+        "    await client.post('https://api.anthropic.com/v1/messages', json={})\n"
+    )
+    assert found("services/serp.py", inline) == [
+        "services/serp.py:_probe: https://api.anthropic.com outside "
+        "['services/extraction.py', 'services/model_jobs.py']"
+    ]
+    assert found(x, raw) == [f"{x}:_probe_model: API {NO_ASK}"]
+    asked = (
+        "from clientscrapper.services import costs\n"
+        "API = 'https://api.anthropic.com/v1/messages'\n"
+        "async def classify(session, client, now):\n"
+        "    return await costs.ask(session, operation='classify', est_usd=1,\n"
+        "                           call=lambda: client.post(API, json={}),\n"
+        "                           price=lambda r: r, now=now)\n"
+    )
+    assert found(x, asked) == []
     # Prose and bare hosts are not calls.
     prose = (
         '"""We call https://api.search.brave.com through costs.ask."""\n'

@@ -353,6 +353,24 @@ def _opt_outs(tree: ast.AST) -> list[int]:
     return lines
 
 
+# The recorder fetches whatever URL it is given; it skips robots.txt only
+# where Fetcher itself allows that (RobotsOptOutRefused everywhere else), and
+# only in this exact form, so the fixture is what the collector gets.
+RECORDER = "tools/record_fixture.py"
+RECORDER_OPTOUT = "host_of(url) not in ROBOTS_OPTOUT_HOSTS"
+
+
+def _opt_out_values(tree: ast.AST) -> list[tuple[int, str]]:
+    return [
+        (node.lineno, ast.unparse(kw.value))
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        for kw in node.keywords
+        if kw.arg == "obey_robots"
+        and not (isinstance(kw.value, ast.Constant) and kw.value.value is True)
+    ]
+
+
 def test_obey_robots_false_only_at_allow_listed_call_sites():
     offenders = []
     for path in sorted(PACKAGE.rglob("*.py")):
@@ -361,9 +379,21 @@ def test_obey_robots_false_only_at_allow_listed_call_sites():
         rel = path.relative_to(PACKAGE).as_posix()
         if rel in OPTOUT_MODULES:
             continue
-        lines = _opt_outs(ast.parse(path.read_text(encoding="utf-8")))
-        offenders += [f"{rel}:{line}" for line in lines]
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        if rel == RECORDER:
+            offenders += [
+                f"{rel}:{line}"
+                for line, value in _opt_out_values(tree)
+                if value != RECORDER_OPTOUT
+            ]
+            continue
+        offenders += [f"{rel}:{line}" for line in _opt_outs(tree)]
     assert offenders == []
+
+
+def test_the_recorder_skips_robots_only_where_fetcher_allows_it():
+    tree = ast.parse((PACKAGE / RECORDER).read_text(encoding="utf-8"))
+    assert [value for _, value in _opt_out_values(tree)] == [RECORDER_OPTOUT]
 
 
 def test_the_fence_catches_each_shape():
