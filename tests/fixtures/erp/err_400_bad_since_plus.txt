@@ -1,0 +1,12 @@
+HTTP/1.1 400 Bad Request
+vary: rsc, next-router-state-tree, next-router-prefetch, next-router-segment-prefetch
+vary: Accept-Encoding
+cache-control: private, no-store
+content-length: 21
+content-type: application/json
+etag: W/"-j25QfM-8SxNUuHYYFStQhIFEy8"
+Date: Sat, 24 Oct 2026 08:56:38 GMT
+Connection: keep-alive
+Keep-Alive: timeout=5
+
+{"error":"bad_since"}

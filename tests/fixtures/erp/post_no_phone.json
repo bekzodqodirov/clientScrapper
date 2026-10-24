@@ -1,0 +1,43 @@
+{
+  "captured_at": "2026-10-24T08:56:31.197Z",
+  "request": {
+    "method": "POST",
+    "path": "/api/leads/in/agent",
+    "headers": {
+      "Content-Type": "application/json",
+      "X-GSR-Key": "<REDACTED: fixture agent key>",
+      "X-ERP-Key": "<REDACTED: fixture agent key>"
+    },
+    "body": {
+      "external_id": "cs:00000000-0000-4000-8000-000000000035:202610",
+      "name": "Namuna telefonsiz 35",
+      "phone": "12345",
+      "note": "NEGA TOPILDI: namuna",
+      "utm_source": "clientscrapper"
+    }
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "vary": "rsc, next-router-state-tree, next-router-prefetch, next-router-segment-prefetch",
+      "cache-control": "no-store",
+      "content-type": "application/json",
+      "date": "Sat, 24 Oct 2026 08:56:31 GMT",
+      "connection": "keep-alive",
+      "keep-alive": "timeout=5",
+      "transfer-encoding": "chunked"
+    },
+    "body": {
+      "ok": true
+    }
+  },
+  "erp_ledger_after": [
+    {
+      "outcome": "dropped",
+      "reason": "no_phone",
+      "source_key": "agent",
+      "lead": false,
+      "client": false
+    }
+  ]
+}

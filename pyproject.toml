@@ -58,6 +58,10 @@ files = [
     "scripts/check_compose_env.py",
     # T-01/T-02 review
     "scripts/revision_id.py",
+    # T-09
+    "clientscrapper/services/erp_feeds.py",
+    "clientscrapper/collectors/erp_sync.py",
+    "clientscrapper/tools/erp_sync.py",
 ]
 
 [tool.pytest.ini_options]

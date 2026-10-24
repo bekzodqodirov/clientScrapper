@@ -10,11 +10,20 @@ and ``collector:<key>[.variant]`` (:func:`collector_component`).
 The status, the problem list and the alert memory (``gather``, ``problems``,
 ``alerts_due``, ``mark_*``) are T-08's and join this module there; nothing
 here sends anything.
+
+The **raised problems** (``REPORTED_KEYS``, ``raise_problem``,
+``clear_problem``) and the **suppression probe** (``SuppressionHealth``,
+``set_suppression_probe``) at the end of this file are T-08's code, copied
+verbatim from its branch (wt/t08 423d97b) so that T-09's feed sync writes
+exactly the ``runtime_flags`` rows T-08's ``gather`` reads; at the merge
+T-08's copy is the one kept.
 """
 
 from __future__ import annotations
 
 import re
+from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Final
 
@@ -23,7 +32,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from clientscrapper.config import settings
-from clientscrapper.db.models import Heartbeat
+from clientscrapper.db.models import Heartbeat, RuntimeFlag
 
 COMPONENTS: Final = ("bot", "worker", "userbot")
 JOB_PREFIX: Final = "job:"
@@ -89,3 +98,109 @@ async def beats(session: AsyncSession) -> dict[str, Heartbeat]:
         sa.select(Heartbeat).execution_options(populate_existing=True)
     )
     return {row.component: row for row in rows}
+
+
+# --- raised problems (T-08, verbatim) ------------------------------------------
+
+# Raised and cleared by the module that sees them (raise_problem): the event
+# is that module's, so is the moment it is over.
+REPORTED_KEYS: Final = frozenset(
+    {
+        "suppression_selftest_failed",  # full pull (T-09)
+        "suppression_stale_hit",  # outcomes walk raises, next full pull clears (T-10)
+        "suppression_shrunk",  # full pull (T-09)
+        "feed_contract",  # any feed call: detail.code (T-09/T-10)
+        "push_unconfirmed",  # reconcile_unconfirmed after healthy walks (T-10)
+        "anthropic_failing",  # the instant lane's failure streak (T-15)
+        "pii_leak",  # validators (T-15)
+        "ig_token_expired",  # Graph 190 (T-26)
+        "source_low_precision",  # source_precision_job (T-36)
+        "evidence_over_cap",  # retention R1 (T-31)
+    }
+)
+PROBLEM_FLAG_PREFIX: Final = "problem:"
+# Codes the push and feed breakers write into sources.erp_sync.breaker_reason
+# (05 §B.1): the reason is the key, optionally «:<detail>».
+ERP_BREAKER_KEYS: Final = ("push_404", "erp_redirect")
+ERP_SOURCE: Final = "erp_sync"
+
+
+@dataclass(frozen=True, slots=True)
+class SuppressionHealth:
+    """What the registered freshness probe answered (services/erp_feeds,
+    T-09): the limits travel with it, so the text never restates them."""
+
+    fresh: bool
+    full_at: datetime | None
+    delta_at: datetime | None
+    full_max_h: int
+    delta_max_h: int
+    salt_ok: bool = True
+    # When freshness was lost (the first limit that ran out), if known.
+    stale_since: datetime | None = None
+
+
+# Probes registered by the module that owns the rule.
+SuppressionProbe = Callable[[AsyncSession, datetime], Awaitable[SuppressionHealth | None]]
+
+
+@dataclass(slots=True)
+class _Probes:
+    suppression: SuppressionProbe | None = None
+
+
+_probes = _Probes()
+
+
+def set_suppression_probe(probe: SuppressionProbe | None) -> None:
+    """services/erp_feeds registers ``suppression_fresh`` here (T-09)."""
+    _probes.suppression = probe
+
+
+async def raise_problem(
+    session: AsyncSession,
+    key: str,
+    *,
+    now: datetime,
+    by: str,
+    detail: Mapping[str, Any] | None = None,
+    until: datetime | None = None,
+) -> None:
+    """Put a problem the caller saw happen in force (the caller's transaction
+    writes it). ``detail`` replaces the stored one; ``since`` stays the first
+    raise of this episode. ``until`` expires it by itself (an event with no
+    «it is over» moment). Only ``REPORTED_KEYS`` may be raised: a key the
+    status reads from the tables has its home there."""
+    if key not in REPORTED_KEYS:
+        raise ValueError(f"{key!r} is not a reported problem key (06 §4.2)")
+    value = {
+        "since": now.isoformat(),
+        "until": until.isoformat() if until is not None else None,
+        "detail": dict(detail or {}),
+    }
+    stmt = pg_insert(RuntimeFlag).values(
+        key=PROBLEM_FLAG_PREFIX + key, value=value, updated_by=by
+    )
+    kept = sa.func.jsonb_set(
+        stmt.excluded.value,
+        sa.text("'{since}'"),
+        sa.func.coalesce(RuntimeFlag.value["since"], stmt.excluded.value["since"]),
+    )
+    await session.execute(
+        stmt.on_conflict_do_update(
+            index_elements=[RuntimeFlag.key],
+            set_={"value": kept, "updated_by": stmt.excluded.updated_by},
+        )
+    )
+
+
+async def clear_problem(session: AsyncSession, key: str) -> bool:
+    """The episode is over: True when a raised row was removed."""
+    if key not in REPORTED_KEYS:
+        raise ValueError(f"{key!r} is not a reported problem key (06 §4.2)")
+    result = await session.execute(
+        sa.delete(RuntimeFlag)
+        .where(RuntimeFlag.key == PROBLEM_FLAG_PREFIX + key)
+        .returning(RuntimeFlag.key)
+    )
+    return result.first() is not None

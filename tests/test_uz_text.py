@@ -64,6 +64,8 @@ OWNER_TEXT_MODULES = (
     "services/costs.py",
     "tools/doctor.py",
     "config.py",
+    # 05 §B.1/06 §4.2: the ERP breaker's alert, told at once by the feed sync.
+    "services/erp_feeds.py",
 )
 # Modules whose raise messages reach the owner (see the docstring).
 OWNER_RAISE_MODULES = frozenset({"config.py"})

@@ -630,7 +630,7 @@ async def run_collector(
         source = await session.get(Source, key)
         if source is None:
             raise LookupError(f"no sources row {key!r}")
-        reason = await skip_reason(session, source, now)
+        reason = await skip_reason(session, source, now) or collector_cls.unavailable()
         if reason is not None:
             return await _skip(
                 session, key, component, now=now, note=reason, variant=variant
@@ -674,6 +674,7 @@ async def run_collector(
         try:
             collector = collector_cls(run_fetcher, serp)
             collector.variant = variant
+            collector.started_at = now
 
             status, error = "ok", None
             # A paid call the collector made itself (services/extraction's
@@ -750,6 +751,7 @@ async def run_collector(
             meta = _meta(
                 variant=variant, fetcher=run_fetcher, written=written, stopped=stopped
             )
+            meta = {**collector.run_meta, **meta}
             end = finished()
             await session.execute(
                 sa.update(CollectorRun)

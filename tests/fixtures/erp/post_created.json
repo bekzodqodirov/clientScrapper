@@ -1,0 +1,48 @@
+{
+  "captured_at": "2026-10-24T08:56:29.912Z",
+  "request": {
+    "method": "POST",
+    "path": "/api/leads/in/agent",
+    "headers": {
+      "Content-Type": "application/json",
+      "X-GSR-Key": "<REDACTED: fixture agent key>",
+      "X-ERP-Key": "<REDACTED: fixture agent key>"
+    },
+    "body": {
+      "external_id": "cs:00000000-0000-4000-8000-000000000021:202610",
+      "name": "Namuna Savdo 21",
+      "phone": "+998 90 000 00 21",
+      "note": "NEGA TOPILDI: namuna e’lon · 24.10.2026 · «Xitoydan mato olib kelamiz, oyiga bir fura» · manba https://example.invalid/namuna-21",
+      "utm_source": "clientscrapper",
+      "firma": "Namuna Savdo MChJ",
+      "kub": "2",
+      "score": "74",
+      "telegram": "@namuna_savdo_21",
+      "evidence": "https://example.invalid/namuna-21 · 2026-10-24"
+    }
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "vary": "rsc, next-router-state-tree, next-router-prefetch, next-router-segment-prefetch",
+      "cache-control": "no-store",
+      "content-type": "application/json",
+      "date": "Sat, 24 Oct 2026 08:56:30 GMT",
+      "connection": "keep-alive",
+      "keep-alive": "timeout=5",
+      "transfer-encoding": "chunked"
+    },
+    "body": {
+      "ok": true
+    }
+  },
+  "erp_ledger_after": [
+    {
+      "outcome": "created",
+      "reason": null,
+      "source_key": "agent",
+      "lead": true,
+      "client": false
+    }
+  ]
+}
