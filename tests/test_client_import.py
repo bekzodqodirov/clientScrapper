@@ -434,11 +434,15 @@ ROW_FIELDS = ("enabled", "config", "breaker_until", "breaker_reason", "paused_un
 @pytest.fixture
 async def erp_row(session: AsyncSession) -> AsyncIterator[None]:
     """``sources.erp_sync`` as it was, put back after the test: the import
-    remembers itself in its ``config`` (seeded configuration, never wiped)."""
+    remembers itself in its ``config`` (seeded configuration, never wiped).
+    The test's own transaction ends first — a test that failed between an
+    ``apply_import`` and its commit still holds the row's lock, and the
+    restore would wait on it for ever."""
     row = await session.get(Source, "erp_sync", populate_existing=True)
     assert row is not None
     kept = {f: getattr(row, f) for f in ROW_FIELDS}
     yield
+    await session.rollback()
     async with SessionLocal() as own:
         await own.execute(
             sa.update(Source).where(Source.key == "erp_sync").values(**kept)
