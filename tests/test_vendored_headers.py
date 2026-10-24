@@ -46,6 +46,8 @@ VENDORED: dict[str, str] = {
     "clientscrapper/services/costs.py": "miya/jarvis/costs.py",
     "clientscrapper/services/companies.py": "miya/services/people.py",
     "clientscrapper/services/text.py": "miya/services/text.py",
+    # FIRST_NAMES is new; HONORIFICS is people.py's _HONORIFICS (04 §1.6).
+    "clientscrapper/services/names.py": "miya/services/people.py",
     "clientscrapper/services/client_import.py": "miya/services/client_import.py",
     "clientscrapper/services/documents.py": "miya/services/documents.py",
     "clientscrapper/services/chats.py": "miya/services/chats.py",
@@ -82,7 +84,7 @@ VENDORED: dict[str, str] = {
 # Not listed although the memo says AS-IS: services/codes.py (02 §7 — suppression
 # by GS code is not in the v1 key set, so it is not ported).
 
-# Built by T-01 and T-02: these must exist now.
+# Built by T-01, T-02 and T-03: these must exist now.
 REQUIRED_NOW = (
     "clientscrapper/config.py",
     "clientscrapper/logs.py",
@@ -99,6 +101,8 @@ REQUIRED_NOW = (
     "clientscrapper/userbot/main.py",
     "clientscrapper/services/lifecycle.py",
     "clientscrapper/tools/doctor.py",
+    "clientscrapper/services/text.py",
+    "clientscrapper/services/names.py",
     "tests/conftest.py",
     "tests/test_env_example.py",
     "tests/test_logs.py",
