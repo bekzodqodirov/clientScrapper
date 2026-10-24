@@ -67,6 +67,10 @@ files = [
     # T-17
     "clientscrapper/services/companies.py",
     "clientscrapper/services/contacts.py",
+    # T-13: the reader's Telethon-free modules (its Telethon code stays out)
+    "clientscrapper/services/chats.py",
+    "clientscrapper/userbot/prefilter.py",
+    "clientscrapper/userbot/limits.py",
 ]
 
 # APScheduler 3 ships no type information.

@@ -133,6 +133,9 @@ REQUIRED_NOW = (
     "clientscrapper/tools/restore.py",
     # T-17
     "clientscrapper/services/companies.py",
+    # T-13
+    "clientscrapper/services/chats.py",
+    "clientscrapper/tools/userbot_login.py",
 )
 
 SCANNED_SUFFIXES = {".py", ".yml", ".yaml", ".ini", ".toml", ".cfg", ".sh", ".mako"}
