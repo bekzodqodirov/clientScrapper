@@ -119,28 +119,32 @@ async def test_the_module_runs_as_docker_calls_it(session):
     assert fresh.stdout.startswith("worker: beat 0 min ago")
 
 
-async def test_the_userbot_skeleton_beats_once_as_switched_off(session, monkeypatch):
-    idled: list[bool] = []
+async def test_a_reader_switched_off_beats_once_and_stays_healthy(session, monkeypatch):
+    """USERBOT_ENABLED=false (T-13's kill switch): one beat {enabled: false},
+    no client built, and days later the container is still healthy while
+    the health job says nothing about the reader (06 §4.1)."""
 
     async def _idle() -> None:
-        idled.append(True)
+        return None
 
-    monkeypatch.setattr(settings, "userbot_enabled", True)
-    monkeypatch.setattr(userbot, "idle_until_stopped", _idle)
+    def _explode(*args, **kwargs):  # pragma: no cover - must never run
+        raise AssertionError("TelegramClient was constructed with the switch off")
+
+    monkeypatch.setattr(settings, "userbot_enabled", False)
+    monkeypatch.setattr(userbot, "TelegramClient", _explode)
+    monkeypatch.setattr(userbot, "_idle_forever", _idle)
     monkeypatch.setattr(userbot, "setup_logging", lambda *a, **k: None)
-    await userbot.beat_switched_off()  # run() beats beside its idle
     await userbot.run()
-    assert idled == [True]
     row = (await health.beats(session))["userbot"]
-    assert row.detail == {"enabled": False, "built": False}
-    # Whatever USERBOT_ENABLED says, nothing reads Telegram before T-13: the
-    # container is healthy and the health job says nothing about the reader.
+    assert row.detail == {"enabled": False}
     later = row.last_seen_at + timedelta(days=3)
     assert healthcheck.verdict("userbot", row.last_seen_at, row.detail, now=later)[0]
     status = await health.gather(session, now=later)
     keys = [p.key for p in health.problems(status)]
-    assert "userbot_silent" not in keys
-    assert {"userbot_silent", "no_signals_24h"} <= health.unjudged(status)
+    assert "userbot_silent" not in keys and "userbot_unauthorized" not in keys
+    assert {"userbot_silent", "userbot_unauthorized", "no_signals_24h"} <= (
+        health.unjudged(status)
+    )
 
 
 async def test_the_bot_skeleton_beats_every_minute_until_stopped(session, monkeypatch):
@@ -175,10 +179,10 @@ async def test_a_userbot_beat_that_did_not_land_is_tried_again(session, monkeypa
         async with real_scope() as s:
             yield s
 
-    monkeypatch.setattr(userbot, "session_scope", flaky)
+    deps = userbot.Deps(session_factory=flaky)
     await asyncio.wait_for(
-        userbot.beat_switched_off(retry=timedelta(milliseconds=10)), timeout=10
+        userbot.beat_switched_off(deps, retry=timedelta(milliseconds=10)), timeout=10
     )
     assert failures == []
     row = (await health.beats(session))["userbot"]
-    assert row.detail == {"enabled": False, "built": False}
+    assert row.detail == {"enabled": False}
