@@ -1,7 +1,7 @@
 # 05 — ERP integration (fullprompt branch `agent-feed` + agent push/feeds)
 
 Scope: both sides of the ERP contract. **Part A is what was built** on fullprompt branch
-`agent-feed` (head `23fe1736`, 2026-10-24) — a summary for the Python side, not a proposal.
+`agent-feed` (head `a4f9f433`, 2026-10-24) — a summary for the Python side, not a proposal.
 **Part B** is `clientscrapper/services/crm_push.py` and `services/erp_feeds.py`, written to consume
 Part A. Tables referenced on the agent side (`push_log`, `outcomes`, `suppression`,
 `lead_candidates`, `sources.config`) are defined in `02-data-model.md` §2.8–2.11; this file does not
@@ -9,7 +9,8 @@ restate their DDL.
 
 Order of truth for the wire: the ERP code on `agent-feed` (`src/modules/wms/crm/agent-feed.ts`,
 `agent-feed-door.ts`, `agent-source.ts`, `inbound.ts`, `inbound-webhook.ts`, `first-contact.ts`,
-`src/app/api/agent/*/route.ts`, `src/app/api/leads/in/[source]/route.ts`), then fullprompt
+`inbound-notify.ts`, `src/modules/platform/text/clip.ts`, `src/app/api/agent/*/route.ts`,
+`src/app/api/leads/in/[source]/route.ts`), then fullprompt
 `docs/AGENT-FEED.md`, then this file. When they disagree this file is the one corrected.
 
 ## 0. Pre-build memo audit — `docs/erp-ozgarishlar-memo.md` against fullprompt (2026-10-23, kept for the record)
@@ -53,30 +54,39 @@ runs `pnpm db:migrate && pnpm db:seed`.
 ### A.0 Status (2026-10-24)
 
 - Repository `bekzodqodirov/fullprompt`, branch `agent-feed`, pushed to `origin/agent-feed` at
-  **`23fe1736`** (2026-10-24 08:31 UTC). Ten commits (`git rev-list 7bea3051..23fe1736`) over
+  **`a4f9f433`** (2026-10-24 10:39 UTC). Twelve commits (`git rev-list 7bea3051..a4f9f433`) over
   `origin/main` at `7bea3051` — the merge commit of PR #129 into `main` (parents `71025447` and `24607e8c`; the PR's
   head, the tip of `claude/gsr-logistics-wms-phase1-o8h4en`, is `24607e8c`, an ancestor of it), so the
   agent-feed PR targets `main`: the build (`98437a75`, `2ebafe83`, `fec8e1b4`,
   `0bd4bcdc`, `abcc9e6a` — DECISIONS #1455–#1459), the first review's fixes (`70a28720`, `c6537cae`,
-  `f2d96526` — #1460–#1466) and the second review's fixes (`aefbf278`, `23fe1736` — #1467–#1472).
+  `f2d96526` — #1460–#1466), the second review's fixes (`aefbf278`, `23fe1736` — #1467–#1472) and
+  the third review's (`bfb5625b` code, `a4f9f433` docs — #1473–#1475: cuts back to UTF-16 units with a
+  whole-emoji back-off, NUL storable on every door, a `ref` that never throws, the `external_id`
+  spelled as postgres stores it).
 - **No PR is open, nothing is merged, nothing is deployed.** No migration: the journal stays at 136
   files, so a deploy is checked by the build stamp at `/api/version`, not by the migration count.
-- 40 files, +3686 / −61. The wire contract's ERP-side home is `docs/AGENT-FEED.md` (402 lines; §0 the
+- 41 files, +4061 / −63 (the 41st, the extended `tests/integration/field-map.integration.test.ts`,
+  came with the third review). The wire contract's ERP-side home is `docs/AGENT-FEED.md` (425 lines; §0 the
   owner's five steps in Uzbek, §1 the door, §2 the landing, §3 the feeds, §4 privacy, §5 honest limits,
   §6 the «Boshqa» fallback).
-- Gates of the last round: a freshly recreated `gsr_ci` migrated (136 = 136), seeded and demo-seeded;
-  `pnpm typecheck` and `pnpm lint` exit 0; full vitest 675 files / 7629 tests green; 16 red proofs by
-  string edit, all red first time. Playwright was not re-run in round 2 (no UI change); round 1 ran
-  `pnpm build`, the bundle host sweep and five e2e specs (16/16) and looked at the doors card at 360 px.
+- Gates of the last round (the third review): a freshly recreated `gsr_ci` migrated (136 = 136), seeded
+  and demo-seeded; `pnpm typecheck` and `pnpm lint` exit 0; full vitest 675 files / 7636 tests green;
+  12 red proofs by string edit, all red. Playwright was not re-run in rounds 2 and 3 (no UI change);
+  round 1 ran `pnpm build`, the bundle host sweep and five e2e specs (16/16) and looked at the doors
+  card at 360 px. Red proofs over the three rounds: 16 + 21 + 16 + 12 (#1458, #1466, #1472, #1475).
   The vitest and e2e counts come from the build session's own report: no fullprompt document records
-  them (DECISIONS #1472 records the 16 red proofs) — the PR's CI run is where they are re-checked.
+  them (DECISIONS records only the red proofs) — the PR's CI run is where they are re-checked.
+- The captured fixtures (07 §1.0) were taken at `23fe1736` and stay valid at `a4f9f433`: the third
+  review changes no captured answer — no captured value reaches a cut (the longest captured string is
+  a 128-unit note) and none carries a NUL, a lone surrogate or a deep body (checked over the v2
+  capture, 2026-10-24).
 
 ### A.1 File map as built
 
 | File | What it holds now |
 |---|---|
 | `src/modules/wms/crm/agent-source.ts` (new) | `AGENT_SOURCE_KEY = 'agent'`, `isAgentSource()`, `personPickableSources()` (lead forms never offer «Agent (qidiruv)» except as a record's own stored value). No imports, on purpose (an import cycle through `inbound-notify` → `first-contact` would read the constant in its temporal dead zone). |
-| `src/modules/wms/crm/inbound.ts` | `'agent'` in `INBOUND_SOURCE_KEYS` (between `sayt` and `other`); `inboundSourceKey(raw, channel)` — `agent` only on channel `webhook`, else `other`; `formSourceKey()` — `/ariza?manba=agent` is «Sayt»; `landInboundLead` = a per-`(channel, external_id)` in-process chain around `landOnce`; the agent's `no_phone` drop, per-family phone cap, belt, `company` onto the card; every text cut by code points (`clipCodePoints`); `ref` stored through `wellFormedJson`. |
+| `src/modules/wms/crm/inbound.ts` | `'agent'` in `INBOUND_SOURCE_KEYS` (between `sayt` and `other`); `inboundSourceKey(raw, channel)` — `agent` only on channel `webhook`, else `other`; `formSourceKey()` — `/ariza?manba=agent` is «Sayt»; `landInboundLead` = a per-`(channel, external_id)` in-process chain around `landOnce`, the id normalised by `storableText` first (the chain key, the replay SELECT and the bot fence `inboundLanded` all use that spelling); the agent's `no_phone` drop, per-family phone cap, belt, `company` onto the card; every text cut by `clipUnits` (UTF-16 units, an emoji left out whole) and made storable (NUL and lone surrogates → U+FFFD — name, note, company, the card's phone); `ref` decided before any write by `storedRef` (`storableJson`, or `{"_truncated":true}` for a body too deep to serialise). |
 | `src/modules/wms/crm/inbound-webhook.ts` | `InboundFields.company` read from `company` then `firma` (key names case-insensitive), **beside** — not instead of — the note line and question pair those keys always produced. |
 | `src/modules/wms/crm/agent-feed.ts` (new, 524 lines) | `hashTail`, `saltIdFor`, `HASH_RULE`, the cursor codec, `parseSince`, `clampLimit`, `noContactReasons()`, the derived suppression table (`suppressionTailsSql`), `suppressionPage`, the belt `isSuppressedTail`, `outcomesPage`. |
 | `src/modules/wms/crm/agent-feed-door.ts` (new) | `agentFeedResponse(request, feed)` (`feed` = `'suppression'` or `'outcomes'`) — the one GET door both routes share (key, 400/404/503, body, `Cache-Control`). |
@@ -86,16 +96,16 @@ runs `pnpm db:migrate && pnpm db:seed`.
 | `src/modules/wms/crm/inbound-notify.ts` | `startContactClock(intakeId, now, remind)`; `announceArrival` passes `!isReminderExempt(sourceKey)`. |
 | `src/modules/wms/crm/inbound-contact-jobs.ts` | Comment only: the 90-day branch and its measured cost. |
 | `src/modules/wms/crm/analytics.ts` | /crm/tahlil's «Birinchi aloqa» median takes only contacts within `CONTACT_LOOKBACK_DAYS` of the clock (late agent contacts stay in the late counts). |
-| `src/modules/wms/crm/field-map.ts`, `src/modules/wms/crm/service.ts` | Code-point cuts in `normalizeKey`/`capturePairs` and in `addActivity`'s audit excerpt. |
+| `src/modules/wms/crm/field-map.ts`, `src/modules/wms/crm/service.ts` | `clipUnits` cuts in `normalizeKey`/`capturePairs` (key 80, value 300) and in `addActivity`'s 200-unit audit excerpt — the UTF-16 budget the old `slice` had, so a `lead_field_map` key saved before the deploy is spelled the same and still matches (#1473). |
 | `src/modules/wms/client-cabinet/service.ts` | `activeClientsByPhone` reads a non-array `clients.phones` as no phones (one such card used to fail every arrival). |
-| `src/modules/platform/text/clip.ts` (new) | `clipCodePoints`, `wellFormed`, `wellFormedJson`. |
+| `src/modules/platform/text/clip.ts` (new) | `storableText` (every lone surrogate and NUL → U+FFFD, one unit for one), `clipUnits` (`storableText(t).slice(0, max)`, minus a high surrogate left dangling at the edge), `storableJson` (`JSON.stringify` untouched, then its `\u0000` and lone `\udXXX` escapes rewritten to `\ufffd` in the output). |
 | `src/modules/platform/settings/reason-list.ts` (new), `settings/service.ts`, `src/app/(protected)/admin/settings/page.tsx` | Setting `agent_no_contact_reasons` (default `Qayta qilinmasin`), its validator and the refusal sentence `badValueReasons`. |
 | `messages/{ru,uz,zh-CN,en}.json` | `settings.descriptions.agent_no_contact_reasons` and `badValueReasons` in all four locales. |
 | `scripts/seed.ts` | `{ key: 'agent', name: 'Agent (qidiruv)', sortOrder: 190 }` (just above «Boshqa» 200; 90 is «Oʻzi keldi»'s). |
 | `src/app/(protected)/crm/(pages)/kelganlar/door-views.ts` (new), `doors.tsx`, `page.tsx` | The doors screen decided on the server: no form or bot link for the agent's door; a door's key sent only to `admin.settings.manage`. |
 | `src/app/(protected)/crm/leads/new/page.tsx`, `crm/leads/[id]/page.tsx`, `src/app/(public)/ariza/page.tsx` | Person doors never claim the agent's source. |
-| `docs/AGENT-FEED.md` (new), `docs/ADS.md` §1 §5.3, `DECISIONS.md` #1455–#1472, `CHANGELOG.md` (Uzbek) | Docs. |
-| `tests/unit/agent-feed.test.ts`, `agent-feed-door.test.ts`, `agent-door-landing.test.ts`, `inbound-source-keys.test.ts`, `text-clip.test.ts`; `tests/integration/agent-feed.integration.test.ts` (1243 lines) | Tests (§A.12). |
+| `docs/AGENT-FEED.md` (new), `docs/ADS.md` §1 §5.3, `DECISIONS.md` #1455–#1475, `CHANGELOG.md` (Uzbek) | Docs. |
+| `tests/unit/agent-feed.test.ts`, `agent-feed-door.test.ts`, `agent-door-landing.test.ts`, `inbound-source-keys.test.ts`, `text-clip.test.ts`; `tests/integration/agent-feed.integration.test.ts` (1373 lines); `tests/integration/field-map.integration.test.ts` (extended, +30) | Tests (§A.12). |
 
 `platform` imports nothing from `wms` (the reason parser lives in `platform/settings` because the
 settings validator needs it).
@@ -115,26 +125,39 @@ exactly `external_id`, `name`, `phone`, `note` and never `id`, `ism`, `telefon`,
 
 **Body.** A JSON object (anything that is not JSON → 404, nothing recorded).
 
-| Key | Read as | Limit (all cuts by **code points**) |
+| Key | Read as | Limit (all cuts by **UTF-16 units** — JavaScript's `.length`, an emoji is two — through `clipUnits`, see below) |
 |---|---|---|
 | `name` / `ism` | the lead's name; whitespace runs collapsed, trimmed | 120 |
 | `phone` / `telefon` | identity = its last 9 digits; the card keeps the text as sent | fewer than 9 digits → `dropped/no_phone` |
 | `note` / `izoh` | the first lenta note | see below |
 | `external_id` / `id` | the replay key | — |
 | `company` / `firma` (case-insensitive key; `company` first) | `leads.company` on a **created** lead — and also a note line and a question pair like any other key, so a joined push still shows it | 200 on the card |
-| any other key | one `key: value` line appended to the note **and** a question pair for the mapping screen | 30 pairs, key 80, value 300 |
+| any other key | one `key: value` line appended to the note **and** a question pair for the mapping screen — only when the value is a number, or a string JavaScript's `trim()` leaves non-empty (`str()` in `inbound-webhook.ts`; a string value is used trimmed, anything else makes no line and no pair) | 30 pairs, key 80, value 300 |
+
+A cut never halves an emoji: `clipUnits(t, max)` = `storableText(t).slice(0, max)`, and a high
+surrogate left dangling at the edge is dropped, so an emoji that does not fit is left out whole —
+while a sequence of several code points (a ZWJ family, a flag, a skin tone, a keycap, a letter +
+combining mark) can lose its tail at the cut (AGENT-FEED.md §1). Every string the old `slice` could
+store comes out spelled exactly as before (#1473).
 
 **The landed note** = the agent's `note`, then one `key: value` line per extra key in the body's own
 key order, then **every whitespace run (line breaks included) collapsed to one space**, trimmed, and
-cut at 1000 code points. The lenta shows `📣 agent` + a line break + that paragraph; the seller's
-Telegram push shows `«<first 159 code points>…»` (`clipText(note, 160)`); `📦 N kub` appears in the push
+cut at 1000 UTF-16 units. The lenta shows `📣 agent` + a line break + that paragraph; the seller's
+Telegram push shows `«<first 159 code points>…»` (`clipText(note, 160)` — the one cut here that still
+counts code points); `📦 N kub` appears in the push
 only for a MAPPED `kub` — and a mapped `kub` is also written as the lead's quoted volume
 (`leads.quoted_volume_m3`, the card's «Kub (m³)» field, `inbound.ts`), echoed back by the outcomes
 feed and carried into the deal's `quotedVolumeM3` by `winLead` (`service.ts`). A volume read from the
 text (`textVolume`) only routes the lead and is never printed or stored — the ERP's own rule that a
 guess must not stand on the card as the customer's figure; hence the agent sends `kub` only for a
-STATED volume (§B.1). `ref` stores the whole body minus the four secret names, uncut. A lone UTF-16
-surrogate the body carries is stored as U+FFFD wherever it lands. The `name` is not checked for a
+STATED volume (§B.1). `ref` stores the whole body minus the four secret names, uncut — or
+`{"_truncated":true}` for a body nested too deep to serialise (about 4,000 levels; `storedRef` decides
+it before any write, and the arrival still lands). A lone UTF-16 surrogate or a NUL (U+0000) the body
+carries (`"\ud83d"` and `"\u0000"` are valid JSON) is stored as U+FFFD wherever it lands — the name,
+the note, the company, the card's phone, every pair, the `ref` (`storableJson` rewrites only the
+`\u0000` and lone `\udXXX` escapes in `JSON.stringify`'s output) **and the `external_id`**: the id is
+normalised before the chain key and the replay SELECT, so the outcomes feed hands such an id back with
+U+FFFD in its place (the agent's own `cs:` ids carry neither). The `name` is not checked for a
 minimum: an empty one becomes `agent · <digits>`.
 
 **`external_id`** = `cs:<company_uuid>:<yyyymm>`; the outcomes feed reports only ids starting `cs:`.
@@ -144,8 +167,8 @@ minimum: an empty one becomes `agent · <digits>`.
 | Code | Body / type | Means |
 |---|---|---|
 | 200 | `{"ok":true}`, `application/json`, `cache-control: no-store` | the arrival was **recorded** — any outcome (created, joined, suppressed, capped, no_phone, no_contact) — **or** it is a replay of one that was |
-| 503 | `{"error":"unavailable"}`, `application/json`, `cache-control: no-store` | the landing threw (or the key lookup threw while `X-GSR-Key` was sent): no ledger row — retry with the same `external_id` (a lead may already stand: the orphan, below) |
-| 5xx HTML (Next's error page) | — | the key lookup threw and no `X-GSR-Key` was sent (never the agent) |
+| 503 | `{"error":"unavailable"}`, `application/json`, `cache-control: no-store` | the landing threw — whichever way the key came — or the key lookup threw while `X-GSR-Key` was sent: normally no ledger row — retry with the same `external_id` (a lead, and on a retry a joined lenta note, may already stand: the orphan, below; rarely the ledger row did commit and only its answer was lost, §A.13 (i)) |
+| 500 | empty body | the database failed before the key could be checked and no `X-GSR-Key` header was sent (the route rethrows) — never the agent, which always sends the header |
 | 404 | `Not found`, `text/plain` | unknown source in the path, door off (no secret, or the `agent` source deactivated), key wrong or absent, body not JSON |
 
 The outcome never changes the answer. Only this door says 503; every advert door and the «Boshqa»
@@ -155,12 +178,16 @@ fallback still answer 200 to a landing that threw.
 ledger row — once the first delivery FINISHED, whatever its outcome (a capped or suppressed first
 delivery spends the month's id too). The fence is per channel across every source: an id first
 posted through another webhook door makes the agent's push a replay. A delivery that arrives while
-one of the same id is still running **waits for it** (a `Map<channel+id, Promise>` chain inside the
-one app process) and is then that replay; across processes only the ledger's unique index stands
-(one ledger row, not one lead). A landing that failed AFTER its lead was written (a database failure
-half-way — the text cuts no longer throw) leaves that lead standing with no ledger row; the retry
-JOINS it, so the outcome reads `joined` and the seller hears «🔁 Qayta yozdi» about a lead whose
-«🆕» never came (AGENT-FEED.md §1, §5).
+one of the same id is still running **waits for it** (a `Map<channel+id, Promise>` chain per copy of
+the landing module — every channel that carries an id lands through one caller, `webhook` the route,
+so each channel's deliveries meet in one map; production runs one app process) and is then that
+replay; across processes only the ledger's unique index stands (one ledger row, not one lead). The
+wait has no bound (§A.13 (iv)). A landing that failed AFTER its lead was written (only a database
+failure half-way does that now: no text the body carries — an emoji at a cut, a lone surrogate, a
+NUL, a body nested too deep — makes a write refuse any more, #1467, #1473) leaves that lead standing
+with no ledger row; the retry normally JOINS it, so the outcome reads `joined` and the seller hears
+«🔁 Qayta yozdi» about a lead whose «🆕» never came (AGENT-FEED.md §1, §5) — §A.13 lists when it
+makes a second lead or comes back `capped` instead.
 
 **Caps** (counted over the arrivals ledger, dropped arrivals included, each over a **rolling 24 h**
 of `lead_intakes.created_at` — `inboundCount`, not a calendar day): 3 per phone and 200 per source →
@@ -214,7 +241,20 @@ in its own catch, so a Telegram failure never changes the answer.
   anybody when both are NULL; the «📞 Bogʻlandim» button's own note counts from whoever pressed it,
   and the button's push reaches the lead's owner or, for an unowned lead, the office); `stage` and
   `followup` (a stage move, a cleared follow-up — both only by that same responsible person; an owner
-  change alone is not contact). Earliest wins **only during the arrival's first 24 h**: a stamped
+  change alone is not contact). **What a «📞 Bogʻlandim» press reads as**: `markContactedFromBot`
+  (`inbound-notify.ts`) first clears the landing's own booking when it is today or earlier
+  (`setFollowUp(lead, null)` — every agent lead is booked for today, `next_action_at` = Tashkent today),
+  and only then writes the note. That clear is an `audit_log` row `after.nextActionAt = null`, which is
+  `followup` evidence when the presser is the responsible person, and it is EARLIER than the note
+  (`firstContactSql` orders by `(at, kind)`, and `followup` sorts before `note` even on a tie). So a
+  press by the responsible person — the routed seller, or anybody on an unowned lead — reads
+  `contact_kind='followup'`; the note decides (`note`) only when the presser is not responsible (the
+  office on a seller's lead) or the date was already moved past today. Likewise a stage change through
+  the card's ✏️ form clears today's booking in the SAME audit row (`clearsFollowUp`), so it reads
+  `followup`; a move on the board or the card's stage control (`moveLead`, whose audit row carries
+  only `stageId`/`lostReason`) reads `stage`. (The ERP's own test of the note calls `addActivity`
+  directly, not the button, so it pins `note` for a path the button does not take.) Earliest wins
+  **only during the arrival's first 24 h**: a stamped
   arrival is re-read while `created_at ≥ now − 1 day`, so a late-uploaded call can move
   `contacted_at` earlier only then; afterwards the stamp is final. Because the outcomes `at` is
   `greatest(created_at, contacted_at, updated_at, closed_at)`, such a day-1 correction can LOWER a
@@ -297,9 +337,10 @@ Copied from the stored capture `suppression_full.json` (07 §1.0), the first of 
   when it holds several numbers (split at `, ; / | \`, a line break (LF or CR), a run of two or
   more spaces or tabs, or spaces/tabs before `+`; `PHONE_SPLIT_PG`) — only a part of nine digits or
   more; and inside a part of **16 to 120** digits (the client import keeps a multi-number cell as one
-  run), every whole 12-digit `998…` number — or, only when the run is NOT made of those, every whole
-  9-digit number. A run that is neither, and any run of more than 120 digits, is read by its last nine
-  only (`tailsSql`). Only nine-digit tails are in the feed. `services/client_import.py` mirrors these
+  run): a part made **entirely** of 12-digit `998…` numbers (`^(998[0-9]{9})+$`) → each number's last
+  nine; else a part whose length is a **multiple of 9** → each 9-digit chunk; anything else — a
+  20-digit part, say — and any part over 120 digits → its last nine only (`tailsSql`,
+  `agent-feed.ts`). Only nine-digit tails are in the feed. `services/client_import.py` mirrors these
   rules for the XLSX fallback (03 §2.2).
 - `at` = when the row last moved: a card's `max(created_at, updated_at)`; a person's
   `max(created_at, updated_at, newest updated_at of the cards that hold it)` (tying a code to a person
@@ -405,9 +446,17 @@ parser), `agent-feed-door.test.ts`, `agent-door-landing.test.ts` (503 on a landi
 delta feeds, kinds (active, inactive, person, won, attached, listed lost), tail splitting and the
 998-run rule, the belt incl. the 7–8-digit suffix, per-family caps, `no_phone`, `company` on the
 card, the clock (`contact_due_at NULL`, 90-day stamp, joined-live), the outcomes window, labels only,
-`no_contact`, the fallback clause, the in-flight chain, the emoji cuts at 120/300/200 code points; it
-walks the full feed (green on a 17,000-entry copy). Red proofs (fullprompt DECISIONS): 16 for the
-build (#1458), 21 for the first review (#1466), 16 for the second review (#1472).
+`no_contact`, the fallback clause, the in-flight chain, an emoji at the name's 120-unit, a pair
+value's 300-unit and the lenta note's 200-unit audit-excerpt edge (left out whole, never halved), a
+lone surrogate and a NUL anywhere in the body through the real route (each 200, `created`, one note,
+its retry a replay, in the outcomes, no `\u0000` stored — on the tiktok door and the public form too,
+where the daily caps now count it), a NUL `external_id` (stored with U+FFFD, the retry a replay), a
+body nested 3,000 deep stored whole and one 50,000 deep kept as `{"_truncated":true}`; it walks the
+full feed (green on a 17,000-entry copy). `field-map.integration.test.ts` maps the old 80-unit
+spelling of a question with an emoji in its first 80 units and lands the whole question (kub filled);
+`text-clip.test.ts` is a property test that `clipUnits` equals `slice` for every text `slice` could
+store. Red proofs (fullprompt DECISIONS): 16 for the build (#1458), 21 for the first review (#1466),
+16 for the second review (#1472), 12 for the third (#1475).
 
 ### A.13 ERP-stated limits the agent designs around
 
@@ -421,8 +470,23 @@ build (#1458), 21 for the first review (#1466), 16 for the second review (#1472)
 - The same company on a new phone number is a new phone to the ERP.
 - A contact from a personal Telegram account whose chat sits undecided on the tray is not reported.
 - The fallback clause is permanent: ignore outcome rows whose `external_id` the agent never pushed.
-- A landing that fails half-way leaves an orphan lead the retry joins (§A.2).
-- The in-flight fence is per app process (production runs one).
+- A landing that fails half-way (the database, after the lead's INSERT) leaves an orphan lead the
+  retry normally joins (§A.2). Four narrower cases the ERP states (AGENT-FEED.md §5, DECISIONS #1475 —
+  reasoned, not reproduced):
+  (i) the ledger row COMMITS and its answer is lost on the way back: the agent is told 503, its retry
+  is a replay answered 200, and nothing announces that arrival again — no «🆕», no contact clock — so
+  its outcomes row reads `created` and never gets `contacted_at` (`open_untouched`, then `stale_open`,
+  although no seller was told; the same window exists on every door);
+  (ii) after a half-way failure the retry makes a SECOND lead when the orphan was moved to won or lost
+  meanwhile (no open lead to join), or comes back `dropped/capped` (no `lead_id`) while the orphan
+  stands, when other agent arrivals on that phone filled the cap;
+  (iii) a cause that repeated on every attempt would answer 503 to every retry and add one lenta note
+  each — up to 9 notes for the agent's 9 POSTs (§B.1); none is known since #1473;
+  (iv) the in-flight chain is per copy of the landing module — each channel that carries an id has one
+  lander, production runs one app process, and across processes only the ledger's unique index stands
+  (one ledger row, not one lead) — and its wait has no bound: a first delivery that never settles (a
+  statement on a dead connection) holds every later delivery of that id until the ERP restarts. Each
+  waiter holds only its HTTP request, so the agent's read timeout ends that try as `unknown` (§B.1).
 - Re-minting the key rotates `salt_id` and makes the old key 404 at once on every route; deactivating
   the `agent` source on the doors screen makes everything 404.
 
@@ -462,8 +526,9 @@ Owner's steps after the deploy (Uzbek; the same five as AGENT-FEED.md §0):
 Routing reads the mapped `kub` first and otherwise the first «N kub» of name + landed note
 (`mapped.volumeM3 ?? textVolume(name, note)` in `landOnce` — VERIFIED from the code, 2026-10-24).
 Before step 4 a note that states «2 kub» therefore routes by rule A, and so does a band, because the
-agent writes the band's number into the HAJM text («fura (taxminan 80 kub)», §B.1) and never as
-`kub`; only a push with no number at all routes by rule B. After step 4 a stated volume also arrives
+agent writes the band's low end right before «kub» in the HAJM text («taxminan 1 kubdan 3 kubgacha»
+→ 1, «fura (taxminan 80 kub)» → 80, §B.1 `BAND_HAJM`) and never as `kub`; only a push with no
+number at all routes by rule B. After step 4 a stated volume also arrives
 as the mapped `kub` (the card's «Kub (m³)», the seller's «📦 N kub», the deal's quote when won); a band
 still only through the text. (AGENT-FEED.md §0 says «kubsiz qoida (B)» for every arrival before the
 mapping — the code reads the text first; open question 10.)
@@ -483,29 +548,32 @@ RESERVED_BODY_KEYS = frozenset({"key", "google_key", "secret", "token",   # read
                                 "id", "ism", "telefon", "izoh",          # fromPlain's other identity spellings: consumed, never a note line (A.2)
                                 "user_column_data"})                     # a non-empty array switches the body to the Google parser
                                 # fromPlain matches body keys LOWER-CASED: never a payload field whose lower-cased name is here
-LANDED_NOTE_MAX = 1000  # ERP: note + one 'key: value' line per extra key, whitespace collapsed, cut at 1000 code points
+LANDED_NOTE_MAX = 1000  # ERP: note + one 'key: value' line per extra key, whitespace collapsed, cut at 1000 UTF-16 units (clipUnits)
 NOTE_MAX = 700          # our own note's budget inside it
-PUSH_PREVIEW = 159      # the seller's Telegram push shows «<first 159 code points>…» of the landed note
+PUSH_PREVIEW = 159      # the seller's Telegram push shows «<first 159 code points>…» of the landed note (clipText — the one ERP cut that counts code points)
 QUOTE_MAX = 140
 OPENER_MAX = 220
 NAME_MAX = 120          # after the ERP's whitespace collapse; every limit here is measured by text_len() below
 COMPANY_MAX = 200       # leads.company on a created lead
 PAIR_KEY_MAX, PAIR_VALUE_MAX, PAIRS_MAX = 80, 300, 30  # ERP capturePairs
-def text_len(s: str) -> int: return len(s.encode("utf-16-le")) // 2   # UTF-16 units ≥ code points: safe for agent-feed (cuts by code points) AND for the production build the «Boshqa» fallback posts to (cuts by UTF-16 units — checked at 7bea3051: trim() = .replace(/\s+/g, ' ').trim().slice(0, max) — and a cut emoji there throws after the lead is written)
+def text_len(s: str) -> int: return len(s.encode("utf-16-le")) // 2   # UTF-16 units — the measure of both agent-feed (clipUnits, DECISIONS #1473) and production 7bea3051, which the «Boshqa» fallback posts to (trim() = .replace(/\s+/g, ' ').trim().slice(0, max)); a cut never halves an emoji on agent-feed, and on production an emoji at a cut throws after the lead is written
 PUSH_DAYS = range(0, 6)                                # Mon–Sat
 PUSH_FROM, PUSH_TO = time(9, 30), time(17, 30)         # Asia/Tashkent (02 §2.10 item 2)
 ATTEMPT_DELAYS = {2: timedelta(minutes=5), 3: timedelta(minutes=30)}   # between push_log attempts (the HTTP tries INSIDE one attempt are with_backoff's, below)
-BAND_HAJM = {"1_3": "taxminan 1–3 kub", "3_10": "taxminan 3–10 kub",          # a band's words for the HAJM section — never sent as `kub`:
-             "container": "konteyner (taxminan 28 kub)", "truck": "fura (taxminan 80 kub)"}   # a mapped kub becomes the lead's quoted volume (A.2); the number keeps the ERP's textVolume routing it by rule A (A.14); low end of 04 §4.3
-JS_SPACE_RUN = re.compile(r"[\t\n\v\f\r \u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff]+")   # JavaScript's \s, written out (the ERP's collapse); NOT str.split()
+BAND_HAJM = {"1_3": "taxminan 1 kubdan 3 kubgacha", "3_10": "taxminan 3 kubdan 10 kubgacha",   # a band's words for the HAJM section — never sent as `kub`:
+             "container": "konteyner (taxminan 28 kub)", "truck": "fura (taxminan 80 kub)"}   # a mapped kub becomes the lead's quoted volume (A.2). The ERP's textVolume routes by the number RIGHT BEFORE the first «kub», so each band puts its LOW END there (04 §4.3): 1_3 → 1, 3_10 → 3, container → 28, truck → 80 — recomputed with textVolume, 2026-10-24; «taxminan 1–3 kub» would route as 3 and «3–10 kub» as 10, wrong for any rule with a «gacha» window
+JS_SPACE = r"[\t\n\v\f\r \u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff]"   # JavaScript's \s (= trim()'s set), written out; NOT str.split()/str.strip()
+JS_SPACE_RUN = re.compile(JS_SPACE + "+")                                 # the ERP's \s+ collapse
+def js_trim(s: str) -> str: return re.sub(f"^{JS_SPACE}+|{JS_SPACE}+$", "", s)   # String.prototype.trim()
+TEXT_VOLUME_RE = re.compile(r"([0-9]+(?:[.,][0-9]+)?)" + JS_SPACE + r"*(?:kub|куб|m3|м3|m³|м³)", re.I)   # field-map.ts textVolume (first match of name + landed note), for the routing tests only
 
 class PushPayload(BaseModel, frozen=True):
     # FIELD ORDER IS THE JSON BODY ORDER, which is the order of the ERP's note lines (A.2):
     # utm_source comes right after the note so that the fallback door's keyword rule always sees it
-    # inside the 1000-code-point cut, and so that no digit at the end of the note can be read by
+    # inside the 1000-unit cut, and so that no digit at the end of the note can be read by
     # the ERP's textVolume as «<n> kub» together with the next line.
     external_id: str        # cs:<company_uuid>:<yyyymm>, Tashkent month at claim time
-    name: str               # company display_name (2..120 code points); never the person alone
+    name: str               # company display_name (2..120 UTF-16 units by text_len); never the person alone
     phone: str              # E.164 from contacts.phone; the ERP keeps the last 9
     note: str               # render_note(); ≤ NOTE_MAX
     utm_source: str = UTM_SOURCE
@@ -521,7 +589,7 @@ class PushPayload(BaseModel, frozen=True):
     evidence: str           # '<url> — "<quote ≤ 100>"' ≤ 300
 
 def external_id_for(company_id: UUID, now: datetime) -> str
-def build_payload(c: CandidateView) -> PushPayload          # pure; raises NoPhone; every text through services/text.well_formed (no lone surrogate)
+def build_payload(c: CandidateView) -> PushPayload          # pure; raises NoPhone; every value through services/text.well_formed: no lone surrogate AND no U+0000 (below)
 def render_note(c: CandidateView) -> str                     # pure; sections below
 def landed_note(p: PushPayload) -> str                       # pure mirror of the ERP's assembly (A.2), for the length tests
 def canonical_sha256(p: PushPayload) -> str                  # sorted keys, no spaces, None dropped
@@ -530,12 +598,23 @@ async def push_one(session, candidate_id: UUID, *, now: datetime, erp: ErpClient
 async def crm_push_job(session_factory, erp, *, now) -> JobReport     # worker: every 60 s inside the window
 ```
 
-`landed_note(p)` = `JS_SPACE_RUN.sub(" ", p.note + "\n" + "\n".join(f"{k}: {v}" for k, v in extras_in_order(p))).strip(" ")` (after the substitution every run is one space)
-— the ERP's `\s+` collapse with the JavaScript class written out, because Python's `str.split()` is a
-different class: it also splits on U+001C–U+001F and U+0085, which JS `\s` does not, and does NOT
-split on U+FEFF, which JS does (enumerated over every code point in Python and Node, 2026-10-24).
+`landed_note(p)` = `JS_SPACE_RUN.sub(" ", "\n".join([js_trim(p.note)] + [f"{k}: {js_trim(v)}" for k, v in extras_in_order(p) if js_trim(v)])).strip(" ")`
+(after the substitution every run is one space) — `fromPlain`'s assembly: each value as `str()` reads
+it (`inbound-webhook.ts`: a string JS `trim()` leaves empty is **no line and no pair**, a non-empty one
+is used trimmed), then the ERP's `\s+` collapse with the JavaScript class written out, because
+Python's `str.split()`/`str.strip()` is a different class: it also splits on U+001C–U+001F and
+U+0085, which JS `\s` does not, and does NOT split on U+FEFF, which JS does (enumerated over every
+code point in Python and Node, 2026-10-24). An empty or whitespace-only value would otherwise add a
+«k: » line the ERP never writes and miscount the length; `build_payload` sends none anyway (an empty
+value becomes `None`, dropped by `exclude_none`), and a test with one pins the skip.
 `build_payload` additionally maps U+001C–U+001F and U+0085 to a space in every value (the ERP would
-keep them as invisible control characters on the lenta). `build_payload` guarantees
+keep them as invisible control characters on the lenta), and `well_formed` drops every U+0000 and
+every lone surrogate from every value: production `7bea3051`, which the «Boshqa» fallback posts to,
+handles neither — a NUL in the name or phone fails `createLead` itself (200, nothing recorded), and a
+NUL or a lone surrogate anywhere else (the note, any pair, or the whole body stored as `ref` jsonb)
+fails a later write after the lead stands (200 and an orphan lead); `text_len` cannot prevent either.
+On agent-feed the same character is stored silently as U+FFFD on the lenta (A.2). A test pins that a
+NUL in a quote, the name or `firma` never reaches the body. `build_payload` guarantees
 `text_len(landed_note(p)) ≤ LANDED_NOTE_MAX` by shortening `render_note` (the drop order below), so the
 ERP never cuts; `name`, `firma` and every extra value respect the limits above by `text_len` — so
 nothing is cut on either ERP build, and no cut can halve an emoji on the old one; no field's
@@ -558,7 +637,7 @@ paragraph on the lenta.
 NEGA TOPILDI: {source_title_uz} · {published_dd.mm.yyyy} · «{quote ≤ 140}»          ← the first 159 code points must stand alone (the seller's push)
 {evidence_url}
 NIMA OLIB KELADI: {goods joined ', '} · Xitoy: {ha|ehtimol} ({origin_hint})
-HAJM: {stated «2 kub» | BAND_HAJM: taxminan 1–3 kub / taxminan 3–10 kub / konteyner (taxminan 28 kub) / fura (taxminan 80 kub)} · {per_month if known}
+HAJM: {stated «2 kub» | BAND_HAJM: taxminan 1 kubdan 3 kubgacha / taxminan 3 kubdan 10 kubgacha / konteyner (taxminan 28 kub) / fura (taxminan 80 kub)} · {per_month if known}
 KOMPANIYA: {legal_name} · STIR {stir|—} · {city} · {registry_status_uz} · {sector}
   Masʼul: {full_name} ({role})                                                      ← only tier=person with legal_basis
 NIMA DEYISH: {opener ≤ 220, from 04 or the segment template in docs/sotuv-playbook.md §3}
@@ -571,9 +650,14 @@ reverse priority order (BALL detail → KOMPANIYA second line → NIMA DEYISH sh
 per-month → `address` value cut to 120); the URL is never cut (a URL over 200 characters is replaced
 by `evidence #<id>`); quote is a verbatim substring of `evidence.excerpt` (02 §2.6). A stated volume
 is written as «N kub» in the HAJM section **and** sent as `kub`; a band is written as its
-`BAND_HAJM` words — with a number, so the ERP's `textVolume` routes it by rule A (A.14) — and is
-**never** sent as `kub`: a mapped `kub` becomes the lead's «Kub (m³)», the seller's «📦 N kub» and the
-won deal's quoted volume (A.2), and a guess must not stand there as the customer's figure.
+`BAND_HAJM` words — with its LOW END as the number right before «kub», so the ERP's `textVolume`
+routes it by that figure (1, 3, 28 or 80; rule A, A.14) — and is **never** sent as `kub`: a mapped
+`kub` becomes the lead's «Kub (m³)», the seller's «📦 N kub» and the won deal's quoted volume (A.2),
+and a guess must not stand there as the customer's figure. `textVolume` reads the FIRST
+«N kub|куб|m3|м3|m³|м³» of name + landed note, and NEGA TOPILDI comes first: a quote that carries its
+own «N kub» routes by the customer's number, before the HAJM line. The routing test asserts
+`TEXT_VOLUME_RE` over `name + "\n" + landed_note(p)` gives the stated volume, or the band's low end
+when no earlier text carries a number.
 
 **Gate and transport** (02 §2.10 items 1–7 are the law for the gate; the attempt scheme and the
 outcome mapping below are owned HERE — 02 §2.10 rule 4 and 07 §1.6 point to this table):
@@ -607,16 +691,20 @@ status = await with_backoff(lambda: _post(erp, source, payload), attempts=3, bas
 (`RETRY_IN_ATTEMPT`), or a 5xx came back. A 5xx is retried because a re-send is **fenced** — the
 ERP's replay fence and its in-process per-id chain turn a second delivery of the same `external_id`
 into a replay (A.2) — not because a 5xx proves nothing landed: the ERP's own 503
-`{"error":"unavailable"}` does mean no ledger row, but a proxy's 502/504 (Caddy in front of the app)
-can come after the app recorded the arrival, and the retry is then a replay answered 200. After a
+`{"error":"unavailable"}` normally means no ledger row — rarely the row committed and only its answer
+was lost, and the retry is then a replay answered 200 for an arrival that was never announced or
+clocked: it shows as `created` with no contact (`open_untouched` → `stale_open`, A.13 (i)) — and a
+proxy's 502/504 (Caddy in front of the app) can come after the app recorded the arrival, and the
+retry is then a replay answered 200 too. After a
 read/write timeout, a read/write error or a protocol error
 (`MAY_HAVE_LANDED`) there is **no resend inside the attempt**: the first request may still be
 running, and although the ERP now chains a second delivery of the same id behind it (A.2), that
 second request waits too and can time out the same way. The attempt ends `unknown` and the
 reconcile path settles it (02 §2.10 rule 5). A further **attempt** (`attempt+1`, identical
 `payload_sha256`) may be claimed only after a `failed` attempt and `ATTEMPT_DELAYS[n+1]` — 5 min
-before attempt 2, 30 min before attempt 3 — so the worst case is 9 POSTs, and after attempt 3 the
-candidate returns to `review`. Outcome mapping (the `push_log` CHECK of 02 §2.10 is
+before attempt 2, 30 min before attempt 3 — so the worst case is 9 POSTs (and, should a half-way
+failure repeat on every try, up to 9 lenta notes on the orphan lead, A.13 (iii)), and after attempt 3
+the candidate returns to `review`. Outcome mapping (the `push_log` CHECK of 02 §2.10 is
 `(status='sent' ⇒ 2xx) AND (2xx ⇒ status IN ('sent','unknown'))`):
 
 | Result | `push_log` | candidate | side effect |
@@ -626,20 +714,23 @@ candidate returns to `review`. Outcome mapping (the `push_log` CHECK of 02 §2.1
 | `MAY_HAVE_LANDED` on any try | `unknown`, `error='timeout'` | stays `approved`, blocked | no resend; `reconcile_job`'s quick outcomes read (≤ 10 min, §B.2) promotes it, else rule 5's 48 h |
 | 404 | `failed`, `error='http_404'` | stays `approved` | breaker: `sources.erp_sync.breaker_until = now+6h`, `breaker_reason='push_404'` (`/yoq crm` clears it by hand, 06 §1.2; it also expires); health problem `push_404`; owner alert once per 6 h — `reminder_log(kind='alert:push_404')`, recovery `recovered:push_404` (06 §4.1): «ERP kaliti yoki manba notoʻgʻri: /api/leads/in/{source} 404 qaytardi. Kelgan arizalar → Reklama havolalari → Agent → kalitni tekshiring.» |
 | 3xx (Caddy answers `308` to an `http://` `CRM_BASE_URL`, `--profile https`) | `failed`, `error='http_3xx'` | stays `approved` | never followed (`follow_redirects=False` — the key is not re-sent to wherever it points); breaker as 404 (`breaker_until = now+6h`, `breaker_reason='erp_redirect'`), health problem `erp_redirect`, owner alert once per 6 h (`alert:erp_redirect`): «ERP manzili yoʻnaltiryapti (HTTP n): `.env` dagi CRM_BASE_URL `https://` bilan boshlanishi kerak.» `make doctor` refuses an `http://` `CRM_BASE_URL` (06 §3.3) |
-| other 4xx | `failed`, `error='http_4xx'` | → `review`, note «ERP rad etdi (HTTP n)» | owner alert — the ERP door itself answers only 200 / 404 / 503, so this is a proxy or a wrong `CRM_BASE_URL` |
-| 5xx (503 JSON or an HTML error page) / connect error after 3 tries | `failed`, `error` = `http_5xx`, `conn` or `timeout` (a connect timeout) | stays `approved`; next attempt after `ATTEMPT_DELAYS[n+1]`; after attempt 3 → `review`, note «CRM javob bermadi» | health problem `push_failing` when 3 consecutive candidates fail |
+| other 4xx | `failed`, `error='http_4xx'` | → `review`, note «ERP rad etdi (HTTP n)» | owner alert — the ERP door answers the agent (which always sends `X-GSR-Key`) only 200 / 404 / 503, so this is a proxy or a wrong `CRM_BASE_URL` |
+| 5xx (503 JSON, the ERP's empty-body 500, or a proxy's HTML page — any 5xx) / connect error after 3 tries | `failed`, `error` = `http_5xx`, `conn` or `timeout` (a connect timeout) | stays `approved`; next attempt after `ATTEMPT_DELAYS[n+1]`; after attempt 3 → `review`, note «CRM javob bermadi» | health problem `push_failing` when 3 consecutive candidates fail |
 | `sending` row older than 10 min (crash) | `unknown` (`reconcile_job`) | stays `approved`, blocked | as `MAY_HAVE_LANDED` |
 
 What 200 does and does not prove: on the `agent` door, that the ERP recorded the arrival (or had
 recorded it before). On the «Boshqa» fallback door (§B.3) a 200 can also be a landing that threw
 with nothing recorded — which is why rule 5 also reconciles `sent` rows. A 503 after the ERP's
-`createLead` (a database failure half-way) leaves an orphan lead; the next try JOINS it and the
-outcome reads `joined` for a lead nobody else was working (A.2) — the agent never reads `joined` as
-«a person already had this company» (no side effect keys on it, 02 §2.11). The fallback door can leave
-the same orphan behind a 200: a failure after `createLead` (production's UTF-16 cut through an emoji,
-which `text_len` prevents, or any database error) leaves the lead standing with no ledger row; rule
-5's re-push through the `agent` door after the switch then JOINS it (`joined`; fake mode
-`throw200_orphan`, §B.4).
+`createLead` (a database failure half-way) leaves an orphan lead; the next try normally JOINS it and
+the outcome reads `joined` for a lead nobody else was working (A.2) — the agent never reads `joined`
+as «a person already had this company» (no side effect keys on it, 02 §2.11). The retry can instead
+make a second lead (the orphan was moved to won/lost meanwhile) or come back `dropped/capped` while
+the orphan stands (A.13 (ii)): the outcome row then speaks for the retry, not for the orphan. The
+fallback door can leave the same orphan behind a 200: a failure after `createLead` (production's
+UTF-16 cut through an emoji, which `text_len` prevents; a NUL or a lone surrogate, which `well_formed`
+prevents; or any database error) leaves the lead standing with no ledger row; rule 5's re-push
+through the `agent` door after the switch then JOINS it (`joined`; fake mode `throw200_orphan`,
+§B.4).
 
 Pre-flight refusals (no HTTP, no `push_log` row, result codes): `window` (outside
 Mon–Sat 09:30–17:30 Tashkent), `cap` (`count(sent|unknown today) ≥ PUSH_DAILY_CAP`), `disabled`
@@ -847,7 +938,7 @@ A flip is one digest line. `/holat` prints the three numbers per source.
 
 | Item | Fallback | Switch-over |
 |---|---|---|
-| Door | `CRM_PUSH_SOURCE=other`; `CRM_AGENT_KEY` = the **«Boshqa»** door's secret (owner mints it on the same screen); body always carries `utm_source=clientscrapper` (right after the note, §B.1); `push_log.endpoint='/api/leads/in/other'`, `source_key_sent='other'`. That door is an ordinary advert door: no belt, the 15-minute reminder fires, its pushes count in the people's per-phone cap, a client is recognised only when exactly one active card holds the phone (A.3 step 6), and a landing that throws is still answered **200** with no ledger row — possibly with an orphan lead standing (§B.1), which a later re-push through `agent` joins. Production without `agent-feed` also still cuts text by UTF-16 units (an emoji at a cut throws after the lead is written) — `text_len` (§B.1) keeps every value under the cut | set `CRM_PUSH_SOURCE=agent`, replace `CRM_AGENT_KEY`, restart `worker`. Candidates already `pushed` are **not** re-pushed by hand (same `channel`, so a replay); rule 5 re-pushes only a push the outcomes feed never shows |
+| Door | `CRM_PUSH_SOURCE=other`; `CRM_AGENT_KEY` = the **«Boshqa»** door's secret (owner mints it on the same screen); body always carries `utm_source=clientscrapper` (right after the note, §B.1); `push_log.endpoint='/api/leads/in/other'`, `source_key_sent='other'`. That door is an ordinary advert door: no belt, the 15-minute reminder fires, its pushes count in the people's per-phone cap, a client is recognised only when exactly one active card holds the phone (A.3 step 6), and a landing that throws is still answered **200** with no ledger row — possibly with an orphan lead standing (§B.1), which a later re-push through `agent` joins. Production without `agent-feed` also still throws on text after (or, for a NUL in the name or phone, at) `createLead`: an emoji at a UTF-16 cut, a NUL anywhere (a text column refuses it, and `ref`'s jsonb refuses `\u0000`) and a lone surrogate (jsonb) — `text_len` (§B.1) keeps every value under the cut and `well_formed` drops every NUL and lone surrogate, so none of the three can happen | set `CRM_PUSH_SOURCE=agent`, replace `CRM_AGENT_KEY`, restart `worker`. Candidates already `pushed` are **not** re-pushed by hand (same `channel`, so a replay); rule 5 re-pushes only a push the outcomes feed never shows |
 | Feeds | **not configured** (`feeds_configured()` false): the «Boshqa» key reads nothing — every GET would be 404 and trip the `push_404` breaker — so no feed call is made | the first suppression full pull and the outcomes `year` walk run on the day of the switch |
 | Routing | the `other` door is also where a bot `?start=ad_<unknown or agent>` deep link and a hand-posted form with an unknown or `agent` source land (`inboundSourceKey`; an unknown `/ariza?manba=` goes to «Sayt» — `formSourceKey`, the same `: 'sayt'` fallback in production `7bea3051`); a rule `manba=other` + keyword `clientscrapper` routes agent arrivals to the cargo managers. VERIFIED from the code: the keyword is a case-insensitive «contains» over name + the landed note (`matchRoute` over `[name, note]`, and the note carries the `utm_source: clientscrapper` line within the 1000 cut, §B.1); still confirm once with `make push-test` (07 §5.6) | delete that rule after switch-over |
 | Suppression | `make import-clients FILE=clients.xlsx` (ERP **Mijozlar → XLSX**); `services/client_import.py` stores `suppression(kind='client', key_type='phone_tail', source='manual_import')` — clear tails, because the future agent secret is unknown and hashes would not match. Lost leads invisible; `/holat` says «yoʻqotilgan lidlar roʻyxati yoʻq». Weekly re-import. These tails are the **only** guard for a multi-code client: the «Boshqa» door has no belt and knows a client only when exactly one active card holds the phone (A.3 step 6), so a phone on two codes would land as a new lead | a full pull retires each `manual_import` row whose tail's hash it carries (§B.2 step 5); tails it does not carry stay until the owner removes them |
@@ -861,8 +952,11 @@ under test is built with `ErpClient(base_url='http://erp.test', key=…, transpo
 real ERP's codec and answers (A.2, A.5–A.9), not a simplification of them: when fullprompt changes,
 the captured fixtures (07 §1.7) and this fake change together.
 
-- **State**: `posted: list[tuple[source, headers, body]]`, `intakes: dict[external_id, row]`
-  (`intake_id` uuid4, `created_at` microseconds), `leads: dict[lead_id, lead]` (an orphan lead may
+- **State**: `posted: list[tuple[source, headers, body]]`, `intakes: dict[external_id, row]` keyed
+  by the id as the ERP stores it — `storable_text(external_id)` (every NUL and lone surrogate →
+  U+FFFD) BEFORE the replay check, so the outcomes it serves hand such an id back with U+FFFD in its
+  place, as the ERP does (A.2; the agent's own `cs:` ids are unaffected) (`intake_id` uuid4,
+  `created_at` microseconds), `leads: dict[lead_id, lead]` (an orphan lead may
   exist without an intake), `entries: list[(tail, kind, at_us, id, n)]`, `outcome_overrides`,
   `secret`, `modes: dict[external_id, mode]`, `held: dict[external_id, asyncio.Event]`.
 - **Key**: `x-gsr-key` must equal `secret`; with no `x-gsr-key` the POST also reads body `key` /
@@ -873,9 +967,15 @@ the captured fixtures (07 §1.7) and this fake change together.
   `ok` → intake `created` + a lead, 200 `{"ok":true}`; `joined` → intake `joined` onto a prior lead;
   `client` → intake `client` + `client_id` (allowed only for `source='other'`, as the real belt makes
   it impossible on `agent`); `capped` / `suppressed` / `no_phone` → intake `dropped` with that
-  reason; `404` → 404; `503` → 503 `{"error":"unavailable"}`, nothing recorded; `html500` → 500
-  `<html>…`; `orphan` → creates a lead with no intake and answers 503 (a throw after the lead's
-  INSERT); the next POST of that id joins it (`joined`); `throw200` (only `source='other'`) → 200
+  reason; `404` → 404; `503` → 503 `{"error":"unavailable"}`, nothing recorded; `503_committed` → the
+  intake is written as for `ok` and the answer is 503 (the ledger row committed, its answer lost, A.13
+  (i)): the next POST of that id is a replay, 200, and the fake's lead never gets a contact;
+  `nonjson5xx` → a non-JSON 5xx — by default 500 with an empty body (the ERP's own answer when the
+  database fails before the key check and no `X-GSR-Key` was sent, A.2), parametrised as a proxy's
+  `text/html` 502 page; `orphan` → creates a lead with no intake and answers 503 (a throw after the
+  lead's INSERT); the next POST of that id joins it (`joined`) — through the fake's own landing order,
+  so a test that first moves the orphan to won/lost gets a second lead (`created`) and one that fills
+  the phone's cap gets `dropped/capped` (A.13 (ii)); `throw200` (only `source='other'`) → 200
   `{"ok":true}`, nothing recorded (the fallback door's answer to a failed landing);
   `throw200_orphan` (only `source='other'`) → 200 `{"ok":true}` with a lead and no intake (a failure
   after `createLead` on the fallback door); a later POST of that id through `agent` joins it
@@ -891,7 +991,10 @@ the captured fixtures (07 §1.7) and this fake change together.
   → `dropped/no_phone`; (4) caps (rolling 24 h, the source cap over every arrival of that source);
   (5) belt; then the mode — so a body with no name and phone `12345` is `no_contact`, not `no_phone`.
   The landed note is built
-  as A.2 (extras in body order, whitespace collapsed, 1000 code points) and kept for assertions.
+  as A.2 (`fromPlain`: extras in body order, each value JS-trimmed and skipped when that leaves it
+  empty; then the whitespace collapse, `storable_text`, and `clip_units(…, 1000)` — UTF-16 units, a
+  high surrogate dangling at the edge dropped so an emoji is left out whole; the name the same at 120)
+  and kept for assertions.
 - **`GET /api/agent/suppression` / `outcomes`** — key as above; then `cursor` → `decode_cursor` FIRST,
   then `since` → `parse_since` (both invalid → `bad_cursor`), either invalid → 400 `{"error":"bad_cursor"}` / `{"error":"bad_since"}`;
   `limit` by `clamp_limit`; mode `feed_503` → 503 `{"error":"unavailable"}`, `feed_timeout`,
@@ -909,20 +1012,34 @@ the captured fixtures (07 §1.7) and this fake change together.
       # ^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d{1,6})?)?(Z|[+-]\d{2}:?\d{2})$, real date, h ≤ 23,
       # m ≤ 59, s ≤ 59 → UTC with six fraction digits; '0', a date alone, a naive time, a space
       # where '+' was → "invalid"
-  def clamp_limit(raw: str | None) -> int:   # the ERP's expression (A.6): n = floor(js_number(raw)); NaN or 0 → 1000; then clamp to [1, 5000]
-      # js_number: absent/'' → 0, ' 7 ' → 7, '1e3' → 1000, '0x10' → 16, 'Infinity' → inf, else NaN; so '0.5' → 1000, '-3' → 1
+  def clamp_limit(raw: str | None) -> int:   # the ERP's expression (A.6): n = floor(js_number(raw)); NaN, 0 or -0 → 1000; then clamp to [1, 5000]
+      # js_number = ECMAScript StringToNumber (what Number(raw) does): absent → the ERP reads q.get('limit') = null → 0;
+      # strip JS whitespace incl. line terminators and U+FEFF (JS_SPACE); '' → 0; a signed decimal ('+7', '-3', '.5',
+      # '5.', '1e3', '1E3') or a signed 'Infinity' (exactly that spelling); an UNSIGNED 0x/0o/0b prefix, any case
+      # ('0x10' → 16, '0O7' → 7, '0b11' → 3); anything else NaN ('-0x10', '+0x10', '7px', '1_000', 'infinity', 'nan',
+      # '0x'). Never Python float()/int(): float('1_000'), float('infinity') and float('nan') read what JS refuses.
+      # Vectors (recomputed in Node over clampLimit, 2026-10-24): None → 1000, '' → 1000, ' 7 ' → 7, '\n7\n' → 7,
+      # '\ufeff7' → 7, '\u00a07' → 7, '+7' → 7, '1e3' → 1000, '0x10' → 16, '0b11' → 3, '0o7' → 7, '.5' → 1000,
+      # '0.5' → 1000, '1.9' → 1, '-0' → 1000, '-0.5' → 1, '-3' → 1, '-Infinity' → 1, 'Infinity' → 5000, '5001' → 5000,
+      # '-0x10' → 1000, '7px' → 1000, '1_000' → 1000
   ```
   Keyset: suppression `(at_us, id, n) > cursor`, outcomes `(at_us, intake_id) > cursor`; `since`
   strict `>`; `next` = the cursor of the last row when one more row exists, else `null`; `resume` =
   the last row's cursor, or the sent cursor on an empty page, or `null`.
 
 Tests (pytest, async): `test_payload_sections_and_limits` (order, NEGA TOPILDI first and whole in 159
-code points, note ≤ 700, `landed_note` ≤ 1000, URL never cut, no person name without `legal_basis`,
+code points, note ≤ 700, `text_len(landed_note) ≤ 1000`, URL never cut, no person name without `legal_basis`,
 `kub` rules, `utm_source` right after `note`, `exclude_none`, no field in `RESERVED_BODY_KEYS`,
-`text_len` limits with an emoji at each edge), `test_external_id_month_tashkent`,
+`text_len` limits with an emoji at each edge), `test_payload_drops_nul_and_lone_surrogates` (a NUL in
+a quote, the name or `firma`, and a lone surrogate anywhere, never reach the body),
+`test_landed_note_skips_empty_values` (an empty and a whitespace-only extra make no «k:» line, as
+`fromPlain`), `test_band_routes_by_low_end` (`TEXT_VOLUME_RE` over name + landed note → 1, 3, 28, 80
+for the four bands; the stated volume for a stated push), `test_external_id_month_tashkent`,
 `test_canonical_sha_stable`, `test_push_200_marks_pushed`, `test_push_404_trips_breaker_and_alerts_once`,
 `test_push_503_three_tries_then_failed_then_review_after_attempt_3` (nothing recorded by the fake
-until a try succeeds), `test_push_html500_is_retried_like_503`,
+until a try succeeds), `test_push_nonjson5xx_is_retried_like_503` (an empty-body 500 and a proxy's
+HTML 502), `test_push_503_committed_retry_is_replay` (attempt 1 `sent` after the in-attempt retry's
+200; one intake; the outcome `created` with no contact → `open_untouched`),
 `test_push_read_timeout_is_unknown_without_resend` (mode `slow`: exactly ONE POST in the attempt,
 `push_log.unknown` + `error='timeout'`; after `fake.release()` the `unknown` walk promotes it to
 `sent` and the candidate to `pushed`), `test_push_orphan_retry_joins` (mode `orphan`: the second try
@@ -930,6 +1047,8 @@ lands `joined`, the outcome row is `landed_joined`, no side effect),
 `test_push_2xx_badbody_is_unknown` (never `sent`; promoted by outcomes),
 `test_push_3xx_is_not_followed_and_trips_breaker` (`erp_redirect`, one POST),
 `test_fake_landing_order` (no name + `12345` → `no_contact`; a name + `12345` → `no_phone`),
+`test_fake_clamp_limit_vectors` (the codec comment's vectors), `test_fake_external_id_storable` (an
+id with a NUL is stored and reported with U+FFFD; its re-send is a replay),
 `test_landed_note_js_whitespace` (U+FEFF collapsed, U+001C/U+0085 mapped by `build_payload`),
 `test_reconcile_repush_joins_fallback_orphan` (`throw200_orphan`, then the switch: the re-push is
 `joined`, `landed_joined`, no side effect),
@@ -953,7 +1072,9 @@ quarter 90 d / year neither — `since` always ends in `Z`), `test_outcomes_igno
 `auto_push_forbidden`), `test_manual_import_retired_after_full_pull`, `test_suppression_fresh`
 (26 h / 3 h / `salt_id` edges; feed unconfigured → true), `test_feeds_not_called_during_fallback`.
 Recorded fixtures: `tests/fixtures/erp/` — captured from `agent-feed` at `23fe1736` on a seeded
-database (07 §1.0 lists the files); `tests/test_erp_feeds_contract.py` runs the parsers over them.
+database (07 §1.0 lists the files) and still valid at `a4f9f433`: the third review changes no captured
+answer (no captured value reaches a cut or carries a NUL, a lone surrogate or a deep body, A.0);
+`tests/test_erp_feeds_contract.py` runs the parsers over them.
 
 ### B.5 Sequences
 
@@ -969,7 +1090,7 @@ crm_push_job (window open, cap ok)            push_log failed/http_404; breaker 
 nightly: outcomes row external_id → label
 
 PUSH (read timeout)                           PUSH (503)
-POST … ReadTimeout (ERP may still be running) POST … 503 {"error":"unavailable"} (nothing recorded)
+POST … ReadTimeout (ERP may still be running) POST … 503 {"error":"unavailable"} (normally nothing recorded)
 no resend in the attempt                      with_backoff: 2nd try 1 s later → 200 → sent
 push_log unknown/timeout; candidate blocked   (after 3 × 503: failed; attempt 2 after 5 min)
 reconcile_job (≤ 10 min): outcomes since=sent_at−10 min
@@ -987,9 +1108,11 @@ SUPPRESSION (full, salt changed)              OUTCOMES (nightly)
 
 | Failure | Agent behaviour | Owner sees |
 |---|---|---|
-| ERP down (conn refused / connect timeout / 503 / 5xx HTML) on push | 3 tries in ≤ 15 s; `failed`; attempt 2 after 5 min, 3 after 30 min; then `review` | `/holat` `push_failing`; digest line |
+| ERP down (conn refused / connect timeout / 503 / any other 5xx — the ERP's empty-body 500, a proxy's HTML page) on push | 3 tries in ≤ 15 s; `failed`; attempt 2 after 5 min, 3 after 30 min; then `review` | `/holat` `push_failing`; digest line |
 | Read timeout / dropped connection after the request was sent | `unknown`, no resend; the 10-minute `unknown` walk or the nightly read promotes it; 48 h without an outcome → `push_unconfirmed` + one re-push (02 §2.10 rule 5) | nothing, or `push_unconfirmed` |
-| ERP database fails half-way through a landing | 503 → retry; the retry joins the orphan lead (`joined`, «🔁 Qayta yozdi» to the seller) | nothing; stated in A.2 |
+| ERP database fails half-way through a landing | 503 → retry; the retry normally joins the orphan lead (`joined`, «🔁 Qayta yozdi» to the seller). It can instead make a SECOND lead (the orphan was moved to won/lost meanwhile) or come back `dropped/capped` while the orphan stands (A.13 (ii)) — the outcome row is the retry's; and a cause that repeats on every try adds one lenta note per POST, ≤ 9, with no Telegram push (A.13 (iii)) | nothing; stated in A.2, A.13 |
+| The ERP's ledger row commits but its answer is lost (A.13 (i)) | 503 → the in-attempt retry is a replay, 200 → `sent`, `pushed`; the outcome reads `created` and never gets `contacted_at` → `open_untouched`, `stale_open` after 30 d — although no seller was told | nothing; a `stale_open` row nobody was told about (reasoned by the ERP, not reproduced) |
+| A first delivery that never settles in the ERP (A.13 (iv)) | every later POST of that id waits in the ERP's per-id chain until it restarts; the agent's 20 s read timeout ends the try as `unknown` (no resend); the `unknown` walk, then rule 5 settle it | nothing, or `push_unconfirmed` |
 | ERP down on feeds | `with_backoff` 4 tries (503 is retried, never `push_404`); collector run `failed`; `suppression_fresh()` false (no full pull ≤ 26 h or no delta ≤ 3 h) → gate `suppression_stale` → pushes stop | alert «ERP roʻyxati 26 soatdan beri yangilanmadi — push toʻxtatildi» (06 §4.2 renders the real `{age}`) |
 | 404 on any call | breaker 6 h (`sources.erp_sync.breaker_until`; `/yoq crm` clears it), `push_404`, alert once per 6 h | «kalit yoki manba notoʻgʻri» |
 | 400 on a feed (`bad_cursor` / `bad_since`) | `feed_contract` code `bad_request`, run `failed`, no retry — an agent bug (a decoded or hand-built cursor, a `since` without `Z`) | «ERP feed shakli oʻzgardi (bad_request) — dasturchi kerak» |
@@ -1018,7 +1141,7 @@ SUPPRESSION (full, salt changed)              OUTCOMES (nightly)
 8. ~~Fixtures captured or hand-written?~~ — resolved: captured from `23fe1736` (07 §1.0).
 9. 02 §2.10 rule 5's one re-push needs `push_log.superseded_at` (migration `0002_erp_contract`, T-10). Accept, or keep `unknown`/`sent` rows blocking for ever and leave every unconfirmed push to `/push tekshir`? (Recommended: accept — without it a 2xx row can never be retried, because `ck_push_log_sent` forbids `failed` on a 2xx.)
 10. AGENT-FEED.md §0 step 4 says arrivals before the `kub` mapping route by rule B; the code reads a «N kub» from the note first (A.14 — VERIFIED 2026-10-24: `mapped.volumeM3 ?? textVolume(name, note)` in `landOnce`, and AGENT-FEED.md line 46 still says «kubsiz qoida (B)»). Since the agent now writes every band with a number (§B.1 `BAND_HAJM`), nearly every agent push routes by rule A before and after the mapping. Ask the ERP session to correct the sentence; nothing to ask the owner.
-11. The orphan lead (A.2): the ERP chose not to claim the ledger row first. The agent lives with `joined` after a 503; is a «🔁 Qayta yozdi» about a never-announced lead acceptable to the owner, or should the ERP adopt the claim-first ledger later?
+11. The orphan lead (A.2, A.13): the ERP chose not to claim the ledger row first (again at #1473, which would have closed the class for any input postgres refuses next). The agent lives with `joined` after a 503; is a «🔁 Qayta yozdi» about a never-announced lead acceptable to the owner, or should the ERP adopt the claim-first ledger later?
 
 Owner decisions that came out of the T-07 verification (2026-10-24) — each is asked of Bekzod in
 Uzbek in **01 §7** (the numbered question there, its options and the ⭐ recommendation); here only
@@ -1057,8 +1180,8 @@ what the ERP side would have to do:
 
 ## Acceptance criteria
 
-- fullprompt `agent-feed` (built at `23fe1736`; T-07): `pnpm typecheck && pnpm lint && pnpm test` green on a fresh `gsr_ci` in CI's order (met, by the build session's report: 675 files / 7629 tests — re-checked by the PR's CI); no migration (met); `GET /api/agent/suppression` and `/outcomes` answer 404 without a key or with `X-ERP-Key` only, 400 `bad_cursor`/`bad_since` on a bad cursor or `since`, 503 JSON when the database fails after the key was sent, 200 gzipped ≥ 1 KB with the documented bodies and `resume` (met; captured except the 503 — no capture has the ERP database down — which is read from the code and pinned by fullprompt `tests/unit/agent-feed-door.test.ts` and `agent-door-landing.test.ts`); an `agent` arrival on a client-book (active or inactive, card, person or won/attached lead, 7–8-digit card by suffix) or «Qayta qilinmasin» phone writes `dropped/suppressed`, creates nothing and notifies nobody (met); an `agent` lead has `contact_clock_at` set and `contact_due_at NULL`, is never claimed by `remindUntouched`, and gets `contacted_at` from `stampFirstContacts` for 90 days (met); the agent door answers 503 to a landing that threw and every other door keeps its 200 (met); `tiktok`/form arrivals behave exactly as before (control group, met); the setting is described in 4 locales (met); the seed adds exactly one row (met); `docs/AGENT-FEED.md` lets the Python side be built without reading TypeScript (met). **Still open: the PR, the merge, the deploy and the owner's five steps (A.14).**
-- Agent: `make test` green with the fake ERP covering 200 / 404 / 503 / 5xx HTML / read timeout with the first request still running / replay / joined / orphan-joined / client (fallback) / `throw200` (fallback) / badjson and both feeds; a 404 trips the breaker and alerts once; a 3xx is never followed and trips `erp_redirect`; a 503 is retried and never trips it; a read timeout is never resent inside the attempt and lands as `unknown`, promoted by the next outcomes read; a 2xx with an unreadable body lands as `unknown`, never `sent`; an unconfirmed `sent`/`unknown` row is re-pushed at most once (02 §2.10 rule 5); `salt_id` change forces a full pull before any push; a full pull never sends `since` or `cursor`, and only it deletes; `suppression_fresh()` refuses pushes at 26 h without a full pull or 3 h without a delta; a shrunk full pull deletes nothing; a full pull retires exactly the `manual_import` tails whose hash it carries; the four outcomes walks send the documented params and the stored cursor is the last non-null `resume`; outcome rows the agent never pushed are ignored; labels match the table for every row kind and the local suppression rows follow the labels both ways (retractions); precision/auto-push flips both ways at the thresholds and never on while `auto_push_forbidden`; the fallback (`other` + both headers + `utm_source` after the note) passes the same push tests and makes no feed call; `make push-test` makes a new `external_id` every run; `tests/test_no_telegram_writes.py` stays green (nothing here sends to a prospect); no secret in repo or logs (`RedactBodies` covers `X-GSR-Key`/`X-ERP-Key` headers and the payload's `phone`).
+- fullprompt `agent-feed` (head `a4f9f433`: built and twice reviewed at `23fe1736`, the third review's fixes `bfb5625b`; T-07): `pnpm typecheck && pnpm lint && pnpm test` green on a fresh `gsr_ci` in CI's order (met, by the build session's report: 675 files / 7636 tests after the third review — re-checked by the PR's CI); an arrival carrying an emoji at a cut, a lone surrogate, a NUL (in any field or the `external_id`) or a body nested too deep lands whole with 200 and one note, its retry a replay (met, pinned through the real route); a `lead_field_map` key saved before the deploy still matches (met); no migration (met); `GET /api/agent/suppression` and `/outcomes` answer 404 without a key or with `X-ERP-Key` only, 400 `bad_cursor`/`bad_since` on a bad cursor or `since`, 503 JSON when the database fails after the key was sent, 200 gzipped ≥ 1 KB with the documented bodies and `resume` (met; captured except the 503 — no capture has the ERP database down — which is read from the code and pinned by fullprompt `tests/unit/agent-feed-door.test.ts` and `agent-door-landing.test.ts`); an `agent` arrival on a client-book (active or inactive, card, person or won/attached lead, 7–8-digit card by suffix) or «Qayta qilinmasin» phone writes `dropped/suppressed`, creates nothing and notifies nobody (met); an `agent` lead has `contact_clock_at` set and `contact_due_at NULL`, is never claimed by `remindUntouched`, and gets `contacted_at` from `stampFirstContacts` for 90 days (met); the agent door answers 503 to a landing that threw and every other door keeps its 200 (met); `tiktok`/form arrivals behave exactly as before (control group, met); the setting is described in 4 locales (met); the seed adds exactly one row (met); `docs/AGENT-FEED.md` lets the Python side be built without reading TypeScript (met). **Still open: the PR, the merge, the deploy and the owner's five steps (A.14).**
+- Agent: `make test` green with the fake ERP covering 200 / 404 / 503 / 503 committed (the retry a replay) / non-JSON 5xx (empty-body 500, proxy HTML) / read timeout with the first request still running / replay / joined / orphan-joined / client (fallback) / `throw200` (fallback) / badjson and both feeds; a 404 trips the breaker and alerts once; a 3xx is never followed and trips `erp_redirect`; a 503 is retried and never trips it; a read timeout is never resent inside the attempt and lands as `unknown`, promoted by the next outcomes read; a 2xx with an unreadable body lands as `unknown`, never `sent`; an unconfirmed `sent`/`unknown` row is re-pushed at most once (02 §2.10 rule 5); `salt_id` change forces a full pull before any push; a full pull never sends `since` or `cursor`, and only it deletes; `suppression_fresh()` refuses pushes at 26 h without a full pull or 3 h without a delta; a shrunk full pull deletes nothing; a full pull retires exactly the `manual_import` tails whose hash it carries; the four outcomes walks send the documented params and the stored cursor is the last non-null `resume`; outcome rows the agent never pushed are ignored; labels match the table for every row kind and the local suppression rows follow the labels both ways (retractions); precision/auto-push flips both ways at the thresholds and never on while `auto_push_forbidden`; the fallback (`other` + both headers + `utm_source` after the note) passes the same push tests and makes no feed call; no U+0000 or lone surrogate ever reaches a body, the landed note skips empty values, and every band routes by its low end; `make push-test` makes a new `external_id` every run; `tests/test_no_telegram_writes.py` stays green (nothing here sends to a prospect); no secret in repo or logs (`RedactBodies` covers `X-GSR-Key`/`X-ERP-Key` headers and the payload's `phone`).
 
 ## Review pass changelog
 
@@ -1099,3 +1222,16 @@ others point here):
 - §B.3 Routing: an unknown `/ariza?manba=` lands under «Sayt»; `other` gets bot `ad_<unknown>` links and hand-posted forms.
 - A.0: `7bea3051` is `origin/main` (PR #129's merge; its head `24607e8c`); the vitest/e2e counts are the build session's report, not a repo record. A.12 red proofs 16 + 21 + 16 (DECISIONS #1458, #1466, #1472). A.6/A.7 tail rules: CR, tabs, runs of 16–120 digits. §B.2 step 4: `aefbf278` removed the 998-run chunks from the feed (fragments only from the belt), and no pull predates it. A.7/A.9 examples copied from `suppression_full.json` / `outcomes_since.json`. §B.2 labels note: a free-text reason equal to a setting label comes back verbatim. Acceptance: the 503 is pinned by unit tests, not captured.
 - Previous editor's open items now checked: production `7bea3051` cuts by UTF-16 units and answers 200 to a thrown landing (resolved, §B.1 `text_len`); `landOnce` routes by `mapped.volumeM3 ?? textVolume(name, note)` (Q10 VERIFIED, still an ERP doc fix); the «📞 Bogʻlandim» note maps to `note` from any presser (A.4). Open questions 12–17 added (owner decisions asked in 01 §7).
+
+**T-07 third review (2026-10-24)** — fullprompt `agent-feed` moved to `a4f9f433` (`bfb5625b` code, `a4f9f433` docs; DECISIONS #1473–#1475). The 11 mismatches the re-verification left were each re-read in the code at that head (`platform/text/clip.ts`, `inbound.ts`, `inbound-webhook.ts`, `field-map.ts`, `inbound-notify.ts`, `service.ts` `setFollowUp`/`moveLead`/`updateLead`, `first-contact.ts`, `agent-feed.ts`, the leads-in route, `docs/AGENT-FEED.md`) or recomputed in Node (`clampLimit`, `textVolume`), then corrected:
+
+- Part A describes `a4f9f433`: header; A.0 (12 commits, 41 files +4061/−63, three review rounds, 7636 tests, red proofs 16 + 21 + 16 + 12; the fixtures captured at `23fe1736` stay valid — no captured value reaches a cut); A.1 (`storableText`/`clipUnits`/`storableJson`, `storedRef`, the normalised id, AGENT-FEED.md 425 lines, the integration test 1373 lines, `field-map.integration.test.ts`); A.12 (the third review's tests and its 12 red proofs).
+- Every ERP cut is UTF-16 units with a whole-emoji back-off, not code points (A.2 table and landed note, B.1 `LANDED_NOTE_MAX`, `text_len`, `name`, the field-order comment, B.4); only the Telegram preview (`PUSH_PREVIEW`) counts code points.
+- A NUL becomes U+FFFD like a lone surrogate, everywhere, the `ref` and the `external_id` included (the outcomes feed returns such an id with U+FFFD); a body too deep to serialise is `{"_truncated":true}` (A.2; the fake normalises the id before its replay check, B.4). `well_formed` also drops U+0000, because production throws on it after (or at) `createLead` (B.1, B.3 Door row, a payload test).
+- The no-header database failure is `500` with an empty body, not Next's HTML page (A.2 answer table); fake mode `html500` renamed `nonjson5xx` (an empty-body 500, or a proxy's HTML 502), with B.1's mapping row, B.6 and the acceptance criteria.
+- #1475's four cases — a committed ledger row whose answer is lost, a retry that makes a second lead or is capped, a repeating cause adding a note per POST, the per-module-copy chain with no bound on its wait — in A.2, A.13, B.1 (503 «normally» means no ledger row), B.6 (two new rows) and a new fake mode `503_committed`.
+- A.4: a «📞 Bogʻlandim» press by the responsible person first clears the landing's today booking, an earlier `followup` evidence row, so it reads `followup`; `note` only when the presser is not responsible or the date was already moved; a ✏️-form stage move also reads `followup`, a board move `stage`.
+- A.7: `tailsSql`'s chunk conditions as written — a part made entirely of `998…` numbers → each, else a length that is a multiple of 9 → each 9-digit chunk, else (a 20-digit part, any part over 120) the last nine only.
+- B.4 `clamp_limit`: `js_number` is ECMAScript `StringToNumber` (JS whitespace incl. U+FEFF, signed decimals and `Infinity`, unsigned `0x`/`0o`/`0b`), with the vectors recomputed in Node.
+- B.1 `landed_note`: a value JS `trim()` leaves empty makes no line (`fromPlain`'s `str()`); `js_trim` written out.
+- B.1 `BAND_HAJM`: `textVolume` reads the number right before the first «kub», so «taxminan 1–3 kub» routed as 3 and «3–10 kub» as 10; the words now put the low end there («taxminan 1 kubdan 3 kubgacha» → 1, «taxminan 3 kubdan 10 kubgacha» → 3; container 28 and truck 80 unchanged), with `TEXT_VOLUME_RE` and a routing test; the note template and A.14 follow.
