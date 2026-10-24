@@ -399,3 +399,62 @@ def bound_name(
             return name if name in bound.get(module, set()) else None
         return node.attr if node.attr in mine else None
     return None
+
+
+# --- names a guard cannot read ---------------------------------------------------
+
+_NAMESPACES = {"vars", "globals", "locals"}
+_LOOKUPS = {"get", "pop", "setdefault", "__getitem__"}
+
+
+def _is_namespace(node: ast.expr) -> bool:
+    """``vars(m)``, ``globals()``, ``locals()`` or ``x.__dict__``."""
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+        return node.func.id in _NAMESPACES
+    return isinstance(node, ast.Attribute) and node.attr == "__dict__"
+
+
+def _literal_text(node: ast.AST | None) -> bool:
+    return isinstance(node, ast.Constant) and isinstance(node.value, str)
+
+
+def dynamic_names(tree: ast.AST) -> list[tuple[ast.AST, str]]:
+    """Every place a module, an attribute or a binding is reached by a name
+    built at run time, which no source-shape guard can read: an import with a
+    non-literal name (``import_module("ht" + "tpx")``, ``__import__(n)``),
+    ``getattr``/``setattr``/``delattr``/``hasattr`` and ``attrgetter`` with a
+    non-literal name, and a namespace (``vars(m)``, ``globals()``,
+    ``m.__dict__``) indexed or looked up by one. Fail closed: the guards that
+    use this refuse the shape whatever the name would have been."""
+    found: list[tuple[ast.AST, str]] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            func = node.func
+            first = node.args[0] if node.args else None
+            name = (
+                func.id
+                if isinstance(func, ast.Name)
+                else (func.attr if isinstance(func, ast.Attribute) else "")
+            )
+            if name in {"import_module", "__import__"} and not _literal_text(first):
+                found.append((node, f"{name}(<built name>)"))
+            elif name in {"getattr", "setattr", "delattr", "hasattr"}:
+                attr = node.args[1] if len(node.args) > 1 else None
+                if not _literal_text(attr):
+                    found.append((node, f"{name}(…, <built name>)"))
+            elif name == "attrgetter" and not all(_literal_text(a) for a in node.args):
+                found.append((node, "attrgetter(<built name>)"))
+            elif (
+                isinstance(func, ast.Attribute)
+                and func.attr in _LOOKUPS
+                and _is_namespace(func.value)
+                and not _literal_text(first)
+            ):
+                found.append((node, f"namespace.{func.attr}(<built name>)"))
+        elif (
+            isinstance(node, ast.Subscript)
+            and _is_namespace(node.value)
+            and not _literal_text(node.slice)
+        ):
+            found.append((node, "namespace[<built name>]"))
+    return found

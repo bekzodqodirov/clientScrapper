@@ -4,6 +4,7 @@ component names of 03 §1.2. The problem list is T-08's ``test_health.py``."""
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -11,6 +12,7 @@ import pytest
 import sqlalchemy as sa
 
 from clientscrapper.db import models as m
+from clientscrapper.db.session import SessionLocal
 from clientscrapper.services import health
 
 NOW = datetime(2026, 10, 24, 9, 0, tzinfo=ZoneInfo("Asia/Tashkent"))
@@ -29,6 +31,30 @@ async def test_beat_upserts_one_row_and_replaces_the_detail(session):
     assert rows["worker"].detail == {"other": True}  # replaced, not merged
     count = await session.scalar(sa.select(sa.func.count()).select_from(m.Heartbeat))
     assert count == 1
+
+
+async def test_an_older_beat_committed_later_does_not_move_the_clock_back(session):
+    later = NOW + timedelta(minutes=5)
+    await health.beat(session, "collector:directories", detail={"run": 2}, now=later)
+    await health.beat(session, "collector:directories", detail={"run": 1}, now=NOW)
+    row = (await health.beats(session))["collector:directories"]
+    assert (row.last_seen_at, row.detail) == (later, {"run": 2})
+
+
+async def test_concurrent_beats_keep_the_latest(session):
+    # The seam review's probe: 40 beats at once, T+i s each; the stored row
+    # is the latest, whichever transaction commits last.
+    async def one(i: int) -> None:
+        async with SessionLocal() as own:
+            await health.beat(
+                own, "collector:maps", detail={"i": i}, now=NOW + timedelta(seconds=i)
+            )
+            await asyncio.sleep(0.001 * ((i * 7) % 5))
+            await own.commit()
+
+    await asyncio.gather(*(one(i) for i in range(40)))
+    row = (await health.beats(session))["collector:maps"]
+    assert (row.last_seen_at, row.detail) == (NOW + timedelta(seconds=39), {"i": 39})
 
 
 async def test_beat_without_detail_stores_an_empty_dict(session):

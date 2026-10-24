@@ -62,15 +62,21 @@ async def beat(
     now: datetime | None = None,
 ) -> None:
     """Record that ``component`` is alive now. One upsert; ``detail`` replaces
-    the stored dict whole (an absent detail stores ``{}``)."""
+    the stored dict whole (an absent detail stores ``{}``). A beat never moves
+    the clock back: of two beats committed out of order (two runs, two
+    processes), the later ``now`` and its detail stay — the stored row would
+    otherwise say a live component was last seen minutes ago."""
     stmt = pg_insert(Heartbeat).values(
         component=component, last_seen_at=_now(now), detail=dict(detail or {})
     )
+    newer = stmt.excluded.last_seen_at >= Heartbeat.last_seen_at
     stmt = stmt.on_conflict_do_update(
         index_elements=[Heartbeat.component],
         set_={
-            "last_seen_at": stmt.excluded.last_seen_at,
-            "detail": stmt.excluded.detail,
+            "last_seen_at": sa.func.greatest(
+                Heartbeat.last_seen_at, stmt.excluded.last_seen_at
+            ),
+            "detail": sa.case((newer, stmt.excluded.detail), else_=Heartbeat.detail),
         },
     )
     await session.execute(stmt)

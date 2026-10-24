@@ -32,7 +32,11 @@ GATES = [
     "migrations",
     "trailers",
 ]
-TRAILERS = "\n\nCo-Authored-By: Namuna CI <ci@example.uz>\n"
+TRAILERS = (
+    "\n\nCo-Authored-By: Namuna CI <ci@example.uz>\n"
+    "Claude-Session: https://namuna.example.uz/session\n"
+)
+CHECK = ROOT / "scripts" / "check_trailers.sh"
 pytestmark = pytest.mark.skipif(shutil.which("git") is None, reason="needs git")
 
 
@@ -42,11 +46,12 @@ def _gate(n: int) -> str:
     return line
 
 
-def _bash(command: str, cwd: Path, env: dict[str, str] | None = None):
+def _bash(command: str, cwd: Path, env: dict[str, str] | None = None, *, stdin: str = ""):
     return subprocess.run(
         ["bash", "-c", f"set -euo pipefail\n{command}"],
         cwd=cwd,
         env=isolated_env(env),
+        input=stdin,
         capture_output=True,
         text=True,
         check=False,
@@ -98,13 +103,82 @@ def test_the_secrets_gate_refuses_a_planted_key(tmp_path):
     assert "notes.md:1: anthropic key" in result.stdout
 
 
+def _with_check(repo: Path) -> Path:
+    (repo / "scripts").mkdir(exist_ok=True)
+    shutil.copy(CHECK, repo / "scripts")
+    return repo
+
+
+def _commit(repo: Path, message: str) -> str:
+    (repo / "README.md").write_text(message)
+    _git(repo, "add", "README.md")
+    _git(repo, "commit", "-q", "-m", message)
+    return _git(repo, "rev-parse", "HEAD")
+
+
 def test_the_trailer_gate_refuses_a_commit_without_co_authored_by(tmp_path):
-    bare = _repo(tmp_path / "bare", "T-04: no trailer\n\nsigned by nobody")
-    result = _bash(_gate(7), bare)
+    bare = _with_check(_repo(tmp_path / "bare", "T-04: no trailer\n\nsigned by nobody"))
+    result = _bash(_gate(7), bare, {"PUSHED": ""})
     assert result.returncode == 1
     assert "missing Co-Authored-By trailer" in result.stdout
-    signed = _repo(tmp_path / "signed", "T-04: with trailer" + TRAILERS)
-    assert _bash(_gate(7), signed).returncode == 0
+    assert "missing Claude-Session trailer" in result.stdout
+    signed = _with_check(_repo(tmp_path / "signed", "T-04: with trailer" + TRAILERS))
+    assert _bash(_gate(7), signed, {"PUSHED": ""}).returncode == 0
+    half = "T-04: one trailer\n\nCo-Authored-By: Namuna CI <ci@example.uz>\n"
+    one = _with_check(_repo(tmp_path / "one", half))
+    result = _bash(_gate(7), one, {"PUSHED": ""})
+    assert result.returncode == 1
+    reported = [line.split(":")[0] for line in result.stdout.splitlines()[1:]]
+    assert reported == ["missing Claude-Session trailer"]
+
+
+def test_every_pushed_commit_carries_both_trailers_not_only_the_tip(tmp_path):
+    # The seam review's case: three commits pushed, the middle one unsigned.
+    repo = _with_check(_repo(tmp_path / "repo", "base" + TRAILERS))
+    base = _git(repo, "rev-parse", "HEAD")
+    _commit(repo, "first" + TRAILERS)
+    unsigned = _commit(repo, "second, unsigned")
+    tip = _commit(repo, "third" + TRAILERS)
+    line = f"refs/heads/wt {tip} refs/heads/wt {base}\n"
+    result = _bash("bash scripts/check_trailers.sh", repo, stdin=line)
+    assert result.returncode == 1
+    short = _git(repo, "rev-parse", "--short", unsigned)
+    assert result.stdout.splitlines() == [
+        f"missing Co-Authored-By trailer: {short}",
+        f"missing Claude-Session trailer: {short}",
+    ]
+    # Only what the push sends is read: the remote already has «second».
+    sent = f"refs/heads/wt {tip} refs/heads/wt {unsigned}\n"
+    assert _bash("bash scripts/check_trailers.sh", repo, stdin=sent).returncode == 0
+    # A new branch sends what no remote has (here: every commit); a deletion
+    # sends nothing.
+    zeros = "0" * 40
+    new = f"refs/heads/wt {tip} refs/heads/wt {zeros}\n"
+    assert _bash("bash scripts/check_trailers.sh", repo, stdin=new).returncode == 1
+    gone = f"(delete) {zeros} refs/heads/old {tip}\n"
+    assert _bash("bash scripts/check_trailers.sh", repo, stdin=gone).returncode == 0
+
+
+def test_the_hook_hands_its_stdin_to_the_trailer_gate(tmp_path):
+    repo = _repo(tmp_path / "repo", "base" + TRAILERS)
+    base = _git(repo, "rev-parse", "HEAD")
+    unsigned = _commit(repo, "unsigned")
+    tip = _commit(repo, "tip" + TRAILERS)
+    shutil.copy(SCRIPT, repo / "pre-push.sh")
+    _with_check(repo)
+    result = subprocess.run(
+        ["bash", "pre-push.sh"],
+        cwd=repo,
+        env=_fake_tools(tmp_path / "bin"),
+        input=f"refs/heads/wt {tip} refs/heads/wt {base}\n",
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 1
+    short = _git(repo, "rev-parse", "--short", unsigned)
+    assert f"missing Co-Authored-By trailer: {short}" in result.stdout
+    assert "pre-push: green" not in result.stdout
 
 
 def test_the_migration_gate_fails_when_alembic_check_fails(tmp_path):
@@ -153,11 +227,13 @@ def _fake_tools(bin_dir: Path) -> dict[str, str]:
 def test_the_chain_stops_at_the_first_red_gate(tmp_path, failing, first_red):
     repo = _repo(tmp_path / "repo", "x" + TRAILERS)
     shutil.copy(SCRIPT, repo / "pre-push.sh")
+    _with_check(repo)
     env = {**_fake_tools(tmp_path / "bin"), "FAKE_FAIL": failing, "CS_REQUIRE_DB": "1"}
     result = subprocess.run(
         ["bash", "pre-push.sh"],
         cwd=repo,
         env=env,
+        input="",
         capture_output=True,
         text=True,
         check=False,
@@ -172,11 +248,13 @@ def test_the_chain_stops_at_the_first_red_gate(tmp_path, failing, first_red):
 def test_all_green_with_fake_tools(tmp_path):
     repo = _repo(tmp_path / "repo", "x" + TRAILERS)
     shutil.copy(SCRIPT, repo / "pre-push.sh")
+    _with_check(repo)
     env = _fake_tools(tmp_path / "bin")
     result = subprocess.run(
         ["bash", "pre-push.sh"],
         cwd=repo,
         env=env,
+        input="",
         capture_output=True,
         text=True,
         check=False,
@@ -209,11 +287,11 @@ def test_scratch_repositories_ignore_an_inherited_git_dir(tmp_path, monkeypatch)
     victim = _victim(tmp_path / "victim")
     monkeypatch.setenv("GIT_DIR", str(victim / ".git"))
     monkeypatch.setenv("GIT_PREFIX", "")
-    scratch = _repo(tmp_path / "scratch", "x" + TRAILERS)
+    scratch = _with_check(_repo(tmp_path / "scratch", "x" + TRAILERS))
     assert _git(victim, "config", "user.email") == "victim@example.uz"
     assert _git(victim, "log", "--format=%s") == "victim: base"
     assert (scratch / ".git").is_dir()
-    assert _bash(_gate(7), scratch).returncode == 0  # it read scratch's commit
+    assert _bash(_gate(7), scratch, {"PUSHED": ""}).returncode == 0  # scratch's
 
 
 def test_the_hook_does_not_lend_its_git_dir_to_the_gates(tmp_path):
@@ -223,6 +301,7 @@ def test_the_hook_does_not_lend_its_git_dir_to_the_gates(tmp_path):
     victim = _victim(tmp_path / "victim")
     repo = _repo(tmp_path / "repo", "x" + TRAILERS)
     shutil.copy(SCRIPT, repo / "pre-push.sh")
+    _with_check(repo)
     env = _fake_tools(tmp_path / "bin")
     # The suite's gate stands in for tests/test_pre_push.py's own _repo().
     (tmp_path / "bin" / "pytest").write_text(
@@ -233,6 +312,7 @@ def test_the_hook_does_not_lend_its_git_dir_to_the_gates(tmp_path):
         ["bash", "pre-push.sh"],
         cwd=repo,
         env=env,
+        input="",
         capture_output=True,
         text=True,
         check=False,

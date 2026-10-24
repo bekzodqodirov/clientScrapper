@@ -31,6 +31,7 @@ from tests.ast_tools import (
     PACKAGE,
     attr_chain,
     dotted_name,
+    dynamic_names,
     imported_modules,
     imports,
     is_under,
@@ -188,6 +189,10 @@ def _collector_offences(tree: ast.Module, module: str = "") -> list[str]:
             if root is not None and ".".join(path[j : j + root.count(".") + 1]) == root:
                 offending.append(f"{where}: {'.'.join(chain)} (reaches {root})")
                 break
+    # A name built at run time is a shape no rule above can read: fail closed.
+    for node, what in dynamic_names(tree):
+        function = owner.get(id(node))
+        offending.append(f"{function.name if function else '<module>'}: {what}")
     return offending
 
 
@@ -366,6 +371,18 @@ def test_the_import_detector_catches_each_shape():
         "collect: h2.socket.create_connection (reaches socket)",
         "collect: http.httpx (reaches httpx)",
         "collect: http.httpx.AsyncClient (reaches httpx)",
+    ]
+    # Names built at run time (the seam review's probe_p4 shape).
+    built = (
+        "import importlib\n"
+        "async def collect(self, session, budget):\n"
+        "    client = importlib.import_module('ht' + 'tpx').AsyncClient()\n"
+        "    verb = 'get'\n"
+        "    return await getattr(client, verb)('https://www.olx.uz/')\n"
+    )
+    assert sorted(offences(built)) == [
+        "collect: getattr(…, <built name>)",
+        "collect: import_module(<built name>)",
     ]
     # What a collector does use stays allowed.
     fine = (

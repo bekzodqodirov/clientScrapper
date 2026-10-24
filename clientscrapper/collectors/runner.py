@@ -103,6 +103,29 @@ SessionFactory = Callable[[], AsyncSession]
 GateFactory = Callable[[AsyncSession, int], CostGate]
 
 
+class UnattributedCall(ValueError):
+    """A paid call attributed to a ``source_key`` that is neither the run's
+    sources row nor one of its sub-sources: ``usage_log.source_key`` would be
+    NULL or another source's, and the run's own dollar budget
+    (``costs.source_budget_usd``) would never see the spend."""
+
+
+async def _attributable(run_id: int) -> frozenset[str]:
+    """The keys a run may attribute a paid call to: its own sources row and
+    the existing rows under its sub-source prefixes (``costs.SUBSOURCE_
+    PREFIXES``). Read in a short session of its own: the run's session may
+    be in use by the collector."""
+    async with SessionLocal() as own:
+        key = await own.scalar(
+            sa.select(CollectorRun.source_key).where(CollectorRun.id == run_id)
+        )
+        known = set(await own.scalars(sa.select(Source.key)))
+    if key is None:
+        return frozenset()
+    prefixes = costs.SUBSOURCE_PREFIXES.get(key, ())
+    return frozenset({key, *(k for k in known if prefixes and k.startswith(prefixes))})
+
+
 def ask_gate(session: AsyncSession, run_id: int) -> CostGate:
     """The run's cost gate: ``costs.ask`` with the run's session and
     ``collector_run_id`` bound (04 §8); the Fetcher supplies the rest per call
@@ -115,7 +138,10 @@ def ask_gate(session: AsyncSession, run_id: int) -> CostGate:
     spelled out because mypy does not hold a partial to a Protocol: written
     as a call, both signatures are checked, so a change to either side of the
     seam is a type error (tests/collectors/test_cost_gate.py runs it against
-    the database)."""
+    the database). A call attributed to anything but the run's row or one of
+    its sub-sources is refused (``UnattributedCall``) before ask is asked."""
+
+    allowed: frozenset[str] | None = None
 
     async def gate(
         *,
@@ -126,6 +152,13 @@ def ask_gate(session: AsyncSession, run_id: int) -> CostGate:
         source_key: str,
         now: datetime,
     ) -> FetchResult:
+        nonlocal allowed
+        if allowed is None:
+            allowed = await _attributable(run_id)
+        if source_key not in allowed:
+            # Before ask: nothing is claimed or sent, and the run fails on it
+            # (a collector's bug, not a budget stop).
+            raise UnattributedCall(f"{source_key!r} is not this run's source")
         return await costs.ask(
             session,
             operation=operation,

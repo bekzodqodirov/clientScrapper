@@ -302,6 +302,20 @@ async def test_a_rerun_over_unchanged_pages_writes_nothing_new(
     assert await session.scalar(sa.select(sa.func.count()).select_from(Evidence)) == 3
 
 
+def test_the_heartbeat_name_is_derived_and_cannot_be_overridden():
+    # The runner beats health.collector_component(key[, variant]); a
+    # subclass's own heartbeat would be silently ignored, so it is refused.
+    assert (
+        Directory.heartbeat
+        == "collector:directories"
+        == (runner_module.health.collector_component(Directory.key))
+    )
+    with pytest.raises(TypeError, match="heartbeat"):
+
+        class Renamed(Directory):
+            heartbeat = "collector:something_else"
+
+
 async def test_a_variant_beats_its_own_component(session, directories, clock, tmp_path):
     report = await run(
         Directory, fetcher_for(directory_site(clock)), clock, tmp_path, variant="full"
@@ -603,7 +617,7 @@ class Paying(Directory):
         paid = PaidCall("serp_brave", Decimal("0.005"), lambda r: _Priced("0.004"))
         await self.fetcher.get(
             "https://api.search.brave.com/res/v1/web/search",
-            source="search_brave",
+            source="directories_goldenpages",
             budget=budget,
             obey_robots=False,
             paid=paid,
@@ -653,7 +667,8 @@ async def test_by_default_a_run_pays_through_the_real_costs_ask(
     session, directories, clock, tmp_path
 ):
     # No cost_gate_for: the runner binds costs.ask itself (runner.ask_gate),
-    # so the usage row names this run and its sub-source.
+    # so the usage row names this run and its sub-source (a directories run
+    # pays as itself or a directories_* row, never as another source).
     await session.execute(
         sa.update(Source)
         .where(Source.key == "directories")
@@ -677,7 +692,7 @@ async def test_by_default_a_run_pays_through_the_real_costs_ask(
         usage.cost_usd,
     ) == (
         "serp_brave",
-        "search_brave",
+        "directories_goldenpages",
         row.id,
         Decimal("0.004000"),
     )
@@ -727,7 +742,7 @@ class LateBrave(Directory):
     wait = 3600.0
     url = "https://api.search.brave.com/res/v1/web/search"
     paid = PaidCall("serp_brave", Decimal("0.005"), lambda r: _Priced("0.004"))
-    sub_source = "search_brave"
+    sub_source = "directories_goldenpages"
 
     async def collect(self, session, budget):
         await self.fetcher._sleep(self.wait)  # FakeClock.sleep: time moves on
@@ -749,7 +764,7 @@ class LateYandex(LateBrave):
         Decimal("0"),
         lambda r: usage.Priced(cost_usd=Decimal("0"), units=Decimal(1)),
     )
-    sub_source = "search_yandex"
+    sub_source = "directories"
 
 
 async def _cap_directories(cap: str) -> None:

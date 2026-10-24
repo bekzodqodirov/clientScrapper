@@ -21,7 +21,7 @@ import pytest
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from clientscrapper.collectors.runner import ask_gate
+from clientscrapper.collectors.runner import UnattributedCall, ask_gate
 from clientscrapper.db.models import CollectorRun, UsageLog
 from clientscrapper.services import costs
 from clientscrapper.services.http import BudgetExhausted, FetchResult, PaidCall
@@ -167,6 +167,46 @@ async def test_at_a_cap_the_real_ask_refuses_and_nothing_is_sent(
         "collector_run_id": run_id,
         "created_at": now,
     }
+
+
+@pytest.mark.parametrize("source", ["search_bravee", "olx_business", "maps_google"])
+async def test_a_call_attributed_outside_the_runs_sources_is_refused(
+    session, clock, source
+):
+    # A key that is no sources row leaves usage_log.source_key NULL, another
+    # source's row bills that source: either way serp_layer's own budget
+    # (source_budget_usd) never sees the spend. Refused before ask.
+    now = clock.now()
+    run_id = await run_row(session, now)
+    site = brave(clock)
+    fetcher = fetcher_for(site, cost_gate=ask_gate(session, run_id))
+    with pytest.raises(UnattributedCall):
+        await fetcher.get(
+            BRAVE,
+            source=source,
+            budget=budget(usd="1"),
+            obey_robots=False,
+            paid=PaidCall("serp_brave", D("0.005"), priced),
+        )
+    assert site.seen == [] and await usage_rows(session) == []
+    assert fetcher.stats.exhausted is None
+
+
+async def test_the_parent_row_itself_may_pay(session, clock):
+    now = clock.now()
+    run_id = await run_row(session, now)
+    fetcher = fetcher_for(brave(clock), cost_gate=ask_gate(session, run_id))
+    await fetcher.get(
+        BRAVE,
+        source="serp_layer",
+        budget=budget(usd="1"),
+        obey_robots=False,
+        paid=PaidCall("serp_brave", D("0.005"), priced),
+    )
+    [row] = await usage_rows(session)
+    assert row["source_key"] == "serp_layer"
+    spent = await costs.source_budget_usd(session, source_key="serp_layer", now=now)
+    assert spent == D("1.0000") - D("0.005")
 
 
 async def test_a_request_ask_cannot_take_fails_the_fetch_and_writes_nothing(

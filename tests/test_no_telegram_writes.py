@@ -39,6 +39,7 @@ from tests.ast_tools import (
     bound_name,
     called,
     dotted_name,
+    dynamic_names,
     functions,
     imported_modules,
     imports,
@@ -464,7 +465,10 @@ SCANNED = _scanned()
 
 
 def _offences(path_rel: str, source: str) -> list[str]:
-    """What a reader module does that it must not."""
+    """What a reader module does that it must not. A name built at run time
+    (``getattr(client, verb)``, ``vars(m)["SendMessage" + "Request"]``,
+    ``import_module(name)``) is refused whatever it would name: no rule here
+    can read it, so the reader fails closed."""
     offending = []
     for function, writes in _uses_by_function(source, WRITE_CALLS).items():
         offending.append(f"{function or '<module>'}: {sorted(writes)}")
@@ -472,6 +476,11 @@ def _offences(path_rel: str, source: str) -> list[str]:
         allowed = RAW_ALLOWED.get((path_rel, function or ""), set())
         if named - allowed:
             offending.append(f"{function or '<module>'}: {sorted(named - allowed)}")
+    tree = ast.parse(source)
+    owner = owners(tree)
+    for node, what in dynamic_names(tree):
+        function = owner.get(id(node))
+        offending.append(f"{function.name if function else '<module>'}: {what}")
     return offending
 
 
@@ -640,6 +649,23 @@ def test_the_write_detector_catches_each_shape():
         "kept: ['send_message']",
         "looked_up: ['send_read_acknowledge']",
         "typing: ['action']",
+    ]
+    # A name built at run time is refused, whatever it would name (the seam
+    # review's probe_t2 / probe_t4 shapes).
+    built = (
+        "import importlib\n"
+        "from telethon.tl import functions as m\n"
+        "async def greet(client, verb):\n"
+        "    await getattr(client, verb)('me', 'salom')\n"
+        "async def raw(client):\n"
+        "    await client(vars(m)['SendMessage' + 'Request']('me', 'salom'))\n"
+        "async def loaded(name):\n"
+        "    return importlib.import_module(name)\n"
+    )
+    assert sorted(_offences("userbot/probe.py", built)) == [
+        "greet: getattr(…, <built name>)",
+        "loaded: import_module(<built name>)",
+        "raw: namespace[<built name>]",
     ]
     history = "async def trawl(client):\n    it = client.iter_messages\n    return it\n"
     assert _uses_by_function(history, HISTORY_CALLS, called_only=()) == {

@@ -21,6 +21,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, ClassVar, Final, Literal
 
+from clientscrapper.services.health import collector_component
 from clientscrapper.services.http import BudgetExhausted, Fetcher
 
 if TYPE_CHECKING:
@@ -123,10 +124,13 @@ class Budget:
 
 
 class Collector(ABC):
-    """Subclasses set the class variables; ``heartbeat`` defaults to
-    ``collector:<key>`` (06 §4.1). ``found`` is what the runner keeps when
-    ``collect`` stops on a budget or a breaker: a collector that appends to it
-    as it goes loses nothing it already parsed."""
+    """Subclasses set the class variables. ``heartbeat`` is derived, never
+    set: ``health.collector_component(key)`` — the name the runner beats
+    (with ``.variant`` for a cadence variant, 03 §1.2) — so a subclass that
+    sets one of its own is refused at class creation rather than ignored.
+    ``found`` is what the runner keeps when ``collect`` stops on a budget or a
+    breaker: a collector that appends to it as it goes loses nothing it
+    already parsed."""
 
     key: ClassVar[str]
     family: ClassVar[str]
@@ -142,9 +146,14 @@ class Collector(ABC):
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
+        if "heartbeat" in cls.__dict__:
+            raise TypeError(
+                f"{cls.__name__}.heartbeat is derived from its key "
+                "(health.collector_component); the runner beats that name"
+            )
         key = cls.__dict__.get("key")
-        if key is not None and "heartbeat" not in cls.__dict__:
-            cls.heartbeat = f"collector:{key}"
+        if key is not None:
+            cls.heartbeat = collector_component(key)
 
     def __init__(self, fetcher: Fetcher, serp: object | None = None) -> None:
         # ``serp`` is services/serp.SerpClient once T-25 builds it.
