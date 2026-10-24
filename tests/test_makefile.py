@@ -206,3 +206,52 @@ def test_make_backup_runs_the_nightly_job_itself():
     service, _, command = _compose_run(line)
     assert service == "worker"
     assert command == ["python", "-m", "clientscrapper.worker.main", "backup"]
+
+
+# --- switches: «1» is on, empty or «0» is off, anything else stops make ------------
+
+
+def _flags(line: str) -> set[str]:
+    return {t for t in line.replace("\\", " ").split() if t.startswith("--")}
+
+
+@pytest.mark.parametrize(
+    ("target", "switches"),
+    [
+        (
+            ["restore", "FILE=/data/backups/x.dump.age"],
+            {"DRY": "--dry-run", "FORCE": "--force"},
+        ),
+        (["purge", "PHONE=901234567"], {"APPLY": "--apply"}),
+        (
+            ["import-clients", "FILE=clients.xlsx"],
+            {"APPLY": "--apply", "ACCEPT_FEWER": "--accept-fewer"},
+        ),
+    ],
+)
+def test_a_switch_is_on_only_at_1(target, switches):
+    """The T-11 fixer's finding: `$(if $(X),…)` read FORCE=0 / DRY=0 /
+    APPLY=0 as on. Off for empty and «0», on for «1», refused otherwise."""
+    for off in (
+        [],
+        [f"{name}=0" for name in switches],
+        [f"{name}=" for name in switches],
+    ):
+        assert not _flags(dry_run(*target, *off)) & set(switches.values()), off
+    on = _flags(dry_run(*target, *(f"{name}=1" for name in switches)))
+    assert set(switches.values()) <= on
+    for name in switches:
+        done = subprocess.run(
+            ["make", "-s", "-n", *target, f"{name}=yes"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+        )
+        assert done.returncode != 0
+        assert f"{name}=yes: use {name}=1 (on) or {name}=0 (off)" in done.stderr
+
+
+def test_skip_doctor_skips_only_at_1():
+    assert "tools.doctor" in dry_run("up", "SKIP_DOCTOR=0")
+    assert "tools.doctor" in dry_run("up")
+    assert "tools.doctor" not in dry_run("up", "SKIP_DOCTOR=1")

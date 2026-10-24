@@ -5,6 +5,11 @@
 # Makefile does not change when the tool lands.
 .DEFAULT_GOAL := help
 COMPOSE := docker compose
+# A switch on the command line (DRY=1, FORCE=1, APPLY=1, ACCEPT_FEWER=1): «1»
+# is on, empty or «0» is off, and any other value stops make with a message
+# — so DRY=yes never runs a real restore and APPLY=0 never applies. A plain
+# $(if $(X),…) would read every non-empty value, «0» included, as on.
+switch = $(if $(filter-out 0 1,$(strip $($(1)))),$(error $(1)=$($(1)): use $(1)=1 (on) or $(1)=0 (off)),$(filter 1,$(strip $($(1)))))
 .PHONY: help env doctor up update down reload logs ps psql migrate revision downgrade \
         bot worker userbot userbot-login backup backup-key backup-key-show restore \
         import-clients push-test purge install test lint fmt typecheck check db-test hooks smoke
@@ -21,7 +26,7 @@ doctor: env ## Check .env, the server and the database before make up
 	$(COMPOSE) build worker
 	$(COMPOSE) run --rm --no-deps -e CS_IN_UPDATE=$(IN_UPDATE) worker python -m clientscrapper.tools.doctor
 
-up: env $(if $(SKIP_DOCTOR),,doctor) ## Build and start everything; init migrates (SKIP_DOCTOR=1 to skip the check)
+up: env $(if $(filter 1,$(strip $(SKIP_DOCTOR))),,doctor) ## Build and start everything; init migrates (SKIP_DOCTOR=1 to skip the check)
 	$(COMPOSE) up -d --build db init
 	$(COMPOSE) up -d --build worker userbot bot
 
@@ -104,19 +109,19 @@ backup: ## Run the encrypted database backup now (fails when the backup does, so
 restore: ## Restore a backup: make restore FILE=/data/backups/clientscrapper-….dump.age [DRY=1] [FORCE=1]
 	@test -n "$(FILE)" || (echo "usage: make restore FILE=/data/backups/clientscrapper-….dump.age [DRY=1] [FORCE=1]" && exit 1)
 	$(COMPOSE) run --rm --no-deps worker python -m clientscrapper.tools.restore "$(FILE)" \
-		--identity /app/secrets/backup-key.txt $(if $(DRY),--dry-run,) $(if $(FORCE),--force,)
+		--identity /app/secrets/backup-key.txt $(if $(call switch,DRY),--dry-run,) $(if $(call switch,FORCE),--force,)
 
 # --- Data -------------------------------------------------------------------
 # The file goes into the server's data/imports/ first (mounted as /data); a
 # bare FILE name is looked for there, a name with a «/» is passed as given. A
 # dry run by default. ACCEPT_FEWER=1 lets one export with fewer rows than the
 # previous import's through (it reads like a filtered screen otherwise); only
-# «1» switches a flag on, so ACCEPT_FEWER=0 is off.
+# «1» switches a flag on (``switch``), so ACCEPT_FEWER=0 is off.
 import-clients: ## Load the ERP client export as suppression: make import-clients FILE=clients.xlsx [APPLY=1] [ACCEPT_FEWER=1]
 	@test -n "$(FILE)" || (echo "usage: make import-clients FILE=clients.xlsx (in data/imports/) [APPLY=1] [ACCEPT_FEWER=1]" && exit 1)
 	$(COMPOSE) run --rm worker python -m clientscrapper.tools.import_clients \
 		"$(if $(findstring /,$(FILE)),$(FILE),/data/imports/$(FILE))" \
-		$(if $(filter 1,$(APPLY)),--apply,) $(if $(filter 1,$(ACCEPT_FEWER)),--accept-fewer,)
+		$(if $(call switch,APPLY),--apply,) $(if $(call switch,ACCEPT_FEWER),--accept-fewer,)
 
 push-test: ## Push one visibly synthetic lead to the ERP (05 §B.1)
 	$(COMPOSE) run --rm worker python -m clientscrapper.tools.push_test
@@ -125,7 +130,7 @@ purge: ## Forget a subject: make purge COMPANY=<uuid> | PHONE=<tail9> | TG_USER=
 	@test -n "$(COMPANY)$(PHONE)$(TG_USER)" || (echo "usage: make purge COMPANY=<uuid> | PHONE=<tail9> | TG_USER=<id> [APPLY=1]" && exit 1)
 	$(COMPOSE) run --rm worker python -m clientscrapper.tools.purge \
 		$(if $(COMPANY),--company "$(COMPANY)",) $(if $(PHONE),--phone "$(PHONE)",) \
-		$(if $(TG_USER),--tg-user "$(TG_USER)",) $(if $(APPLY),--apply,)
+		$(if $(TG_USER),--tg-user "$(TG_USER)",) $(if $(call switch,APPLY),--apply,)
 
 # --- Local development ------------------------------------------------------
 install: ## Install dev dependencies into the active virtualenv
