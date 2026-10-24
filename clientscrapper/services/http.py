@@ -19,9 +19,14 @@ not declare a ``PaidCall``, and a ``PaidCall`` without a cost gate: the gate is
 ``costs.ask`` (04 §8), bound by the runner — the order is ``Budget.can_spend``
 first, then the gate, then the request.
 
-Logs carry host, status, elapsed, bytes, source and the cache verdict, never a
-body; the URL is logged only after ``scrub_url`` (query values of ``*key``,
-``*token``, ``*secret``, ``*password`` parameters) and ``logs.redact``.
+robots.txt is read by ``services/robots`` (RFC 9309: the longest rule wins,
+``*`` and ``$``), fetched from the URL's own scheme, host and port.
+
+Logs carry host, status, elapsed, bytes, source, the cache verdict and a
+``url_id`` (the first 12 hex digits of the sha256 of the stored form of the
+URL, ``urlsafe.strip_secrets``) — never the URL itself, whose path names a
+person on t.me or instagram.com and whose query may carry a phone (06 §4.5),
+and never a body.
 """
 
 from __future__ import annotations
@@ -29,6 +34,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import hashlib
+import html
 import logging
 import re
 import time
@@ -39,15 +45,16 @@ from decimal import Decimal
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any, Final, Literal, Protocol
-from urllib import robotparser
 from urllib.parse import urljoin, urlsplit
 
 import httpx
 
 from clientscrapper.collectors.keywords import CAPTCHA_MARKERS, EMAIL_RE
 from clientscrapper.config import settings
-from clientscrapper.logs import redact
 from clientscrapper.services.retry import is_transient_http, with_backoff
+from clientscrapper.services.robots import RobotsRules, parse_robots
+from clientscrapper.services.urlsafe import scrub_url as scrub_url  # re-exported
+from clientscrapper.services.urlsafe import strip_secrets
 
 log = logging.getLogger(__name__)
 
@@ -289,21 +296,20 @@ class FetchStats:
 
 @dataclass(slots=True)
 class _Robots:
-    parser: robotparser.RobotFileParser | None  # None = allow everything
+    rules: RobotsRules | None  # None = allow everything
     expires_at: datetime
 
     def allows(self, url: str) -> bool:
-        return self.parser is None or self.parser.can_fetch(ROBOTS_AGENT, url)
+        return self.rules is None or self.rules.allows(url)
 
     def crawl_delay(self) -> float | None:
-        if self.parser is None:
-            return None
-        delay = self.parser.crawl_delay(ROBOTS_AGENT)
-        return float(delay) if delay is not None else None
+        return None if self.rules is None else self.rules.crawl_delay
 
 
 class HostState:
-    """Process-wide per-host state, shared by every Fetcher ``bind`` makes."""
+    """Process-wide per-host state, shared by every Fetcher ``bind`` makes.
+    Pacing and the breaker are keyed by host name; robots.txt by authority
+    (host and a non-default port), since each port serves its own file."""
 
     def __init__(self) -> None:
         self.last_at: dict[str, float] = {}
@@ -322,21 +328,33 @@ class HostState:
 
 # --- small pure helpers ------------------------------------------------------------
 
-_SECRET_PARAM = re.compile(
-    r"(?i)([?&;][a-z0-9_.\-]*(?:key|token|secret|password)=)[^&#]*"
-)
 _ROBOTS_HEADER = re.compile(
     r"\A# clientScrapper robots fetched_at=(?P<at>\S+) status=(?P<status>\d+)\n"
 )
 
 
-def scrub_url(url: str) -> str:
-    """``?q=x&key=abc&access_token=def`` → ``?q=x&key=***&access_token=***``."""
-    return _SECRET_PARAM.sub(r"\1***", url)
-
-
 def host_of(url: str) -> str:
     return (urlsplit(url).hostname or "").lower()
+
+
+_DEFAULT_PORTS: Final = {"http": 80, "https": 443}
+
+
+def authority_of(url: str) -> str:
+    """``host`` or ``host:port`` (a non-default port): where robots.txt lives."""
+    parts = urlsplit(url)
+    host = (parts.hostname or "").lower()
+    if ":" in host:
+        host = f"[{host}]"
+    port = parts.port
+    if port is None or port == _DEFAULT_PORTS.get(parts.scheme.lower()):
+        return host
+    return f"{host}:{port}"
+
+
+def url_id(url: str) -> str:
+    """A log line's handle on a URL it must not print (see the module doc)."""
+    return hashlib.sha256(strip_secrets(url).encode("utf-8")).hexdigest()[:12]
 
 
 def same_site(a: str, b: str) -> bool:
@@ -360,9 +378,42 @@ def retry_after_seconds(value: str | None, *, now: datetime) -> float | None:
     return max((when - now).total_seconds(), 0.0)
 
 
+# A marker that names challenge machinery (a script, a challenge id) is found in
+# the markup; the others are words a challenge page shows a reader. «captcha»
+# is also in the markup of every page that embeds a reCAPTCHA in its contact
+# form (recaptcha/api.js, g-recaptcha), so words count only in visible text.
+MARKUP_MARKERS: Final = frozenset({"anomaly.js", "cf-chl"})
+# A challenge page shows a reader a sentence or two; a directory page with a
+# captcha-labelled form field shows the directory. Beyond this many visible
+# characters a word marker counts only in the title or a heading.
+CHALLENGE_TEXT_MAX: Final = 2000
+_HIDDEN = re.compile(
+    r"<(script|style|noscript|template)\b[^>]*>.*?</\1\s*>|<!--.*?-->", re.I | re.S
+)
+_TAG = re.compile(r"<[^>]*>")
+_HEADING = re.compile(r"<(title|h1|h2)\b[^>]*>(.*?)</\1\s*>", re.I | re.S)
+_SPACES = re.compile(r"\s+")
+
+
+def _visible(markup: str) -> str:
+    return _SPACES.sub(" ", html.unescape(_TAG.sub(" ", markup))).strip()
+
+
 def looks_like_captcha(body: bytes) -> bool:
-    text = body.decode("utf-8", errors="ignore").lower()
-    return any(marker.lower() in text for marker in CAPTCHA_MARKERS)
+    """A challenge page, not a page that embeds a challenge widget: a markup
+    marker anywhere, or a word marker in the title / a heading, or in the
+    visible text of a page that shows little else (03 §1.1 CAPTCHA_MARKERS)."""
+    text = body.decode("utf-8", errors="ignore")
+    lowered = text.lower()
+    words = [m.lower() for m in CAPTCHA_MARKERS if m not in MARKUP_MARKERS]
+    if any(marker in lowered for marker in MARKUP_MARKERS):
+        return True
+    shown = _HIDDEN.sub(" ", text)
+    headings = " ".join(_visible(m.group(2)) for m in _HEADING.finditer(shown)).lower()
+    if any(marker in headings for marker in words):
+        return True
+    visible = _visible(shown).lower()
+    return len(visible) <= CHALLENGE_TEXT_MAX and any(m in visible for m in words)
 
 
 async def _read_capped(response: httpx.Response, cap: int) -> tuple[bytes, bool]:
@@ -476,7 +527,9 @@ class Fetcher:
         paid: PaidCall | None = None,
         proxy: bool = False,
     ) -> FetchResult:
-        full = str(httpx.URL(url, params=dict(params))) if params else url
+        # Merged, not replaced: httpx.URL(url, params=…) would drop the query the
+        # caller already wrote (hh's text= and area= under a page=).
+        full = str(httpx.URL(url).copy_merge_params(dict(params))) if params else url
         return await self._fetch(
             "GET",
             full,
@@ -797,7 +850,7 @@ class Fetcher:
         json_body: Any,
         proxy: bool,
     ) -> tuple[int, dict[str, str], bytes, bool]:
-        await self._pace(host)
+        await self._pace(host, authority_of(url))
         self.stats.requests += 1
         client = self._client_for(proxy)
         request = client.build_request(
@@ -837,12 +890,14 @@ class Fetcher:
             verdict = "miss"
         elapsed_ms = int((self._monotonic() - started) * 1000)
         log.info(
-            "%s %s -> %d",
+            "%s %s %s -> %d",
             method,
-            redact(scrub_url(result.url)),
+            host,
+            url_id(result.url),
             result.status,
             extra={
                 "host": host,
+                "url_id": url_id(result.url),
                 "status": result.status,
                 "elapsed_ms": elapsed_ms,
                 "bytes": len(result.body),
@@ -896,20 +951,20 @@ class Fetcher:
 
     # -- pacing ----------------------------------------------------------------------
 
-    def _interval(self, host: str) -> float:
+    def _interval(self, host: str, authority: str) -> float:
         rps = self.host_rps.get(host, self.rps_default)
         interval = 1.0 / rps
-        robots = self._hosts.robots.get(host)
+        robots = self._hosts.robots.get(authority)
         delay = robots.crawl_delay() if robots is not None else None
         return max(interval, delay) if delay is not None else interval
 
-    async def _pace(self, host: str) -> None:
+    async def _pace(self, host: str, authority: str) -> None:
         # The interval is read at the next request, not fixed at the last one:
         # a Crawl-delay learnt from the robots.txt just fetched already counts.
         async with self._hosts.pace_lock(host):
             last = self._hosts.last_at.get(host)
             if last is not None:
-                wait = last + self._interval(host) - self._monotonic()
+                wait = last + self._interval(host, authority) - self._monotonic()
                 if wait > 0:
                     await self._sleep(wait)
             self._hosts.last_at[host] = self._monotonic()
@@ -917,26 +972,29 @@ class Fetcher:
     # -- robots.txt ------------------------------------------------------------------
 
     async def _check_robots(self, url: str, host: str) -> None:
-        robots = await self._robots_for(urlsplit(url).scheme or "https", host)
+        robots = await self._robots_for(urlsplit(url).scheme or "https", url, host)
         if not robots.allows(url):
             self.stats.skipped_robots += 1
             raise RobotsDisallowed(url)
 
-    async def _robots_for(self, scheme: str, host: str) -> _Robots:
-        async with self._hosts.robots_lock(host):
+    async def _robots_for(self, scheme: str, url: str, host: str) -> _Robots:
+        authority = authority_of(url)
+        async with self._hosts.robots_lock(authority):
             now = self._wall()
-            entry = self._hosts.robots.get(host)
+            entry = self._hosts.robots.get(authority)
             if entry is not None and entry.expires_at > now:
                 return entry
-            entry = self._robots_from_disk(host, now)
+            entry = self._robots_from_disk(authority, now)
             if entry is None:
-                entry = await self._fetch_robots(scheme, host, now)
-            self._hosts.robots[host] = entry
+                entry = await self._fetch_robots(scheme, host, authority, now)
+            self._hosts.robots[authority] = entry
             return entry
 
-    async def _fetch_robots(self, scheme: str, host: str, now: datetime) -> _Robots:
-        url = f"{scheme}://{host}/robots.txt"
-        await self._pace(host)
+    async def _fetch_robots(
+        self, scheme: str, host: str, authority: str, now: datetime
+    ) -> _Robots:
+        url = f"{scheme}://{authority}/robots.txt"
+        await self._pace(host, authority)
         self.stats.requests += 1
         try:
             async with self._client.stream(
@@ -950,29 +1008,32 @@ class Fetcher:
                 status = response.status_code
         except httpx.HTTPError:
             # Unreachable: allow for an hour, then ask again (03 §1.1).
-            return _Robots(parser=None, expires_at=now + ROBOTS_ERROR_TTL)
-        if status >= 500:
-            return _Robots(parser=None, expires_at=now + ROBOTS_ERROR_TTL)
+            return _Robots(rules=None, expires_at=now + ROBOTS_ERROR_TTL)
+        if status >= 500 or status == 429:
+            # A 429 is the server asking us to slow down, not saying it has no
+            # robots.txt: the 5xx rule (an hour, then ask again), not 24 h of
+            # "no rules".
+            return _Robots(rules=None, expires_at=now + ROBOTS_ERROR_TTL)
         text = body.decode("utf-8", errors="replace") if status == 200 else ""
-        self._robots_to_disk(host, now, status, text)
+        self._robots_to_disk(authority, now, status, text)
         return self._robots_entry(text, status, now + self.robots_ttl)
 
     @staticmethod
     def _robots_entry(text: str, status: int, expires_at: datetime) -> _Robots:
         if status != 200:
             # A 4xx robots.txt means "no rules": everything is allowed (RFC 9309).
-            return _Robots(parser=None, expires_at=expires_at)
-        parser = robotparser.RobotFileParser()
-        parser.parse(text.splitlines())
-        return _Robots(parser=parser, expires_at=expires_at)
+            return _Robots(rules=None, expires_at=expires_at)
+        return _Robots(rules=parse_robots(text, ROBOTS_AGENT), expires_at=expires_at)
 
-    def _robots_path(self, host: str) -> Path | None:
-        if self.robots_dir is None or "/" in host or host.startswith("."):
+    def _robots_path(self, authority: str) -> Path | None:
+        if self.robots_dir is None or "/" in authority or authority.startswith("."):
             return None
-        return self.robots_dir / f"{host}.txt"
+        return self.robots_dir / f"{authority}.txt"
 
-    def _robots_to_disk(self, host: str, now: datetime, status: int, text: str) -> None:
-        path = self._robots_path(host)
+    def _robots_to_disk(
+        self, authority: str, now: datetime, status: int, text: str
+    ) -> None:
+        path = self._robots_path(authority)
         if path is None:
             return
         try:
@@ -984,10 +1045,10 @@ class Fetcher:
             tmp.write_text(header + text, encoding="utf-8")
             tmp.replace(path)
         except OSError:
-            log.warning("robots cache not writable", extra={"host": host})
+            log.warning("robots cache not writable", extra={"host": authority})
 
-    def _robots_from_disk(self, host: str, now: datetime) -> _Robots | None:
-        path = self._robots_path(host)
+    def _robots_from_disk(self, authority: str, now: datetime) -> _Robots | None:
+        path = self._robots_path(authority)
         if path is None or not path.is_file():
             return None
         try:

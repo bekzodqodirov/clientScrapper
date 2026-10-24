@@ -11,6 +11,7 @@ found).
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import hashlib
 import re
@@ -735,3 +736,162 @@ async def test_a_stale_running_row_is_closed_and_a_fresh_one_blocks(
     await session.commit()
     blocked = await run(Directory, fetcher_for(directory_site(clock)), clock, tmp_path)
     assert (blocked.status, blocked.meta) == ("skipped", {"note": "already_running"})
+
+
+# --- what reaches a row: no credential, no all-or-nothing -------------------------------
+
+GRAPH = "https://graph.facebook.com/v21.0/17841400000000001"
+
+
+class GraphApi(Directory):
+    paths = ()
+    api_row = False
+
+    async def collect(self, session, budget):
+        result = await self.fetcher.get(
+            GRAPH,
+            source="directories",
+            budget=budget,
+            obey_robots=False,
+            params={"fields": "biography,website", "access_token": "EAAB-SECRET-1"},
+        )
+        return [
+            Observation(
+                source="directories",
+                source_ref="ig:namuna_01",
+                url=result.url,
+                fetched_at=result.fetched_at,
+                raw_sha256=result.sha256,
+                kind="company",
+                company_name_raw="Namuna Savdo MChJ",
+                excerpt="Namuna Savdo MChJ optom",
+            )
+        ]
+
+
+async def test_an_api_key_in_the_query_never_reaches_a_row(
+    session, directories, clock, tmp_path
+):
+    answer = httpx.Response(200, json={"biography": "Namuna Savdo MChJ optom"})
+    site = directory_site(clock, **{GRAPH: answer})
+    report = await run(GraphApi, fetcher_for(site), clock, tmp_path)
+    assert report.status == "ok"
+    clean = f"{GRAPH}?fields=biography%2Cwebsite"
+    [ev] = (await session.scalars(sa.select(Evidence))).all()
+    [obs] = (await session.scalars(sa.select(ObservationRow))).all()
+    assert (ev.url, ev.meta["final_url"], obs.parsed["url"]) == (clean, clean, clean)
+    dumped = await session.scalar(
+        sa.select(sa.func.string_agg(sa.cast(Evidence.meta, sa.Text), "")).select_from(
+            Evidence
+        )
+    )
+    assert "SECRET" not in ev.url + dumped + str(obs.parsed)
+
+
+LONG = "/katalog/long?" + "&".join(f"utm_{i}=x" for i in range(400))
+
+
+class LongUrl(Directory):
+    paths = ("/katalog/1", LONG)
+    api_row = False
+
+
+async def test_a_url_no_row_can_hold_is_dropped_and_the_rest_kept(
+    session, directories, clock, tmp_path
+):
+    page = listing((9, "Namuna Long MChJ", "+998 90 000 00 09"))
+    long_page = httpx.Response(200, headers=HTML, content=page)
+    site = directory_site(clock, **{f"{EX}/katalog/long": long_page})
+    report = await run(LongUrl, fetcher_for(site), clock, tmp_path)
+    assert (report.status, report.error) == ("ok", None)
+    [row] = await runs(session)
+    assert (row.new_evidence, row.new_observations) == (1, 2)
+    assert row.meta["dropped"] == {"url_too_long": 1}
+    [ev] = (await session.scalars(sa.select(Evidence))).all()
+    assert [p.name for p in tmp_path.rglob("*.gz")] == [ev.raw_path.split("/")[1]]
+
+
+class NulExcerpt(Directory):
+    """Page 1 parses fine; page 2 yields a row with a NUL character, which
+    Postgres refuses (a page with binary junk in it)."""
+
+    api_row = False
+
+    @staticmethod
+    def parse_listing(body, *, url, fetched_at):
+        found = Directory.parse_listing(body, url=url, fetched_at=fetched_at)
+        if url.endswith("/katalog/2"):
+            for obs in found:
+                obs.excerpt = "Namuna Tekstil XK \x00 optom"
+        return found
+
+
+async def test_a_group_the_database_refuses_is_dropped_and_the_rest_kept(
+    session, directories, clock, tmp_path
+):
+    report = await run(NulExcerpt, fetcher_for(directory_site(clock)), clock, tmp_path)
+    assert (report.status, report.error) == ("ok", None)
+    [row] = await runs(session)
+    assert (row.new_evidence, row.new_observations) == (1, 2)
+    assert row.meta["dropped"] == {"bad_evidence": 1}
+    urls = (await session.scalars(sa.select(Evidence.url))).all()
+    assert urls == [f"{EX}/katalog/1"]
+    # The refused group's file went with its row: one file, the kept page's.
+    assert len(list(tmp_path.rglob("*.gz"))) == 1
+
+
+# --- a run that does not end by itself --------------------------------------------------
+
+
+class Slow(Directory):
+    paths = ()
+    api_row = False
+    started: asyncio.Event | None = None
+
+    async def collect(self, session, budget):
+        assert self.started is not None
+        self.started.set()
+        await asyncio.sleep(3600)
+        return []
+
+
+async def test_a_cancelled_run_closes_its_row_and_the_next_run_goes(
+    session, directories, clock, tmp_path
+):
+    Slow.started = asyncio.Event()
+    task = asyncio.ensure_future(
+        run(Slow, fetcher_for(directory_site(clock)), clock, tmp_path)
+    )
+    await Slow.started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    [cancelled] = await runs(session)
+    assert (cancelled.status, cancelled.error) == ("failed", "cancelled")
+    assert cancelled.finished_at is not None
+
+    clock.advance(3 * 3600)  # the next hourly job, well inside the old stale window
+    report = await run(Directory, fetcher_for(directory_site(clock)), clock, tmp_path)
+    assert report.status == "ok"
+
+
+async def test_a_running_row_is_stale_by_its_own_deadline(
+    session, directories, clock, tmp_path
+):
+    now = clock.now()
+    long_job = CollectorRun(
+        source_key="directories",
+        started_at=now - timedelta(hours=3),
+        status="running",
+        meta={"deadline_at": (now + timedelta(hours=1)).isoformat()},
+    )
+    session.add(long_job)
+    await session.commit()
+    blocked = await run(Directory, fetcher_for(directory_site(clock)), clock, tmp_path)
+    assert (blocked.status, blocked.meta) == ("skipped", {"note": "already_running"})
+
+    clock.advance(timedelta(hours=1, minutes=31).total_seconds())
+    report = await run(Directory, fetcher_for(directory_site(clock)), clock, tmp_path)
+    assert report.status == "ok"
+    first = (await runs(session))[0]
+    assert (first.status, first.error) == ("failed", "abandoned")

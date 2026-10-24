@@ -191,6 +191,61 @@ async def test_our_agent_group_is_read_before_the_star_group(clock):
     assert site.paths() == ["/robots.txt", "/about"]
 
 
+async def test_the_fetcher_decides_robots_by_rfc_9309(clock):
+    # robotparser let the first line win (Allow: / ahead of the Disallows),
+    # knew no «*» and «$», and lost the first group behind a BOM.
+    robots = httpx.Response(
+        200,
+        content=(
+            "\ufeffUser-agent: *\nAllow: /\nDisallow: /private/\n"
+            "Disallow: /*?*page=\nDisallow: /*/contacts$\n"
+        ).encode(),
+    )
+    site = Site(
+        clock,
+        {
+            f"{EX}/robots.txt": robots,
+            f"{EX}/private/x": page(),
+            f"{EX}/list": page(),
+            f"{EX}/firm/contacts": page(),
+            f"{EX}/firm/1": page(),
+        },
+    )
+    fetcher = fetcher_for(site)
+    for path in ("/private/x", "/list?sort=new&page=2", "/firm/contacts"):
+        with pytest.raises(RobotsDisallowed):
+            await fetcher.get(EX + path, source="directories", budget=budget())
+    await fetcher.get(f"{EX}/firm/1", source="directories", budget=budget())
+    assert site.paths() == ["/robots.txt", "/firm/1"]
+    assert fetcher.stats.skipped_robots == 3
+
+
+async def test_robots_is_read_from_the_urls_own_port(clock):
+    searx = "http://searxng:8080"
+    robots = httpx.Response(200, text="User-agent: *\nDisallow: /stats\n")
+    site = Site(clock, {f"{searx}/robots.txt": robots, f"{searx}/search": page("{}")})
+    fetcher = fetcher_for(site)
+    await fetcher.get(f"{searx}/search?q=optom", source="search_searxng", budget=budget())
+    with pytest.raises(RobotsDisallowed):
+        await fetcher.get(f"{searx}/stats", source="search_searxng", budget=budget())
+    assert [s.url for s in site.seen] == [
+        "http://searxng:8080/robots.txt",
+        "http://searxng:8080/search?q=optom",
+    ]
+    assert http.authority_of("https://a.example.uz:443/x") == "a.example.uz"
+    assert http.authority_of("https://A.example.uz:8443/x") == "a.example.uz:8443"
+
+
+async def test_a_robots_429_is_asked_again_within_the_hour(clock):
+    robots = [httpx.Response(429), ALLOW_ALL]
+    site = Site(clock, {f"{EX}/robots.txt": robots, f"{EX}/a": page()})
+    fetcher = fetcher_for(site)
+    await fetcher.get(f"{EX}/a", source="directories", budget=budget())
+    clock.advance(61 * 60)
+    await fetcher.get(f"{EX}/a", source="directories", budget=budget())
+    assert site.paths().count("/robots.txt") == 2
+
+
 async def test_robots_is_fetched_once_per_24_hours(clock):
     site = site_with(clock, {f"{EX}/a": page()})
     fetcher = fetcher_for(site)
@@ -509,6 +564,37 @@ def test_an_ordinary_page_is_not_a_captcha():
     assert http.looks_like_captcha(b"<p>Namuna Savdo, optom</p>") is False
 
 
+RECAPTCHA_FORM = (
+    "<html><head><title>Namuna Tekstil MChJ</title>"
+    '<script src="https://www.google.com/recaptcha/api.js"></script></head>'
+    '<body><div class="firm">Namuna Tekstil MChJ, +998 90 000 00 01</div>'
+    '<form id="contact"><div class="g-recaptcha" data-sitekey="x"></div>'
+    '<input type="hidden" name="g-recaptcha-response"></form>'
+    "<noscript>Please enable JavaScript to use reCAPTCHA</noscript></body></html>"
+)
+
+
+def test_a_page_embedding_a_recaptcha_widget_is_not_a_captcha_page():
+    assert http.looks_like_captcha(RECAPTCHA_FORM.encode()) is False
+
+
+def test_a_long_page_with_a_captcha_label_is_not_a_captcha_page():
+    listing = "".join(f"<li>Namuna Savdo {i}, optom mebel</li>" for i in range(100))
+    body = f"<html><body><ul>{listing}</ul><label>Captcha</label></body></html>"
+    assert http.looks_like_captcha(body.encode()) is False
+    titled = f"<html><head><title>Captcha</title></head><body>{listing}</body></html>"
+    assert http.looks_like_captcha(titled.encode()) is True
+
+
+async def test_five_firm_pages_with_a_recaptcha_form_do_not_trip_the_breaker(clock):
+    site = site_with(clock, {f"{EX}/firm": page(RECAPTCHA_FORM)})
+    fetcher = fetcher_for(site)
+    for _ in range(6):
+        result = await fetcher.get(f"{EX}/firm", source="directories", budget=budget())
+        assert (result.status, result.captcha) == (200, False)
+    assert (fetcher.stats.http_403, fetcher.stats.blocked_hosts) == (0, [])
+
+
 async def test_bind_shares_the_breaker_but_not_the_counters(clock):
     site = site_with(clock, {f"{EX}/a": httpx.Response(403)})
     shared = fetcher_for(site)
@@ -689,6 +775,23 @@ async def test_a_body_over_the_cap_is_truncated(clock, monkeypatch):
     assert fetcher.stats.truncated == 1
 
 
+async def test_params_are_merged_into_the_query_the_url_already_has(clock):
+    api = "https://api.hh.ru"
+    site = Site(clock, {f"{api}/vacancies": httpx.Response(200, json={"items": []})})
+    fetcher = fetcher_for(site)
+    result = await fetcher.get(
+        f"{api}/vacancies?text=optom&area=2759",
+        source="hh_vacancies",
+        budget=budget(),
+        obey_robots=False,
+        params={"page": 2},
+    )
+    assert [s.url for s in site.seen] == [
+        "https://api.hh.ru/vacancies?text=optom&area=2759&page=2"
+    ]
+    assert result.url == "https://api.hh.ru/vacancies?text=optom&area=2759&page=2"
+
+
 async def test_a_same_site_redirect_is_followed_and_a_cross_host_one_returned(clock):
     bare = "https://namuna.example.uz"
     site = Site(
@@ -736,14 +839,33 @@ async def test_logs_scrub_keys_and_tokens_and_never_carry_the_body(clock, caplog
     rendered = record.getMessage() + repr(record.__dict__)
     assert "K3YVALUE" not in rendered and "T0KENVALUE" not in rendered
     assert "maxfiy" not in rendered and "000 00 01" not in rendered
-    assert "key=***" in record.getMessage()
-    assert "access_token=***" in record.getMessage()
+    stored = "https://api.hh.ru/vacancies?text=VED"
+    assert record.url_id == hashlib.sha256(stored.encode()).hexdigest()[:12]
+    assert record.getMessage() == f"GET api.hh.ru {record.url_id} -> 200"
     assert (record.host, record.status, record.source, record.bytes) == (
         "api.hh.ru",
         200,
         "hh_vacancies",
         len(secret_body.encode()),
     )
+
+
+async def test_logs_never_carry_the_path_that_names_a_person(clock, caplog):
+    tg = "https://t.me"
+    site = Site(clock, {f"{tg}/robots.txt": ALLOW_ALL, f"{tg}/s/namuna_person_7": page()})
+    fetcher = fetcher_for(site)
+    with caplog.at_level(logging.INFO, logger="clientscrapper.services.http"):
+        await fetcher.get(
+            f"{tg}/s/namuna_person_7?q=%2B998900000007&phone=900000007",
+            source="telegram_monitor",
+            budget=budget(),
+        )
+    rendered = " ".join(
+        r.getMessage() + repr(r.__dict__)
+        for r in caplog.records
+        if r.name == "clientscrapper.services.http"
+    )
+    assert "namuna_person_7" not in rendered and "900000007" not in rendered
 
 
 @pytest.mark.parametrize(

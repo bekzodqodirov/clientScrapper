@@ -5,9 +5,13 @@
 ``meta.note``) when ``COLLECTORS_ENABLED=false``, the row is disabled, its
 ``paused_until`` is ahead, or ``/toxtat`` holds ``runtime_flags('paused')``.
 Otherwise it claims the run (``ux_collector_runs_one_running``; a ``running``
-row older than ``STALE_RUN`` is closed as ``failed``/``abandoned`` first),
-builds the ``Budget``, beats ``collector:<key>[.variant]``, binds the shared
-``Fetcher`` to the run and calls ``collect``.
+row whose deadline (``meta.deadline_at``) passed more than ``STALE_MARGIN``
+ago belongs to a process that died, and is closed as ``failed``/``abandoned``
+first), builds the ``Budget``, beats ``collector:<key>[.variant]``, binds the
+shared ``Fetcher`` to the run and calls ``collect``. A run that is cancelled
+(worker shutdown, a deploy) closes its own row ``failed``/``cancelled`` from a
+fresh session before the cancellation goes on, so the next run is not
+refused as ``already_running``.
 
 Then, for each observation: the evidence row (and file) for the bytes it was
 parsed from — the body the run's Fetcher handed out, or for an API row
@@ -15,7 +19,11 @@ parsed from — the body the run's Fetcher handed out, or for an API row
 same bytes at the same URL were stored by an earlier run (``unchanged``:
 nothing new is written); one ``observations(status='new')`` row per
 observation, deduplicated on (source, source_ref, sha256) within 24 h, its
-``parsed`` from ``normalise.to_observation_json``. The ``collector_runs`` row
+``parsed`` from ``normalise.to_observation_json``. Every stored URL is
+``urlsafe.strip_secrets``'d (an API key in a query never reaches a row or a
+backup). Each evidence group is written in its own savepoint: one the
+database refuses is dropped and counted (``meta.dropped.bad_evidence``), the
+rest of the run is kept. The ``collector_runs`` row
 carries the 02 §2.2 counters; ``unchanged``, ``skipped_robots``, ``note`` and
 the rest go into ``meta``.
 
@@ -29,6 +37,8 @@ else. What a stopped collector put in ``Collector.found`` is still written.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import dataclasses
 import hashlib
 import json
@@ -42,7 +52,7 @@ from pathlib import Path
 from typing import Any, Final
 
 import sqlalchemy as sa
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import DataError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from clientscrapper.collectors.base import Budget, Collector, Observation
@@ -64,12 +74,15 @@ from clientscrapper.services.http import (
     StoredCopy,
 )
 from clientscrapper.services.normalise import NOT_OBSERVATIONS, to_observation_json
+from clientscrapper.services.urlsafe import strip_secrets
 
 log = logging.getLogger(__name__)
 
 DEFAULT_DEADLINE: Final = timedelta(hours=2)
-# A 'running' row older than this belongs to a process that died mid-run.
-STALE_RUN: Final = timedelta(hours=6)
+# A 'running' row this long past its deadline belongs to a process that died
+# (the Fetcher refuses every request after the deadline, so a live run ends
+# soon after it). Rows without meta.deadline_at count from started_at + 2 h.
+STALE_MARGIN: Final = timedelta(minutes=30)
 DEDUPE_WINDOW: Final = timedelta(hours=24)
 # Attribution-only rows whose spend counts against their parent's dollar
 # budget (02 §2.1): costs.ask records the sub-source a call was made for.
@@ -79,6 +92,9 @@ SUBSOURCE_PREFIXES: Final = {
     "maps": ("maps_",),
 }
 ABANDONED: Final = "abandoned"
+CANCELLED: Final = "cancelled"
+# The database refused this row: skip the group, keep the run.
+_REFUSED: Final = (IntegrityError, DataError, ValueError)
 
 SessionFactory = Callable[[], AsyncSession]
 GateFactory = Callable[[AsyncSession, int, datetime], CostGate]
@@ -109,7 +125,7 @@ class RunLedger:
 
     async def stored_copy(self, url: str) -> StoredCopy | None:
         async with self._factory() as session:
-            row = await evidence_store.latest_stored(session, url)
+            row = await evidence_store.latest_stored(session, strip_secrets(url))
         if row is None:
             return None
         body = evidence_store.open_raw(row, root=self._root)
@@ -229,7 +245,10 @@ def _canonical_body(obs: Observation) -> bytes:
 
 
 def _fetch_meta(result: FetchResult) -> dict[str, Any]:
-    meta: dict[str, Any] = {"final_url": result.final_url, "status": result.status}
+    meta: dict[str, Any] = {
+        "final_url": strip_secrets(result.final_url),
+        "status": result.status,
+    }
     if result.etag:
         meta["etag"] = result.etag
     if result.last_modified:
@@ -256,6 +275,83 @@ async def _recently_seen(
     return (await session.scalar(stmt)) is not None
 
 
+def _merge(into: _Written, part: _Written) -> None:
+    into.new_evidence += part.new_evidence
+    into.new_observations += part.new_observations
+    into.unchanged_observations += part.unchanged_observations
+    into.duplicates += part.duplicates
+    into.serp_hits += part.serp_hits
+    into.truncated += part.truncated
+    into.dropped.update(part.dropped)
+    for source, counts in part.by_source.items():
+        mine = into.by_source.setdefault(source, {"evidence": 0, "observations": 0})
+        for what, n in counts.items():
+            mine[what] += n
+
+
+async def _write_group(
+    session: AsyncSession,
+    group: _Group,
+    *,
+    seen: set[tuple[str, str, str]],
+    run_id: int,
+    collector_version: str,
+    now: datetime,
+    root: Path | None,
+) -> _Written:
+    written = _Written()
+    existing = await evidence_store.find(session, group.url, group.sha256)
+    if existing is not None and existing.collector_run_id != run_id:
+        # Same bytes at the same URL as an earlier run: nothing new to say.
+        evidence_store.keep_raw(session, existing, group.body, root=root)
+        written.unchanged_observations += len(group.members)
+        return written
+    first = group.members[0]
+    single = len(group.members) == 1
+    row = existing or await evidence_store.store(
+        session,
+        source_key=first.source,
+        url=group.url,
+        body=group.body,
+        content_type=group.content_type,
+        fetched_at=group.fetched_at,
+        source_ref=first.source_ref if single else None,
+        excerpt=first.excerpt or None,
+        lang=first.lang,
+        published_at=first.published_at if single else None,
+        collector_run_id=run_id,
+        meta=group.meta,
+        root=root,
+    )
+    if existing is None:
+        written.new_evidence += 1
+        written.bump(first.source, "evidence")
+        if row.meta.get("truncated"):
+            written.truncated += 1
+    for ordinal, obs in enumerate(group.members):
+        if obs.kind == "serp_hit":
+            written.serp_hits += 1
+            continue
+        mark = (obs.source, obs.source_ref, group.sha256)
+        if mark in seen or await _recently_seen(session, obs, group.sha256, now=now):
+            written.duplicates += 1
+            continue
+        seen.add(mark)
+        session.add(
+            ObservationRow(
+                evidence_id=row.id,
+                ordinal=ordinal,
+                source_key=obs.source,
+                status="new",
+                parsed=to_observation_json(obs, collector_version=collector_version),
+            )
+        )
+        written.new_observations += 1
+        written.bump(obs.source, "observations")
+    await session.flush()
+    return written
+
+
 async def write_observations(
     session: AsyncSession,
     observations: list[Observation],
@@ -266,7 +362,9 @@ async def write_observations(
     now: datetime,
     root: Path | None,
 ) -> _Written:
-    """Evidence + observation rows for one run's findings (no commit)."""
+    """Evidence + observation rows for one run's findings (no commit). Each
+    evidence group is one savepoint: a group the database refuses is dropped
+    and counted, never the whole run."""
     written = _Written()
     known = set(await session.scalars(sa.select(Source.key)))
     groups: dict[tuple[str, str], _Group] = {}
@@ -282,81 +380,46 @@ async def write_observations(
             if result is None:
                 written.dropped["no_evidence"] += 1
                 continue
-            key = (result.url, result.sha256)
-            if key not in groups:
-                groups[key] = _Group(
-                    url=result.url,
-                    sha256=result.sha256,
-                    body=result.body,
-                    content_type=result.content_type or "text/html",
-                    meta=_fetch_meta(result),
-                    fetched_at=result.fetched_at,
-                )
+            url, sha, body = strip_secrets(result.url), result.sha256, result.body
+            content_type = result.content_type or "text/html"
+            meta, fetched_at = _fetch_meta(result), result.fetched_at
         else:
             body = _canonical_body(obs)
-            sha = hashlib.sha256(body).hexdigest()
-            key = (obs.url, sha)
-            if key not in groups:
-                groups[key] = _Group(
-                    url=obs.url,
-                    sha256=sha,
-                    body=body,
-                    content_type="application/json",
-                    meta={},
-                    fetched_at=obs.fetched_at,
-                )
+            url, sha = strip_secrets(obs.url), hashlib.sha256(body).hexdigest()
+            content_type, meta, fetched_at = "application/json", {}, obs.fetched_at
+        if len(url) > evidence_store.URL_MAX:
+            # evidence.url holds 2048 characters; such a page cannot be cited.
+            written.dropped["url_too_long"] += 1
+            continue
+        key = (url, sha)
+        if key not in groups:
+            groups[key] = _Group(url, sha, body, content_type, meta, fetched_at)
         groups[key].members.append(obs)
 
     seen: set[tuple[str, str, str]] = set()
     for group in groups.values():
-        existing = await evidence_store.find(session, group.url, group.sha256)
-        if existing is not None and existing.collector_run_id != run_id:
-            # Same bytes at the same URL as an earlier run: nothing new to say.
-            written.unchanged_observations += len(group.members)
-            continue
-        first = group.members[0]
-        single = len(group.members) == 1
-        row = existing or await evidence_store.store(
-            session,
-            source_key=first.source,
-            url=group.url,
-            body=group.body,
-            content_type=group.content_type,
-            fetched_at=group.fetched_at,
-            source_ref=first.source_ref if single else None,
-            excerpt=first.excerpt or None,
-            lang=first.lang,
-            published_at=first.published_at if single else None,
-            collector_run_id=run_id,
-            meta=group.meta,
-            root=root,
-        )
-        if existing is None:
-            written.new_evidence += 1
-            written.bump(first.source, "evidence")
-            if row.meta.get("truncated"):
-                written.truncated += 1
-        for ordinal, obs in enumerate(group.members):
-            if obs.kind == "serp_hit":
-                written.serp_hits += 1
-                continue
-            mark = (obs.source, obs.source_ref, group.sha256)
-            if mark in seen or await _recently_seen(session, obs, group.sha256, now=now):
-                written.duplicates += 1
-                continue
-            seen.add(mark)
-            session.add(
-                ObservationRow(
-                    evidence_id=row.id,
-                    ordinal=ordinal,
-                    source_key=obs.source,
-                    status="new",
-                    parsed=to_observation_json(obs, collector_version=collector_version),
+        marks = set(seen)
+        try:
+            async with session.begin_nested():
+                part = await _write_group(
+                    session,
+                    group,
+                    seen=marks,
+                    run_id=run_id,
+                    collector_version=collector_version,
+                    now=now,
+                    root=root,
                 )
+        except _REFUSED as exc:
+            written.dropped["bad_evidence"] += len(group.members)
+            log.warning(
+                "evidence group refused: %s",
+                type(exc).__name__,
+                extra={"source": group.members[0].source, "run_id": run_id},
             )
-            written.new_observations += 1
-            written.bump(obs.source, "observations")
-    await session.flush()
+            continue
+        seen = marks
+        _merge(written, part)
     return written
 
 
@@ -414,6 +477,48 @@ async def _skip(
     return RunReport(key, component, "skipped", run_id=run.id, meta=meta)
 
 
+async def _close_interrupted(
+    session_factory: SessionFactory,
+    run_id: int,
+    fetcher: Fetcher,
+    *,
+    error: str,
+    variant: str | None,
+    finished_at: datetime,
+) -> None:
+    stats = fetcher.stats
+    meta: dict[str, Any] = {
+        "unchanged": stats.unchanged,
+        "skipped_robots": stats.skipped_robots,
+        "note": error,
+    }
+    if variant:
+        meta["variant"] = variant
+    async with session_factory() as session:
+        await session.execute(
+            sa.update(CollectorRun)
+            .where(CollectorRun.id == run_id, CollectorRun.status == "running")
+            .values(
+                finished_at=finished_at,
+                status="failed",
+                error=error,
+                meta=meta,
+                requests=stats.requests,
+                pages=stats.pages,
+                http_403=stats.http_403,
+                http_429=stats.http_429,
+                cost_usd=stats.cost_usd,
+            )
+        )
+        await session.commit()
+    log.warning(
+        "collector run %s interrupted: %s",
+        run_id,
+        error,
+        extra={"run_id": run_id, "error": error},
+    )
+
+
 async def run_collector(
     collector_cls: type[Collector],
     *,
@@ -448,21 +553,23 @@ async def run_collector(
                 session, key, component, now=now, note=reason, variant=variant
             )
 
+        deadline_at = CollectorRun.meta["deadline_at"].astext.cast(
+            sa.DateTime(timezone=True)
+        )
+        due = sa.func.coalesce(deadline_at, CollectorRun.started_at + DEFAULT_DEADLINE)
         await session.execute(
             sa.update(CollectorRun)
             .where(
                 CollectorRun.source_key == key,
                 CollectorRun.status == "running",
-                CollectorRun.started_at < now - STALE_RUN,
+                due < now - STALE_MARGIN,
             )
             .values(status="failed", error=ABANDONED, finished_at=now)
         )
-        run = CollectorRun(
-            source_key=key,
-            started_at=now,
-            status="running",
-            meta={"variant": variant} if variant else {},
-        )
+        claim: dict[str, Any] = {"deadline_at": (now + deadline).isoformat()}
+        if variant:
+            claim["variant"] = variant
+        run = CollectorRun(source_key=key, started_at=now, status="running", meta=claim)
         session.add(run)
         try:
             await session.flush()
@@ -481,98 +588,128 @@ async def run_collector(
         ledger = RunLedger(session_factory, evidence_root)
         gate = cost_gate_for(session, run_id, now) if cost_gate_for is not None else None
         run_fetcher = fetcher.bind(hooks=ledger, cost_gate=gate)
-        collector = collector_cls(run_fetcher, serp)
-        collector.variant = variant
-
-        status, error = "ok", None
         try:
-            observations = await collector.collect(session, budget)
-        except HostPaused:
-            observations, status, error = list(collector.found), "failed", BLOCKED_ERROR
-        except BudgetExhausted:
-            observations, status = list(collector.found), "partial"
-        except Exception as exc:
-            await session.rollback()
-            observations, status, error = [], "failed", type(exc).__name__
-            log.warning(
-                "collector %s failed: %s",
-                key,
-                error,
-                extra={"source": key, "run_id": run_id, "error": error},
-            )
-        blocked = list(run_fetcher.stats.blocked_hosts)
-        if blocked:
-            status, error = "failed", BLOCKED_ERROR
-        elif status == "ok" and run_fetcher.stats.exhausted is not None:
-            status = "partial"
+            collector = collector_cls(run_fetcher, serp)
+            collector.variant = variant
 
-        try:
-            written = await write_observations(
-                session,
-                observations,
-                ledger=ledger,
-                run_id=run_id,
-                collector_version=version,
-                now=now,
-                root=evidence_root,
-            )
-        except Exception as exc:
-            await session.rollback()
-            written = _Written()
-            status, error = "failed", error or type(exc).__name__
-            log.warning(
-                "collector %s: writing its findings failed: %s",
-                key,
-                type(exc).__name__,
-                extra={"source": key, "run_id": run_id},
-            )
+            status, error = "ok", None
+            try:
+                observations = await collector.collect(session, budget)
+            except HostPaused:
+                observations, status, error = (
+                    list(collector.found),
+                    "failed",
+                    BLOCKED_ERROR,
+                )
+            except BudgetExhausted:
+                observations, status = list(collector.found), "partial"
+            except Exception as exc:
+                await session.rollback()
+                observations, status, error = [], "failed", type(exc).__name__
+                log.warning(
+                    "collector %s failed: %s",
+                    key,
+                    error,
+                    extra={"source": key, "run_id": run_id, "error": error},
+                )
+            blocked = list(run_fetcher.stats.blocked_hosts)
+            if blocked:
+                status, error = "failed", BLOCKED_ERROR
+            elif status == "ok" and run_fetcher.stats.exhausted is not None:
+                status = "partial"
 
-        stats = run_fetcher.stats
-        counters: dict[str, Any] = {
-            "requests": stats.requests,
-            "pages": stats.pages,
-            "http_403": stats.http_403,
-            "http_429": stats.http_429,
-            "new_evidence": written.new_evidence,
-            "new_observations": written.new_observations,
-            "new_companies": 0,
-            "new_signals": 0,
-            "cost_usd": stats.cost_usd,
-        }
-        meta = _meta(variant=variant, fetcher=run_fetcher, written=written)
-        end = finished()
-        await session.execute(
-            sa.update(CollectorRun)
-            .where(CollectorRun.id == run_id)
-            .values(finished_at=end, status=status, error=error, meta=meta, **counters)
-        )
-        source_values: dict[str, Any] = {"last_run_at": now}
-        if blocked:
-            until = end + BREAKER_PAUSE
-            reason = f"{BLOCKED_ERROR}:{blocked[0]}"
-            source_values.update(
-                paused_until=until,
-                paused_reason=reason,
-                breaker_until=until,
-                breaker_reason=reason,
+            try:
+                written = await write_observations(
+                    session,
+                    observations,
+                    ledger=ledger,
+                    run_id=run_id,
+                    collector_version=version,
+                    now=now,
+                    root=evidence_root,
+                )
+            except Exception as exc:
+                await session.rollback()
+                written = _Written()
+                status, error = "failed", error or type(exc).__name__
+                log.warning(
+                    "collector %s: writing its findings failed: %s",
+                    key,
+                    type(exc).__name__,
+                    extra={"source": key, "run_id": run_id},
+                )
+
+            stats = run_fetcher.stats
+            counters: dict[str, Any] = {
+                "requests": stats.requests,
+                "pages": stats.pages,
+                "http_403": stats.http_403,
+                "http_429": stats.http_429,
+                "new_evidence": written.new_evidence,
+                "new_observations": written.new_observations,
+                "new_companies": 0,
+                "new_signals": 0,
+                "cost_usd": stats.cost_usd,
+            }
+            meta = _meta(variant=variant, fetcher=run_fetcher, written=written)
+            end = finished()
+            await session.execute(
+                sa.update(CollectorRun)
+                .where(CollectorRun.id == run_id)
+                .values(
+                    finished_at=end, status=status, error=error, meta=meta, **counters
+                )
             )
-        await session.execute(
-            sa.update(Source).where(Source.key == key).values(**source_values)
-        )
-        detail: dict[str, Any] = {
-            "phase": "end",
-            "run_id": run_id,
-            "status": status,
-            "error": error,
-            **{k: (str(v) if isinstance(v, Decimal) else v) for k, v in counters.items()},
-            "unchanged": meta["unchanged"],
-            "skipped_robots": meta["skipped_robots"],
-        }
-        if blocked:
-            detail["problem"] = BLOCKED_PROBLEM
-            detail["blocked_hosts"] = blocked
-        await health.beat(session, component, detail=detail, now=end)
-        await session.commit()
+            source_values: dict[str, Any] = {"last_run_at": now}
+            if blocked:
+                until = end + BREAKER_PAUSE
+                reason = f"{BLOCKED_ERROR}:{blocked[0]}"
+                source_values.update(
+                    paused_until=until,
+                    paused_reason=reason,
+                    breaker_until=until,
+                    breaker_reason=reason,
+                )
+            await session.execute(
+                sa.update(Source).where(Source.key == key).values(**source_values)
+            )
+            detail: dict[str, Any] = {
+                "phase": "end",
+                "run_id": run_id,
+                "status": status,
+                "error": error,
+                **{
+                    k: (str(v) if isinstance(v, Decimal) else v)
+                    for k, v in counters.items()
+                },
+                "unchanged": meta["unchanged"],
+                "skipped_robots": meta["skipped_robots"],
+            }
+            if blocked:
+                detail["problem"] = BLOCKED_PROBLEM
+                detail["blocked_hosts"] = blocked
+            await health.beat(session, component, detail=detail, now=end)
+            await session.commit()
+        except BaseException as exc:
+            # Cancelled (worker shutdown, a deploy) or the bookkeeping failed:
+            # the row must not stay 'running', or ux_collector_runs_one_running
+            # refuses every later run until the stale margin. A fresh session,
+            # shielded: this one may be mid-statement, and a second cancel must
+            # not interrupt the close.
+            cancelled = isinstance(exc, asyncio.CancelledError)
+            error = CANCELLED if cancelled else type(exc).__name__
+            with contextlib.suppress(Exception):
+                await asyncio.shield(
+                    _close_interrupted(
+                        session_factory,
+                        run_id,
+                        run_fetcher,
+                        error=error,
+                        variant=variant,
+                        finished_at=finished(),
+                    )
+                )
+            raise
 
     log.info(
         "collector %s %s",

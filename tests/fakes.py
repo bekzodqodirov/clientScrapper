@@ -65,8 +65,9 @@ class Seen:
 
 
 class Site:
-    """Routes keyed by ``https://host/path`` (query ignored). A list answers in
-    order and repeats its last item; a callable answers every time."""
+    """Routes keyed by ``https://host[:port]/path`` (query ignored; a default
+    port is not written). A list answers in order and repeats its last item;
+    a callable answers every time."""
 
     def __init__(self, clock: FakeClock, routes: dict[str, Any] | None = None) -> None:
         self.clock = clock
@@ -83,7 +84,8 @@ class Site:
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
         self.seen.append(Seen(self.clock.t, request))
-        key = f"{request.url.scheme}://{request.url.host}{request.url.path}"
+        port = f":{request.url.port}" if request.url.port is not None else ""
+        key = f"{request.url.scheme}://{request.url.host}{port}{request.url.path}"
         answer = self.routes.get(key)
         if answer is None:
             return httpx.Response(404, text="not found")

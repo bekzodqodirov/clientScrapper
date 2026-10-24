@@ -191,6 +191,41 @@ def test_a_field_with_a_14_digit_run_is_dropped():
     assert parsed["hints"]["pinfl_dropped"] is True
 
 
+def test_a_14_digit_number_is_dropped_too():
+    parsed = to_observation_json(
+        obs(attrs={"director_pinfl": 30000000000003, "ads_count": 12})
+    )
+    assert parsed["hints"]["collector"]["attrs"] == {
+        "director_pinfl": None,
+        "ads_count": 12,
+    }
+    assert parsed["hints"]["pinfl_dropped"] is True
+
+
+def test_a_longer_digit_run_is_an_id_not_a_pinfl():
+    parsed = to_observation_json(
+        obs(
+            source="maps_2gis",
+            source_ref="2gis:70000001018500001",
+            url="https://2gis.uz/tashkent/firm/70000001018500001",
+            kind="place",
+            company_name_raw="Namuna Mebel MChJ",
+            external_ids={"twogis_firm_id": "70000001018500001"},
+            attrs={"ig_user_id": 17841400000000001},
+        )
+    )
+    assert parsed["handles"]["gis2_firm_id"] == "70000001018500001"
+    assert parsed["hints"]["collector"]["attrs"] == {"ig_user_id": 17841400000000001}
+    assert parsed["hints"]["pinfl_dropped"] is False
+
+
+def test_the_url_is_stored_without_its_api_key():
+    parsed = to_observation_json(
+        obs(url="https://catalog.api.2gis.com/3.0/items?q=mebel&key=K3Y-VALUE")
+    )
+    assert parsed["url"] == "https://catalog.api.2gis.com/3.0/items?q=mebel"
+
+
 def test_the_excerpt_is_cut_at_600():
     parsed = to_observation_json(obs(excerpt="x" * 900))
     assert len(parsed["text"]["excerpt"]) == 600

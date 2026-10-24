@@ -11,6 +11,14 @@ still carries ``url``, ``fetched_at``, ``bytes`` and ``excerpt``, which is all
 a card or an ERP note quotes. The file goes at ``expires_at`` (180 d; 30 d for
 ``maps_google``, the Maps terms), the row stays.
 
+A file is written only for a row this transaction inserted, and only once the
+transaction commits (``after_commit``); a rollback — of the whole transaction
+or of the savepoint the row was stored in — drops the write. So no file ever
+exists that no row points to, which retention (R1 selects rows) could never
+find. The opposite failure, a crash between the commit and the write, leaves a
+row whose file is missing: harmless (``open_raw`` answers None, the excerpt
+still quotes), and healed by the next store of the same bytes.
+
 Only the runner writes here (03 §1.1: "the runner, not the collector").
 """
 
@@ -19,16 +27,21 @@ from __future__ import annotations
 import gzip
 import hashlib
 import html
+import logging
 import os
 import re
+import secrets
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Final
 from zoneinfo import ZoneInfo
 
 import sqlalchemy as sa
+from sqlalchemy import event
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import Session, SessionTransaction
 
 from clientscrapper.config import settings
 from clientscrapper.db.models import Evidence
@@ -42,6 +55,9 @@ DEFAULT_RETENTION: Final = timedelta(days=180)
 # Google Maps Platform terms: no caching beyond 30 days (02 §2.5, R4b).
 RETENTION: Final = {"maps_google": timedelta(days=30)}
 TASHKENT: Final = ZoneInfo("Asia/Tashkent")
+_PENDING: Final = "evidence_pending_raw"
+
+log = logging.getLogger(__name__)
 
 _SCRIPT = re.compile(r"<(script|style|noscript)\b[^>]*>.*?</\1\s*>", re.I | re.S)
 _TAG = re.compile(r"<[^>]+>")
@@ -96,14 +112,70 @@ def lang_code(lang: str | None) -> str | None:
     return lang[:2].lower() if lang else None
 
 
-def write_raw(root: Path, raw_path: str, body: bytes) -> None:
-    path = root / raw_path
+def write_raw(path: Path, body: bytes) -> None:
     if path.is_file():
         return
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
+    # Two processes may store the same bytes at once: each its own tmp name.
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp")
     tmp.write_bytes(gzip.compress(body, compresslevel=GZIP_LEVEL, mtime=0))
     os.replace(tmp, path)
+
+
+# --- files follow the transaction -------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class _PendingRaw:
+    path: Path
+    body: bytes
+    transaction: SessionTransaction  # the innermost one the row was stored in
+
+
+def _pending(session: Session) -> list[_PendingRaw]:
+    pending: list[_PendingRaw] = session.info.setdefault(_PENDING, [])
+    return pending
+
+
+def _queue_raw(session: AsyncSession, path: Path, body: bytes) -> None:
+    sync = session.sync_session
+    transaction = sync.get_nested_transaction() or sync.get_transaction()
+    assert transaction is not None  # called right after a statement ran
+    _pending(sync).append(_PendingRaw(path, body, transaction))
+
+
+def _within(transaction: SessionTransaction | None, outer: SessionTransaction) -> bool:
+    while transaction is not None:
+        if transaction is outer:
+            return True
+        transaction = transaction.parent
+    return False
+
+
+@event.listens_for(Session, "after_commit")
+def _write_after_commit(session: Session) -> None:
+    # Also fired when a savepoint is released; the files wait for the root.
+    if session.in_nested_transaction() or not session.info.get(_PENDING):
+        return
+    for item in session.info.pop(_PENDING):
+        try:
+            write_raw(item.path, item.body)
+        except OSError:
+            log.warning("evidence file not written", extra={"raw": item.path.name})
+
+
+@event.listens_for(Session, "after_soft_rollback")
+def _drop_after_rollback(session: Session, previous: SessionTransaction) -> None:
+    pending = session.info.get(_PENDING)
+    if pending:
+        session.info[_PENDING] = [
+            item for item in pending if not _within(item.transaction, previous)
+        ]
+
+
+def pending_raw(session: AsyncSession) -> list[Path]:
+    """The files the next commit of ``session`` writes (for tests and doctor)."""
+    return [item.path for item in session.sync_session.info.get(_PENDING, [])]
 
 
 async def find(session: AsyncSession, url: str, sha256: str) -> Evidence | None:
@@ -150,7 +222,8 @@ async def store(
 ) -> Evidence:
     """The evidence row for these bytes at this URL — the existing one when the
     same bytes were stored before (nothing is rewritten: evidence is
-    immutable), else a new row and, under 2 MB, its file."""
+    immutable), else a new row and, under 2 MB, its file, written when the
+    transaction commits (see the module docstring)."""
     if len(url) > URL_MAX:
         raise ValueError("evidence url longer than 2048 characters")
     sha = hashlib.sha256(body).hexdigest()
@@ -159,8 +232,6 @@ async def store(
     if not stored_raw or facts.get("truncated"):
         facts["truncated"] = True
     raw_path = raw_path_for(sha, fetched_at) if stored_raw else None
-    if raw_path is not None:
-        write_raw(root or evidence_root(), raw_path, body)
     kind = (content_type or "text/html").split(";")[0].strip().lower() or "text/html"
     quote = clip(excerpt if excerpt else text_of(body, kind), EXCERPT_MAX)
     heading = clip(title, TITLE_MAX) if title else html_title(body, kind)
@@ -192,7 +263,25 @@ async def store(
     if row is None:
         row = await find(session, url, sha)
         assert row is not None  # the conflict was this very (url, sha)
+        keep_raw(session, row, body, root=root)
+    elif raw_path is not None:
+        _queue_raw(session, (root or evidence_root()) / raw_path, body)
     return row
+
+
+def keep_raw(
+    session: AsyncSession, evidence: Evidence, body: bytes, *, root: Path | None = None
+) -> bool:
+    """Heal a row whose file is missing (a crash between its commit and its
+    write) when ``body`` is its bytes; the write waits for the commit. A
+    purged row (``raw_path`` NULL) stays purged. True when a write was queued."""
+    if evidence.raw_path is None or hashlib.sha256(body).hexdigest() != evidence.sha256:
+        return False
+    path = (root or evidence_root()) / evidence.raw_path
+    if path.is_file():
+        return False
+    _queue_raw(session, path, body)
+    return True
 
 
 def open_raw(evidence: Evidence, *, root: Path | None = None) -> bytes | None:

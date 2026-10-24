@@ -47,6 +47,7 @@ from clientscrapper.services.keys import (
 )
 from clientscrapper.services.names import FIRST_NAMES, HONORIFICS
 from clientscrapper.services.text import fold_apostrophes, to_latin
+from clientscrapper.services.urlsafe import strip_secrets
 
 if TYPE_CHECKING:
     # Type only: collectors/base imports the Fetcher, and this module stays pure.
@@ -482,7 +483,9 @@ _HINT_SIGNALS: Final = {
 }
 _VOLUME_BASES: Final = frozenset({"stated", "container_words", "weight", "proxy", "none"})
 # A PINFL is 14 digits; a field carrying one is dropped (02 §2.5 validators).
-_PINFL = re.compile(r"\d{14}")
+# Exactly 14: a 2GIS firm id or a Graph user id is a 17-digit run, and holds
+# no PINFL (dropping it would lose the id the resolver matches on).
+_PINFL = re.compile(r"(?<!\d)\d{14}(?!\d)")
 _EXCERPT_MAX = 600
 
 
@@ -506,7 +509,7 @@ def parsed_kind(
 
 
 class _Pinfl:
-    """Drops every text carrying a 14-digit run and remembers that it did."""
+    """Drops every value carrying a 14-digit run and remembers that it did."""
 
     def __init__(self) -> None:
         self.dropped = False
@@ -519,14 +522,22 @@ class _Pinfl:
             return None
         return value
 
+    def number(self, value: int | float | Decimal) -> int | float | Decimal | None:
+        # A PINFL typed as a number (``director_pinfl: 31234567890123``).
+        digits = f"{value:f}" if isinstance(value, Decimal | float) else str(value)
+        return None if self(digits) is None else value
+
 
 def _jsonable(value: Any, clean: _Pinfl) -> Any:
     if isinstance(value, str):
         return clean(value)
-    if isinstance(value, bool | int | float) or value is None:
+    if isinstance(value, bool) or value is None:
         return value
+    if isinstance(value, int | float):
+        return clean.number(value)
     if isinstance(value, Decimal):
-        return float(value)
+        kept = clean.number(value)
+        return None if kept is None else float(kept)
     if isinstance(value, datetime | date):
         return value.isoformat()
     if isinstance(value, dict):
@@ -636,7 +647,8 @@ def to_observation_json(
         "kind": kind,
         "source_key": obs.source,
         "source_ref": obs.source_ref,
-        "url": obs.url,
+        # A collector may cite the API URL it called: never with its key.
+        "url": strip_secrets(obs.url),
         "observed_at": observed_at.isoformat(),
         "name_key": key,
         "company": {
