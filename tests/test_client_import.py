@@ -776,17 +776,25 @@ async def test_the_tool_dry_run_writes_nothing(session, erp_row):
 
 
 async def test_the_tool_applies_and_refuses(session, erp_row, tmp_path):
-    code, lines = await import_clients.run(XLSX, apply=True, now=NOW)
+    # A copy: a regression that deletes outside data/imports/ must not take
+    # the repository's fixture with it.
+    elsewhere = tmp_path / "elsewhere" / "clients.xlsx"
+    elsewhere.parent.mkdir()
+    elsewhere.write_bytes(XLSX.read_bytes())
+    code, lines = await import_clients.run(
+        elsewhere, apply=True, now=NOW, imports_dir=tmp_path / "imports"
+    )
     assert (code, lines[-2:]) == (
         0,
         [
             "Yozildi: 44 ta yangi raqam; 0 tasi oldingi importda bor edi, 0 tasi "
             "boshqa manbadan bor.",
-            # Not in data/imports/: the owner deletes it (here: the fixture).
-            f"⚠️ Endi faylni oʻchiring ({XLSX}) — mijozlar raqamlari diskda qolmasin.",
+            # Not in data/imports/: the owner deletes it.
+            f"⚠️ Endi faylni oʻchiring ({elsewhere}) — mijozlar raqamlari diskda "
+            "qolmasin.",
         ],
     )
-    assert XLSX.exists()
+    assert elsewhere.exists()
     assert await manual_tails(session) == sorted(FIXTURE_TAILS)
     one = write_xlsx(
         tmp_path / "one.xlsx", [["Code", "Phones"], ["NMN99", "+998 90 000 00 77"]]
