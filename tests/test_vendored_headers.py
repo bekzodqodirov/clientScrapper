@@ -80,6 +80,8 @@ VENDORED: dict[str, str] = {
     "tests/test_env_example.py": "tests/test_env_example.py",
     "tests/test_logs.py": "tests/test_logs.py",
     "tests/test_no_telegram_writes.py": "tests/test_userbot.py",
+    "tests/test_retry.py": "tests/test_retry.py",
+    "tests/test_health_beat.py": "tests/test_health.py",
 }
 # Not listed although the memo says AS-IS: services/codes.py (02 §7 — suppression
 # by GS code is not in the v1 key set, so it is not ported).
@@ -103,9 +105,13 @@ REQUIRED_NOW = (
     "clientscrapper/tools/doctor.py",
     "clientscrapper/services/text.py",
     "clientscrapper/services/names.py",
+    "clientscrapper/services/retry.py",
+    "clientscrapper/services/health.py",
     "tests/conftest.py",
     "tests/test_env_example.py",
     "tests/test_logs.py",
+    "tests/test_retry.py",
+    "tests/test_health_beat.py",
     # T-06
     "clientscrapper/services/usage.py",
     "clientscrapper/services/costs.py",
