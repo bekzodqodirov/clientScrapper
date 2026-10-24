@@ -16,6 +16,7 @@ from typing import Any
 import pytest
 
 from clientscrapper import logs
+from clientscrapper.services.normalise import parse_phones
 
 
 @pytest.fixture
@@ -109,6 +110,24 @@ ANTHROPIC_KEY = "sk-ant-" + "x" * 24
         ("sent X-ERP-Key: abc123secret", "abc123secret", "X-ERP-Key=<key>"),
         ("header x-gsr-key=zzzsecret", "zzzsecret", "x-gsr-key=<key>"),
         ("Authorization: Bearer-tokenvalue", "Bearer-tokenvalue", "Authorization=<key>"),
+        # The scheme word is not the credential: the token after it goes too.
+        (
+            "Authorization: Bearer apify_api_namuna1",
+            "apify_api_namuna1",
+            "Authorization=<key>",
+        ),
+        ("authorization: Api-Key AQVNnamunakey", "AQVNnamunakey", "authorization=<key>"),
+        (
+            "Proxy-Authorization: Basic bmFtdW5hOm5hbXVuYQ==",
+            "bmFtdW5hOm5hbXVuYQ",
+            "Proxy-Authorization=<key>",
+        ),
+        (
+            "headers {'Authorization': 'Bearer namuna.jwt.sig', 'n': 1}",
+            "namuna.jwt.sig",
+            "Authorization=<key>",
+        ),
+        ('sent {"X-GSR-Key": "namunasecret"}', "namunasecret", "X-GSR-Key=<key>"),
         (f"model key {ANTHROPIC_KEY}", ANTHROPIC_KEY, "<secret>"),
         (f"bot {BOT_TOKEN} failed", BOT_TOKEN, "<secret>"),
         ("TELETHON_SESSION=1BVtsOKABu0abc", "1BVtsOKABu0abc", "<secret>"),
@@ -129,11 +148,119 @@ def test_patterns_are_rewritten_in_the_message(install, fmt, message, leaked, ke
     assert kept in out
 
 
+@pytest.mark.parametrize("fmt", ["json", "text"])
+def test_the_values_of_other_extras_are_redacted(install, fmt):
+    stream = install("worker", fmt)
+    dsn = "postgresql+psycopg://cs:hunter2namuna@db:5432/cs"
+    logging.getLogger("clientscrapper.x").warning(
+        "db down",
+        extra={
+            "error": f"OperationalError: {dsn}",
+            "sender": "+998 90 000 00 07",
+            "context": {"where": "@namuna_04", "tries": [3, "+998900000008"]},
+            "request": {"Authorization": "Bearer namunatoken9", "text": "namuna matn"},
+            "attempt": 3,
+        },
+    )
+    out = stream.getvalue()
+    leaks = ("hunter2namuna", "000 00 07", "namuna_04", "900000008", "namunatoken9",
+             "namuna matn")  # fmt: skip
+    for leaked in leaks:
+        assert leaked not in out
+    if fmt == "json":
+        (line,) = _lines(stream)
+        assert line["error"] == (
+            "OperationalError: postgresql+psycopg://cs:***@db:5432/cs"
+        )
+        assert line["sender"] == "<phone>"
+        assert line["context"] == {"where": "@…", "tries": [3, "<phone>"]}
+        assert line["request"] == {"Authorization": "<key>", "text": "<redacted>"}
+        assert line["attempt"] == 3
+
+
+def test_an_extra_that_is_not_json_is_redacted_as_printed(install):
+    class Raw:
+        def __str__(self) -> str:
+            return "dsn postgresql://cs:hunter3namuna@db/cs"
+
+    stream = install()
+    logging.getLogger("clientscrapper.x").info("x", extra={"thing": Raw()})
+    (line,) = _lines(stream)
+    assert line["thing"] == "dsn postgresql://cs:***@db/cs"
+
+
+def test_redacting_an_extra_leaves_the_callers_object_alone():
+    context = {"phone_like": "+998 90 000 00 09"}
+    assert logs.redact_value(context) == {"phone_like": "<phone>"}
+    assert context == {"phone_like": "+998 90 000 00 09"}
+
+
 def test_arguments_are_redacted_too(install):
     stream = install()
     logging.getLogger("clientscrapper.x").info("phone %s", "+998 90 000 00 04")
     (line,) = _lines(stream)
     assert line["msg"] == "phone <phone>"
+
+
+def _readable_phones() -> list[str]:
+    """Every raw shape of test_normalise's phone table the normaliser reads
+    in running text (a bare 7-digit landline needs a city it is not given)."""
+    from tests.test_normalise import PHONES
+
+    # The seam review's shapes, synthetic: each was logged in clear before.
+    review = ["Murojaat: 93 000 00 84", "(93) 000-00-84", "8 (93) 000-00-84", "930000084"]
+    table = [raw for raw, *_ in PHONES]
+    return [raw for raw in table + review if parse_phones(f"seller wrote {raw}")]
+
+
+def test_the_phone_table_reaches_the_shapes_without_998():
+    shapes = _readable_phones()
+    assert {"90 123-45-67", "900000003", "+998 (90) 000-00-07", "930000084"} <= set(
+        shapes
+    )
+    assert len(shapes) >= 30
+
+
+@pytest.mark.parametrize("raw", _readable_phones())
+def test_no_phone_the_normaliser_reads_is_logged_in_clear(install, raw):
+    # 06 §5.2: the log redactor, the normaliser and the pseudonymiser agree on
+    # what a phone is — PHONE_RE, imported, never restated.
+    stream = install("worker", "json")
+    logging.getLogger("clientscrapper.x").warning("seller wrote %s", raw)
+    (line,) = _lines(stream)
+    [phone] = parse_phones(f"seller wrote {raw}")
+    assert parse_phones(line["msg"]) == []
+    assert phone.tail not in "".join(ch for ch in line["msg"] if ch.isdigit())
+    assert "<phone>" in line["msg"]
+
+
+@pytest.mark.parametrize(
+    ("message", "expected"),
+    [
+        ("from namuna.shop@example.uz today", "from <email> today"),
+        ("insta: namuna.karimova", "insta: …"),
+        ("Instagram @namuna_shop", "Instagram @…"),
+        ("see instagram.com/namuna.shop", "see instagram.com/…"),
+    ],
+)
+def test_an_email_and_an_instagram_handle_are_not_logged(install, message, expected):
+    stream = install()
+    logging.getLogger("clientscrapper.x").info(message)
+    (line,) = _lines(stream)
+    assert line["msg"] == expected
+
+
+def test_ids_counts_and_clocks_are_left_alone(install):
+    stream = install()
+    logging.getLogger("clientscrapper.x").info(
+        "run 7 at 2026-10-24T10:00:00+05:00 job 550e8400-e29b-41d4-a716-446655440000",
+        extra={"chat_id": 900000001, "count": 123456789},
+    )
+    (line,) = _lines(stream)
+    assert line["msg"] == (
+        "run 7 at 2026-10-24T10:00:00+05:00 job 550e8400-e29b-41d4-a716-446655440000"
+    )
+    assert (line["chat_id"], line["count"]) == (900000001, 123456789)
 
 
 def test_a_handle_inside_a_url_is_left_alone(install):

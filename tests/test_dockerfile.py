@@ -1,16 +1,14 @@
-"""The image and the compose file (07 §1.2, 06 §3.1–3.2).
+"""The image (07 §1.2, 06 §3.2); the compose file is tests/test_compose.py.
 
 String checks on purpose (fullprompt's dockerfile-offline test pattern): no
 build is needed to see that the image grew a heavy dependency, runs as root,
-lost the backup tools, or that a port opened to the network.
+or lost the backup tools.
 """
 
 from __future__ import annotations
 
 import re
 from pathlib import Path
-
-import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 DOCKERFILE = (ROOT / "Dockerfile").read_text(encoding="utf-8")
@@ -58,19 +56,3 @@ def test_runs_as_uid_10001_after_the_last_copy():
 
 def test_default_command_is_the_worker():
     assert 'CMD ["python", "-m", "clientscrapper.worker.main"]' in DOCKERFILE
-
-
-def test_compose_publishes_nothing_but_localhost():
-    services = yaml.safe_load((ROOT / "docker-compose.yml").read_text())["services"]
-    published = {
-        name: [str(port) for port in service.get("ports", [])]
-        for name, service in services.items()
-    }
-    open_ports = {
-        name: ports
-        for name, ports in published.items()
-        if any(not port.startswith("127.0.0.1:") for port in ports)
-    }
-    assert open_ports == {}
-    assert published["db"] == ["127.0.0.1:${DB_PORT:-5433}:5432"]
-    assert [name for name, ports in published.items() if ports] == ["db"]

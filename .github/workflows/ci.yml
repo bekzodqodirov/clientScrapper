@@ -1,0 +1,87 @@
+# 07 §2.1, verbatim but for three fixes:
+# * the concurrency group is quoted: unquoted, "${{" inside a flow mapping is
+#   a YAML parse error and GitHub would refuse the whole file;
+# * EVIDENCE_DIR moved from the job's env to the pytest step: the runner
+#   context does not exist at job level (actionlint: "context runner is not
+#   allowed here"), so the job would not start;
+# * the pytest steps add -rs so CI prints every skip's reason (a fence that
+#   waits for a later task says which, 07 §1.10).
+name: CI
+on:
+  push: { branches: ["**"] }
+  pull_request:
+  workflow_dispatch:
+permissions: { contents: read }
+concurrency: { group: "ci-${{ github.ref }}", cancel-in-progress: true }
+
+jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12", cache: pip, cache-dependency-path: requirements-dev.txt }
+      - run: pip install -r requirements-dev.txt
+      - run: python scripts/secret_scan.py          # sk-ant-, bot tokens, Telethon sessions, +998 tails outside tests/fixtures
+      - run: ruff check .
+      - run: ruff format --check .
+      - run: mypy                                   # strict scope from pyproject (§2.3)
+
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    services:
+      postgres:
+        image: postgres:16
+        env: { POSTGRES_USER: cs, POSTGRES_PASSWORD: cs, POSTGRES_DB: cs }
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U cs -d cs" --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      DATABASE_URL: postgresql+psycopg://cs:cs@localhost:5432/cs
+      CS_MIGRATION_DATABASE_URL: postgresql+psycopg://cs:cs@localhost:5432/cs_rt
+      TZ: Asia/Tashkent
+      CS_REQUIRE_DB: "1"
+      CS_FORBIDDEN_STRINGS: ${{ secrets.CS_FORBIDDEN_STRINGS }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12", cache: pip, cache-dependency-path: requirements-dev.txt }
+      - run: sudo apt-get update -q && sudo apt-get install -y -q age postgresql-client-16
+      - run: pip install -r requirements-dev.txt
+      - name: Migration round trip on a second database
+        run: |
+          PGPASSWORD=cs psql -h localhost -U cs -d cs -c 'CREATE DATABASE cs_rt'
+          DATABASE_URL=$CS_MIGRATION_DATABASE_URL alembic upgrade head
+          DATABASE_URL=$CS_MIGRATION_DATABASE_URL alembic downgrade base
+          DATABASE_URL=$CS_MIGRATION_DATABASE_URL alembic upgrade head
+      - run: alembic upgrade head
+      - run: alembic check                          # ORM metadata == migrations, no drift
+      - run: pytest -q -rs -p no:cacheprovider      # live tests skip without LIVE=1 and are reported as skipped
+        env: { EVIDENCE_DIR: "${{ runner.temp }}/evidence" }
+
+  time-travel:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env: { DATABASE_URL: "postgresql+psycopg://none:none@127.0.0.1:1/none", TZ: Asia/Tashkent }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12", cache: pip, cache-dependency-path: requirements-dev.txt }
+      - run: pip install -r requirements-dev.txt
+      - run: CS_TIME_TRAVEL=newyear pytest -q -rs -p no:cacheprovider
+      - run: CS_TIME_TRAVEL=+400d  pytest -q -rs -p no:cacheprovider
+
+  docker:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t clientscrapper:ci .
+      - run: docker run --rm clientscrapper:ci python -c "import clientscrapper.worker.main, clientscrapper.bot.main, clientscrapper.userbot.main"
+      - name: Compose parses .env.example without comment-shaped values
+        run: |
+          cp .env.example .env
+          docker compose config --format json > compose.json
+          python3 scripts/check_compose_env.py compose.json

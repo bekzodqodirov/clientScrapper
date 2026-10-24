@@ -64,8 +64,12 @@ class Company(Base):
     is_state_body: Mapped[bool] = mapped_column(sa.Boolean, server_default=sa.false())
     state: Mapped[str] = mapped_column(sa.Text, server_default="new")
     exclude_reason: Mapped[str | None] = mapped_column(sa.Text)
+    # RESTRICT, not 02's SET NULL: ck_companies_merged spans this column, and
+    # SET NULL beside a CHECK on the FK column fails on the CHECK instead
+    # (fullprompt #809). Companies are never deleted (purge sets 'purged'),
+    # and a merge target is pinned by merge_log anyway.
     merged_into: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), sa.ForeignKey("companies.id", ondelete="SET NULL")
+        UUID(as_uuid=True), sa.ForeignKey("companies.id", ondelete="RESTRICT")
     )
     # The resolver's 80–89 fuzzy band: the «🔀 Birlashtir» proposal (04 §2.2).
     dup_of: Mapped[uuid.UUID | None] = mapped_column(
@@ -93,12 +97,15 @@ class Company(Base):
         sa.CheckConstraint("stir ~ '^[0-9]{9}$'", name="ck_companies_stir"),
         sa.CheckConstraint("oked ~ '^[0-9]{5}$'", name="ck_companies_oked"),
         sa.CheckConstraint("length(address) <= 300", name="ck_companies_address"),
+        # «Stored only as its key»: IS NOT DISTINCT FROM, because the key
+        # functions answer NULL for what they refuse and a CHECK reads the NULL
+        # of «x = NULL» as passed. A NULL column stays legal.
         sa.CheckConstraint(
-            "website_domain = cs_domain_key(website_domain)",
+            "website_domain IS NOT DISTINCT FROM cs_domain_key(website_domain)",
             name="ck_companies_website_domain",
         ),
         sa.CheckConstraint(
-            "telegram_channel = cs_username_key(telegram_channel)",
+            "telegram_channel IS NOT DISTINCT FROM cs_username_key(telegram_channel)",
             name="ck_companies_telegram_channel",
         ),
         sa.CheckConstraint("instagram = lower(instagram)", name="ck_companies_instagram"),
@@ -250,7 +257,7 @@ class Contact(Base):
             name="ck_contacts_phone_kind_values",
         ),
         sa.CheckConstraint(
-            "telegram_username = cs_username_key(telegram_username)",
+            "telegram_username IS NOT DISTINCT FROM cs_username_key(telegram_username)",
             name="ck_contacts_telegram_username",
         ),
         sa.CheckConstraint("instagram = lower(instagram)", name="ck_contacts_instagram"),

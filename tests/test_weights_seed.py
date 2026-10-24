@@ -1,9 +1,13 @@
 """Version-1 weights (02 §2.7, 04 §5.1, 07 §1.3).
 
-One row per key of SIGNAL_KEYS ∪ DERIVED_KEYS, caps of the positive groups
-summing to 100, approved by the seed; enums.WEIGHTS_V1 (what the scorer's
-tests load) equal to the migration's frozen copy and to the seeded rows.
-``validate_version``'s ±30 % rule belongs to services/scoring.py (T-18).
+04 §5.1: «the table above is the seeded version 1 and tests/test_weights_seed.py
+holds the two equal». So the table is written out here, by hand from the spec,
+as the oracle: enums.WEIGHTS_V1 (what the scorer's tests load), the
+migration's frozen copy and the seeded rows must each equal it — a typo made
+in both enums.py and 0001 is still a difference from the spec. Plus: one row
+per key of SIGNAL_KEYS ∪ DERIVED_KEYS, caps of the positive groups summing to
+100, approved by the seed. ``validate_version``'s ±30 % rule belongs to
+services/scoring.py (T-18).
 """
 
 from __future__ import annotations
@@ -28,6 +32,46 @@ CAPS = {
     "negative": 0,
     "gate": 0,
 }
+
+
+# 04 §5.1 (= 02 §2.7), row by row: key → (group, points, decay days). «—» and
+# «rolling» are None. decayed_factor is 0.5 for every row («×0.5 after»).
+SPEC_TABLE: dict[str, tuple[str, int, int | None]] = {
+    "vol_container": ("volume", 40, 180),
+    "vol_stated_3plus": ("volume", 30, 180),
+    "vol_stated_1_3": ("volume", 20, 180),
+    "vol_wholesale_bulky": ("volume", 20, 365),
+    "vol_marketplace_velocity": ("volume", 20, 60),
+    "vol_vacancy_import": ("volume", 15, 180),
+    "vol_exhibitor": ("volume", 15, 365),
+    "vol_directory_wholesale": ("volume", 10, 365),
+    "cn_origin": ("origin", 20, 365),
+    "cn_sector_prior": ("origin", 10, None),
+    "ent_legal_confirmed": ("solidity", 8, None),
+    "ent_age_2y_active": ("solidity", 4, None),
+    "ent_not_micro": ("solidity", 3, None),
+    "derived_fresh_7d": ("recency", 10, None),
+    "derived_fresh_30d": ("recency", 7, None),
+    "derived_fresh_90d": ("recency", 4, None),
+    "derived_contact_mobile": ("contact", 6, None),
+    "derived_contact_decision_maker": ("contact", 2, None),
+    "derived_contact_dm_channel": ("contact", 2, None),
+    "derived_corroboration": ("corroboration", 5, None),
+    "neg_b2c_words": ("negative", -40, 180),
+    "neg_liquidated": ("negative", -50, None),
+    "neg_non_cn_origin": ("negative", -20, 365),
+    "neg_state_body": ("negative", -20, None),
+    "flag_competitor": ("gate", 0, None),
+    "flag_supplier_cn": ("gate", 0, None),
+}
+
+
+def _spec_rows() -> set[tuple[object, ...]]:
+    """The spec table as (key, group_key, points, group_cap, decay_days)."""
+    return {
+        (key, group, points, CAPS[group], decay)
+        for key, (group, points, decay) in SPEC_TABLE.items()
+    }
 
 
 def _migration_weights() -> tuple[tuple[object, ...], ...]:
@@ -74,6 +118,12 @@ def test_the_migration_seeds_exactly_the_enums_copy():
     assert _migration_weights() == tuple(tuple(w) for w in e.WEIGHTS_V1)
 
 
+def test_both_copies_are_the_spec_table():
+    assert len(SPEC_TABLE) == 26
+    assert {tuple(w) for w in e.WEIGHTS_V1} == _spec_rows()
+    assert set(_migration_weights()) == _spec_rows()
+
+
 async def test_version_1_is_seeded_approved_and_equal_to_the_tuple(session):
     rows = (
         await session.execute(
@@ -85,9 +135,9 @@ async def test_version_1_is_seeded_approved_and_equal_to_the_tuple(session):
         )
     ).all()
     assert len(rows) == 26
-    assert {(r.key, r.group_key, r.points, r.group_cap, r.decay_days) for r in rows} == {
-        tuple(w) for w in e.WEIGHTS_V1
-    }
+    seeded = {(r.key, r.group_key, r.points, r.group_cap, r.decay_days) for r in rows}
+    assert seeded == {tuple(w) for w in e.WEIGHTS_V1}
+    assert seeded == _spec_rows()
     assert {(r.proposed_by, r.approved_by) for r in rows} == {("seed", "seed")}
     assert all(r.approved_at is not None for r in rows)
     assert {str(r.decayed_factor) for r in rows} == {"0.50"}

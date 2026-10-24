@@ -127,6 +127,57 @@ async def test_a_handle_is_stored_only_as_its_key(session, company):
     assert await refused(session, insert, c=company, u="namuna_01") is None
 
 
+# (table, column, extra columns for a valid row, a valid key, the constraint).
+COMPANY = {"display_name": "'Namuna'", "name_key": "'namuna'"}
+KEY_COLUMNS = [
+    ("companies", "website_domain", COMPANY, "namuna.example.uz",
+     "ck_companies_website_domain"),
+    ("companies", "telegram_channel", COMPANY, "namuna_optom",
+     "ck_companies_telegram_channel"),
+    ("contacts", "telegram_username", {"company_id": ":c", "tier": "'company'"},
+     "namuna_optom", "ck_contacts_telegram_username"),
+    ("interactions", "sender_username",
+     {"tg_chat_id": "-1001000000001", "tg_message_id": "7", "occurred_at": "now()",
+      "prefilter_hit": "'{volume_kub}'"},
+     "namuna_optom", "ck_interactions_sender_username"),
+    ("suppression", "key",
+     {"kind": "'dnc'", "key_type": "'tg_username'", "source": "'owner_bot'"},
+     "namuna_optom", "ck_suppression_username"),
+    ("suppression", "key",
+     {"kind": "'dnc'", "key_type": "'domain'", "source": "'owner_bot'"},
+     "namuna.example.uz", "ck_suppression_domain"),
+]  # fmt: skip
+# Values the key function answers NULL for: «x = NULL» is NULL, which a CHECK
+# read as passed, so 02's «col = cs_key(col)» stored every one of them.
+NOT_KEYS = ["namunabot", "Mixed Case!!", "instagram.com", "not a domain", "t.me", "abc"]
+
+
+@pytest.mark.parametrize(("table", "column", "extra", "good", "constraint"), KEY_COLUMNS)
+@pytest.mark.parametrize("bad", NOT_KEYS)
+async def test_a_value_the_key_function_refuses_is_never_stored(
+    session, company, table, column, extra, good, constraint, bad
+):
+    names = ", ".join([*extra, column])
+    values = ", ".join([*extra.values(), ":v"])
+    insert = f"INSERT INTO {table} ({names}) VALUES ({values})"
+    params = {"c": company} if ":c" in values else {}
+    error = await refused(session, insert, v=bad, **params)
+    assert error is not None and f'"{constraint}"' in error, (bad, error)
+    assert await refused(session, insert, v=good, **params) is None
+
+
+async def test_a_key_column_may_stay_empty(session, company):
+    assert (
+        await refused(
+            session,
+            "UPDATE companies SET website_domain = NULL, telegram_channel = NULL "
+            "WHERE id = :c",
+            c=company,
+        )
+        is None
+    )
+
+
 async def test_one_delivered_push_per_external_id(session, company, candidate):
     insert = (
         "INSERT INTO push_log (external_id, attempt, candidate_id, company_id, "
@@ -149,13 +200,16 @@ async def test_one_delivered_push_per_external_id(session, company, candidate):
 
 @pytest.mark.parametrize(
     ("status", "http", "ok"),
-    # Not pinned: ('sent', NULL) passes — NULL BETWEEN … is NULL, which a CHECK
-    # reads as true; that is the 02 §2.10 text as written (crm_push sets both).
     [
         ("failed", 200, False),
         ("unknown", 200, True),
         ("sent", 500, False),
         ("sent", 201, True),
+        # Allowed on purpose (02 §2.10 rule 5b): an 'unknown' row with no HTTP
+        # answer (a read timeout, a crash) that an outcomes walk confirms
+        # becomes 'sent' with http_status left as it was.
+        ("sent", None, True),
+        ("failed", None, True),
     ],
 )
 async def test_sent_means_2xx_and_2xx_means_sent_or_unknown(
@@ -205,7 +259,7 @@ async def test_a_joined_chat_has_a_join_time(session):
          "ck_lead_candidates_approved"),
         ("state = 'review'", "ck_lead_candidates_scored"),
         ("state = 'excluded'", "ck_lead_candidates_excluded"),
-        ("state = 'suppressed'", "ck_lead_candidates_suppressed"),
+        ("state = 'suppressed'", "trg_lead_candidates_suppressed"),
     ],
 )  # fmt: skip
 async def test_candidate_state_invariants(session, candidate, assignment, constraint):
@@ -215,6 +269,163 @@ async def test_candidate_state_invariants(session, candidate, assignment, constr
         cand=candidate,
     )
     assert error is not None and f'"{constraint}"' in error
+
+
+COOLDOWN_ROW = (
+    "INSERT INTO suppression (kind, key_type, key, source, expires_at) VALUES "
+    "('cooldown', 'company_id', :key, 'outcomes', now() - interval '40 days') "
+    "RETURNING id"
+)
+FEED_ROW = (
+    "INSERT INTO suppression (kind, key_type, key, salt_id, source, last_seen_at) "
+    "VALUES ('client', 'phone_hash', 'a1b2c3d4e5f6a7b8c9d0', '9caf06bb', 'erp_feed', "
+    "now() - interval '2 days') RETURNING id"
+)
+# The statements that retire suppression rows: 02 §4 R6 and the full pull's
+# delete of unseen feed rows (02 §2.8, 05 §B.2 step 4).
+R6_COOLDOWN = (
+    "DELETE FROM suppression WHERE kind = 'cooldown' "
+    "AND expires_at < now() - interval '30 days'"
+)
+FULL_PULL_UNSEEN = (
+    "DELETE FROM suppression WHERE source = 'erp_feed' "
+    "AND last_seen_at < now() - interval '1 day'"
+)
+
+
+@pytest.mark.parametrize(
+    ("row", "retire"), [(COOLDOWN_ROW, R6_COOLDOWN), (FEED_ROW, FULL_PULL_UNSEEN)]
+)
+async def test_retiring_a_suppression_row_keeps_its_suppressed_candidate(
+    session, company, candidate, row, retire
+):
+    params = {"key": str(company)} if ":key" in row else {}
+    suppression_id = await _run(session, row, **params)
+    await _run(
+        session,
+        "UPDATE lead_candidates SET state = 'suppressed', suppressed_by = :s "
+        "WHERE id = :cand",
+        s=suppression_id,
+        cand=candidate,
+    )
+    # 02's CHECK made this DELETE fail on the FK's own SET NULL (#809).
+    assert await refused(session, retire) is None
+    state, pointer = (
+        await session.execute(
+            sa.text("SELECT state, suppressed_by FROM lead_candidates WHERE id = :cand"),
+            {"cand": candidate},
+        )
+    ).one()
+    assert (state, pointer) == ("suppressed", None)
+    # The «row is gone» state is still an ordinary row to every other write.
+    assert (
+        await refused(
+            session,
+            "UPDATE lead_candidates SET hold_until = now() WHERE id = :cand",
+            cand=candidate,
+        )
+        is None
+    )
+
+
+async def test_a_candidate_enters_suppressed_only_naming_its_row(session, company):
+    error = await refused(
+        session,
+        "INSERT INTO lead_candidates (company_id, state) VALUES (:c, 'suppressed')",
+        c=company,
+    )
+    assert error is not None and '"trg_lead_candidates_suppressed"' in error
+    suppression_id = await _run(session, COOLDOWN_ROW, key=str(company))
+    assert (
+        await refused(
+            session,
+            "INSERT INTO lead_candidates (company_id, state, suppressed_by) "
+            "VALUES (:c, 'suppressed', :s)",
+            c=company,
+            s=suppression_id,
+        )
+        is None
+    )
+
+
+async def test_a_merge_target_cannot_be_deleted_from_under_its_sources(session, company):
+    source = await _run(
+        session,
+        "INSERT INTO companies (display_name, name_key, state, merged_into) "
+        "VALUES ('Namuna Ikki', 'namuna ikki', 'merged', :c) RETURNING id",
+        c=company,
+    )
+    # RESTRICT names the real reason; 02's SET NULL failed on ck_companies_merged.
+    error = await refused(session, "DELETE FROM companies WHERE id = :c", c=company)
+    assert error is not None and '"fk_companies_merged_into"' in error
+    error = await refused(
+        session, "UPDATE companies SET merged_into = NULL WHERE id = :s", s=source
+    )
+    assert error is not None and '"ck_companies_merged"' in error
+    # Undoing the merge clears both in one statement.
+    assert (
+        await refused(
+            session,
+            "UPDATE companies SET state = 'active', merged_into = NULL WHERE id = :s",
+            s=source,
+        )
+        is None
+    )
+    delete = "DELETE FROM companies WHERE id = :c"
+    assert await refused(session, delete, c=company) is None
+
+
+# 02 §4 R6's hold sweep as T-31's retention_job must run it: push_log keeps
+# its candidate (candidate_id ON DELETE RESTRICT, the ledger is append-only),
+# so a hold candidate with push history (approved → 3 failed attempts →
+# review → hold) is skipped, not deleted. Without the NOT EXISTS clause one
+# such row aborts the whole statement.
+R6_HOLD_SWEEP = (
+    "DELETE FROM lead_candidates WHERE state = 'hold' "
+    "AND updated_at < now() - interval '365 days' "
+    "AND NOT EXISTS (SELECT 1 FROM push_log p WHERE p.candidate_id = lead_candidates.id)"
+)
+
+
+async def test_r6_hold_sweep_skips_candidates_with_push_history(session):
+    old = "now() - interval '400 days'"
+    ids = []
+    for n in (1, 2):
+        company_id = await _run(
+            session,
+            "INSERT INTO companies (display_name, name_key) "
+            f"VALUES ('Namuna {n}', 'namuna {n}') RETURNING id",
+        )
+        candidate_id = await _run(
+            session,
+            "INSERT INTO lead_candidates (company_id, state, updated_at) "
+            f"VALUES (:c, 'hold', {old}) RETURNING id",
+            c=company_id,
+        )
+        ids.append((company_id, candidate_id))
+    (pushed_company, pushed), (_, quiet) = ids
+    await _run(
+        session,
+        "INSERT INTO push_log (external_id, attempt, candidate_id, company_id, "
+        "phone_tail, endpoint, source_key_sent, payload_sha256, status, http_status) "
+        "VALUES (:e, 3, :cand, :c, '900000001', '/api/leads/in/agent', 'agent', :sha, "
+        "'failed', 503)",
+        e=EXTERNAL.format(pushed_company),
+        cand=pushed,
+        c=pushed_company,
+        sha="0" * 64,
+    )
+    bare = R6_HOLD_SWEEP.split(" AND NOT EXISTS", 1)[0]
+    error = await refused(session, bare)
+    assert error is not None and '"fk_push_log_candidate_id"' in error
+    assert await refused(session, R6_HOLD_SWEEP) is None
+    left = (
+        await session.execute(
+            sa.text("SELECT id FROM lead_candidates WHERE id IN (:a, :b)"),
+            {"a": pushed, "b": quiet},
+        )
+    ).scalars()
+    assert set(left) == {pushed}
 
 
 async def test_a_second_open_candidate_per_company_is_refused(
@@ -282,23 +493,76 @@ async def test_an_interaction_without_a_prefilter_hit_is_refused(session):
     assert error is not None and '"ck_interactions_prefilter_nonempty"' in error
 
 
-async def test_an_approved_weights_version_is_frozen(session):
-    error = await refused(
-        session,
-        "UPDATE scoring_weights SET points = 35 WHERE version = 1 AND key = 'cn_origin'",
-    )
+ONE_ROW = "WHERE version = 1 AND key = 'cn_origin'"
+
+
+@pytest.mark.parametrize(
+    "assignment",
+    [
+        "points = 35",
+        # 02 §2.16 froze five weight columns only; each of these went through.
+        "approved_at = NULL, approved_by = NULL",
+        "version = 7",
+        "key = 'cn_sector_prior'",
+        "note = 'namuna'",
+        "proposed_by = 'owner:1'",
+        "approved_at = now(), approved_by = 'owner:1'",
+        "created_at = now() - interval '1 day'",
+    ],
+)
+async def test_an_approved_weights_row_refuses_every_change(session, assignment):
+    error = await refused(session, f"UPDATE scoring_weights SET {assignment} {ONE_ROW}")
+    assert error is not None and "is frozen" in error, error
+
+
+async def test_un_approve_edit_re_approve_is_refused_at_the_first_step(session):
+    steps = [
+        "UPDATE scoring_weights SET approved_at = NULL, approved_by = NULL",
+        "UPDATE scoring_weights SET points = 99",
+        "UPDATE scoring_weights SET approved_at = now(), approved_by = 'seed'",
+    ]
+    error = await refused(session, f"{steps[0]} {ONE_ROW}")
     assert error is not None and "is frozen" in error
+    # Even run as one transaction the first step stops it.
+    with pytest.raises(sa.exc.DBAPIError, match="is frozen"):
+        async with session.begin_nested():
+            for step in steps:
+                await session.execute(sa.text(f"{step} {ONE_ROW}"))
+    points = await _run(session, f"SELECT points FROM scoring_weights {ONE_ROW}")
+    assert points == 20
+
+
+async def test_an_approved_weights_version_refuses_delete(session):
     error = await refused(session, "DELETE FROM scoring_weights WHERE version = 1")
     assert error is not None and "append-only" in error
-    # The note is not a weight: editing it is allowed.
+
+
+async def test_a_proposed_version_is_edited_then_approved_then_frozen(session):
+    # /vazn's path (02 §2.7), inside the test's rolled-back transaction.
+    await _run(
+        session,
+        "INSERT INTO scoring_weights (version, key, group_key, points, group_cap, "
+        "decay_days, proposed_by) SELECT 2, key, group_key, points, group_cap, "
+        "decay_days, 'owner:1' FROM scoring_weights WHERE version = 1",
+    )
+    v2 = "WHERE version = 2 AND key = 'cn_origin'"
+    assert await refused(session, f"UPDATE scoring_weights SET points = 18 {v2}") is None
+    assert await refused(session, f"UPDATE scoring_weights SET note = 'x' {v2}") is None
+    # Approval is one act with a name: half of it is refused.
+    error = await refused(
+        session, "UPDATE scoring_weights SET approved_at = now() WHERE version = 2"
+    )
+    assert error is not None and '"ck_scoring_weights_approved"' in error
     assert (
         await refused(
             session,
-            "UPDATE scoring_weights SET note = 'namuna' WHERE version = 1 AND key = "
-            "'cn_origin'",
+            "UPDATE scoring_weights SET approved_by = 'owner:1', approved_at = now() "
+            "WHERE version = 2",
         )
         is None
     )
+    error = await refused(session, f"UPDATE scoring_weights SET points = 17 {v2}")
+    assert error is not None and "version 2 is frozen" in error
 
 
 APPEND_ONLY_ROWS = {

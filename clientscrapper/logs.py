@@ -11,8 +11,12 @@ Logs carry ids and counts, never bodies, names, phones, handles, quotes,
 payloads, headers or any `.env` value. Two filters are the backstop for a
 careless call: ``RedactBodies`` drops an extra named like a body before any
 formatter sees it, and ``RedactPatterns`` rewrites what still slipped into the
-message or the traceback (a phone, a key header, a token, a DSN password, a
-handle). Both run in either format.
+message, the traceback or the value of any other extra (a phone, an e-mail, a
+key header, a token, a DSN password, a Telegram or Instagram handle). Both run
+in either format. The phone, e-mail and Instagram patterns are imported from
+``collectors/keywords.py`` (06 §5.2), never restated: they over-match (any nine
+digits standing alone become ``<phone>``), which is the safe direction for a
+log; an integer extra is an id and is left as it is.
 """
 
 from __future__ import annotations
@@ -21,9 +25,11 @@ import json
 import logging
 import re
 import sys
+from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any, Literal, TextIO
 
+from clientscrapper.collectors.keywords import EMAIL_RE, IG_RE, PHONE_RE
 from clientscrapper.config import settings
 
 LogFormat = Literal["json", "text"]
@@ -53,19 +59,42 @@ REDACTED_EXTRAS = frozenset(
     }
 )
 
+_KEY_NAMES = r"x-gsr-key|x-erp-key|proxy-authorization|authorization|x-api-key"
+_AUTH_SCHEME = r"(?:bearer|basic|digest|token|api-key|bot)\s+"
+_KEY_HEADER = re.compile(
+    rf"(?i)({_KEY_NAMES})[\"']?\s*[=:]\s*"
+    rf"(?:([\"'])(?:{_AUTH_SCHEME})?[^\"']*\2|(?:{_AUTH_SCHEME})?\S+)"
+)
+
+
+def _ig_handle(match: re.Match[str]) -> str:
+    """«insta: malika.karimova» → «insta: …»: the label stays, the handle goes."""
+    return match.group(0)[: match.start(1) - match.start(0)] + "…"
+
+
 # Applied in this order: credentials first, so a token is never half-eaten by
-# the phone rule; handles last, and only outside URLs (a DSN's «@host» or a
-# link's «user@» is not a Telegram handle).
-_SECRET_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
+# the phone rule; then e-mails (whole, before the handle rule can eat their
+# «@domain»), phones and Instagram handles — PHONE_RE, EMAIL_RE and IG_RE are
+# collectors/keywords.py's, the patterns the normaliser and the pseudonymiser
+# use (06 §5.2: one home, so all three agree on what a phone is: «93 517 22
+# 84», «(93) 517-22-84» and nine bare digits are phones without a +998);
+# Telegram handles last, and only outside URLs (a DSN's «@host» or a link's
+# «user@» is not a Telegram handle).
+_SECRET_RULES: tuple[
+    tuple[re.Pattern[str], str | Callable[[re.Match[str]], str]], ...
+] = (
     (re.compile(r"sk-ant-[A-Za-z0-9_-]{20,}"), "<secret>"),
     (re.compile(r"\d{8,10}:[A-Za-z0-9_-]{35}"), "<secret>"),
     (re.compile(r"(?i)telethon_session=\S+"), "<secret>"),
-    (
-        re.compile(r"(?i)(x-gsr-key|x-erp-key|authorization|x-api-key)[=:]\s*\S+"),
-        r"\1=<key>",
-    ),
+    # A key header with its whole value: the auth scheme too («Authorization:
+    # Bearer <t>», Apify; «Api-Key <k>», Yandex), and a quoted value as a dict's
+    # repr prints it. 06 §4.5's «[=:]\s*\S+» stopped at the scheme word and
+    # logged the credential after it.
+    (_KEY_HEADER, r"\1=<key>"),
     (re.compile(r"postgresql(\+\w+)?://([^:/]+):([^@]+)@"), r"postgresql\1://\2:***@"),
-    (re.compile(r"\+?998[\s-]?\d{2}[\s-]?\d{3}[\s-]?\d{2}[\s-]?\d{2}"), "<phone>"),
+    (EMAIL_RE, "<email>"),
+    (PHONE_RE, "<phone>"),
+    (IG_RE, _ig_handle),
 )
 _URL_RE = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://\S+")
 _HANDLE_RE = re.compile(r"@[A-Za-z][A-Za-z0-9_]{4,}")
@@ -81,7 +110,8 @@ _RECORD_ATTRS = frozenset(
 
 
 def redact(text: str) -> str:
-    """The 06 §4.5 pattern table applied to one string."""
+    """The 06 §4.5 pattern table, with keywords.py's phone, e-mail and
+    Instagram patterns, applied to one string."""
     for pattern, replacement in _SECRET_RULES:
         text = pattern.sub(replacement, text)
     out: list[str] = []
@@ -103,11 +133,42 @@ class RedactBodies(logging.Filter):
         return True
 
 
+_KEY_HEADER_NAMES = frozenset(_KEY_NAMES.split("|"))
+
+
+def _redact_item(key: Any, value: Any) -> Any:
+    name = key.lower() if isinstance(key, str) else None
+    if name in _KEY_HEADER_NAMES:
+        return "<key>"
+    if name in REDACTED_EXTRAS:
+        return "<redacted>"
+    return redact_value(value)
+
+
+def redact_value(value: Any) -> Any:
+    """``redact`` through an extra's value: strings, the strings inside lists,
+    tuples and dicts (keys too; under a key-header or body-shaped key the whole
+    value goes), and the ``str()`` of anything JSON cannot carry, since that is
+    what the formatter would print. Numbers, booleans and None are ids and
+    counts and stay as they are. Never mutates its input."""
+    if value is None or isinstance(value, bool | int | float):
+        return value
+    if isinstance(value, str):
+        return redact(value)
+    if isinstance(value, dict):
+        return {redact_value(k): _redact_item(k, v) for k, v in value.items()}
+    if isinstance(value, list | tuple | set | frozenset):
+        return [redact_value(v) for v in value]
+    return redact(str(value))
+
+
 class RedactPatterns(logging.Filter):
-    """Rewrite the message and the traceback through ``redact``.
+    """Rewrite the message, the traceback and every extra through ``redact``.
 
     The message is rendered once here (``msg % args``) and stored back with no
-    args, so no formatter can re-insert an argument that carried a phone.
+    args, so no formatter can re-insert an argument that carried a phone. An
+    extra not on the body list is kept, its value redacted (``error=str(exc)``
+    can carry a DSN, ``sender=…`` a phone).
     """
 
     def __init__(self) -> None:
@@ -123,6 +184,9 @@ class RedactPatterns(logging.Filter):
             record.exc_text = redact(record.exc_text)
         if record.stack_info:
             record.stack_info = redact(record.stack_info)
+        for key, value in list(record.__dict__.items()):
+            if key not in _RECORD_ATTRS and not key.startswith("_"):
+                record.__dict__[key] = redact_value(value)
         return True
 
 

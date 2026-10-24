@@ -48,16 +48,22 @@ logs: ## Tail logs from all running services
 ps: ## Show container status
 	$(COMPOSE) ps
 
+# The role and database come from the db container's own environment (compose
+# set them from .env); the host shell never loaded .env, so expanding them here
+# fell back to the defaults whenever the owner had changed them.
 psql: ## Open a psql shell
-	$(COMPOSE) exec db psql -U $${POSTGRES_USER:-clientscrapper} -d $${POSTGRES_DB:-clientscrapper}
+	$(COMPOSE) exec db sh -c 'exec psql -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"'
 
 # --- Database ---------------------------------------------------------------
 migrate: ## Apply all migrations
 	$(COMPOSE) run --rm init alembic upgrade head
 
-revision: ## Autogenerate a migration on this machine (needs DATABASE_URL): make revision m="add x"
+# 02 §5 names migrations 000N_<slug>: the id is minted here and alembic.ini's
+# file_template names the file after it.
+revision: ## Autogenerate a migration 000N_<slug> on this machine (needs DATABASE_URL): make revision m="add x"
 	@test -n "$(m)" || (echo "usage: make revision m=\"message\"" && exit 1)
-	alembic revision --autogenerate -m "$(m)"
+	rev_id="$$(python scripts/revision_id.py "$(m)")" && \
+		alembic revision --autogenerate -m "$(m)" --rev-id "$$rev_id"
 
 downgrade: ## Roll back one migration
 	$(COMPOSE) run --rm init alembic downgrade -1
@@ -132,15 +138,27 @@ typecheck: ## mypy strict on the files listed in pyproject.toml
 
 check: test ## Same gates as make test
 
-db-test: ## Throwaway postgres:16 for the suite on 127.0.0.1, port DB_PORT (5433)
+# Migrated, with the scratch database test_migrations needs, so the printed
+# line is the whole recipe. TCP readiness, not the socket: during initdb the
+# image runs a socket-only server that is then restarted.
+DB_TEST_URL = postgresql+psycopg://cs:cs@localhost:$${DB_PORT:-5433}
+db-test: ## Throwaway postgres:16 (cs_test migrated + cs_test_rt) on 127.0.0.1:DB_PORT (5433); prints the line to run
 	docker run -d --rm --name clientscrapper-test-db \
 		-e POSTGRES_USER=cs -e POSTGRES_PASSWORD=cs -e POSTGRES_DB=cs_test \
 		-p 127.0.0.1:$${DB_PORT:-5433}:5432 postgres:16
-	@echo "DATABASE_URL=postgresql+psycopg://cs:cs@localhost:$${DB_PORT:-5433}/cs_test CS_REQUIRE_DB=1 make test"
+	@for i in $$(seq 60); do \
+		docker exec clientscrapper-test-db pg_isready -q -h 127.0.0.1 -U cs -d cs_test && exit 0; \
+		sleep 1; \
+	done; echo "postgres did not start in 60 s"; exit 1
+	docker exec clientscrapper-test-db psql -q -h 127.0.0.1 -U cs -d cs_test -c 'CREATE DATABASE cs_test_rt'
+	DATABASE_URL=$(DB_TEST_URL)/cs_test alembic upgrade head
+	@echo "DATABASE_URL=$(DB_TEST_URL)/cs_test CS_MIGRATION_DATABASE_URL=$(DB_TEST_URL)/cs_test_rt CS_REQUIRE_DB=1 make test"
 
+# git rev-parse finds the hooks directory even where .git is a file (a
+# worktree shares the main checkout's hooks, and so its script).
 hooks: ## Install the pre-push gate (scripts/pre-push.sh)
-	@test -f scripts/pre-push.sh || (echo "scripts/pre-push.sh hali yoʻq" && exit 1)
-	ln -sf ../../scripts/pre-push.sh .git/hooks/pre-push
+	@test -x scripts/pre-push.sh || (echo "scripts/pre-push.sh yoʻq yoki bajariladigan emas" && exit 1)
+	ln -sf ../../scripts/pre-push.sh "$$(git rev-parse --git-path hooks)/pre-push"
 
 smoke: ## Live smoke tests, one real request per collector (VPS only)
 	LIVE=1 pytest -q -m live tests/live

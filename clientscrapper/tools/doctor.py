@@ -11,9 +11,11 @@ from ``os.environ`` (Compose passes `.env` through ``env_file``),
 here; ``tests/test_env_example.py`` keeps it equal to the keys of
 `.env.example`.
 
-Skeleton (T-01): config, server and database checks. The Telegram
-(``get_me``/``get_chat``), ERP reachability, model price and ``salt_id``
-checks arrive with T-08 and are reported as «not checked yet» meanwhile.
+Config, server and database checks (T-01); the configured model ids priced
+and the daily allocations table (T-06) — read from ``services/usage.py``,
+which imports no settings. The Telegram (``get_me``/``get_chat``), ERP
+reachability and ``salt_id`` checks arrive with T-08 and are reported as
+«not checked yet» meanwhile.
 
 Exit code 1 when anything is an error; warnings alone exit 0.
 """
@@ -27,8 +29,11 @@ import sys
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import time
+from decimal import Decimal
 from pathlib import Path
 from typing import Literal
+
+from clientscrapper.services import usage
 
 EXPECTED_ENV_KEYS: tuple[str, ...] = (
     "POSTGRES_USER",
@@ -217,6 +222,75 @@ def _database(state: DbState) -> Finding:
     return _info(f"✅ Baza: ulanish bor, migratsiya {state.version}.")
 
 
+def _usd(value: Decimal) -> str:
+    """Money with at least two decimals and no trailing noise: 0.10, 0.165, 10.00."""
+    whole, _, frac = f"{value.normalize():f}".partition(".")
+    return f"{whole}.{frac.ljust(2, '0')}"
+
+
+def _model_prices(env: Mapping[str, str]) -> list[Finding]:
+    """Each configured model id must be priced (04 §8): ``costs.ask`` refuses
+    every call to an unpriced one, so a wrong id silently stops that work."""
+    found: list[Finding] = []
+    # A missing key runs on the shipped default; a blank one is read by the
+    # settings as an empty id, which nothing prices.
+    roles = tuple(
+        (env.get(r.key, r.default).strip(), env.get(r.price_key) or "")
+        for r in usage.MODEL_ROLES
+    )
+    for role, (model, override) in zip(usage.MODEL_ROLES, roles, strict=True):
+        if override.strip() and usage.parse_price(override) is None:
+            found.append(
+                _error(
+                    f"❌ {role.price_key} oʻqilmadi — «kirish/chiqish» yoki "
+                    "«kirish/chiqish/kesh_oʻqish/kesh_yozish» boʻlsin, masalan 0.10/0.50."
+                )
+            )
+            continue
+        if not model:
+            found.append(_error(f"❌ {role.key} boʻsh — model nomini yoz."))
+            continue
+        price = usage.resolve_price(model, roles)
+        if price is None:
+            found.append(
+                _error(
+                    f"❌ {role.key}={model}: narxi nomaʼlum — bu modelga har bir "
+                    f"chaqiruv ({role.label_uz}) rad etiladi. Model nomini tekshir yoki "
+                    f"{role.price_key}=kirish/chiqish yoz (1 mln token uchun $)."
+                )
+            )
+            continue
+        source = role.price_key if override.strip() else "usage.py"
+        if price.input == 0 and price.output == 0:
+            # costs.ask refuses a paid call estimated at $0 as unpriced.
+            found.append(
+                _error(
+                    f"❌ {role.key}={model}: narxi $0 ({source}) — bunday narx bilan har "
+                    f"bir chaqiruv ({role.label_uz}) rad etiladi. {role.price_key} ni "
+                    "boʻshat yoki haqiqiy narxni yoz."
+                )
+            )
+            continue
+        found.append(
+            _info(
+                f"✅ {role.key}={model}: kirish ${_usd(price.input)} · chiqish "
+                f"${_usd(price.output)} / 1 mln token ({source}; {role.label_uz})."
+            )
+        )
+    return found
+
+
+def allocations_table() -> str:
+    """The daily budget split of 04 §8, one line per family."""
+    total = sum(usage.ALLOCATIONS.values(), Decimal(0))
+    lines = [f"ℹ️ Kunlik byudjet taqsimoti (USD, Toshkent kuni) — jami ${_usd(total)}:"]
+    for family in usage.FAMILIES:
+        ops = [op for op, f in usage.FAMILY.items() if f == family]
+        parts = " · ".join(f"{op} {_usd(usage.ALLOCATIONS[op])}" for op in ops)
+        lines.append(f"   {family} ${_usd(usage.FAMILY_CAPS[family])}: {parts}")
+    return "\n".join(lines)
+
+
 def check(
     env: Mapping[str, str],
     meminfo: str,
@@ -393,7 +467,11 @@ def check(
     if db is not None:
         found.append(_database(db))
 
-    # C13: what the skeleton does not check yet.
+    # C13: the configured model ids are priced; the allocations table.
+    found.extend(_model_prices(env))
+    found.append(_info(allocations_table()))
+
+    # C14: what is not checked yet.
     found.append(
         _info("ℹ️ Telegram (bot tokeni, menejerlar) bilan bogʻlanish hali tekshirilmaydi.")
     )

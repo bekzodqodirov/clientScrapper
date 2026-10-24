@@ -53,7 +53,7 @@ class Interaction(Base):
 
     __table_args__ = (
         sa.CheckConstraint(
-            "sender_username = cs_username_key(sender_username)",
+            "sender_username IS NOT DISTINCT FROM cs_username_key(sender_username)",
             name="ck_interactions_sender_username",
         ),
         sa.CheckConstraint(

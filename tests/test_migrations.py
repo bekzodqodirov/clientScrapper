@@ -5,22 +5,27 @@ empties its ``public`` schema first and the round trip ends in ``downgrade
 base``. Without it the tests skip, and under
 ``CS_REQUIRE_DB=1`` they fail: a skipped migration test proves nothing.
 
-``compare_metadata`` (what ``alembic check`` runs) is blind to four things,
-measured by editing the models one at a time: CHECK text, a partial index's
-WHERE, an index's method/operator class, and a generated column's expression.
-Those four are compared against the catalog here instead. PG rewrites the text
-it stores (``IN`` → ``= ANY (ARRAY[…])``, ``BETWEEN`` → ``>= AND <=``, casts),
-so the comparison is by signature: the literals and numbers, and the table's
-columns the expression names.
+``compare_metadata`` (what ``alembic check`` runs) is blind to CHECK text, a
+partial index's WHERE, an index's method or operator class, and a generated
+column's expression. So the models are also built for real: inside a
+rolled-back transaction ``Base.metadata.create_all`` makes a second copy of
+every table in a probe schema, and every constraint, index and column default
+the server prints for it must equal what it prints for the migration's tables,
+character for character. The server canonicalises both sides the same way
+(``IN`` → ``= ANY (ARRAY[…])``, casts), so no text is compared by hand — an
+operator turned round (``<=`` → ``>=``, ``!~`` → ``~``, ``IN`` → ``NOT IN``)
+is a difference. ``alembic upgrade head --sql`` is rebuilt the same way, so
+offline mode cannot drift from online either.
 """
 
 from __future__ import annotations
 
+import io
 import os
-import re
-from collections import Counter
 from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
+from typing import Any
 
 import pytest
 import sqlalchemy as sa
@@ -42,6 +47,7 @@ FUNCTIONS = {
     "cs_touch_updated_at",
     "cs_append_only",
     "cs_scoring_weights_frozen",
+    "cs_candidate_suppressed_by",
 }
 TOUCHED = {
     "sources",
@@ -53,6 +59,8 @@ TOUCHED = {
     "runtime_flags",
 }
 APPEND_ONLY = {"push_log", "outcomes", "merge_log", "purge_log", "usage_log"}
+MODEL_PROBE = "cs_model_probe"
+OFFLINE_PROBE = "cs_offline_probe"
 
 
 def _scratch_url() -> str:
@@ -73,8 +81,8 @@ def _scratch_url() -> str:
     return async_url(url)
 
 
-def _config(url: str) -> Config:
-    cfg = Config(str(ROOT / "alembic.ini"))
+def _config(url: str, output: io.StringIO | None = None) -> Config:
+    cfg = Config(str(ROOT / "alembic.ini"), output_buffer=output)
     cfg.set_main_option("script_location", str(ROOT / "alembic"))
     cfg.set_main_option("sqlalchemy.url", url.replace("%", "%%"))
     cfg.attributes["configure_logger"] = False
@@ -97,6 +105,8 @@ def scratch() -> Iterator[tuple[sa.Engine, Config]]:
     # in the tree is what gets measured (a scratch left at head by an earlier
     # run would skip it).
     with engine.begin() as conn:
+        for schema in (MODEL_PROBE, OFFLINE_PROBE):
+            conn.execute(sa.text(f"DROP SCHEMA IF EXISTS {schema} CASCADE"))
         conn.execute(sa.text("DROP SCHEMA public CASCADE"))
         conn.execute(sa.text("CREATE SCHEMA public"))
     assert _public_tables(engine) == set()
@@ -116,31 +126,131 @@ def _public_tables(engine: sa.Engine) -> set[str]:
     return {str(r) for r in rows} - {"alembic_version"}
 
 
-# --- signatures ------------------------------------------------------------------
+# --- the catalog as the server prints it -------------------------------------------
 
-_QUOTED = re.compile(r"'((?:[^']|'')*)'")
-_CAST = re.compile(
-    r"::(?:character varying|double precision|timestamp with time zone|[a-z_]+)"
-    r"(?:\[\])?(?:\(\d+\))?",
-    re.IGNORECASE,
-)
-_NUMBER = re.compile(r"(?<![\w.])-?\d+(?:\.\d+)?")
-_WORD = re.compile(r"[a-z_][a-z0-9_]*")
+_NAMESPACE = "(SELECT oid FROM pg_namespace WHERE nspname = :schema)"
 
 
-def signature(sql: str, columns: set[str]) -> tuple[Counter[str], frozenset[str]]:
-    """(literals and numbers as a multiset, the columns and cs_* functions named)."""
-    literals = [m.group(1).replace("''", "'") for m in _QUOTED.finditer(sql)]
-    rest = _CAST.sub("", _QUOTED.sub(" ", sql))
-    numbers = _NUMBER.findall(rest)
-    words = {
-        w for w in _WORD.findall(rest.lower()) if w in columns or w.startswith("cs_")
+def catalog(conn: sa.Connection, schema: str) -> dict[str, dict[tuple[str, ...], str]]:
+    """Every constraint, index, column default / generated expression, trigger
+    and function of ``schema``, keyed by name, with the schema's own name taken
+    out of the text.
+
+    The caller sets the search path first: ``public`` alone for the migration's
+    tables, ``<probe>, public`` for a probe, so a name the probe shadows (its
+    own tables, its own functions) and one it borrows from public (pg_trgm, the
+    cs_* functions the model probe has none of) print unqualified on both
+    sides.
+    """
+    params = {"schema": schema}
+
+    def rows(sql: str) -> list[sa.Row[Any]]:
+        return list(conn.execute(sa.text(sql), params))
+
+    def plain(text: str) -> str:
+        return text.replace(f"{schema}.", "")
+
+    constraints = {
+        (r.table, r.name): f"{r.kind}: {plain(r.definition)}"
+        for r in rows(
+            "SELECT cl.relname AS table, c.conname AS name, c.contype AS kind, "
+            "pg_get_constraintdef(c.oid) AS definition FROM pg_constraint c "
+            f"JOIN pg_class cl ON cl.oid = c.conrelid WHERE c.connamespace = {_NAMESPACE}"
+        )
     }
-    return Counter(literals + numbers), frozenset(words)
+    indexes = {
+        (r.tablename, r.indexname): plain(r.indexdef)
+        for r in rows("SELECT tablename, indexname, indexdef FROM pg_indexes "
+                      "WHERE schemaname = :schema")
+    }  # fmt: skip
+    defaults = {
+        (r.table, r.column): f"{r.generated or '-'}: {plain(r.expression)}"
+        for r in rows(
+            "SELECT c.relname AS table, a.attname AS column, "
+            "a.attgenerated AS generated, "
+            "pg_get_expr(d.adbin, d.adrelid) AS expression FROM pg_attrdef d "
+            "JOIN pg_attribute a ON a.attrelid = d.adrelid AND a.attnum = d.adnum "
+            f"JOIN pg_class c ON c.oid = d.adrelid WHERE c.relnamespace = {_NAMESPACE}"
+        )
+    }
+    triggers = {
+        (r.table, r.name): plain(r.definition)
+        for r in rows(
+            "SELECT c.relname AS table, t.tgname AS name, "
+            "pg_get_triggerdef(t.oid) AS definition FROM pg_trigger t "
+            "JOIN pg_class c ON c.oid = t.tgrelid "
+            f"WHERE NOT t.tgisinternal AND c.relnamespace = {_NAMESPACE}"
+        )
+    }
+    functions = {
+        (r.name,): plain(r.definition)
+        for r in rows(
+            "SELECT p.proname AS name, pg_get_functiondef(p.oid) AS definition "
+            f"FROM pg_proc p WHERE p.pronamespace = {_NAMESPACE} "
+            "AND p.proname LIKE 'cs\\_%'"
+        )
+    }
+    return {
+        "constraints": constraints,
+        "indexes": indexes,
+        "defaults": defaults,
+        "triggers": triggers,
+        "functions": functions,
+    }
 
 
-def _columns(table: sa.Table) -> set[str]:
-    return {c.name for c in table.columns}
+def differences(
+    ours: dict[tuple[str, ...], str], theirs: dict[tuple[str, ...], str]
+) -> dict[tuple[str, ...], tuple[str | None, str | None]]:
+    return {
+        key: (ours.get(key), theirs.get(key))
+        for key in ours.keys() | theirs.keys()
+        if ours.get(key) != theirs.get(key)
+    }
+
+
+@contextmanager
+def rolled_back(engine: sa.Engine) -> Iterator[sa.Connection]:
+    """One connection inside a transaction that is always rolled back."""
+    with engine.connect() as conn:
+        trans = conn.begin()
+        try:
+            yield conn
+        finally:
+            trans.rollback()
+
+
+def _public_catalog(conn: sa.Connection) -> dict[str, dict[tuple[str, ...], str]]:
+    conn.execute(sa.text("SET LOCAL search_path TO public"))
+    return catalog(conn, "public")
+
+
+def _probe_catalog(
+    conn: sa.Connection, probe: str
+) -> dict[str, dict[tuple[str, ...], str]]:
+    conn.execute(sa.text(f"SET LOCAL search_path TO {probe}, public"))
+    return catalog(conn, probe)
+
+
+def _seed_rows(conn: sa.Connection) -> dict[str, list[object]]:
+    # Unqualified: the caller's search path picks the schema.
+    sources = conn.execute(
+        sa.text(
+            "SELECT to_jsonb(s) - 'created_at' - 'updated_at' FROM sources s ORDER BY key"
+        )
+    ).scalars()
+    weights = conn.execute(
+        sa.text(
+            "SELECT to_jsonb(w) - 'created_at' - 'approved_at', approved_at IS NOT NULL "
+            "FROM scoring_weights w ORDER BY version, key"
+        )
+    ).all()
+    version = conn.execute(sa.text("SELECT version_num FROM alembic_version")).scalars()
+    return {
+        "sources": list(sources),
+        "weights": [tuple(r) for r in weights],
+        "alembic_version": list(version),
+    }
 
 
 # --- tests (file order matters: the round trip runs last) -------------------------
@@ -237,72 +347,82 @@ def test_no_drift_between_the_models_and_the_migration(scratch):
         assert compare_metadata(ctx, Base.metadata) == []
 
 
-def test_check_constraints_match_the_models(scratch):
+def test_the_models_build_the_migrations_catalog_exactly(scratch):
+    """CHECK text, partial-index predicates, index methods and operator classes,
+    FK actions, defaults and the generated column — as the server prints them."""
     engine, _ = scratch
-    with engine.connect() as conn:
-        live = {
-            (r.table, r.name): r.definition
-            for r in conn.execute(
-                sa.text(
-                    "SELECT c.conrelid::regclass::text AS table, c.conname AS name, "
-                    "pg_get_constraintdef(c.oid) AS definition FROM pg_constraint c "
-                    "WHERE c.contype = 'c' AND c.connamespace = 'public'::regnamespace"
-                )
-            )
-        }
-    model = {
-        (table.name, str(ck.name)): (str(ck.sqltext), _columns(table))
-        for table in Base.metadata.tables.values()
-        for ck in table.constraints
-        if isinstance(ck, sa.CheckConstraint)
-    }
-    assert set(live) == set(model)
-    differs = {
-        key: (text, live[key])
-        for key, (text, columns) in model.items()
-        if signature(text, columns) != signature(live[key], columns)
-    }
-    assert differs == {}
+    with rolled_back(engine) as conn:
+        live = _public_catalog(conn)
+        conn.execute(sa.text(f"CREATE SCHEMA {MODEL_PROBE}"))
+        conn.execute(sa.text(f"SET LOCAL search_path TO {MODEL_PROBE}, public"))
+        Base.metadata.create_all(
+            conn.execution_options(schema_translate_map={None: MODEL_PROBE}),
+            checkfirst=False,
+        )
+        model = _probe_catalog(conn, MODEL_PROBE)
+    for part in ("constraints", "indexes", "defaults"):
+        # alembic_version is the migration's own table, not a model.
+        tables = {k: v for k, v in live[part].items() if k[0] != "alembic_version"}
+        assert len(tables) > 20, part  # the comparison must have a subject
+        assert differences(model[part], tables) == {}, part
 
 
-def test_partial_indexes_and_index_methods_match_the_models(scratch):
+def test_offline_sql_builds_the_same_schema_and_seeds(scratch):
+    """``alembic upgrade head --sql`` once crashed on the JSONB seed; its
+    script, run into a probe schema, must give what the online upgrade gave."""
+    engine, _ = scratch
+    url = engine.url.render_as_string(hide_password=False)
+    output = io.StringIO()
+    command.upgrade(_config(url, output), "head", sql=True)
+    script = output.getvalue()
+    body = "\n".join(
+        line for line in script.splitlines() if line.strip() not in {"BEGIN;", "COMMIT;"}
+    )
+    assert "INSERT INTO sources" in body and "INSERT INTO scoring_weights" in body
+    with rolled_back(engine) as conn:
+        live = _public_catalog(conn)
+        live_seeds = _seed_rows(conn)
+        conn.execute(sa.text(f"CREATE SCHEMA {OFFLINE_PROBE}"))
+        conn.execute(sa.text(f"SET LOCAL search_path TO {OFFLINE_PROBE}, public"))
+        # The driver's own cursor and no parameters: the script holds «%» in
+        # the function bodies, which a parameterised execute reads as a
+        # placeholder.
+        conn.connection.cursor().execute(body)
+        offline = _probe_catalog(conn, OFFLINE_PROBE)
+        offline_seeds = _seed_rows(conn)
+    for part, entries in live.items():
+        assert entries, part
+        assert differences(offline[part], entries) == {}, part
+    assert offline_seeds == live_seeds
+    assert len(live_seeds["sources"]) == 23 and len(live_seeds["weights"]) == 26
+
+
+def test_no_check_spans_a_set_null_foreign_key_column(scratch):
+    """fullprompt #809: a referential SET NULL (or SET DEFAULT) runs as an
+    UPDATE, and a CHECK on the same column then refuses the parent's DELETE
+    instead of letting it through — the action can never take effect."""
     engine, _ = scratch
     with engine.connect() as conn:
-        live = {
-            r.indexname: r.indexdef
-            for r in conn.execute(
-                sa.text(
-                    "SELECT indexname, indexdef FROM pg_indexes WHERE schemaname = "
-                    "'public'"
-                )
+        clashes = conn.execute(
+            sa.text(
+                "SELECT f.conrelid::regclass::text AS table, a.attname AS column, "
+                "c.conname AS check FROM pg_constraint f "
+                "JOIN pg_attribute a ON a.attrelid = f.conrelid "
+                "AND a.attnum = ANY (f.conkey) "
+                "JOIN pg_constraint c ON c.conrelid = f.conrelid AND c.contype = 'c' "
+                "AND a.attnum = ANY (c.conkey) "
+                "WHERE f.contype = 'f' AND f.confdeltype IN ('n', 'd') "
+                "AND f.connamespace = 'public'::regnamespace"
             )
-        }
-    wrong = {}
-    for table in Base.metadata.tables.values():
-        for index in table.indexes:
-            name = str(index.name)
-            definition = live.get(name)
-            if definition is None:
-                wrong[name] = "missing"
-                continue
-            options = index.dialect_options["postgresql"]
-            method = options["using"] or "btree"
-            if f"USING {method} " not in definition:
-                wrong[name] = f"method: {definition}"
-            for opclass in (options["ops"] or {}).values():
-                if opclass not in definition:
-                    wrong[name] = f"opclass: {definition}"
-            where = options["where"]
-            live_where = (
-                definition.split(" WHERE ", 1)[1] if " WHERE " in definition else None
+        ).all()
+        set_null = conn.execute(
+            sa.text(
+                "SELECT count(*) FROM pg_constraint WHERE contype = 'f' "
+                "AND confdeltype = 'n' AND connamespace = 'public'::regnamespace"
             )
-            if (where is None) != (live_where is None):
-                wrong[name] = f"where: {definition}"
-            elif where is not None and live_where is not None:
-                columns = _columns(table)
-                if signature(str(where), columns) != signature(live_where, columns):
-                    wrong[name] = f"where: {where} vs {live_where}"
-    assert wrong == {}
+        ).scalar()
+    assert set_null and set_null > 10  # the fence must have something to guard
+    assert [tuple(r) for r in clashes] == []
 
 
 def test_phone_tail_is_generated_from_the_phone(scratch):
@@ -314,13 +434,7 @@ def test_phone_tail_is_generated_from_the_phone(scratch):
         "WHERE d.adrelid = 'contacts'::regclass AND a.attname = 'phone_tail' "
         "AND a.attgenerated = 's'",
     )
-    computed = Base.metadata.tables["contacts"].c.phone_tail.computed
-    assert computed is not None
-    columns = _columns(Base.metadata.tables["contacts"])
-    assert signature(str(expression), columns) == signature(
-        str(computed.sqltext), columns
-    )
-    assert signature(str(expression), columns)[1] == {"cs_phone_tail", "phone"}
+    assert expression == "cs_phone_tail(phone)"
 
 
 def test_the_triggers_of_02_section_2_16(scratch):
@@ -339,6 +453,14 @@ def test_the_triggers_of_02_section_2_16(scratch):
         {(t, "trg_touch_updated_at", "cs_touch_updated_at") for t in TOUCHED}
         | {(t, "trg_append_only", "cs_append_only") for t in APPEND_ONLY}
         | {("scoring_weights", "trg_scoring_weights_frozen", "cs_scoring_weights_frozen")}
+        # Replaces 02's ck_lead_candidates_suppressed (#809, see 0001).
+        | {
+            (
+                "lead_candidates",
+                "trg_lead_candidates_suppressed",
+                "cs_candidate_suppressed_by",
+            )
+        }
     )
     assert found == expected
 

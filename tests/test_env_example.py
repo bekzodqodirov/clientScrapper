@@ -171,7 +171,11 @@ def test_parse_price_reads_in_out_and_the_optional_cache_prices(text, expected):
         assert price is None
     else:
         assert price is not None
-        assert tuple(None if v is None else str(v) for v in price) == expected
+        rates = (price.input, price.output, price.cache_read, price.cache_write)
+        assert tuple(None if v is None else str(v) for v in rates) == expected
+        # An override names no long-context tier; resolve_price lends the
+        # table's to the override's own model (tests/test_usage.py).
+        assert (price.long_above, price.long_input, price.long_output) == (None,) * 3
 
 
 def test_an_unreadable_price_override_is_refused():

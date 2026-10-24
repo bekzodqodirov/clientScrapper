@@ -1,4 +1,4 @@
-"""The initial schema (02 §5): pg_trgm, 6 functions, 25 tables, the triggers,
+"""The initial schema (02 §5): pg_trgm, 7 functions, 25 tables, the triggers,
 23 `sources` rows and the 26 version-1 `scoring_weights` rows.
 
 Every day-1 column is here, not in a 0002: runtime_flags, companies.dup_of /
@@ -11,6 +11,23 @@ ran. tests/test_enums_frozen.py and tests/test_weights_seed.py hold these
 copies equal to clientscrapper/db/enums.py; tests/test_migrations.py holds
 the tables equal to Base.metadata (``alembic check`` in CI).
 
+Where this file departs from 02's literal DDL, on purpose (the T-01/T-02
+review, before 0001 ever ran anywhere; each is commented where it is made and
+pinned in tests/test_constraints.py):
+
+* the «stored only as its key» CHECKs read ``col IS NOT DISTINCT FROM
+  cs_key(col)``: with «=» every value the key function refuses (and answers
+  NULL for) passed;
+* ``companies.merged_into`` is ON DELETE RESTRICT and ``ck_lead_candidates_
+  suppressed`` became the trigger ``trg_lead_candidates_suppressed``: a CHECK
+  spanning a SET NULL FK column turns the parent's DELETE into an error
+  (fullprompt #809);
+* ``cs_scoring_weights_frozen`` freezes the whole approved row, and
+  ``ck_scoring_weights_approved`` pairs approved_by with approved_at;
+* ``cs_username_key`` strips the t.me prefix in either case;
+* version 1 is approved by the activation UPDATE of 02 §2.7, and the sources
+  seed renders as a literal, so ``alembic upgrade head --sql`` works.
+
 Revision ID: 0001_initial
 Revises:
 Create Date: T-02
@@ -18,7 +35,9 @@ Create Date: T-02
 
 from __future__ import annotations
 
+import json
 from collections.abc import Sequence
+from typing import Any
 
 import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
@@ -336,12 +355,17 @@ _FUNCTIONS = (
   SELECT CASE WHEN length(d) >= 9 THEN right(d, 9) END
   FROM (SELECT regexp_replace(raw, '[^0-9]', '', 'g') AS d) s $$""",
     ),
+    # The prefix in either case, spelled as ASCII classes rather than the 'i'
+    # flag, so that SQL and Python (services/keys.username_key) fold exactly
+    # the same letters: 02 §1's case-sensitive strip turned «HTTPS://T.ME/x»,
+    # a link to a real channel, into NULL.
     (
         "cs_username_key(text)",
         r"""CREATE FUNCTION cs_username_key(raw text) RETURNS text LANGUAGE sql IMMUTABLE STRICT AS $$
   SELECT CASE WHEN u ~ '^[a-z0-9_]{5,32}$' AND u !~ 'bot$' THEN u END
   FROM (SELECT lower(regexp_replace(regexp_replace(trim(raw),
-          '^([A-Za-z]+://)?(www\.)?(t\.me/|telegram\.me/)?@?', ''), '[/?#].*$', '')) AS u) s $$""",
+          '^([A-Za-z]+://)?([Ww][Ww][Ww]\.)?([Tt]\.[Mm][Ee]/|[Tt][Ee][Ll][Ee][Gg][Rr][Aa][Mm]\.[Mm][Ee]/)?@?',
+          ''), '[/?#].*$', '')) AS u) s $$""",
     ),
     (
         "cs_domain_key(text)",
@@ -362,14 +386,35 @@ BEGIN NEW.updated_at := now(); RETURN NEW; END $$""",
         """CREATE FUNCTION cs_append_only() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN RAISE EXCEPTION '% is append-only', TG_TABLE_NAME; END $$""",
     ),
+    # The whole row, not 02 §2.16's five weight columns: with those alone an
+    # approved row could be un-approved, edited and re-approved, or moved to
+    # another version, and every stored score names its version (02 §2.7).
+    # approved_by/approved_at are set only while approved_at is still NULL.
     (
         "cs_scoring_weights_frozen()",
         """CREATE FUNCTION cs_scoring_weights_frozen() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
   IF TG_OP = 'DELETE' THEN RAISE EXCEPTION 'scoring_weights is append-only'; END IF;
-  IF OLD.approved_at IS NOT NULL AND (NEW.points, NEW.group_cap, NEW.decay_days, NEW.decayed_factor, NEW.group_key)
-       IS DISTINCT FROM (OLD.points, OLD.group_cap, OLD.decay_days, OLD.decayed_factor, OLD.group_key)
+  IF OLD.approved_at IS NOT NULL AND NEW IS DISTINCT FROM OLD
   THEN RAISE EXCEPTION 'approved scoring_weights version % is frozen', OLD.version; END IF;
+  RETURN NEW;
+END $$""",
+    ),
+    # Replaces 02's ck_lead_candidates_suppressed (see _lead_candidates): only
+    # the step INTO 'suppressed' needs the pointer; the FK's own SET NULL,
+    # when the suppression row is retired, leaves the state alone.
+    (
+        "cs_candidate_suppressed_by()",
+        """CREATE FUNCTION cs_candidate_suppressed_by() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF NEW.state = 'suppressed' AND NEW.suppressed_by IS NULL
+     AND (TG_OP = 'INSERT' OR OLD.state IS DISTINCT FROM 'suppressed') THEN
+    RAISE EXCEPTION USING
+      ERRCODE = 'check_violation',
+      TABLE = 'lead_candidates',
+      CONSTRAINT = 'trg_lead_candidates_suppressed',
+      MESSAGE = 'lead_candidates: a candidate enters state suppressed only with suppressed_by ("trg_lead_candidates_suppressed")';
+  END IF;
   RETURN NEW;
 END $$""",
     ),
@@ -422,6 +467,19 @@ _ZERO = sa.text("0")
 _EMPTY_JSONB = sa.text("'{}'::jsonb")
 _EMPTY_ARRAY = sa.text("'{}'")
 _UUID = sa.text("gen_random_uuid()")
+
+
+class _SeedJsonb(sa.types.TypeDecorator[Any]):
+    """JSONB that can also be written as a literal. ``alembic upgrade --sql``
+    (offline, literal binds) has no literal renderer for JSONB and stopped at
+    the sources seed; online, the value binds exactly as JSONB does."""
+
+    impl = postgresql.JSONB
+    cache_ok = True
+
+    def process_literal_param(self, value: Any, dialect: sa.Dialect) -> str:
+        text = json.dumps(value, ensure_ascii=False, sort_keys=True)
+        return "'" + text.replace("'", "''") + "'::jsonb"
 
 
 def _sql_list(values: tuple[str, ...]) -> str:
@@ -636,7 +694,11 @@ def _companies() -> None:
         _bool("is_state_body", False),
         _text("state", nullable=False, default="new"),
         _text("exclude_reason"),
-        _uuid("merged_into", _fk(t, "merged_into", "companies.id", "SET NULL")),
+        # RESTRICT, not 02's SET NULL: ck_companies_merged spans this column, and
+        # SET NULL beside a CHECK on the FK column makes the delete fail on the
+        # CHECK instead (fullprompt #809). A company is never deleted (purge sets
+        # state='purged') and a merge target is pinned by merge_log anyway.
+        _uuid("merged_into", _fk(t, "merged_into", "companies.id", "RESTRICT")),
         _uuid("dup_of", _fk(t, "dup_of", "companies.id", "SET NULL")),
         _int("dup_score", sa.SmallInteger, default=None),
         _jsonb("verdict", nullable=True),
@@ -653,10 +715,16 @@ def _companies() -> None:
         _ck("ck_companies_stir", "stir ~ '^[0-9]{9}$'"),
         _ck("ck_companies_oked", "oked ~ '^[0-9]{5}$'"),
         _ck("ck_companies_address", "length(address) <= 300"),
-        _ck("ck_companies_website_domain", "website_domain = cs_domain_key(website_domain)"),
+        # «Stored only as its key»: IS NOT DISTINCT FROM, not «=», because the
+        # key functions answer NULL for what they refuse, and a CHECK reads the
+        # NULL of «x = NULL» as passed. A NULL column stays legal.
+        _ck(
+            "ck_companies_website_domain",
+            "website_domain IS NOT DISTINCT FROM cs_domain_key(website_domain)",
+        ),
         _ck(
             "ck_companies_telegram_channel",
-            "telegram_channel = cs_username_key(telegram_channel)",
+            "telegram_channel IS NOT DISTINCT FROM cs_username_key(telegram_channel)",
         ),
         _ck("ck_companies_instagram", "instagram = lower(instagram)"),
         _in(t, "registry_status", REGISTRY_STATUSES),
@@ -783,7 +851,7 @@ def _contacts() -> None:
         _ck("ck_contacts_phone_kind_values", f"phone_kind IN ({_sql_list(PHONE_KINDS)})"),
         _ck(
             "ck_contacts_telegram_username",
-            "telegram_username = cs_username_key(telegram_username)",
+            "telegram_username IS NOT DISTINCT FROM cs_username_key(telegram_username)",
         ),
         _ck("ck_contacts_instagram", "instagram = lower(instagram)"),
         _ck("ck_contacts_email", "email ~ '^[^@[:space:]]+@[^@[:space:]]+$'"),
@@ -992,6 +1060,10 @@ def _scoring_weights() -> None:
         _ck("ck_scoring_weights_decay_days", "decay_days > 0"),
         _ck("ck_scoring_weights_decayed_factor", "decayed_factor BETWEEN 0 AND 1"),
         _in(t, "key", SIGNAL_KEYS + DERIVED_KEYS),
+        # Not in 02 §2.7: approval is one act with a name, and the freeze
+        # trigger makes it permanent, so a half-set approval would stay
+        # anonymous for ever.
+        _ck("ck_scoring_weights_approved", "(approved_by IS NULL) = (approved_at IS NULL)"),
     )
     op.create_index(
         "ix_scoring_weights_approved",
@@ -1028,8 +1100,14 @@ def _suppression() -> None:
             "key_type <> 'phone_hash' OR (key ~ '^[0-9a-f]{20}$' AND salt_id IS NOT NULL)",
         ),
         _ck("ck_suppression_stir", "key_type <> 'stir' OR key ~ '^[0-9]{9}$'"),
-        _ck("ck_suppression_username", "key_type <> 'tg_username' OR key = cs_username_key(key)"),
-        _ck("ck_suppression_domain", "key_type <> 'domain' OR key = cs_domain_key(key)"),
+        _ck(
+            "ck_suppression_username",
+            "key_type <> 'tg_username' OR key IS NOT DISTINCT FROM cs_username_key(key)",
+        ),
+        _ck(
+            "ck_suppression_domain",
+            "key_type <> 'domain' OR key IS NOT DISTINCT FROM cs_domain_key(key)",
+        ),
         _ck(
             "ck_suppression_erp_kinds",
             "kind NOT IN ('client', 'lost') "
@@ -1110,9 +1188,14 @@ def _lead_candidates() -> None:
             "ck_lead_candidates_scored",
             "state NOT IN ('scored', 'review', 'approved', 'pushed') OR score IS NOT NULL",
         ),
-        _ck(
-            "ck_lead_candidates_suppressed", "state <> 'suppressed' OR suppressed_by IS NOT NULL"
-        ),
+        # No ck_lead_candidates_suppressed: 02's CHECK spans suppressed_by, which
+        # is ON DELETE SET NULL, so retiring a suppression row a candidate points
+        # at failed the whole DELETE on the CHECK (fullprompt #809) — and R6, the
+        # ERP full pull, the manual_import retirement and the outcomes
+        # retractions all retire rows. The pointer must be able to go («after
+        # suppressed — the suppression row is gone», 02 §2.9), so the rule is
+        # trg_lead_candidates_suppressed's: a candidate ENTERS 'suppressed' only
+        # naming its row (_triggers below).
     )
     op.create_index(
         "ux_lead_candidates_open",
@@ -1211,6 +1294,10 @@ def _push_log() -> None:
         _id(t),
         _text("external_id", nullable=False),
         sa.Column("attempt", sa.SmallInteger(), nullable=False),
+        # RESTRICT on purpose: the ledger keeps its candidate, so a candidate
+        # with push history is never deleted. 02 §4 R6's hold sweep must skip
+        # them (AND NOT EXISTS push_log), or one such row aborts the whole
+        # DELETE; tests/test_constraints.py holds the statement R6 must use.
         _uuid(
             "candidate_id",
             _fk(t, "candidate_id", "lead_candidates.id", "RESTRICT"),
@@ -1234,7 +1321,9 @@ def _push_log() -> None:
         _in(t, "source_key_sent", PUSH_SOURCE_KEYS),
         _in(t, "status", PUSH_STATUSES),
         sa.UniqueConstraint("external_id", "attempt", name="uq_push_log_external_attempt"),
-        # sent ⇒ 2xx, and 2xx ⇒ sent | unknown.
+        # sent ⇒ 2xx or no answer at all, and 2xx ⇒ sent | unknown. The NULL
+        # passes on purpose (02 §2.10 rule 5b): an `unknown` row the outcomes
+        # walk confirms becomes `sent` with no HTTP status ever received.
         _ck(
             "ck_push_log_sent",
             "(status <> 'sent' OR http_status BETWEEN 200 AND 299) "
@@ -1330,7 +1419,7 @@ def _interactions() -> None:
         _pk(t, "id"),
         _ck(
             "ck_interactions_sender_username",
-            "sender_username = cs_username_key(sender_username)",
+            "sender_username IS NOT DISTINCT FROM cs_username_key(sender_username)",
         ),
         _ck("ck_interactions_sender_name", "length(sender_name) <= 120"),
         _ck("ck_interactions_sender_bio", "length(sender_bio) <= 300"),
@@ -1614,6 +1703,10 @@ def _triggers() -> None:
         "CREATE TRIGGER trg_scoring_weights_frozen BEFORE UPDATE OR DELETE ON scoring_weights "
         "FOR EACH ROW EXECUTE FUNCTION cs_scoring_weights_frozen()"
     )
+    op.execute(
+        "CREATE TRIGGER trg_lead_candidates_suppressed BEFORE INSERT OR UPDATE OF state "
+        "ON lead_candidates FOR EACH ROW EXECUTE FUNCTION cs_candidate_suppressed_by()"
+    )
 
 
 def _seed() -> None:
@@ -1627,7 +1720,7 @@ def _seed() -> None:
         sa.column("rps", sa.Numeric(6, 3)),
         sa.column("daily_page_budget", sa.Integer()),
         sa.column("daily_cost_cap_usd", sa.Numeric(8, 4)),
-        sa.column("config", postgresql.JSONB()),
+        sa.column("config", _SeedJsonb()),
     )
     op.bulk_insert(
         sources,
@@ -1655,10 +1748,7 @@ def _seed() -> None:
         sa.column("group_cap", sa.SmallInteger()),
         sa.column("decay_days", sa.Integer()),
         sa.column("proposed_by", sa.Text()),
-        sa.column("approved_by", sa.Text()),
-        sa.column("approved_at", sa.DateTime(timezone=True)),
     )
-    # One row at a time so approved_at can be the server's now().
     op.bulk_insert(
         weights,
         [
@@ -1670,12 +1760,16 @@ def _seed() -> None:
                 "group_cap": cap,
                 "decay_days": decay,
                 "proposed_by": "seed",
-                "approved_by": "seed",
-                "approved_at": sa.func.now(),
             }
             for key, group, points, cap, decay in WEIGHTS_V1
         ],
-        multiinsert=False,
+    )
+    # Approved the way every later version is (02 §2.7: one UPDATE of
+    # approved_by and approved_at), which also keeps --sql free of a
+    # server-side now() inside the insert.
+    op.execute(
+        "UPDATE scoring_weights SET approved_by = 'seed', approved_at = now() "
+        "WHERE version = 1"
     )
 
 
