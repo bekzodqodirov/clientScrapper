@@ -295,6 +295,8 @@ def test_the_erp_export_reads_back_as_its_book():
     ]
     assert [r.active for r in export.rows] == [c["active"] for c in BOOK["cards"]]
     assert all(r.unreadable == () for r in export.rows)
+    # The bot hands the bytes it downloaded; the name only says the kind.
+    assert ci.read_rows("hujjat.xlsx", data=XLSX.read_bytes()) == export
 
 
 def test_the_fixture_yields_exactly_its_tails():
