@@ -20,6 +20,8 @@ Include when **all** hold:
 
 Exclude when **any** holds: B2C wording («o'zim uchun», «для себя», single item, personal profile with no business); cargo/forwarding/customs-broker/logistics company (competitor); Chinese-side supplier; state body (tender path, not direct); liquidated entity; phone/handle/STIR in suppression; an open push for the same company in the last 90 days or the same phone in the last 24 hours.
 
+Two clauses above depend on what the ERP exposes (T-07 verification, 2026-10-24): the «measured» volume signal (§7 question 3) and «phone/handle/STIR in suppression» for ERP clients, which the ERP feeds by phone only (§7 question 2).
+
 Segments (for routing and scripts): A bazaar wholesalers · B marketplace sellers · C factories (equipment/raw materials) · D construction/furniture importers · E electronics/auto/appliance distributors.
 
 ## 3. Functional requirements
@@ -61,12 +63,14 @@ Segments (for routing and scripts): A bazaar wholesalers · B marketplace seller
 | Metric | MVP (end of week 2) | Month 3 |
 |---|---|---|
 | Pushed leads with phone and score ≥60 | ≥20 | ≥40/week |
-| Precision (not lost as «Import qilmaydi» / «Raqam noto'g'ri» / «Kargo/konkurent») | ≥60% | ≥75% |
+| Precision (not lost as «Import qilmaydi» / «Raqam notoʻgʻri» / «Kargo/konkurent») | ≥60% | ≥75% |
 | Contacted within 1 business day (`contacted_at`) | ≥40% | ≥70% |
 | Quotes sent / contacted | ≥25% | ≥35% |
 | First shipment / pushed (60-day lag) | ≥3% | ≥8% |
 | Paid spend | ≤$5/day | ≤$10/day |
 | Cost per qualified lead | <$5 | <$12 |
+
+How the ERP-fed rows can be measured (T-07 verification, 2026-10-24): precision needs the owner's lost-reason labels (§7 question 1); «contacted within 1 business day» counts only contacts the ERP can see and is measured from `push_log.sent_at` (§7 question 6); «quotes sent» and «first shipment» are not in the ERP's feeds and have a v1 proxy until the owner decides (§7 questions 5 and 3).
 
 ## 6. Constraints and assumptions
 
@@ -74,3 +78,106 @@ Segments (for routing and scripts): A bazaar wholesalers · B marketplace seller
 - The customs Excel in `TelegramCustoms` has no importer identity; it is used only for category priors.
 - Web search engines index Uzbek sites unevenly; directory rubric pages and Telegram catalogues must be read directly (see `docs/ochiq-internet.md` §4).
 - From 2026-11-01 advertising calls/SMS require prior consent and are banned 18:00–09:00; the design keeps all outreach human, 10:00–17:00, with an opt-out line.
+
+## 7. Open questions (owner decisions)
+
+Raised by the T-07 verification (2026-10-24) against the ERP as built (fullprompt `agent-feed` at
+`23fe1736`, 05 Part A): requirements in §2 and §5 that the ERP cannot satisfy today. None of them is
+weakened here; each is a decision for Bekzod. The lead asks him the Uzbek question as written, with
+the options; ⭐ marks the recommendation. Until he answers, the build follows the line «Meanwhile».
+The ERP side of each is in 05's open questions 12–17.
+
+1. **Precision needs lost-reason labels** (§5 precision, F-11, the agent's «wrong number ×2» DNC; 05
+   Q12, Q6). The ERP sends a lost reason only when it is a label of the owner's lost-reason dictionary
+   (or of the `agent_no_contact_reasons` setting); a seller's free text arrives as `null`. The owner's
+   step 2 (05 §A.14) adds only «Qayta qilinmasin», so «Import qilmaydi», «Raqam notoʻgʻri» and
+   «Kargo/konkurent» losses arrive as `lost_other` (neutral) and the wrong-number rule never fires.
+   **Savol:** «Sotuvchi lidni yoʻqotganda sababini roʻyxatdan tanlaydi. Agent qaysi manba yaxshi lid
+   berayotganini oʻlchashi uchun shu roʻyxatda quyidagi sabablar boʻlishi kerak. Qaysi variant?
+   a) ⭐ CRM sozlamalari → «Yoʻqotish sabablari»ga «Qayta qilinmasin» bilan birga «Import qilmaydi»,
+   «Raqam notoʻgʻri», «Kargo/konkurent», «Kichik yuk», «Narx qimmat» ni ham qoʻshamiz; jamoa hozir
+   ishlatadigan boshqa sabablarni ham oʻsha zahoti qoʻshamiz (roʻyxatda birinchi sabab paydo boʻlgach,
+   faqat roʻyxatdagi sabab tanlanadi);
+   b) faqat «Qayta qilinmasin» — agent aniqlikni faqat «yutildi / bogʻlanildi» boʻyicha oʻlchaydi,
+   notoʻgʻri raqam va konkurentlar avtomatik yopilmaydi, avtomatik push juda kech yoqiladi;
+   c) roʻyxat kerak emas — aniqlik oʻlchanmaydi, avtomatik push hech qachon yoqilmaydi.»
+   Follow-up if (a): «“Raqam notoʻgʻri” ni `agent_no_contact_reasons` sozlamasiga ham qoʻshamizmi?
+   a) ⭐ yoʻq — agent raqamni ikki marta “notoʻgʻri” boʻlgandan keyin oʻzi yopadi, bitta xato bosish
+   raqamni abadiy yopmaydi; b) ha — birinchi marta tanlanganda raqam ERPda ham abadiy yopiladi.»
+   Meanwhile: the labels table of 05 §B.2 / 02 §2.11 stays as specified; precision counts what
+   arrives.
+2. **ERP clients reached by another phone, handle, domain or STIR** (§2 exclusion «phone/handle/STIR
+   in suppression», F-07; 05 Q13). The ERP feeds only nine-digit phone hashes and checks arrivals by
+   phone; an ERP client or a «Qayta qilinmasin» lead that the agent finds through another number, a
+   Telegram username, an Instagram account, a website or a STIR is not suppressed, and F-12's
+   Telegram-only cards never reach any ERP check.
+   **Savol:** «ERP agentga mijozlarni faqat telefon raqami boʻyicha beradi. Mavjud mijozni (yoki
+   “Qayta qilinmasin” lidni) agent boshqa raqam, Telegram, Instagram, sayt yoki STIR orqali topsa, u
+   yangi lid boʻlib keladi; raqamsiz (faqat Telegram) kartalar ERPda umuman tekshirilmaydi. Qaysi
+   variant?
+   a) ⭐ hozircha agent tomonida: agent oʻzi yuborgan va “yutildi” boʻlgan kompaniyaning Telegram,
+   Instagram, sayt va STIR ini ham yopadi; menejer kartasida “yozishdan oldin ERPda nomi boʻyicha
+   qidiring” qatori boʻladi; ERPdagi eski mijozlar faqat raqam boʻyicha tekshiriladi;
+   b) ERPga keyingi bosqichda: mijoz kartasidagi Telegram, Instagram, sayt va STIR ham (xeshlangan
+   holda) agentga beriladi — buning uchun avval kartada shu maydonlar boʻlishi kerak;
+   c) hech narsa qilmaymiz — menejer oʻzi tekshiradi.»
+   Meanwhile: phone-only for ERP clients; `won`/`landed_client` suppress the pushed phone tail
+   (02 §2.11); option (a) would widen those two rows to the company's other keys.
+3. **Measured volume and first shipment** (§2 «measured (ERP receipts for unclaimed markings)», §5
+   «First shipment / pushed»; 05 Q14). No ERP route returns receipts, unclaimed markings, cargo volumes
+   or shipments; `stage_kind='won'` means the lead became a client card and a deal, not that cargo
+   arrived.
+   **Savol:** «ERP hozir agentga prixod, kub va birinchi yuk kelganini bermaydi. Shuning uchun egasiz
+   markirovkali yukdan olinadigan “oʻlchangan hajm” belgisi ishlamaydi va “birinchi yuk / yuborilgan
+   lid” koʻrsatkichini oʻlchab boʻlmaydi. Qaysi variant?
+   a) ⭐ hozircha “yutildi” (lid mijozga aylandi) ni birinchi yuk oʻrnida hisoblaymiz, oʻlchangan hajm
+   belgisi v1 da yoʻq; pilotdan keyin ERPga alohida bosqich: mijozning birinchi prixodi sanasi va kubi
+   (narxsiz) agentga beriladi;
+   b) hozirdan ERPga shu bosqichni qoʻshamiz (pilot kechikadi);
+   c) bu koʻrsatkichlar kerak emas.»
+   Meanwhile: `won` is the proxy in `/holat` and `tools/mvp_report.py`, labelled as such; no
+   `measured` signal is produced.
+4. **The 15-minute reminder during the «Boshqa» fallback** (binding decision «Reminder»; §6 first
+   constraint; 05 Q15). Only the `agent` door is reminder-exempt. Through the fallback every agent push
+   is reminded like an advert lead and counts in people's per-phone cap; production runs only the
+   fallback until `agent-feed` is merged and deployed.
+   **Savol:** «Agent lidlari uchun 15 daqiqalik “tegilmagan lid” eslatmasi oʻchirilgan, lekin bu faqat
+   yangi “Agent” eshigida ishlaydi. ERPning bu yangi qismi tayyor, lekin hali serverga qoʻyilmagan;
+   vaqtincha “Boshqa” eshigidan yuborsak, har bir agent lidi uchun eslatma keladi va oddiy
+   mijozlarning limitiga qoʻshiladi. Qaysi variant?
+   a) ⭐ pilotdan oldin ERPning yangi qismini serverga qoʻyamiz (faqat birlashtirish va deploy
+   qolgan) — “Boshqa” eshigi ishlatilmaydi;
+   b) vaqtincha “Boshqa” eshigidan kuniga 10 tagacha lid yuboramiz, eslatmalarga chidaymiz;
+   c) yangi qism qoʻyilguncha push qilmaymiz, faqat kartalarni koʻrib chiqamiz.»
+   Meanwhile: the fallback stays a capability (05 §B.3, `PUSH_DAILY_CAP ≤ 10`), not the plan.
+5. **«Quotes sent / contacted»** (§5; 05 Q16). The outcomes feed carries only the lead's CURRENT stage
+   and never a price, by design; a lead that passed «Narx aytildi» and moved on is indistinguishable
+   from one that never got a price.
+   **Savol:** «ERP agentga lidning faqat hozirgi bosqichini aytadi, narxni hech qachon bermaydi.
+   “Narx aytildi” bosqichidan oʻtib ketgan lidni agent koʻrmaydi. “Narx aytilgan / bogʻlanilgan”
+   koʻrsatkichi uchun qaysi variant?
+   a) ⭐ hozircha bosqich nomi boʻyicha: siz qaysi bosqichlar “narx aytilgan” degani ekanini aytasiz
+   (masalan “Narx aytildi” va undan keyingilari, “Yutildi” ham), agent hozirgi bosqichni shu roʻyxat
+   bilan solishtiradi — taxminiy;
+   b) ERPga keyingi bosqichda: lidga birinchi marta narx yozilgan vaqt (summasiz) agentga beriladi;
+   c) bu koʻrsatkich kerak emas.»
+   Meanwhile: the metric is not computed; `/holat` shows it as «—».
+6. **«Contacted within 1 business day» is measured partially** (§5; 05 Q17). `contacted_at` reflects
+   only what the ERP can see: the calls app, a message from a CONNECTED Telegram account on a chat the
+   lead owns, a note, a stage move or a cleared follow-up by the responsible person, or the «📞
+   Bogʻlandim» button. A seller writing from a personal account whose chat sits undecided on the tray
+   is not reported, and the outcomes row has no arrival time (the agent measures from
+   `push_log.sent_at`). The metric under-counts.
+   **Savol:** «ERP “bogʻlanildi” ni faqat oʻzi koʻrgan narsadan biladi: qoʻngʻiroqlar ilovasi, ERPga
+   ulangan Telegram akkauntdan yozilgan xabar, lidga yozilgan izoh, bosqich oʻzgarishi yoki “📞
+   Bogʻlandim” tugmasi. Sotuvchi ERPga ulanmagan shaxsiy Telegramdan yozsa, agent buni koʻrmaydi va
+   koʻrsatkich past chiqadi. Qaysi variant?
+   a) ⭐ sotuvchilarga qoida: birinchi xabardan keyin “📞 Bogʻlandim” ni bosish yoki bosqichni
+   oʻzgartirish, yozishmalar faqat ERPga ulangan akkauntdan (sotuv qoʻllanmasida bor);
+   b) koʻrsatkichni shundayligicha qabul qilamiz (past chiqadi);
+   c) bu koʻrsatkichni olib tashlaymiz.»
+   Meanwhile: measured as specified, with the under-count stated beside the number in `/holat`.
+
+## Review pass changelog
+
+**T-07 verification (2026-10-24)** — an adversarial check of the spec against fullprompt `agent-feed` at `23fe1736` found seven requirements the ERP as built cannot satisfy. None was weakened: §7 lists them as owner decisions (questions 1–6, Uzbek wording, options, ⭐), and one-line pointers were added under §2 (the «measured» and «handle/STIR» clauses) and §5 (how the ERP-fed metrics can be measured). The seven findings fit six questions: measured volume and first shipment share question 3. §5's «Raqam notoʻgʻri» is now spelt with ʻ, as the recommended dictionary label of question 1.
