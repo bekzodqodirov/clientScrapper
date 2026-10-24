@@ -66,15 +66,17 @@ def verdict(
 ) -> tuple[bool, str]:
     """(healthy, the one line ``docker inspect`` shows)."""
     judged = health.judge(component, last_seen_at, detail, now=now)
+    # The verdict is health.healthy's alone; the branches below only word it.
+    ok = health.healthy(judged)
     limit = int(health.stale_after(component).total_seconds() // 60)
     if judged.age is None:
-        return False, f"{component}: no heartbeat yet"
+        return ok, f"{component}: no heartbeat yet"
     minutes = int(judged.age.total_seconds() // 60)
+    if not ok:
+        return ok, f"{component}: last beat {minutes} min ago (limit {limit} min)"
     if judged.disabled:
-        return True, f"{component}: switched off on purpose (beat {minutes} min ago)"
-    if health.healthy(judged):
-        return True, f"{component}: beat {minutes} min ago (limit {limit} min)"
-    return False, f"{component}: last beat {minutes} min ago (limit {limit} min)"
+        return ok, f"{component}: switched off on purpose (beat {minutes} min ago)"
+    return ok, f"{component}: beat {minutes} min ago (limit {limit} min)"
 
 
 def main(
