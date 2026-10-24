@@ -15,6 +15,7 @@ Pure: no I/O, no clock, no settings — and no import of ``clientscrapper.db``
 
 from __future__ import annotations
 
+import math
 import re
 import unicodedata
 from dataclasses import dataclass
@@ -48,7 +49,7 @@ from clientscrapper.services.keys import (
     username_key,
 )
 from clientscrapper.services.names import FIRST_NAMES
-from clientscrapper.services.text import fold_apostrophes, to_latin
+from clientscrapper.services.text import fold_apostrophes, storable, to_latin
 from clientscrapper.services.urlsafe import strip_secrets
 
 if TYPE_CHECKING:
@@ -699,10 +700,28 @@ def _volume(attrs: dict[str, Any]) -> tuple[float | None, str]:
         volume = float(raw) if raw is not None else None
     except (TypeError, ValueError):
         volume = None
+    if volume is not None and not math.isfinite(volume):
+        volume = None  # «nan», «inf»: no volume was stated
     basis = attrs.get("basis") or attrs.get("volume_basis")
     if basis not in _VOLUME_BASES:
         basis = "stated" if volume is not None else "none"
     return volume, str(basis)
+
+
+def _storable_tree(value: Any) -> Any:
+    """The parsed tree as ``jsonb`` accepts it: every string (keys too)
+    ``text.storable`` (no NUL, no lone surrogate), every non-finite float
+    None — NaN and Infinity are not JSON, and one such value in a page's rows
+    would cost the whole page its observations."""
+    if isinstance(value, str):
+        return storable(value)
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {storable(str(k)): _storable_tree(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_storable_tree(v) for v in value]
+    return value
 
 
 def to_observation_json(
@@ -713,7 +732,8 @@ def to_observation_json(
     key, E.164 phones and their kind, handles, legal form, city), with the
     02 §2.5 validators applied: excerpt ≤ 600, a field with a 14-digit run
     dropped (``hints.pinfl_dropped``), a person only for the kinds that may
-    carry one, and a person-shaped company name moved to ``person``.
+    carry one, and a person-shaped company name moved to ``person``; and the
+    whole tree storable (``_storable_tree``: no NUL, no NaN).
     ``collector_version`` is ``<collector key>@<Collector.version>``."""
     kind = parsed_kind(obs.kind, obs.source, obs.attrs)
     clean = _Pinfl()
@@ -816,4 +836,5 @@ def to_observation_json(
         "collector_version": collector_version or f"{obs.source}@1",
     }
     hints["pinfl_dropped"] = clean.dropped
-    return parsed
+    tree: dict[str, Any] = _storable_tree(parsed)
+    return tree

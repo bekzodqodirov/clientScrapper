@@ -22,6 +22,7 @@ import httpx
 import pytest
 import sqlalchemy as sa
 
+from clientscrapper.collectors import runner as runner_module
 from clientscrapper.collectors.base import Budget, Collector, Observation
 from clientscrapper.collectors.runner import build_budget, run_collector
 from clientscrapper.db.models import (
@@ -1042,10 +1043,10 @@ async def test_a_url_no_row_can_hold_is_dropped_and_the_rest_kept(
 
 
 class NulGoods(Directory):
-    """Page 1 parses fine; page 2 yields a row whose goods text carries a NUL
-    character (a page with binary junk in it). Its evidence row is accepted;
-    the server refuses its observations.parsed (jsonb has no \\u0000), which
-    aborts the transaction it runs in."""
+    """Page 2 yields rows whose goods text, source_ref and excerpt carry a NUL
+    character (a page with binary junk in it), and a volume of «nan». Neither
+    text nor jsonb holds a NUL, and NaN is not JSON: before they were made
+    storable, one such row cost the page all its observations."""
 
     api_row = False
 
@@ -1055,21 +1056,90 @@ class NulGoods(Directory):
         if url.endswith("/katalog/2"):
             for obs in found:
                 obs.goods_text = "mato \x00 furnitura"
+                obs.excerpt = "Namuna\x00 Tekstil"
+                obs.attrs = {"volume_m3": "nan", "ratio": float("inf")}
         return found
 
 
-async def test_a_group_the_database_refuses_is_dropped_and_the_rest_kept(
+async def test_nul_characters_and_nan_are_made_storable_and_the_rows_kept(
     session, directories, clock, tmp_path
 ):
     report = await run(NulGoods, fetcher_for(directory_site(clock)), clock, tmp_path)
     assert (report.status, report.error) == ("ok", None)
     [row] = await runs(session)
-    assert (row.new_evidence, row.new_observations) == (1, 2)
-    assert row.meta["dropped"] == {"bad_evidence": 1}
-    urls = (await session.scalars(sa.select(Evidence.url))).all()
-    assert urls == [f"{EX}/katalog/1"]
-    # The refused group's file went with its row: one file, the kept page's.
-    assert len(list(tmp_path.rglob("*.gz"))) == 1
+    assert (row.new_evidence, row.new_observations) == (2, 3)
+    assert "dropped" not in row.meta
+    page2 = await session.scalar(
+        sa.select(Evidence).where(Evidence.url == f"{EX}/katalog/2")
+    )
+    assert page2 is not None and page2.excerpt == "Namuna Tekstil"
+    parsed = (
+        await session.scalars(
+            sa.select(ObservationRow.parsed).where(ObservationRow.evidence_id == page2.id)
+        )
+    ).one()
+    assert parsed["company"]["goods_text"] == "mato  furnitura"
+    assert parsed["hints"]["volume_m3"] is None
+    assert parsed["hints"]["volume_basis"] == "none"
+    assert parsed["hints"]["collector"]["attrs"] == {"volume_m3": "nan", "ratio": None}
+
+
+async def test_a_nul_in_the_page_body_reaches_no_column(
+    session, directories, clock, tmp_path
+):
+    junk = PAGE_2.replace(b"<ul>", b"<p>\x00\x00 binary</p><ul>")
+    site = directory_site(
+        clock, **{f"{EX}/katalog/2": httpx.Response(200, headers=HTML, content=junk)}
+    )
+
+    class NoExcerpt(Directory):
+        api_row = False
+
+        @staticmethod
+        def parse_listing(body, *, url, fetched_at):
+            found = Directory.parse_listing(body, url=url, fetched_at=fetched_at)
+            for obs in found:
+                obs.excerpt = ""  # the store quotes the page itself
+            return found
+
+    report = await run(NoExcerpt, fetcher_for(site), clock, tmp_path)
+    assert report.status == "ok"
+    [row] = await runs(session)
+    assert (row.new_evidence, row.new_observations) == (2, 3)
+    page2 = await session.scalar(
+        sa.select(Evidence).where(Evidence.url == f"{EX}/katalog/2")
+    )
+    assert page2 is not None and "\x00" not in page2.excerpt
+    assert page2.excerpt.startswith("Katalog binary")
+
+
+async def test_a_row_the_database_refuses_costs_that_row_not_its_page(
+    session, directories, clock, tmp_path, monkeypatch
+):
+    # Whatever the normaliser lets through that the database still refuses:
+    # one observation of page 1's two, here an unstorable tree.
+    real = runner_module.to_observation_json
+
+    def one_bad(obs, **kwargs):
+        parsed = real(obs, **kwargs)
+        if obs.source_ref == "goldenpages:2":
+            parsed["text"]["excerpt"] = "\x00"
+        return parsed
+
+    monkeypatch.setattr(runner_module, "to_observation_json", one_bad)
+    report = await run(Directory, fetcher_for(directory_site(clock)), clock, tmp_path)
+    assert (report.status, report.error) == ("partial", None)
+    [row] = await runs(session)
+    assert (row.status, row.new_evidence, row.new_observations) == ("partial", 3, 3)
+    assert row.meta["dropped"] == {"bad_observation": 1}
+    refs = (await session.scalars(sa.select(ObservationRow.parsed))).all()
+    assert sorted(p["source_ref"] for p in refs) == [
+        "goldenpages:1",
+        "goldenpages:3",
+        "uzts:300000004",
+    ]
+    # Every page kept its evidence file: one per page, the API row's too.
+    assert len(list(tmp_path.rglob("*.gz"))) == 3
 
 
 # --- a run that does not end by itself --------------------------------------------------

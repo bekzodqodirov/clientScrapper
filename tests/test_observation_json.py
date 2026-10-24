@@ -4,6 +4,7 @@ shape or the concrete fields the mapping table names."""
 
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -301,3 +302,31 @@ def test_the_kind_mapping_table(kind, source, attrs, expected):
 def test_what_is_not_an_observation_is_refused(kind):
     with pytest.raises(ValueError):
         parsed_kind(kind, "serp_layer")
+
+
+def test_the_parsed_tree_holds_nothing_jsonb_refuses():
+    # NUL and lone surrogates in any string, NaN/Infinity anywhere: one such
+    # value used to cost a page all its observations (the runner's savepoint).
+    parsed = to_observation_json(
+        obs(
+            source_ref="tg:-1001000000001:\x0018234",
+            company_name_raw="Namuna\x00 Tekstil MChJ",
+            goods_text="mato \ud83d furnitura",
+            phones=["+998 90 000 00 01\x00"],
+            excerpt="Guangzhoudan 2 kub\x00",
+            attrs={"volume_m3": "nan", "ratio": float("-inf"), "k\x00ey": 1.5},
+        )
+    )
+    text = json.dumps(parsed, allow_nan=False, ensure_ascii=False)  # NaN raises
+    assert "\x00" not in text and "\\u0000" not in text
+    assert all(not 0xD800 <= ord(ch) <= 0xDFFF for ch in text)
+    assert parsed["source_ref"] == "tg:-1001000000001:18234"
+    assert parsed["company"]["goods_text"] == "mato � furnitura"
+    assert parsed["text"]["excerpt"] == "Guangzhoudan 2 kub"
+    assert parsed["hints"]["volume_m3"] is None
+    assert parsed["hints"]["volume_basis"] == "none"
+    assert parsed["hints"]["collector"]["attrs"] == {
+        "volume_m3": "nan",
+        "ratio": None,
+        "key": 1.5,
+    }

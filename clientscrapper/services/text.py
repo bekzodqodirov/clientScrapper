@@ -5,11 +5,13 @@ One table for the apostrophes people type for oʻ / gʻ, so a company name in
 a directory, a post in a chat and a transliterated name all fold the same way.
 Extend it here and nowhere else.
 
-Copied from MIYA as-is (docs/kod-audit-miya.md §1) with three changes: type
+Copied from MIYA as-is (docs/kod-audit-miya.md §1) with four changes: type
 annotations for the strict mypy scope; ``normalise_for_search`` no longer
 joins MIYA's GS client codes (``services/codes.py`` is not ported, 02 §7);
-and ``APOSTROPHE_CLASS``, the apostrophe table as a regex class for the
-keyword patterns that run on unfolded text.
+``APOSTROPHE_CLASS``, the apostrophe table as a regex class for the
+keyword patterns that run on unfolded text; and ``storable``, the one rule
+for what a ``text``/``jsonb`` column accepts (the evidence store and the
+normaliser ask it).
 """
 
 from __future__ import annotations
@@ -46,6 +48,21 @@ APOSTROPHE_CLASS = "[" + "".join(sorted({"'", *map(chr, APOSTROPHES)})) + "]"
 def fold_apostrophes(text: str) -> str:
     """Pure: the same text with every apostrophe variant as ASCII ``'``."""
     return text.translate(APOSTROPHES)
+
+
+# --- What the database can store ----------------------------------------------
+
+_LONE_SURROGATE = re.compile(r"[\ud800-\udfff]")
+
+
+def storable(text: str) -> str:
+    """``text`` as Postgres ``text`` and ``jsonb`` accept it: NUL characters
+    removed (a page with binary junk in it, ``\u0000`` in an API answer) and
+    lone surrogates (half an emoji cut by a byte-wise clip, a ``\ud83d`` an
+    API escaped alone) replaced by U+FFFD. Anything else is kept as written."""
+    if "\x00" in text:
+        text = text.replace("\x00", "")
+    return _LONE_SURROGATE.sub("\ufffd", text)
 
 
 # --- Latin → Cyrillic, for matching an alias in either script ----------------

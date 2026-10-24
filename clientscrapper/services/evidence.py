@@ -45,6 +45,7 @@ from sqlalchemy.orm import Session, SessionTransaction
 
 from clientscrapper.config import settings
 from clientscrapper.db.models import Evidence
+from clientscrapper.services.text import storable
 
 RAW_CAP: Final = 2 * 1024 * 1024
 URL_MAX: Final = 2048
@@ -79,8 +80,9 @@ def expires_for(source_key: str, fetched_at: datetime) -> datetime:
 
 
 def clip(text: str, limit: int) -> str:
-    """At most ``limit`` characters, cut at a space when one is near the end."""
-    text = text.strip()
+    """At most ``limit`` characters, cut at a space when one is near the end;
+    what a ``text`` column accepts (``text.storable``: no NUL)."""
+    text = storable(text).strip()
     if len(text) <= limit:
         return text
     cut = text[:limit]
@@ -90,11 +92,12 @@ def clip(text: str, limit: int) -> str:
 
 def text_of(body: bytes, content_type: str) -> str:
     """Readable text of a body: HTML without scripts, styles and tags, entities
-    decoded, whitespace collapsed; anything else decoded as UTF-8."""
+    decoded (``&#0;`` too: ``storable`` takes the NUL out), whitespace
+    collapsed; anything else decoded as UTF-8."""
     text = body.decode("utf-8", errors="replace")
     if "html" in content_type or text.lstrip()[:1] == "<":
         text = html.unescape(_TAG.sub(" ", _SCRIPT.sub(" ", text)))
-    return _SPACE.sub(" ", text).strip()
+    return _SPACE.sub(" ", storable(text)).strip()
 
 
 def html_title(body: bytes, content_type: str) -> str | None:
@@ -253,7 +256,7 @@ async def store(
             source_key=source_key,
             collector_run_id=collector_run_id,
             url=url,
-            source_ref=source_ref,
+            source_ref=storable(source_ref) if source_ref is not None else None,
             fetched_at=fetched_at,
             published_at=published_at,
             sha256=sha,

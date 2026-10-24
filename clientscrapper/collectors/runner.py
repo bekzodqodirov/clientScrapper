@@ -19,15 +19,18 @@ parsed from — the body the run's Fetcher handed out, or for an API row
 same bytes at the same URL were stored by an earlier run (``unchanged``:
 nothing new is written); one ``observations(status='new')`` row per
 observation, deduplicated on (source, source_ref, sha256) within 24 h, its
-``parsed`` from ``normalise.to_observation_json``. Every stored URL is
-``urlsafe.strip_secrets``'d (an API key in a query never reaches a row or a
-backup). Each evidence group is written in its own savepoint: one the
-database refuses is dropped and counted (``meta.dropped.bad_evidence``), the
-rest of the run is kept. The ``collector_runs`` row
+``parsed`` from ``normalise.to_observation_json`` (storable: no NUL, no
+NaN). Every stored URL is ``urlsafe.strip_secrets``'d (an API key in a query
+never reaches a row or a backup). Each evidence group is written in its own
+savepoint, and each observation in one inside it: a group the database
+refuses is dropped and counted (``meta.dropped.bad_evidence``), an
+observation it refuses likewise (``bad_observation``), the rest of the page
+and of the run is kept, and the run ends ``partial``. The ``collector_runs`` row
 carries the 02 §2.2 counters; ``unchanged``, ``skipped_robots``, ``note`` and
 the rest go into ``meta``.
 
-Endings: ``ok``; ``partial`` when a page/dollar budget, a cost cap (or any
+Endings: ``ok``; ``partial`` when the database refused a row, or when a
+page/dollar budget, a cost cap (or any
 ``costs.ask`` refusal, ``meta.refused`` naming its code — through the Fetcher
 or from a paid call the collector made itself, ``costs.ModelUnavailable``) or
 the deadline stopped the run; ``failed`` + ``error='host_blocked'`` when a host
@@ -89,8 +92,12 @@ STALE_MARGIN: Final = timedelta(minutes=30)
 DEDUPE_WINDOW: Final = timedelta(hours=24)
 ABANDONED: Final = "abandoned"
 CANCELLED: Final = "cancelled"
-# The database refused this row: skip the group, keep the run.
+# The database refused this row: skip it (or its group), keep the run.
 _REFUSED: Final = (IntegrityError, DataError, ValueError)
+# meta.dropped keys for rows the database refused; either ends the run
+# 'partial' — what it found is not all stored.
+BAD_EVIDENCE: Final = "bad_evidence"
+BAD_OBSERVATION: Final = "bad_observation"
 
 SessionFactory = Callable[[], AsyncSession]
 GateFactory = Callable[[AsyncSession, int], CostGate]
@@ -349,16 +356,31 @@ async def _write_group(
         if mark in seen or await _recently_seen(session, obs, group.sha256, now=now):
             written.duplicates += 1
             continue
-        seen.add(mark)
-        session.add(
-            ObservationRow(
-                evidence_id=row.id,
-                ordinal=ordinal,
-                source_key=obs.source,
-                status="new",
-                parsed=to_observation_json(obs, collector_version=collector_version),
+        try:
+            # Its own savepoint: a row the database refuses costs that row,
+            # not the page's other observations.
+            async with session.begin_nested():
+                session.add(
+                    ObservationRow(
+                        evidence_id=row.id,
+                        ordinal=ordinal,
+                        source_key=obs.source,
+                        status="new",
+                        parsed=to_observation_json(
+                            obs, collector_version=collector_version
+                        ),
+                    )
+                )
+                await session.flush()
+        except _REFUSED as exc:
+            written.dropped[BAD_OBSERVATION] += 1
+            log.warning(
+                "observation refused: %s",
+                type(exc).__name__,
+                extra={"source": obs.source, "run_id": run_id},
             )
-        )
+            continue
+        seen.add(mark)
         written.new_observations += 1
         written.bump(obs.source, "observations")
     await session.flush()
@@ -424,7 +446,7 @@ async def write_observations(
                     root=root,
                 )
         except _REFUSED as exc:
-            written.dropped["bad_evidence"] += len(group.members)
+            written.dropped[BAD_EVIDENCE] += len(group.members)
             log.warning(
                 "evidence group refused: %s",
                 type(exc).__name__,
@@ -676,6 +698,10 @@ async def run_collector(
                     extra={"source": key, "run_id": run_id},
                 )
 
+            if status == "ok" and (
+                written.dropped[BAD_EVIDENCE] or written.dropped[BAD_OBSERVATION]
+            ):
+                status = "partial"
             stats = run_fetcher.stats
             counters: dict[str, Any] = {
                 "requests": stats.requests,

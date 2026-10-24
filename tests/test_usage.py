@@ -28,7 +28,10 @@ BATCH = usage.DEFAULT_MODELS["BATCH_MODEL"]
 
 def test_the_price_table_is_the_specs():
     assert {
-        EXTRACT: usage.ModelPrice(D("0.10"), D("0.50"), D("0.01"), D("0.125")),
+        # Above 100K prompt tokens: $0.50 / $2.50 (cached model table, 2026-10-06).
+        EXTRACT: usage.ModelPrice(
+            D("0.10"), D("0.50"), D("0.01"), D("0.125"), 100_000, D("0.50"), D("2.50")
+        ),
         VERDICT: usage.ModelPrice(D("2"), D("10"), D("0.20"), D("2.50")),
         BATCH: usage.ModelPrice(D("4"), D("20"), D("0.20"), D("5.00")),
     } == usage.MODEL_PRICES
@@ -77,6 +80,55 @@ def test_token_costs_reproduce_the_specs_estimates(model, tokens, expected):
     assert usage.anthropic_cost_usd(model, **tokens) == D(expected)
 
 
+@pytest.mark.parametrize(
+    ("tokens", "expected"),
+    [
+        # The seam review's case: 150K in + 1K out is the long tier, 5×.
+        ({"input_tokens": 150_000, "output_tokens": 1_000}, "0.077500"),
+        # Exactly 100K is still «up to 100K».
+        ({"input_tokens": 100_000, "output_tokens": 1_000}, "0.010500"),
+        # The prompt is input + cache reads + cache writes: 60K + 50K read.
+        (
+            {"input_tokens": 60_000, "cache_read_tokens": 50_000, "output_tokens": 1_000},
+            "0.035000",  # 60K × 0.50 + 50K × 0.05 + 1K × 2.50, per million
+        ),
+        # The long tier scales the cache write price with the input's ratio.
+        ({"input_tokens": 1_000, "cache_write_tokens": 100_000}, "0.063000"),
+    ],
+)
+def test_haiku_prompts_over_100k_tokens_are_billed_at_the_long_rate(tokens, expected):
+    assert usage.anthropic_cost_usd(EXTRACT, **tokens) == D(expected)
+
+
+def test_a_role_override_keeps_its_models_long_context_tier(monkeypatch):
+    monkeypatch.setattr(settings, "extract_model_price", "0.20/1.00")
+    price = usage.price_for(settings.extract_model)
+    assert price is not None and price.long_above == 100_000
+    assert (price.long_input, price.long_output) == (D("1.00"), D("5.00"))
+    assert usage.anthropic_cost_usd(settings.extract_model, input_tokens=150_000) == D(
+        "0.150000"
+    )
+
+
+def test_one_hour_cache_writes_cost_twice_the_input_price():
+    # The 5-minute write is the table's cache_write (1.25×); the 1-hour one 2×.
+    assert usage.anthropic_cost_usd(EXTRACT, cache_write_1h_tokens=1000) == D("0.000200")
+    priced = usage.priced_anthropic(
+        EXTRACT,
+        SimpleNamespace(
+            input_tokens=100,
+            output_tokens=10,
+            cache_creation_input_tokens=3000,
+            cache_creation=SimpleNamespace(
+                ephemeral_5m_input_tokens=1000, ephemeral_1h_input_tokens=2000
+            ),
+        ),
+    )
+    # 100 × 0.10 + 10 × 0.50 + 1000 × 0.125 + 2000 × 0.20, per million
+    assert priced.cost_usd == D("0.000540")
+    assert priced.cache_write_tokens == 3000
+
+
 def test_a_cost_is_rounded_up_never_away():
     # 1 input token on the extract model is $0.0000001: the column keeps 6 places.
     assert usage.anthropic_cost_usd(EXTRACT, input_tokens=1) == D("0.000001")
@@ -96,7 +148,10 @@ def test_an_unknown_model_is_unpriced():
 
 def test_a_role_override_wins_for_that_roles_model_only(monkeypatch):
     monkeypatch.setattr(settings, "extract_model_price", "1/5")
-    assert usage.price_for(settings.extract_model) == usage.ModelPrice(D("1"), D("5"))
+    # The model's long-context tier stays, scaled to the override (5× here).
+    assert usage.price_for(settings.extract_model) == usage.ModelPrice(
+        D("1"), D("5"), long_above=100_000, long_input=D("5"), long_output=D("25")
+    )
     # Without cache prices in the override the ratios apply: read 0.1×, write 1.25×.
     assert usage.anthropic_cost_usd(
         settings.extract_model, cache_read_tokens=1000, cache_write_tokens=1000

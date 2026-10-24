@@ -199,12 +199,37 @@ OP_WINDOWS: Final[Mapping[Operation, tuple[time, time]]] = {
 
 
 class ModelPrice(NamedTuple):
-    """USD per million tokens; the cache prices are optional in an override."""
+    """USD per million tokens; the cache prices are optional in an override.
+
+    ``long_above``/``long_input``/``long_output``: a long-context tier — a
+    prompt (input + cache reads + cache writes) of more than ``long_above``
+    tokens is billed at the long rates, its cache rates scaled by the same
+    ratio as the input's (``token_cost``)."""
 
     input: Decimal
     output: Decimal
     cache_read: Decimal | None = None
     cache_write: Decimal | None = None
+    long_above: int | None = None
+    long_input: Decimal | None = None
+    long_output: Decimal | None = None
+
+    def for_prompt(self, prompt_tokens: int) -> ModelPrice:
+        """The rates a prompt of ``prompt_tokens`` is billed at."""
+        if (
+            self.long_above is None
+            or self.long_input is None
+            or self.long_output is None
+            or prompt_tokens <= self.long_above
+        ):
+            return self
+        ratio = self.long_input / self.input if self.input else D(1)
+        return ModelPrice(
+            self.long_input,
+            self.long_output,
+            None if self.cache_read is None else self.cache_read * ratio,
+            None if self.cache_write is None else self.cache_write * ratio,
+        )
 
 
 def parse_price(text: str) -> ModelPrice | None:
@@ -221,13 +246,26 @@ def parse_price(text: str) -> ModelPrice | None:
         return None
     if any(not v.is_finite() or v < 0 for v in values):
         return None
-    return ModelPrice(*values)
+    cache_read, cache_write = values[2:] if len(values) == 4 else (None, None)
+    return ModelPrice(values[0], values[1], cache_read, cache_write)
 
 
 # Code, keyed by the configured ids (04 §8). There is no MODEL_PRICES in
 # `.env`; a price change for a configured role is a *_MODEL_PRICE edit.
+# Haiku 5.5's prices hold for prompts up to 100K tokens; above that it is
+# $0.50 / $2.50 (Anthropic's model table, cached 2026-10-06) — a long classify
+# bundle or an enrich_search full of web results, five times the short rate.
+HAIKU_LONG_ABOVE: Final = 100_000
 MODEL_PRICES: Final[Mapping[str, ModelPrice]] = {
-    "claude-haiku-5-5": ModelPrice(D("0.10"), D("0.50"), D("0.01"), D("0.125")),
+    "claude-haiku-5-5": ModelPrice(
+        D("0.10"),
+        D("0.50"),
+        D("0.01"),
+        D("0.125"),
+        HAIKU_LONG_ABOVE,
+        D("0.50"),
+        D("2.50"),
+    ),
     "claude-sonnet-5-5": ModelPrice(D("2"), D("10"), D("0.20"), D("2.50")),
     "claude-opus-5-5": ModelPrice(D("4"), D("20"), D("0.20"), D("5.00")),
 }
@@ -273,6 +311,10 @@ DEFAULT_MODELS: Final[Mapping[str, str]] = {r.key: r.default for r in MODEL_ROLE
 # An override that names only in/out takes MIYA's cache ratios.
 CACHE_READ_RATIO: Final = D("0.1")
 CACHE_WRITE_RATIO: Final = D("1.25")
+# A cache write with the 1-hour TTL costs twice the input price (the 5-minute
+# one, ``cache_write``, 1.25×): priced_anthropic reads the split from the SDK's
+# ``usage.cache_creation``.
+CACHE_WRITE_1H_RATIO: Final = D(2)
 # Anthropic web search: $10 per 1,000 searches (checked 2026-10-23).
 WEB_SEARCH_USD: Final = D("0.010")
 _MILLION: Final = D(1_000_000)
@@ -285,12 +327,33 @@ def resolve_price(
     """``roles`` = ((configured model id, its *_MODEL_PRICE text), …): an
     override applies to its own role's model only, then the code table.
     An unreadable override is ignored here (the settings refuse it at start)."""
+    table = MODEL_PRICES.get(model)
     for role_model, configured in roles:
         if model == role_model and configured.strip():
             price = parse_price(configured)
             if price is not None:
-                return price
-    return MODEL_PRICES.get(model)
+                return _with_long_tier(price, table)
+    return table
+
+
+def _with_long_tier(price: ModelPrice, table: ModelPrice | None) -> ModelPrice:
+    """An override names no long-context tier; the table's, scaled to the
+    override's own rates, still applies to its model — dropping it would
+    price a long prompt at the short rate (the cap never undercounts)."""
+    if (
+        table is None
+        or table.long_above is None
+        or table.long_input is None
+        or table.long_output is None
+        or not table.input
+        or not table.output
+    ):
+        return price
+    return price._replace(
+        long_above=table.long_above,
+        long_input=price.input * table.long_input / table.input,
+        long_output=price.output * table.long_output / table.output,
+    )
 
 
 def price_for(model: str) -> ModelPrice | None:
@@ -321,7 +384,14 @@ def token_cost(
     cache_write_tokens: int = 0,
     batch: bool = False,
     web_searches: int = 0,
+    cache_write_1h_tokens: int = 0,
 ) -> Decimal:
+    """``cache_write_tokens`` are 5-minute writes (``cache_write``, else 1.25×
+    input), ``cache_write_1h_tokens`` 1-hour ones (2× input). The whole prompt
+    — input, cache reads and both writes — picks the tier
+    (``ModelPrice.for_prompt``)."""
+    prompt = input_tokens + cache_read_tokens + cache_write_tokens + cache_write_1h_tokens
+    price = price.for_prompt(prompt)
     cache_read = (
         price.cache_read
         if price.cache_read is not None
@@ -337,6 +407,7 @@ def token_cost(
         + D(output_tokens) * price.output
         + D(cache_read_tokens) * cache_read
         + D(cache_write_tokens) * cache_write
+        + D(cache_write_1h_tokens) * price.input * CACHE_WRITE_1H_RATIO
     ) / _MILLION
     if batch:
         tokens /= 2  # the Message Batches API is half price
@@ -353,6 +424,7 @@ def anthropic_cost_usd(
     cache_write_tokens: int = 0,
     batch: bool = False,
     web_searches: int = 0,
+    cache_write_1h_tokens: int = 0,
 ) -> Decimal | None:
     """The cost of one call (or one estimate) on ``model``; None = unpriced,
     which ``costs.ask`` refuses before anything is sent."""
@@ -367,6 +439,7 @@ def anthropic_cost_usd(
         cache_write_tokens=cache_write_tokens,
         batch=batch,
         web_searches=web_searches,
+        cache_write_1h_tokens=cache_write_1h_tokens,
     )
 
 
@@ -488,11 +561,17 @@ def priced_anthropic(
 ) -> Priced:
     """One SDK ``response.usage`` (or a batch result's) as a row. Web searches
     are read from ``usage.server_tool_use.web_search_requests`` and recorded
-    as the row's units."""
+    as the row's units; the 1-hour share of the cache writes from
+    ``usage.cache_creation.ephemeral_1h_input_tokens`` (priced 2×; the row's
+    ``cache_write_tokens`` keeps the total)."""
     input_tokens = _count(usage, "input_tokens")
     output_tokens = _count(usage, "output_tokens")
     cache_read = _count(usage, "cache_read_input_tokens")
     cache_write = _count(usage, "cache_creation_input_tokens")
+    one_hour = min(
+        _count(getattr(usage, "cache_creation", None), "ephemeral_1h_input_tokens"),
+        cache_write,
+    )
     searches = _count(getattr(usage, "server_tool_use", None), "web_search_requests")
     return Priced(
         cost_usd=anthropic_cost_usd(
@@ -500,9 +579,10 @@ def priced_anthropic(
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             cache_read_tokens=cache_read,
-            cache_write_tokens=cache_write,
+            cache_write_tokens=cache_write - one_hour,
             batch=batch,
             web_searches=searches,
+            cache_write_1h_tokens=one_hour,
         ),
         units=D(searches),
         model=model,
@@ -520,6 +600,7 @@ __all__ = [
     "ALLOCATIONS",
     "APIFY_USD_PER_UNIT",
     "BRAVE_USD_PER_QUERY",
+    "CACHE_WRITE_1H_RATIO",
     "CALLABLE",
     "COUNTED_OPERATIONS",
     "DAILY_UNIT_CAPS",
@@ -528,6 +609,7 @@ __all__ = [
     "FAMILY",
     "FAMILY_CAPS",
     "FREE_OPERATIONS",
+    "HAIKU_LONG_ABOVE",
     "MODEL_PRICES",
     "MODEL_ROLES",
     "MONTHLY_UNIT_CAPS",
