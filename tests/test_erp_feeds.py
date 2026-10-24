@@ -12,9 +12,12 @@ requests the fake saw. ``sources`` is migration-seeded configuration: the
 from __future__ import annotations
 
 import hashlib
+import shutil
+import subprocess
 from collections.abc import AsyncIterator
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -1287,11 +1290,48 @@ def test_the_tool_takes_one_walk_and_accept_shrink_only_with_full():
     from clientscrapper.tools import erp_sync as tool
 
     args = tool.parse_args(["--full", "--accept-shrink"])
-    assert (args.full, args.delta, args.accept_shrink) == (True, False, True)
-    assert tool.parse_args(["--delta"]).delta
-    for bad in ([], ["--full", "--delta"], ["--delta", "--accept-shrink"]):
+    assert (args.variant, args.accept_shrink) == ("full", True)
+    # Every cadence of the table can be run by hand (07 §5.6's outcomes walk
+    # among them), and nothing else.
+    for variant in erp_sync.VARIANTS:
+        assert tool.parse_args([f"--{variant}"]).variant == variant
+    assert {job.variant for job in erp_sync.JOBS} == set(erp_sync.VARIANTS)
+    for bad in (
+        [],
+        ["--full", "--delta"],
+        ["--delta", "--accept-shrink"],
+        ["--outcomes", "--accept-shrink"],
+        ["--unknown"],
+    ):
         with pytest.raises(SystemExit):
             tool.parse_args(bad)
+
+
+@pytest.mark.skipif(shutil.which("make") is None, reason="no make")
+def test_make_erp_sync_runs_each_walk_and_refuses_any_other():
+    root = Path(__file__).resolve().parents[1]
+
+    def dry(*args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["make", "-s", "-n", "erp-sync", *args],
+            cwd=root,
+            capture_output=True,
+            text=True,
+        )
+
+    for variant in erp_sync.VARIANTS:
+        done = dry(f"WALK={variant}")
+        assert done.returncode == 0, done.stderr
+        line = " ".join(done.stdout.replace("\\\n", " ").split())
+        assert line.endswith(f"python -m clientscrapper.tools.erp_sync --{variant}")
+    shrink = dry("WALK=full", "ACCEPT_SHRINK=1")
+    assert " ".join(shrink.stdout.replace("\\\n", " ").split()).endswith(
+        "--full --accept-shrink"
+    )
+    for bad in ("WALK=bogus", "WALK=", "WALK=full delta", "ACCEPT_SHRINK=yes"):
+        refused = dry(bad) if bad.startswith("WALK") else dry("WALK=full", bad)
+        assert refused.returncode != 0, bad
+    assert "use one of full delta outcomes quarter year" in dry("WALK=x").stderr
 
 
 async def test_the_tool_s_line_says_what_the_run_did(session, erp_row):
@@ -1308,6 +1348,8 @@ async def test_the_tool_s_line_says_what_the_run_did(session, erp_row):
     await session.commit()
     skipped = await erp_sync.run("full", fetcher=a_fetcher(), now=NOW, erp=erp)
     assert tool.describe(skipped) == "erp_sync.full: skipped (source_disabled)"
+    # A skip is not a success to a script (07 §5.6 reads the exit code).
+    assert (tool.exit_code(report), tool.exit_code(skipped)) == (0, 3)
 
 
 async def test_accept_shrink_reaches_the_pull_through_the_run(session, erp_row):

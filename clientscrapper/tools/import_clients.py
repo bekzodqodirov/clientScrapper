@@ -8,7 +8,11 @@ The file is the ERP's **Mijozlar → XLSX**, downloaded from an unfiltered
 screen with no saved view, copied into the server's ``data/imports/`` —
 the container's ``/data/imports/``, where ``make`` looks for a bare file
 name (a name with a «/» is passed as it stands). A file that is not there
-is said to be missing, with the place looked at, never «broken».
+is said to be missing, with the place looked at, never «broken». The file
+holds every client's name, code, manager and phones: once its tails are
+written it is deleted from ``data/imports/`` (a file elsewhere: the owner is
+told to delete it), and a file the app cannot read is given to the app's
+user (uid 10001), never opened to everybody.
 Without ``--apply`` it prints what would happen and writes nothing; with it
 the new tails are written in one transaction. ``--accept-fewer`` lets one
 file with fewer rows than the previous import's through, after the owner
@@ -44,11 +48,43 @@ HINT_TEXT: dict[client_import.BadFileCode, str] = {
         "Qidirilgan joy: {path}. Faylni serverdagi data/imports/ papkasiga "
         "koʻchiring va make import-clients FILE={name} bilan qayta ishga tushiring."
     ),
+    # The containers run as uid 10001 (Dockerfile); the file holds every
+    # client's phones, so it is given to that user, never opened to all.
     "denied": (
         "Qidirilgan joy: {path}. Fayl bor, lekin dastur uni oʻqiy olmaydi: serverda "
-        "chmod a+r data/imports/{name} qiling va qayta ishga tushiring."
+        "sudo chown 10001 data/imports/{name} qiling (hammaga ochmang) va qayta "
+        "ishga tushiring."
     ),
 }
+# Where make puts a bare FILE name: the server's data/imports/, the
+# containers' /data/imports (docker-compose.yml, ./data:/data).
+IMPORTS_DIR = Path("/data/imports")
+# The export holds the name, code, manager and phones of every client: once
+# written, it is not left on the server's disk.
+REMOVED_TEXT = (
+    "Fayl serverdan oʻchirildi: data/imports/{name} — mijozlar raqamlari diskda "
+    "qolmasin."
+)
+REMOVE_FAILED_TEXT = (
+    "⚠️ Faylni oʻchirib boʻlmadi: serverda rm data/imports/{name} qiling — mijozlar "
+    "raqamlari diskda qolmasin."
+)
+REMOVE_YOURSELF_TEXT = (
+    "⚠️ Endi faylni oʻchiring ({path}) — mijozlar raqamlari diskda qolmasin."
+)
+
+
+def _forget_file(path: Path, imports_dir: Path) -> str:
+    """After a written import: the file goes when it is one of data/imports/
+    (where make put it), else the owner is told to delete it."""
+    resolved = path.resolve()
+    if resolved.parent != imports_dir.resolve():
+        return REMOVE_YOURSELF_TEXT.format(path=path)
+    try:
+        resolved.unlink()
+    except OSError:
+        return REMOVE_FAILED_TEXT.format(name=path.name)
+    return REMOVED_TEXT.format(name=path.name)
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -72,8 +108,10 @@ async def run(
     accept_fewer: bool = False,
     now: datetime | None = None,
     sessions: SessionFactory = SessionLocal,
+    imports_dir: Path = IMPORTS_DIR,
 ) -> tuple[int, list[str]]:
-    """The exit code and the lines to print."""
+    """The exit code and the lines to print. A written import deletes its
+    file from ``imports_dir`` (or tells the owner to delete it)."""
     try:
         export = client_import.read_rows(path)
         async with sessions() as session:
@@ -93,7 +131,8 @@ async def run(
             )
             await session.commit()
             lines.append(client_import.applied_line(applied))
-            return 0, lines
+        lines.append(_forget_file(Path(path), imports_dir))
+        return 0, lines
     except client_import.BadFile as exc:
         name = Path(path).name
         lines = [CANNOT_READ_TEXT.format(name=name, why=exc.text())]

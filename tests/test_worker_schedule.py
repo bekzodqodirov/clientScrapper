@@ -682,6 +682,11 @@ async def test_catch_up_runs_the_nightly_outcomes_walks_it_missed(session, monke
     monkeypatch.setattr(settings, "crm_push_source", "agent")
     monkeypatch.setattr(settings, "crm_agent_key", "namuna-agent-key")
     scheduler, ran = _scheduler_with(worker.OUTCOMES_JOB)
+    # sources is seeded configuration (tests/conftest.py KEPT_TABLES): what
+    # this test changes it puts back as it found it.
+    row = await session.get(m.Source, "erp_sync")
+    assert row is not None
+    seeded = dict(row.config)
     scheduler.start(paused=True)
     try:
         moment = datetime.now(TZ)
@@ -701,11 +706,7 @@ async def test_catch_up_runs_the_nightly_outcomes_walks_it_missed(session, monke
         assert job is not None and job.next_run_time > moment + timedelta(hours=1)
         # The feeds off (the «Boshqa» fallback): never.
         monkeypatch.setattr(settings, "crm_push_source", "other")
-        await session.execute(
-            sa.update(m.Source)
-            .where(m.Source.key == "erp_sync")
-            .values(config=m.Source.config.op("-")("outcomes"))
-        )
+        await erp_feeds._store_outcomes_config(session, erp_feeds.OutcomesConfig())
         await session.commit()
         await worker.catch_up(now=moment, scheduler=scheduler)
         job = scheduler.get_job(worker.OUTCOMES_JOB)
@@ -713,9 +714,7 @@ async def test_catch_up_runs_the_nightly_outcomes_walks_it_missed(session, monke
     finally:
         scheduler.shutdown(wait=False)
         await session.execute(
-            sa.update(m.Source)
-            .where(m.Source.key == "erp_sync")
-            .values(config=m.Source.config.op("-")("outcomes"))
+            sa.update(m.Source).where(m.Source.key == "erp_sync").values(config=seeded)
         )
         await session.commit()
 
@@ -779,10 +778,15 @@ async def test_a_worker_that_loses_the_lock_pauses_its_scheduler(session, monkey
         assert await mine.acquire()
         keeping = asyncio.ensure_future(worker.keep_leadership(mine, scheduler, stop))
         await asyncio.sleep(0.2)
-        assert scheduler.calls == []
-        # A database restart drops this connection; the other takes the lock.
+        assert scheduler.calls == []  # still ours: nothing changes
+        stop.set()
+        await asyncio.wait_for(keeping, 5)
+        # A database restart dropped this connection and the other worker took
+        # the lock before this one asked again (no loop runs between the two).
         await mine.release()
         assert await theirs.acquire()
+        stop.clear()
+        keeping = asyncio.ensure_future(worker.keep_leadership(mine, scheduler, stop))
         await asyncio.sleep(0.3)
         assert scheduler.calls == ["pause"]
         await theirs.release()

@@ -52,6 +52,8 @@ URL_MAX: Final = 2048
 EXCERPT_MAX: Final = 600
 TITLE_MAX: Final = 300
 GZIP_LEVEL: Final = 6
+# Raw files are the app user's alone (06 §5.6).
+RAW_MODE: Final = 0o600
 DEFAULT_RETENTION: Final = timedelta(days=180)
 # Google Maps Platform terms: no caching beyond 30 days (02 §2.5, R4b).
 RETENTION: Final = {"maps_google": timedelta(days=30)}
@@ -121,8 +123,17 @@ def write_raw(path: Path, body: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     # Two processes may store the same bytes at once: each its own tmp name.
     tmp = path.with_name(f"{path.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp")
-    tmp.write_bytes(gzip.compress(body, compresslevel=GZIP_LEVEL, mtime=0))
-    os.replace(tmp, path)
+    # Owner-only from its first byte, whatever the umask: a raw page can hold
+    # phones and names, and ./data is a bind mount every host user could
+    # otherwise read (the backups are 0600 for the same reason).
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, RAW_MODE)
+    try:
+        with os.fdopen(fd, "wb") as sink:
+            sink.write(gzip.compress(body, compresslevel=GZIP_LEVEL, mtime=0))
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 # --- files follow the transaction -------------------------------------------------

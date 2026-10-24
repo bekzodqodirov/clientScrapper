@@ -51,6 +51,31 @@ async def test_store_writes_one_row_and_one_gzip_file(session, tmp_path):
     assert evidence.open_raw(row, root=tmp_path) == BODY
 
 
+async def test_a_raw_file_is_owner_only_whatever_the_umask(session, tmp_path):
+    """A raw page can hold phones and names, and ./data is a bind mount:
+    0600 like the backups, not the umask's 0644."""
+    import os
+    import stat
+
+    previous = os.umask(0o022)
+    try:
+        row = await evidence.store(
+            session,
+            source_key="directories_goldenpages",
+            url=URL,
+            body=BODY,
+            content_type="text/html",
+            fetched_at=T0,
+            root=tmp_path,
+        )
+        await session.commit()
+    finally:
+        os.umask(previous)
+    stored = tmp_path / str(row.raw_path)
+    assert stat.S_IMODE(stored.stat().st_mode) == 0o600
+    assert gzip.decompress(stored.read_bytes()) == BODY
+
+
 async def test_the_same_bytes_at_the_same_url_are_a_no_op(session, tmp_path):
     kwargs = {
         "source_key": "directories_goldenpages",

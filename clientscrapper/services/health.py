@@ -475,6 +475,14 @@ class SuppressionHealth:
     salt_ok: bool = True
     # When freshness was lost (the first limit that ran out), if known.
     stale_since: datetime | None = None
+    # The «Boshqa» fallback (05 §B.3): no feed, the owner's XLSX import is
+    # the gate — fresh while the last import is at most import_max_d days
+    # old and newer than the last completed full pull (a full pull retires
+    # the imported tails it carries; back on the fallback door they are gone).
+    fallback: bool = False
+    imported_at: datetime | None = None
+    import_max_d: int = 0
+    import_before_feed: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -1318,6 +1326,22 @@ def _suppression_text(status: Status, health: SuppressionHealth) -> str:
         return "hech qachon" if at is None else f"{age_label(status.now - at)} oldin"
 
     head = "⛔" if _suppression_critical(status, health) else "⚠️"
+    if health.fallback:
+        remedy = (
+            "ERP → Mijozlar → XLSX, <code>make import-clients</code> — push toʻxtatildi"
+        )
+        if health.imported_at is None:
+            return f"{head} Mijozlar roʻyxati hali import qilinmagan: {remedy}"
+        if health.import_before_feed:
+            return (
+                f"{head} Mijozlar roʻyxati {age(health.imported_at)} — ERP "
+                "roʻyxatidan oldin import qilingan, «Boshqa» eshigida qayta import "
+                f"kerak: {remedy}"
+            )
+        return (
+            f"{head} Mijozlar roʻyxati {age(health.imported_at)} import qilingan "
+            f"(chegara {health.import_max_d} kun): {remedy}"
+        )
     salt = "" if health.salt_ok else " · kalit almashgan (salt_id)"
     return (
         f"{head} ERP bostirish roʻyxati yangilanmadi: toʻliq {age(health.full_at)} "
@@ -1614,7 +1638,7 @@ _RECOVERY: Final[Mapping[str, str]] = {
     "erp_redirect": "✅ ERP manzili toʻgʻri — tiklandi",
     "backup_failed": "✅ Tungi zaxira yana yozildi — tiklandi",
     "restore_drill_failed": "✅ Zaxirani tiklash sinovi oʻtdi — tiklandi",
-    "suppression_stale": "✅ ERP bostirish roʻyxati yangilandi — push davom etadi",
+    "suppression_stale": "✅ Bostirish roʻyxati yangilandi — push davom etadi",
     "suppression_selftest_failed": (
         "✅ ERP roʻyxati oʻz-oʻzini tekshirishdan oʻtdi — tiklandi"
     ),

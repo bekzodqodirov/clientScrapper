@@ -777,11 +777,16 @@ async def test_the_tool_dry_run_writes_nothing(session, erp_row):
 
 async def test_the_tool_applies_and_refuses(session, erp_row, tmp_path):
     code, lines = await import_clients.run(XLSX, apply=True, now=NOW)
-    assert (code, lines[-1]) == (
+    assert (code, lines[-2:]) == (
         0,
-        "Yozildi: 44 ta yangi raqam; 0 tasi oldingi importda bor edi, 0 tasi boshqa "
-        "manbadan bor.",
+        [
+            "Yozildi: 44 ta yangi raqam; 0 tasi oldingi importda bor edi, 0 tasi "
+            "boshqa manbadan bor.",
+            # Not in data/imports/: the owner deletes it (here: the fixture).
+            f"⚠️ Endi faylni oʻchiring ({XLSX}) — mijozlar raqamlari diskda qolmasin.",
+        ],
     )
+    assert XLSX.exists()
     assert await manual_tails(session) == sorted(FIXTURE_TAILS)
     one = write_xlsx(
         tmp_path / "one.xlsx", [["Code", "Phones"], ["NMN99", "+998 90 000 00 77"]]
@@ -800,6 +805,44 @@ async def test_the_tool_applies_and_refuses(session, erp_row, tmp_path):
         1,
         ["x.ods oʻqilmadi: Faqat .xlsx yoki .csv fayl oʻqiladi (ERP → Mijozlar → XLSX)."],
     )
+
+
+async def test_a_written_import_deletes_its_file_from_data_imports(
+    session, erp_row, tmp_path
+):
+    """The export is every client's name, code, manager and phones: once the
+    tails are written it does not stay on the server's disk. A dry run and a
+    refused run keep it (the owner applies or accepts next)."""
+    imports = tmp_path / "imports"
+    imports.mkdir()
+    copy = imports / "clients.xlsx"
+    copy.write_bytes(XLSX.read_bytes())
+    code, lines = await import_clients.run(copy, apply=False, imports_dir=imports)
+    assert code == 0 and copy.exists()
+    code, lines = await import_clients.run(copy, apply=True, now=NOW, imports_dir=imports)
+    assert code == 0
+    assert lines[-1] == (
+        "Fayl serverdan oʻchirildi: data/imports/clients.xlsx — mijozlar raqamlari "
+        "diskda qolmasin."
+    )
+    assert not copy.exists()
+    assert len(await manual_tails(session)) == 44
+    fewer = write_xlsx(
+        imports / "one.xlsx", [["Code", "Phones"], ["NMN99", "+998 90 000 00 77"]]
+    )
+    code, _ = await import_clients.run(
+        fewer, apply=True, now=NOW + timedelta(days=7), imports_dir=imports
+    )
+    assert code == 1 and fewer.exists()
+
+
+def test_a_file_the_app_cannot_read_is_given_to_it_not_opened_to_all():
+    hint = import_clients.HINT_TEXT["denied"]
+    assert "chown 10001 data/imports/{name}" in hint
+    assert "chmod" not in hint and "a+r" not in hint
+    from tests.test_uz_text import problems as uz_problems
+
+    assert uz_problems(hint.format(path="/data/imports/c.xlsx", name="c.xlsx")) == set()
 
 
 async def test_the_tool_says_where_a_missing_file_belongs(session, erp_row, tmp_path):

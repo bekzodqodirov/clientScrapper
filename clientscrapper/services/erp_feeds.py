@@ -29,8 +29,10 @@ is the 48-hour rule's detection (02 §2.10 rule 5; the re-push is T-28's), and
 ``source_precision`` the per-source numbers 04 §7's auto-push reads.
 
 ``suppression_fresh`` is THE home of feed freshness (``FULL_MAX_AGE_H``,
-``DELTA_MAX_AGE_H``): the push gate, 04's gate, 06 §4.2's
-``suppression_stale`` and ``/holat`` all ask it and none restates the hours.
+``DELTA_MAX_AGE_H``, and during the «Boshqa» fallback the XLSX import's
+``IMPORT_MAX_AGE_D``): the push gate, 04's gate, 06 §4.2's
+``suppression_stale`` and ``/holat`` all ask it (``suppression_probe`` reads
+what it needs) and none restates the limits.
 ``freshness`` also says since when the gate is stale — a limit that ran out,
 or the first try of a key no full pull has completed under — which 06 §4.2's
 «critical after 6 h» counts from.
@@ -132,6 +134,9 @@ UPSERT_CHUNK: Final = 1000
 # One nightly full pull (30 2 * * *) plus slack; one hourly delta plus slack.
 FULL_MAX_AGE_H: Final = 26
 DELTA_MAX_AGE_H: Final = 3
+# The «Boshqa» fallback's gate (05 §B.3): the weekly XLSX re-import, plus a
+# day of grace.
+IMPORT_MAX_AGE_D: Final = 8
 # A full pull is due again once the last completed one is a day and half an
 # hour old (the nightly 30 2 * * * plus its run): from then on every delta
 # runs AS a full pull until one completes, so one failed, skipped or missed
@@ -684,23 +689,50 @@ def freshness(
     key: str,
     now: datetime,
     configured: bool | None = None,
+    imported_at: datetime | None = None,
 ) -> health.SuppressionHealth:
     """Fresh when the feed is configured and the last completed full pull is
     at most ``FULL_MAX_AGE_H`` old, the last completed delta at most
     ``DELTA_MAX_AGE_H`` (a full pull counts as one), and the stored
-    ``salt_id`` is the current key's. Feed not configured ⇒ fresh: the XLSX
-    fallback carries the gate (05 §B.3). ``stale_since`` is the moment the
+    ``salt_id`` is the current key's. ``stale_since`` is the moment the
     first limit ran out — or, while no full pull has completed under this
     key, the agent's first try with it (``awaiting_since``); None only
-    before any run has tried the key."""
+    before any run has tried the key.
+
+    Feed not configured (the «Boshqa» fallback, 05 §B.3): the XLSX import
+    carries the gate, so fresh only when an import exists (``imported_at``,
+    the last ``client_import``), is at most ``IMPORT_MAX_AGE_D`` days old,
+    and is newer than the last completed full pull — a full pull retired the
+    imported tails its hashes carry, and once the door is back on «Boshqa»
+    those hashes, made with the agent key, match nothing. No import at all
+    fails closed (``stale_since`` None)."""
     on = feeds_configured() if configured is None else configured
     full_at = cfg.last_full_at if cfg is not None else None
     delta_at = cfg.last_delta_at if cfg is not None else None
     full_limit = timedelta(hours=FULL_MAX_AGE_H)
     delta_limit = timedelta(hours=DELTA_MAX_AGE_H)
     if not on:
+        import_limit = timedelta(days=IMPORT_MAX_AGE_D)
+        before_feed = (
+            imported_at is not None and full_at is not None and imported_at <= full_at
+        )
+        in_time = imported_at is not None and now - imported_at <= import_limit
+        expired = (
+            imported_at + import_limit
+            if imported_at is not None and not before_feed and not in_time
+            else None
+        )
         return health.SuppressionHealth(
-            True, full_at, delta_at, FULL_MAX_AGE_H, DELTA_MAX_AGE_H
+            fresh=in_time and not before_feed,
+            full_at=full_at,
+            delta_at=delta_at,
+            full_max_h=FULL_MAX_AGE_H,
+            delta_max_h=DELTA_MAX_AGE_H,
+            stale_since=expired,
+            fallback=True,
+            imported_at=imported_at,
+            import_max_d=IMPORT_MAX_AGE_D,
+            import_before_feed=before_feed,
         )
     key_salt = salt_id(key)
     salt_ok = cfg is not None and cfg.salt_id is not None and cfg.salt_id == key_salt
@@ -738,18 +770,33 @@ def suppression_fresh(
     key: str,
     now: datetime,
     configured: bool | None = None,
+    imported_at: datetime | None = None,
 ) -> bool:
     """The gate's question (02 §2.8, 02 §2.10 rule 2, 03 §2.2, 04's gate,
     06 §4.2): false → every push is refused ``stale``."""
-    return freshness(cfg, key=key, now=now, configured=configured).fresh
+    return freshness(
+        cfg, key=key, now=now, configured=configured, imported_at=imported_at
+    ).fresh
+
+
+async def last_import_at(session: AsyncSession) -> datetime | None:
+    """When the owner's XLSX client import last ran (``client_import``'s
+    record in ``sources.erp_sync.config``), else None."""
+    from clientscrapper.services import client_import  # it imports this module
+
+    last = await client_import.last_import(session)
+    return last.at if last is not None else None
 
 
 async def suppression_probe(
     session: AsyncSession, now: datetime
 ) -> health.SuppressionHealth:
-    """``health``'s probe for ``suppression_stale`` (``register_health_probe``)."""
+    """Freshness as stored now — ``health``'s probe for ``suppression_stale``
+    (``register_health_probe``) and the push gate's question (T-28): it reads
+    the feed's config and, for the fallback, the last XLSX import."""
     cfg = await suppression_config(session)
-    return freshness(cfg, key=settings.crm_agent_key, now=now)
+    imported_at = None if feeds_configured() else await last_import_at(session)
+    return freshness(cfg, key=settings.crm_agent_key, now=now, imported_at=imported_at)
 
 
 def register_health_probe() -> None:

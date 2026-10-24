@@ -131,10 +131,89 @@ def test_stale_since_counts_from_the_first_try_of_the_key():
     assert (report.fresh, report.stale_since) == (True, None)
 
 
-def test_the_feed_not_configured_is_fresh():
-    # The «Boshqa» fallback: the XLSX import carries the gate (05 §B.3).
-    assert suppression_fresh(None, key=KEY, now=NOW, configured=False)
-    assert suppression_fresh(cfg(100, 100), key=KEY, now=NOW, configured=False)
+def test_the_fallback_is_fresh_only_with_a_recent_import():
+    """The «Boshqa» fallback (05 §B.3): the XLSX import is the only client
+    guard, so the gate passes only while one exists and is at most
+    IMPORT_MAX_AGE_D days old — no import, no push (seam review: it used to
+    pass with an empty suppression table)."""
+    assert erp_feeds.IMPORT_MAX_AGE_D == 8  # the weekly re-import plus a day
+    never = freshness(None, key=KEY, now=NOW, configured=False)
+    assert (never.fresh, never.fallback, never.imported_at, never.stale_since) == (
+        False,
+        True,
+        None,
+        None,
+    )
+    for days in (0, 7, 8):
+        at = NOW - timedelta(days=days)
+        assert suppression_fresh(None, key=KEY, now=NOW, configured=False, imported_at=at)
+    old = NOW - timedelta(days=8, seconds=1)
+    report = freshness(None, key=KEY, now=NOW, configured=False, imported_at=old)
+    assert (report.fresh, report.stale_since, report.import_max_d) == (
+        False,
+        old + timedelta(days=8),
+        8,
+    )
+
+
+def test_an_import_older_than_the_last_full_pull_does_not_carry_the_fallback():
+    """Back on «Boshqa» after the agent door: the full pulls retired the
+    imported tails their hashes carried, and those hashes (the agent key's)
+    match nothing now. Only an import made after the last full pull counts."""
+    pulled = cfg(30, 30)  # the last full pull 30 h ago
+    before = freshness(
+        pulled, key=KEY, now=NOW, configured=False, imported_at=NOW - timedelta(days=2)
+    )
+    assert (before.fresh, before.import_before_feed, before.stale_since) == (
+        False,
+        True,
+        None,
+    )
+    after = freshness(
+        pulled, key=KEY, now=NOW, configured=False, imported_at=NOW - timedelta(hours=1)
+    )
+    assert (after.fresh, after.import_before_feed) == (True, False)
+    # The feeds on, the import says nothing.
+    assert not suppression_fresh(
+        pulled, key=KEY, now=NOW, configured=True, imported_at=NOW
+    )
+
+
+@pytest.mark.parametrize(
+    ("imported", "before", "fragment"),
+    [
+        (None, False, "Mijozlar roʻyxati hali import qilinmagan"),
+        (timedelta(days=9), False, "9 kun oldin import qilingan (chegara 8 kun)"),
+        (timedelta(days=2), True, "ERP roʻyxatidan oldin import qilingan"),
+    ],
+)
+def test_the_fallback_line_names_the_import(imported, before, fragment):
+    from tests.test_uz_text import problems as uz_problems
+
+    sup = health.SuppressionHealth(
+        fresh=False,
+        full_at=None,
+        delta_at=None,
+        full_max_h=26,
+        delta_max_h=3,
+        fallback=True,
+        imported_at=None if imported is None else NOW - imported,
+        import_max_d=8,
+        import_before_feed=before,
+    )
+    status = health.Status(
+        now=NOW,
+        db_ok=True,
+        disk_free_bytes=None,
+        disk_total_bytes=None,
+        disk_low=False,
+        backup=health.BackupInfo(configured=True),
+        suppression=sup,
+    )
+    [problem] = [p for p in health.problems(status) if p.key == "suppression_stale"]
+    assert fragment in problem.text
+    assert "<code>make import-clients</code>" in problem.text
+    assert uz_problems(problem.text, rendered=True) == set()
 
 
 def test_freshness_says_what_health_prints():
@@ -177,6 +256,33 @@ def test_the_config_round_trips_and_reads_the_seed():
     assert SuppressionConfig.from_json({"last_full_at": "2026-10-24T10:00:00"}) == (
         SuppressionConfig()
     )
+
+
+async def test_the_probe_reads_the_last_import_during_the_fallback(session, monkeypatch):
+    from tests.test_client_import import XLSX, imported
+
+    monkeypatch.setattr(settings, "crm_push_source", "other")
+    monkeypatch.setattr(settings, "crm_agent_key", KEY)
+    row = await session.get(erp_feeds.Source, erp_feeds.ERP_SOURCE)
+    assert row is not None
+    seeded = dict(row.config)
+    try:
+        report = await erp_feeds.suppression_probe(session, NOW)
+        assert (report.fresh, report.fallback, report.imported_at) == (False, True, None)
+        from clientscrapper.services import client_import as ci
+
+        await imported(session, ci.read_rows(XLSX))
+        last = await ci.last_import(session)
+        assert last is not None
+        report = await erp_feeds.suppression_probe(session, last.at)
+        assert (report.fresh, report.imported_at) == (True, last.at)
+        later = last.at + timedelta(days=9)
+        assert not (await erp_feeds.suppression_probe(session, later)).fresh
+    finally:
+        row = await session.get(erp_feeds.Source, erp_feeds.ERP_SOURCE)
+        assert row is not None
+        row.config = seeded
+        await session.commit()
 
 
 async def test_the_probe_reads_the_stored_config(session, monkeypatch):

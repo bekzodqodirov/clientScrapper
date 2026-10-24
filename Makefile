@@ -12,7 +12,7 @@ COMPOSE := docker compose
 switch = $(if $(filter-out 0 1,$(strip $($(1)))),$(error $(1)=$($(1)): use $(1)=1 (on) or $(1)=0 (off)),$(filter 1,$(strip $($(1)))))
 .PHONY: help env doctor up update down reload logs ps psql migrate revision downgrade \
         bot worker userbot userbot-login backup backup-key backup-key-show restore \
-        import-clients push-test purge install test lint fmt typecheck check db-test hooks smoke
+        import-clients erp-sync push-test purge install test lint fmt typecheck check db-test hooks smoke
 
 help: ## Show this help
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -122,6 +122,15 @@ import-clients: ## Load the ERP client export as suppression: make import-client
 	$(COMPOSE) run --rm worker python -m clientscrapper.tools.import_clients \
 		"$(if $(findstring /,$(FILE)),$(FILE),/data/imports/$(FILE))" \
 		$(if $(call switch,APPLY),--apply,) $(if $(call switch,ACCEPT_FEWER),--accept-fewer,)
+
+# One ERP feed walk by hand (06 §4.6, 07 §5.6): the run the scheduler makes.
+# Exit 3 when it was skipped (disabled, feeds not configured, already running).
+# A WALK that is not exactly one of ERP_WALKS stops make with the list.
+ERP_WALKS := full delta outcomes quarter year
+erp_walk = $(if $(and $(filter $(ERP_WALKS),$(WALK)),$(filter 1,$(words $(WALK)))),$(strip $(WALK)),$(error WALK=$(WALK): use one of $(ERP_WALKS)))
+erp-sync: ## One ERP feed walk: make erp-sync WALK=full|delta|outcomes|quarter|year [ACCEPT_SHRINK=1]
+	$(COMPOSE) run --rm worker python -m clientscrapper.tools.erp_sync --$(erp_walk) \
+		$(if $(call switch,ACCEPT_SHRINK),--accept-shrink,)
 
 push-test: ## Push one visibly synthetic lead to the ERP (05 §B.1)
 	$(COMPOSE) run --rm worker python -m clientscrapper.tools.push_test
