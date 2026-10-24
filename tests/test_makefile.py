@@ -106,7 +106,7 @@ def test_the_next_number_is_one_past_the_highest(tmp_path):
     for name in ("0001_initial.py", "0003_later.py", "cae10a182ef9_probe.py", "env.py"):
         (tmp_path / name).write_text("", encoding="utf-8")
     assert rid.revision_id("add x", tmp_path) == "0004_add_x"
-    assert rid.next_number() == 2  # this tree: 0001_initial only
+    assert rid.next_number() == 3  # this tree: 0001_initial, 0002_erp_contract
 
 
 def test_alembic_names_the_file_after_the_id_alone(tmp_path):
@@ -120,7 +120,7 @@ def test_alembic_names_the_file_after_the_id_alone(tmp_path):
     cfg.set_section_option("post_write_hooks", "hooks", "")
     rev = rid.revision_id("probe slug", scripts / "versions")
     command.revision(cfg, message="probe slug", rev_id=rev)
-    assert rev == "0002_probe_slug"
-    assert (scripts / "versions" / "0002_probe_slug.py").is_file()
+    assert rev == "0003_probe_slug"
+    assert (scripts / "versions" / "0003_probe_slug.py").is_file()
     script = ScriptDirectory.from_config(cfg).get_revision(rev)
-    assert script is not None and script.down_revision == "0001_initial"
+    assert script is not None and script.down_revision == "0002_erp_contract"
