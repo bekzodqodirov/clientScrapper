@@ -122,24 +122,69 @@ class Text:
     value: str
 
 
+def _concat_operands(node: ast.BinOp) -> list[ast.expr]:
+    """The operands of a ``a + b + c`` chain, left to right."""
+    found: list[ast.expr] = []
+    for side in (node.left, node.right):
+        if isinstance(side, ast.BinOp) and isinstance(side.op, ast.Add):
+            found += _concat_operands(side)
+        else:
+            found.append(side)
+    return found
+
+
+def _is_literal_text(node: ast.AST) -> bool:
+    return isinstance(node, ast.JoinedStr) or (
+        isinstance(node, ast.Constant) and isinstance(node.value, str)
+    )
+
+
+def _template(node: ast.expr) -> str:
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.JoinedStr):
+        return "".join(
+            v.value if isinstance(v, ast.Constant) else "{}" for v in node.values
+        )
+    return "{}"
+
+
 def texts(tree: ast.AST) -> Iterator[Text]:
-    """Every literal text that is not a docstring, an f-string as one
-    template (``f"https://{host}/x"`` → ``"https://{}/x"``) so a URL split
-    around a placeholder is still one string to the guards."""
+    """Every literal text that is not a docstring, a built string as one
+    template so a URL split around a placeholder is still one string to the
+    guards: an f-string (``f"https://{host}/x"`` → ``"https://{}/x"``) and a
+    ``+`` chain holding a literal (``"https://" + HOST + "/x"`` → the same).
+    The pieces of a built string are not yielded on their own."""
     skip = docstring_ids(tree)
     parts: set[int] = set()
     specs: set[int] = set()
+    concat: dict[int, list[ast.expr]] = {}
     for node in ast.walk(tree):
         if isinstance(node, ast.JoinedStr):
             parts.update(id(v) for v in node.values)
         elif isinstance(node, ast.FormattedValue) and node.format_spec is not None:
             specs.add(id(node.format_spec))
+        elif (
+            isinstance(node, ast.BinOp)
+            and isinstance(node.op, ast.Add)
+            and id(node) not in parts
+        ):
+            operands = _concat_operands(node)
+            if any(_is_literal_text(o) for o in operands):
+                # ast.walk is breadth first: the outermost + of a chain comes
+                # first, and claims its inner + nodes and its literals.
+                concat[id(node)] = operands
+                for inner in ast.walk(node):
+                    if inner is not node and (
+                        isinstance(inner, ast.BinOp) and isinstance(inner.op, ast.Add)
+                    ):
+                        parts.add(id(inner))
+                parts.update(id(o) for o in operands if _is_literal_text(o))
     for node in ast.walk(tree):
-        if isinstance(node, ast.JoinedStr) and id(node) not in specs:
-            value = "".join(
-                v.value if isinstance(v, ast.Constant) else "{}" for v in node.values
-            )
-            yield Text(node, value)
+        if isinstance(node, ast.BinOp) and id(node) in concat:
+            yield Text(node, "".join(_template(o) for o in concat[id(node)]))
+        elif isinstance(node, ast.JoinedStr) and id(node) not in specs | parts:
+            yield Text(node, _template(node))
         elif (
             isinstance(node, ast.Constant)
             and isinstance(node.value, str)
@@ -281,3 +326,49 @@ def reached_only_from(
         caller is not None and reached_only_from(tree, caller, is_root, seen)
         for caller in callers
     )
+
+
+# id(tree) → (tree, its parent map); the tree is kept so its id is never reused.
+_PARENTS: dict[int, tuple[ast.AST, dict[int, ast.AST]]] = {}
+
+
+def parents(tree: ast.AST) -> dict[int, ast.AST]:
+    """Node id → the node directly containing it."""
+    cached = _PARENTS.get(id(tree))
+    if cached is not None and cached[0] is tree:
+        return cached[1]
+    parent = {
+        id(child): node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)
+    }
+    _PARENTS[id(tree)] = (tree, parent)
+    return parent
+
+
+def module_aliases(tree: ast.AST, *, module: str = "") -> dict[str, str]:
+    """Names an import binds to a module (or to what may be one):
+    ``import a.b`` → ``a: a``, ``import a.b as c`` → ``c: a.b``, ``from a
+    import b`` → ``b: a.b``."""
+    aliases: dict[str, str] = {}
+    for imp in imports(tree, module=module):
+        if not imp.alias or imp.name == "*":
+            continue
+        if imp.name is None:
+            plain = isinstance(imp.node, ast.Import) and not any(
+                a.asname for a in imp.node.names if a.name == imp.module
+            )
+            aliases[imp.alias] = imp.module.split(".")[0] if plain else imp.module
+        else:
+            aliases[imp.alias] = f"{imp.module}.{imp.name}" if imp.module else imp.name
+    return aliases
+
+
+def resolve_attribute(
+    node: ast.Attribute, aliases: dict[str, str]
+) -> tuple[str, str] | None:
+    """(module, name) for a load through an imported module —
+    ``serp.BRAVE_URL`` or ``clientscrapper.services.serp.BRAVE_URL`` — or
+    None when the chain does not start at an import alias."""
+    chain = attr_chain(node)
+    if chain[0] not in aliases:
+        return None
+    return ".".join([aliases[chain[0]], *chain[1:-1]]), chain[-1]

@@ -22,6 +22,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import re
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 
 import pytest
@@ -32,15 +33,19 @@ from tests.ast_tools import (
     PACKAGE,
     ROOT,
     called,
+    dotted_name,
     functions,
     imported_modules,
     imports,
     is_under,
+    module_aliases,
     modules,
     owners,
+    parents,
     reached_only_from,
     references,
     rel,
+    resolve_attribute,
     texts,
     tree_of,
 )
@@ -178,6 +183,12 @@ BOT_SEND_CALLS = {
 }
 DELIVER = "bot/deliver.py"
 DELIVER_ROOT = "to_person"
+# The same sends as aiogram method objects (bot(SendMessage(chat_id=…))),
+# reachable without importing aiogram.methods by name (``import aiogram``
+# then ``aiogram.methods.SendMessage``): refused outside deliver.py, by name.
+BOT_METHOD_OBJECTS = frozenset(
+    "".join(part.title() for part in name.split("_")) for name in BOT_SEND_CALLS
+)
 # Message/callback shortcuts answer into the chat the update came from. Inside
 # bot/ the routers admit only the owner and the managers (06 §1.1); anywhere
 # else a module holding aiogram objects has no business answering anyone.
@@ -256,6 +267,11 @@ OUTBOUND_TARGETS = re.compile(
     r"|\bsmtps?://|\bsmtp\.[a-z0-9-]+\.[a-z]+|\bsendmail\b",
     re.IGNORECASE,
 )
+# The same hosts bare, as a constant a URL is built from at run time
+# (``f"https://{TG_HOST}/bot{token}/sendMessage"``). A bare host is allowed
+# where it classifies — compared, or listed in a table — and nowhere else.
+SENDER_HOST = re.compile(_HOST, re.IGNORECASE)
+CLASSIFYING = ast.Compare | ast.Set | ast.List | ast.Tuple | ast.Dict
 REQUIREMENTS = (ROOT / "requirements.txt", ROOT / "requirements-dev.txt")
 
 
@@ -318,6 +334,95 @@ def _raw_requests_by_function(source: str) -> dict[str | None, set[str]]:
     return found
 
 
+# A write needs no call of its own: a bound method kept for later (``send =
+# client.send_message``), handed over (``call=client.send_file``) or looked
+# up by name (``getattr(client, "send_message")``) writes once it is called.
+# Telethon's Message.action is data — the service-message payload a reader
+# reads to skip joins — so it counts only when called, like the one-word
+# names the package-wide fence below shares with other libraries.
+DATA_ATTRIBUTES = frozenset({"action"})
+LOOKUPS = frozenset({"getattr", "methodcaller", "attrgetter", "__getattribute__"})
+
+
+def _is_lookup(func: ast.expr) -> bool:
+    return (isinstance(func, ast.Name) and func.id in LOOKUPS) or (
+        isinstance(func, ast.Attribute) and func.attr in LOOKUPS
+    )
+
+
+def _method_refs_by_function(
+    source: str, names: Iterable[str], called_only: Iterable[str] = DATA_ATTRIBUTES
+) -> dict[str | None, set[str]]:
+    """Methods of ``names`` named without a direct call, by the innermost
+    function: an attribute load that is not the called function, and a
+    string a getattr-like lookup is given. A ``called_only`` name counts only
+    when the plain name it is bound to is called in the same function, or
+    when its lookup is called straight away."""
+    tree = ast.parse(source)
+    wanted, data = set(names), set(called_only)
+    owner: dict[int, str | None] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+            for child in ast.walk(node):
+                owner[id(child)] = node.name
+    calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call)]
+    callees = {id(n.func) for n in calls}
+    called_names = {
+        (owner.get(id(n)), n.func.id) for n in calls if isinstance(n.func, ast.Name)
+    }
+    bound_to: dict[int, set[str]] = {}  # an attribute load → the names it is bound to
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            targets, value = node.targets, node.value
+        elif isinstance(node, ast.AnnAssign | ast.NamedExpr) and node.value is not None:
+            targets, value = [node.target], node.value
+        else:
+            continue
+        if isinstance(value, ast.Attribute):
+            plain = {t.id for t in targets if isinstance(t, ast.Name)}
+            bound_to.setdefault(id(value), set()).update(plain)
+
+    found: dict[str | None, set[str]] = {}
+
+    def add(node: ast.AST, name: str) -> None:
+        found.setdefault(owner.get(id(node)), set()).add(name)
+
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Attribute)
+            and isinstance(node.ctx, ast.Load)
+            and node.attr in wanted
+            and id(node) not in callees
+        ):
+            function = owner.get(id(node))
+            later = {(function, name) for name in bound_to.get(id(node), set())}
+            if node.attr not in data or later & called_names:
+                add(node, node.attr)
+        elif isinstance(node, ast.Call) and _is_lookup(node.func):
+            for arg in node.args:
+                looked_up = isinstance(arg, ast.Constant) and arg.value in wanted
+                if looked_up and (arg.value not in data or id(node) in callees):
+                    add(node, str(arg.value))
+    return found
+
+
+def _uses_by_function(
+    source: str, names: Iterable[str], called_only: Iterable[str] = DATA_ATTRIBUTES
+) -> dict[str | None, set[str]]:
+    """Calls and method references of ``names``, by the innermost function
+    (only the functions that name one)."""
+    wanted = set(names)
+    found: dict[str | None, set[str]] = {}
+    for by in (
+        _calls_by_function(source),
+        _method_refs_by_function(source, wanted, called_only),
+    ):
+        for function, named in by.items():
+            if named & wanted:
+                found.setdefault(function, set()).update(named & wanted)
+    return found
+
+
 def _imports_telethon(path: Path) -> bool:
     tree = ast.parse(path.read_text(encoding="utf-8"))
     for node in ast.walk(tree):
@@ -333,11 +438,21 @@ def _imports_telethon(path: Path) -> bool:
     return any(is_under(imp.module, ["telethon"]) for imp in imports(tree))
 
 
+def _imports_the_reader(tree: ast.Module, module: str) -> bool:
+    names = imported_modules(tree, module=module)
+    return any(is_under(name, ["clientscrapper.userbot"]) for name in names)
+
+
 def _scanned() -> list[Path]:
-    """Every module of clientscrapper/userbot (recursively) and every module
-    of the package that imports Telethon."""
+    """Every module of clientscrapper/userbot (recursively), every module of
+    the package that imports Telethon, and every module that imports the
+    reader (it holds the reader's objects)."""
     paths = set(modules(USERBOT_PACKAGE))
-    paths |= {p for p in modules() if _imports_telethon(p)}
+    paths |= {
+        p
+        for p in modules()
+        if _imports_telethon(p) or _imports_the_reader(tree_of(p), dotted_name(p))
+    }
     return sorted(paths)
 
 
@@ -347,10 +462,8 @@ SCANNED = _scanned()
 def _offences(path_rel: str, source: str) -> list[str]:
     """What a reader module does that it must not."""
     offending = []
-    for function, calls in _calls_by_function(source).items():
-        writes = calls & WRITE_CALLS
-        if writes:
-            offending.append(f"{function or '<module>'}: {sorted(writes)}")
+    for function, writes in _uses_by_function(source, WRITE_CALLS).items():
+        offending.append(f"{function or '<module>'}: {sorted(writes)}")
     for function, named in _raw_requests_by_function(source).items():
         allowed = RAW_ALLOWED.get((path_rel, function or ""), set())
         if named - allowed:
@@ -411,8 +524,10 @@ def test_joins_happen_in_join_one_reached_only_from_join_daily():
 
 @pytest.mark.parametrize("path", SCANNED, ids=rel)
 def test_history_is_only_read_where_the_owner_asked_for_it(path):
-    for function, calls in _calls_by_function(path.read_text(encoding="utf-8")).items():
-        offending = calls & HISTORY_CALLS
+    history = _uses_by_function(
+        path.read_text(encoding="utf-8"), HISTORY_CALLS, called_only=()
+    )
+    for function, offending in history.items():
         if not offending or (rel(path), function) in HISTORY_ALLOWED:
             continue
         pytest.fail(
@@ -420,6 +535,35 @@ def test_history_is_only_read_where_the_owner_asked_for_it(path):
             "reader follows live events and must not pull history on its own. "
             f"Only {sorted(HISTORY_ALLOWED)} may, to read what the owner asked for."
         )
+
+
+# Outside the scan a module may still be handed the reader's client (T-13's
+# services/chats.py takes one). Telethon's write methods are refused there
+# too, except the words other libraries use every day (httpx's client.send,
+# a session's delete, edit, Message.action), and the one-word ones count only
+# when called. bot/ is aiogram's: its fence is the Bot API one below.
+PACKAGE_WRITES = frozenset(WRITE_CALLS - {"send", "edit", "delete", "action"})
+PACKAGE_CALLED_ONLY = frozenset(n for n in PACKAGE_WRITES if "_" not in n)
+
+
+def _package_write_offences(source: str) -> list[str]:
+    uses = _uses_by_function(source, PACKAGE_WRITES, called_only=PACKAGE_CALLED_ONLY)
+    return sorted(f"{f or '<module>'}: {sorted(names)}" for f, names in uses.items())
+
+
+def test_no_module_writes_with_a_client_it_was_handed():
+    scanned = set(SCANNED)
+    offending = {}
+    for path in modules():
+        if path in scanned or rel(path).startswith("bot/"):
+            continue
+        found = _package_write_offences(path.read_text(encoding="utf-8"))
+        if found:
+            offending[rel(path)] = found
+    assert offending == {}, (
+        "a Telethon write outside the reader is still the reader writing "
+        f"(06 §5.3): {offending}"
+    )
 
 
 def test_the_write_detector_catches_each_shape():
@@ -471,6 +615,53 @@ def test_the_write_detector_catches_each_shape():
     assert _offences("userbot/joiner.py", sneaky) == ["join_one: ['SendMessageRequest']"]
     dynamic = "import importlib\nT = importlib.import_module('telethon.sync')\n"
     assert any(is_under(i.module, ["telethon"]) for i in imports(ast.parse(dynamic)))
+    # A write method kept, handed over or looked up writes when called.
+    kept = (
+        "async def kept(client):\n"
+        "    send = client.send_message\n"
+        "    await send('me', 'x')\n"
+        "async def handed(client, run):\n"
+        "    await run(call=client.send_file)\n"
+        "async def looked_up(client):\n"
+        "    await getattr(client, 'send_read_acknowledge')(1)\n"
+        "async def typing(client):\n"
+        "    act = client.action\n"
+        "    await act(1, 'typing')\n"
+        "def skip(message):\n"
+        "    act = message.action\n"
+        "    return message.action is None or getattr(message, 'action', None) or act\n"
+    )
+    assert sorted(_offences("userbot/main.py", kept)) == [
+        "handed: ['send_file']",
+        "kept: ['send_message']",
+        "looked_up: ['send_read_acknowledge']",
+        "typing: ['action']",
+    ]
+    history = "async def trawl(client):\n    it = client.iter_messages\n    return it\n"
+    assert _uses_by_function(history, HISTORY_CALLS, called_only=()) == {
+        "trawl": {"iter_messages"}
+    }
+    # Handed the client, a module outside the scan may not write with it; the
+    # everyday words of other libraries stay theirs.
+    chats = (
+        "async def ack(client, chat, message, path):\n"
+        "    await client.send_read_acknowledge(chat)\n"
+        "    await client.send_file(chat, path)\n"
+        "    await message.reply('salom')\n"
+        "    reply = message.reply\n"
+        "async def store(session, http, row, request):\n"
+        "    await session.delete(row)\n"
+        "    await http.send(request)\n"
+        "    return row.reply\n"
+    )
+    assert _package_write_offences(chats) == [
+        "ack: ['reply', 'send_file', 'send_read_acknowledge']"
+    ]
+    # A module importing the reader holds its objects: it joins the scan.
+    services = "clientscrapper.services.chats"
+    assert _imports_the_reader(ast.parse("from ..userbot import about\n"), services)
+    assert _imports_the_reader(ast.parse("import clientscrapper.userbot.x\n"), services)
+    assert not _imports_the_reader(ast.parse("from ..db import models\n"), services)
 
 
 def test_the_kill_switch_idles_and_never_builds_a_client(monkeypatch):
@@ -543,6 +734,8 @@ def _send_offences(path_rel: str, tree: ast.Module, module: str = "") -> list[st
     imported = imported_modules(tree, module=module)
     if path_rel != DELIVER and any(is_under(m, ["aiogram.methods"]) for m in imported):
         offending.append("<module>: imports aiogram.methods")
+    if path_rel != DELIVER:
+        offending += _method_object_offences(tree, module)
     holds_aiogram = any(is_under(m, ["aiogram"]) for m in imported)
     if holds_aiogram and not path_rel.startswith("bot/"):
         for node in ast.walk(tree):
@@ -557,14 +750,134 @@ def _send_offences(path_rel: str, tree: ast.Module, module: str = "") -> list[st
     return sorted(offending)
 
 
-def _channel_offences(tree: ast.Module, module: str = "") -> list[str]:
+def _method_object_offences(tree: ast.Module, module: str) -> list[str]:
+    """aiogram method objects: any chain through ``aiogram.methods`` and any
+    sending method object named or looked up by its class name."""
+    aliases = module_aliases(tree, module=module)
+    parent = parents(tree)
+    owner = owners(tree)
+    found = []
+
+    def where(node: ast.AST) -> str:
+        function = owner.get(id(node))
+        return function.name if function else "<module>"
+
+    for node in ast.walk(tree):
+        up = parent.get(id(node))
+        inner = isinstance(up, ast.Attribute) and up.value is node  # mid-chain
+        if (
+            isinstance(node, ast.Attribute)
+            and isinstance(node.ctx, ast.Load)
+            and not inner
+        ):
+            resolved = resolve_attribute(node, aliases)
+            dotted = ".".join(resolved) if resolved else ""
+            if is_under(dotted, ["aiogram.methods"]):
+                found.append(f"{where(node)}: {dotted}")
+                continue
+        if isinstance(node, ast.Name | ast.Attribute) and isinstance(node.ctx, ast.Load):
+            name = node.id if isinstance(node, ast.Name) else node.attr
+            if name in BOT_METHOD_OBJECTS:
+                found.append(f"{where(node)}: {name}")
+        if isinstance(node, ast.Call) and _is_lookup(node.func):
+            for arg in node.args:
+                if isinstance(arg, ast.Constant) and arg.value in BOT_METHOD_OBJECTS:
+                    found.append(f"{where(node)}: {arg.value}")
+    return found
+
+
+def _top_level_assigns(tree: ast.Module) -> list[tuple[list[str], ast.expr]]:
+    owner = owners(tree)
+    found = []
+    for node in ast.walk(tree):
+        if id(node) in owner:
+            continue
+        if isinstance(node, ast.Assign):
+            targets = [t.id for t in node.targets if isinstance(t, ast.Name)]
+            found.append((targets, node.value))
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            if node.value is not None:
+                found.append(([node.target.id], node.value))
+    return found
+
+
+def _bound_name(
+    node: ast.AST, mine: set[str], aliases: dict[str, str], bound: Mapping[str, set[str]]
+) -> str | None:
+    """The bound host name a load reads: a plain name of this module, an
+    attribute through an imported module of ours, or a class attribute."""
+    if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
+        return node.id if node.id in mine else None
+    if isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Load):
+        resolved = resolve_attribute(node, aliases)
+        if resolved is not None:
+            module, name = resolved
+            return name if name in bound.get(module, set()) else None
+        return node.attr if node.attr in mine else None
+    return None
+
+
+def sender_host_names(trees: Mapping[str, ast.Module]) -> dict[str, set[str]]:
+    """Per module (dotted name), the names bound at module or class level to
+    a bare sender host: a literal, another such name, or one imported from a
+    module of ours that binds it. A fixpoint over all the modules."""
+    bound: dict[str, set[str]] = {m: set() for m in trees}
+    changed = True
+    while changed:
+        changed = False
+        for module, tree in trees.items():
+            mine = bound[module]
+            aliases = module_aliases(tree, module=module)
+            for targets, value in _top_level_assigns(tree):
+                host = (
+                    isinstance(value, ast.Constant)
+                    and isinstance(value.value, str)
+                    and SENDER_HOST.fullmatch(value.value.strip()) is not None
+                )
+                alias = _bound_name(value, mine, aliases, bound)
+                if set(targets) - mine and (host or alias):
+                    mine.update(targets)
+                    changed = True
+            for imp in imports(tree, module=module):
+                exported = bound.get(imp.module, set())
+                if imp.name in exported and imp.alias not in mine:
+                    mine.add(imp.alias)
+                    changed = True
+    return bound
+
+
+def _host_offences(
+    tree: ast.Module, module: str, bound: Mapping[str, set[str]]
+) -> list[str]:
+    mine = bound.get(module, set())
+    aliases = module_aliases(tree, module=module)
+    parent = parents(tree)
+    defining: set[int] = set()  # the definitions of the host names themselves
+    for targets, value in _top_level_assigns(tree):
+        if set(targets) & mine:
+            defining.update(id(n) for n in ast.walk(value))
+    found: list[tuple[int, str]] = []
+    for node in ast.walk(tree):
+        name = _bound_name(node, mine, aliases, bound)
+        if name is None or id(node) in defining or not isinstance(node, ast.expr):
+            continue
+        if not isinstance(parent.get(id(node)), CLASSIFYING):
+            found.append((node.lineno, name))
+    return [f"line {line}: builds on {name}" for line, name in sorted(found)]
+
+
+def _channel_offences(
+    tree: ast.Module, module: str = "", hosts: Mapping[str, set[str]] | None = None
+) -> list[str]:
     names = imported_modules(tree, module=module)
     roots = {is_under(name, FORBIDDEN_IMPORTS) for name in names}
     offending = [f"imports {root}" for root in sorted(r for r in roots if r)]
     for text in texts(tree):
         if hit := OUTBOUND_TARGETS.search(text.value):
             offending.append(f"line {text.node.lineno}: names {hit.group(0)!r}")
-    return offending
+    if hosts is None:
+        hosts = sender_host_names({module: tree})
+    return offending + _host_offences(tree, module, hosts)
 
 
 def _requirement_names(text: str) -> set[str]:
@@ -607,9 +920,11 @@ def test_to_person_checks_the_owner_and_manager_allowlist():
 
 
 def test_nothing_imports_or_names_a_mail_sms_or_messenger_route():
+    trees = {dotted_name(p): tree_of(p) for p in modules()}
+    hosts = sender_host_names(trees)
     offending = {}
     for path in modules():
-        found = _channel_offences(tree_of(path))
+        found = _channel_offences(tree_of(path), dotted_name(path), hosts)
         if found:
             offending[rel(path)] = found
     assert offending == {}
@@ -653,6 +968,24 @@ def test_the_outbound_detectors_catch_each_shape():
     assert _send_offences("bot/handlers/review.py", tree(methods)) == [
         "<module>: imports aiogram.methods"
     ]
+    # The method objects reached without importing aiogram.methods by name.
+    through_package = (
+        "import aiogram\n"
+        "import aiogram.types as t\n"
+        "async def alert(bot, chat_id):\n"
+        "    await bot(aiogram.methods.SendMessage(chat_id=chat_id, text='x'))\n"
+        "async def later(bot, m, chat_id):\n"
+        "    await bot(getattr(m, 'CopyMessage')(chat_id=chat_id))\n"
+        "async def kept(bot, ns):\n"
+        "    cls = ns.EditMessageText\n"
+        "    return t.Message\n"
+    )
+    assert _send_offences("services/alerts.py", tree(through_package)) == [
+        "alert: aiogram.methods.SendMessage",
+        "kept: EditMessageText",
+        "later: CopyMessage",
+    ]
+    assert _send_offences(DELIVER, tree(through_package)) == []
     shortcut = (
         "from aiogram.types import Message\n"
         "async def nudge(message: Message):\n"
@@ -692,7 +1025,52 @@ def test_the_outbound_detectors_catch_each_shape():
         "line 2: names 'wa.me/'",
         "line 3: names 'smtp.example.uz'",
     ]
+    # A bare host is a table entry until a URL is built on it.
+    built = (
+        "TG_HOST = 'api.telegram.org'\n"
+        "WA: str = 'wa.me'\n"
+        "HUBS = frozenset({TG_HOST, WA})\n"
+        "async def notify(http, token, host):\n"
+        "    if host == TG_HOST or host in (WA, 'x'):\n"
+        "        return None\n"
+        "    return await http.post(f'https://{TG_HOST}/bot{token}/sendMessage')\n"
+        "BASE = 'https://' + WA\n"
+    )
+    assert _channel_offences(tree(built)) == [
+        "line 7: builds on TG_HOST",
+        "line 8: builds on WA",
+    ]
+    # ... and across modules: imported by name or read through the module.
+    hosts_module = "clientscrapper.services.hosts"
+    trees = {
+        hosts_module: tree("TG = 'api.telegram.org'\nALIAS = TG\n"),
+        "clientscrapper.services.notify": tree(
+            "from clientscrapper.services.hosts import ALIAS as H\n"
+            "from clientscrapper.services import hosts\n"
+            "import httpx\n"
+            "def url(t):\n"
+            "    return f'https://{H}/bot{t}/getMe', 'https://%s/x' % hosts.TG\n"
+            "def fine(u):\n"
+            "    return httpx.URL(u).host == hosts.TG\n"
+        ),
+    }
+    hosts = sender_host_names(trees)
+    assert hosts[hosts_module] == {"TG", "ALIAS"}
+    notify = "clientscrapper.services.notify"
+    assert _channel_offences(trees[notify], notify, hosts) == [
+        "line 5: builds on H",
+        "line 5: builds on TG",
+    ]
     assert _requirement_names("twilio==9.0.0  # sms\nTelethon==1.44.0\n-r x.txt\n") == {
         "twilio",
         "telethon",
     }
+
+
+def test_the_method_object_names_are_aiogram_s():
+    """BOT_METHOD_OBJECTS is derived from BOT_SEND_CALLS; each derived class
+    name must be a real aiogram method, or the fence guards a typo."""
+    import aiogram.methods
+
+    assert set(BOT_METHOD_OBJECTS) <= set(dir(aiogram.methods))
+    assert {"SendMessage", "CopyMessage", "EditMessageText"} <= BOT_METHOD_OBJECTS

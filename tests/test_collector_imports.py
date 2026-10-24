@@ -10,7 +10,10 @@ Telethon read is ``userbot/about.py`` draining ``chat_monitors`` (03 §2.3,
 04 §3).
 
 A second walk covers the whole package: Telethon is imported only by the
-reader (``clientscrapper/userbot/``) and its login tool. The package-wide
+reader (``clientscrapper/userbot/``) and its login tool, and an HTTP
+connection is opened only in httpx's four homes (``services/http.py``,
+``serp.py``, ``erp_feeds.py``, ``crm_push.py`` — 07 §1.2); elsewhere httpx
+is types and exceptions, and no other HTTP client exists. The package-wide
 ``anthropic`` allow-list is 06 §5.2's ``tests/test_imports_fence.py``.
 
 Written to hold on a tree with or without services/http.py and
@@ -28,10 +31,13 @@ from tests.ast_tools import (
     PACKAGE,
     dotted_name,
     imported_modules,
+    imports,
     is_under,
+    module_aliases,
     modules,
     owners,
     rel,
+    resolve_attribute,
     tree_of,
 )
 
@@ -77,6 +83,42 @@ RAW_CALLS = {
 # login tool, which must build the StringSession — T-13).
 TELETHON_HOMES = ("userbot/",)
 TELETHON_TOOLS = {"tools/userbot_login.py"}
+# httpx's homes (07 §1.2). Outside them httpx may be named for its types and
+# exceptions (services/retry.py classifies httpx.TimeoutException) but not
+# for what opens a connection: a client, a transport, a request function.
+HTTPX_HOMES = {
+    "services/http.py",
+    "services/serp.py",
+    "services/erp_feeds.py",
+    "services/crm_push.py",
+}
+HTTPX_OPENERS = {
+    "Client",
+    "AsyncClient",
+    "HTTPTransport",
+    "AsyncHTTPTransport",
+    "get",
+    "post",
+    "put",
+    "patch",
+    "delete",
+    "head",
+    "options",
+    "request",
+    "stream",
+}
+# The package has one HTTP client; a second one is a route around Fetcher,
+# its robots/breaker rules, and the outbound guards (06 §5.3).
+OTHER_HTTP_CLIENTS = (
+    "requests",
+    "aiohttp",
+    "urllib3",
+    "pycurl",
+    "httplib2",
+    "http.client",
+    "urllib.request",
+    "websockets",
+)
 
 
 def _collector_offences(tree: ast.Module, module: str = "") -> list[str]:
@@ -106,6 +148,30 @@ def _telethon_outside_the_reader(path_rel: str, tree: ast.Module, module: str) -
     )
 
 
+def _http_offences(path_rel: str, tree: ast.Module, module: str) -> list[str]:
+    found = [
+        f"imports {name}"
+        for name in sorted(imported_modules(tree, module=module))
+        if is_under(name, OTHER_HTTP_CLIENTS)
+    ]
+    if path_rel in HTTPX_HOMES:
+        return found
+    for imp in imports(tree, module=module):
+        if imp.module == "httpx" and (imp.name in HTTPX_OPENERS or imp.name == "*"):
+            found.append(f"imports httpx.{imp.name}")
+    aliases = module_aliases(tree, module=module)
+    owner = owners(tree)
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Load)):
+            continue
+        resolved = resolve_attribute(node, aliases)
+        if resolved and resolved[0] == "httpx" and resolved[1] in HTTPX_OPENERS:
+            function = owner.get(id(node))
+            where = function.name if function else "<module>"
+            found.append(f"{where}: httpx.{resolved[1]}")
+    return sorted(found)
+
+
 COLLECTOR_MODULES = modules(COLLECTORS)
 
 
@@ -133,6 +199,53 @@ def test_telethon_is_imported_only_by_the_reader():
         "only clientscrapper/userbot/ (and tools/userbot_login.py) may import "
         f"telethon; services/enrich.py reads t.me/s/ through Fetcher: {outside}"
     )
+
+
+def test_an_http_connection_opens_only_in_httpx_s_homes():
+    offending = {
+        rel(p): found
+        for p in modules()
+        if (found := _http_offences(rel(p), tree_of(p), dotted_name(p)))
+    }
+    assert offending == {}, (
+        "httpx clients live in services/http.py, serp.py, erp_feeds.py and "
+        f"crm_push.py; nothing else opens a connection (07 §1.2): {offending}"
+    )
+
+
+def test_the_http_detector_catches_each_shape():
+    def found(path: str, source: str) -> list[str]:
+        module = "clientscrapper." + path.removesuffix(".py").replace("/", ".")
+        return _http_offences(path, ast.parse(source), module)
+
+    sender = (
+        "import httpx\n"
+        "async def notify(url):\n"
+        "    async with httpx.AsyncClient() as c:\n"
+        "        await c.post(url)\n"
+        "def once(url):\n"
+        "    return httpx.post(url)\n"
+    )
+    assert found("services/notify.py", sender) == [
+        "notify: httpx.AsyncClient",
+        "once: httpx.post",
+    ]
+    assert found("services/http.py", sender) == []
+    assert found("services/notify.py", "from httpx import AsyncClient as C\n") == [
+        "imports httpx.AsyncClient"
+    ]
+    assert found("tools/doctor.py", "import requests\n") == ["imports requests"]
+    assert found("services/http.py", "from urllib import request\n") == [
+        "imports urllib.request"
+    ]
+    # Types and exceptions are no connection.
+    types = (
+        "import httpx\n"
+        "TRANSIENT = (httpx.ConnectError, httpx.ReadTimeout)\n"
+        "def is_ok(r: httpx.Response) -> bool:\n"
+        "    return httpx.URL(str(r.url)).host != ''\n"
+    )
+    assert found("services/retry.py", types) == []
 
 
 def test_the_import_detector_catches_each_shape():
