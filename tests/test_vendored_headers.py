@@ -80,6 +80,10 @@ VENDORED: dict[str, str] = {
     "tests/test_env_example.py": "tests/test_env_example.py",
     "tests/test_logs.py": "tests/test_logs.py",
     "tests/test_no_telegram_writes.py": "tests/test_userbot.py",
+    "tests/test_forbidden_strings.py": "tests/test_owner_aliases.py",
+    "tests/timetravel.py": "tests/timetravel.py",
+    # MIYA's compose-env CI step, moved into a script (07 §2.1 docker job)
+    "scripts/check_compose_env.py": ".github/workflows/python-ci.yml",
 }
 # Not listed although the memo says AS-IS: services/codes.py (02 §7 — suppression
 # by GS code is not in the v1 key set, so it is not ported).
@@ -109,6 +113,11 @@ REQUIRED_NOW = (
     # T-06
     "clientscrapper/services/usage.py",
     "clientscrapper/services/costs.py",
+    # T-04
+    "tests/test_no_telegram_writes.py",
+    "tests/test_forbidden_strings.py",
+    "tests/timetravel.py",
+    "scripts/check_compose_env.py",
 )
 
 SCANNED_SUFFIXES = {".py", ".yml", ".yaml", ".ini", ".toml", ".cfg", ".sh", ".mako"}

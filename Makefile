@@ -138,9 +138,11 @@ db-test: ## Throwaway postgres:16 for the suite on 127.0.0.1, port DB_PORT (5433
 		-p 127.0.0.1:$${DB_PORT:-5433}:5432 postgres:16
 	@echo "DATABASE_URL=postgresql+psycopg://cs:cs@localhost:$${DB_PORT:-5433}/cs_test CS_REQUIRE_DB=1 make test"
 
+# git rev-parse finds the hooks directory even where .git is a file (a
+# worktree shares the main checkout's hooks, and so its script).
 hooks: ## Install the pre-push gate (scripts/pre-push.sh)
-	@test -f scripts/pre-push.sh || (echo "scripts/pre-push.sh hali yoʻq" && exit 1)
-	ln -sf ../../scripts/pre-push.sh .git/hooks/pre-push
+	@test -x scripts/pre-push.sh || (echo "scripts/pre-push.sh yoʻq yoki bajariladigan emas" && exit 1)
+	ln -sf ../../scripts/pre-push.sh "$$(git rev-parse --git-path hooks)/pre-push"
 
 smoke: ## Live smoke tests, one real request per collector (VPS only)
 	LIVE=1 pytest -q -m live tests/live
