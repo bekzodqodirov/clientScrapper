@@ -84,7 +84,7 @@ VENDORED: dict[str, str] = {
 # Not listed although the memo says AS-IS: services/codes.py (02 §7 — suppression
 # by GS code is not in the v1 key set, so it is not ported).
 
-# Built by T-01, T-02 and T-03: these must exist now.
+# Built by the tasks done so far: these must exist now.
 REQUIRED_NOW = (
     "clientscrapper/config.py",
     "clientscrapper/logs.py",
@@ -106,6 +106,9 @@ REQUIRED_NOW = (
     "tests/conftest.py",
     "tests/test_env_example.py",
     "tests/test_logs.py",
+    # T-06
+    "clientscrapper/services/usage.py",
+    "clientscrapper/services/costs.py",
 )
 
 SCANNED_SUFFIXES = {".py", ".yml", ".yaml", ".ini", ".toml", ".cfg", ".sh", ".mako"}
