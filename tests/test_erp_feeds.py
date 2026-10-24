@@ -336,18 +336,26 @@ async def test_feed_delta_anchor_is_erp_generated_at(session, erp_row):
 
 
 async def test_a_delta_adds_and_never_deletes(session, erp_row):
-    fake, erp = make(3)
+    fake, erp = make(10)
     await erp_feeds.sync_suppression(session, erp, mode="full", now=NOW)
+    # One entry leaves the ERP's set (a delta cannot say so, A.7); the other
+    # nine are touched after the anchor and one is new — a delta that held
+    # 90 % of the last full pull, so no shrink rule stands in the way.
     fake.entries.pop(0)
-    fake.add_entry(tail(9), "lost", at=NOW.astimezone(UTC))
+    for entry in fake.entries:
+        entry.at = NOW.astimezone(UTC)
+    fake.add_entry(tail(50), "lost", at=NOW.astimezone(UTC))
     report = await erp_feeds.sync_suppression(
         session, erp, mode="delta", now=NOW + timedelta(hours=1)
     )
-    assert (report.walk, report.entries, report.deleted) == ("delta", 1, 0)
+    assert (report.walk, report.entries, report.deleted) == ("delta", 10, 0)
     rows = await feed_rows(session)
-    assert set(rows) == {h(0), h(1), h(2), h(9)}
-    assert rows[h(9)].kind == "lost"
-    assert (await config(session)).count == 3
+    assert set(rows) == {h(n) for n in range(10)} | {h(50)}
+    assert rows[h(0)].last_seen_at == NOW
+    assert rows[h(50)].kind == "lost"
+    # A delta is no yardstick for the shrink rule.
+    cfg = await config(session)
+    assert (cfg.count, cfg.last_full_at) == (10, NOW)
 
 
 async def test_a_delta_with_no_anchor_runs_as_a_full_pull(session, erp_row):
@@ -462,6 +470,9 @@ async def test_a_proxy_s_401_and_403_are_push_404_too(session, erp_row, status):
     with pytest.raises(erp_feeds.ErpHttpError):
         await erp_feeds.sync_suppression(session, erp, mode="full", now=NOW)
     assert await breaker(session) == (NOW + timedelta(hours=6), "push_404")
+    # No owner notifier registered: nothing is claimed, so the first process
+    # that can tell still tells.
+    assert (await session.scalars(sa.select(ReminderLog.kind))).all() == []
 
 
 async def test_feed_3xx_is_never_followed_and_is_erp_redirect(session, erp_row, told):
@@ -543,7 +554,9 @@ async def test_more_pages_than_max_pages_is_a_runaway():
     assert (caught.value.code, len(got)) == ("runaway", 3)
 
 
-@pytest.mark.parametrize("mode", ["feed_shape", "feed_badjson", "feed_missing_key"])
+@pytest.mark.parametrize(
+    "mode", ["feed_shape", "feed_badjson", "feed_missing_key", "feed_missing_key:entries"]
+)
 async def test_a_body_of_the_wrong_shape_is_feed_contract_shape(session, erp_row, mode):
     fake, erp = make(2)
     fake.feed_modes[PATH] = mode
@@ -747,7 +760,7 @@ async def test_a_run_beats_its_variant_and_records_the_report(session, erp_row):
         "previous": 0,
         "deleted": 0,
         "retired_manual": 0,
-        "salt_changed": True,
+        "salt_changed": False,
         "generated_at": "2026-10-23T21:29:00.000Z",
     }
     beat = await session.get(Heartbeat, "collector:erp_sync.full", populate_existing=True)
@@ -891,3 +904,15 @@ async def test_accept_shrink_reaches_the_pull_through_the_run(session, erp_row):
         "ok",
         5,
     )
+
+
+@pytest.mark.parametrize("status", [204, 304])
+async def test_a_status_the_feed_never_sends_is_shape(session, erp_row, status):
+    def odd(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status)
+
+    erp = ErpClient(BASE, SECRET, transport=httpx.MockTransport(odd), sleep=no_sleep)
+    with pytest.raises(erp_feeds.ErpHttpError):
+        await erp_feeds.sync_suppression(session, erp, mode="full", now=NOW)
+    assert (await raised(session))["feed_contract"]["detail"]["code"] == "shape"
+    assert await breaker(session) == (None, None)

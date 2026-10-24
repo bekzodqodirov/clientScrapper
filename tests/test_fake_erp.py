@@ -167,6 +167,11 @@ def test_since_the_erp_refuses(raw):
         ("-0x10", 1000),
         ("7px", 1000),
         ("1_000", 1000),
+        # What Python's float() reads and JavaScript's Number() does not.
+        ("1_0", 1000),
+        ("infinity", 1000),
+        ("inf", 1000),
+        ("nan", 1000),
     ],
 )
 def test_fake_clamp_limit_vectors(raw, limit):
@@ -322,7 +327,9 @@ async def test_an_orphan_moved_to_lost_makes_the_retry_a_second_lead():
 
 async def test_slow_a_second_post_waits_for_the_first_and_is_a_replay():
     fake = FakeErp(SECRET)
-    fake.modes[EID] = "slow"
+    # Only the first delivery is slow; the second would land at once if the
+    # ERP's per-id chain did not hold it behind the first.
+    fake.modes[EID] = ["slow"]
     timeout = fake.timeout_transport(0.05)
     async with client_for(fake, timeout) as c:
         with pytest.raises(httpx.ReadTimeout):

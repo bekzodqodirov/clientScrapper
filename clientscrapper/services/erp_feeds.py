@@ -754,8 +754,9 @@ async def _apply_walk(
                     raise FeedContract("rule_changed", "the hash rule moved")
                 salt, generated = page.salt_id, page.generated
                 report.generated_at = page.generated_at
-                report.salt_changed = salt != cfg.salt_id
-                if report.walk == "delta" and report.salt_changed:
+                # The key was re-minted (a first pull has nothing to differ from).
+                report.salt_changed = cfg.salt_id is not None and salt != cfg.salt_id
+                if report.walk == "delta" and salt != cfg.salt_id:
                     report.status = "salt_changed"
                     log.warning(
                         "erp feed: a new salt_id on a delta — a full pull runs now",
@@ -980,7 +981,9 @@ def contract_code(exc: FeedError) -> ContractCode | None:
         return exc.code
     if isinstance(exc, FeedShapeError):
         return "shape"
-    if isinstance(exc, ErpHttpError) and exc.status == 304:
+    if isinstance(exc, ErpHttpError) and (exc.status == 304 or 200 <= exc.status < 300):
+        # Never asked for (no If-None-Match), or a 2xx that is not the 200
+        # the feed answers: not the documented body.
         return "shape"
     if isinstance(exc, ErpHttpError) and 400 <= exc.status < 500:
         if exc.status in MISCONFIGURED or exc.status == 429:
