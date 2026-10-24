@@ -57,7 +57,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from clientscrapper.collectors.base import Budget, Collector, Observation
 from clientscrapper.config import settings
-from clientscrapper.db.models import CollectorRun, Evidence, RuntimeFlag, Source, UsageLog
+from clientscrapper.db.models import CollectorRun, Evidence, RuntimeFlag, Source
 from clientscrapper.db.models import Observation as ObservationRow
 from clientscrapper.db.session import SessionLocal
 from clientscrapper.services import costs, health
@@ -85,13 +85,6 @@ DEFAULT_DEADLINE: Final = timedelta(hours=2)
 # soon after it). Rows without meta.deadline_at count from started_at + 2 h.
 STALE_MARGIN: Final = timedelta(minutes=30)
 DEDUPE_WINDOW: Final = timedelta(hours=24)
-# Attribution-only rows whose spend counts against their parent's dollar
-# budget (02 §2.1): costs.ask records the sub-source a call was made for.
-SUBSOURCE_PREFIXES: Final = {
-    "serp_layer": ("search_",),
-    "directories": ("directories_",),
-    "maps": ("maps_",),
-}
 ABANDONED: Final = "abandoned"
 CANCELLED: Final = "cancelled"
 # The database refused this row: skip the group, keep the run.
@@ -204,11 +197,6 @@ class _Group:
     members: list[Observation] = field(default_factory=list)
 
 
-def _tashkent_day_start(now: datetime) -> datetime:
-    local = now.astimezone(settings.tz)
-    return local.replace(hour=0, minute=0, second=0, microsecond=0)
-
-
 async def global_pause(session: AsyncSession) -> bool:
     """``policy.paused()``: ``/toxtat`` set ``runtime_flags('paused')``."""
     row = await session.get(RuntimeFlag, "paused", populate_existing=True)
@@ -232,8 +220,9 @@ async def build_budget(
 ) -> Budget:
     """03 §1.2: pages = the row's daily budget minus pages used today (and the
     global COLLECTOR_DAILY_PAGE_BUDGET minus every source's pages); usd = the
-    row's daily cap minus today's spend of the row and its sub-sources."""
-    day = _tashkent_day_start(now)
+    row's daily cap minus today's spend of the row and its sub-sources
+    (``costs.source_budget_usd``, the rule's one home)."""
+    day = costs.day_start(now)  # the Tashkent business day, as costs counts it
     pages_today = sa.func.coalesce(sa.func.sum(CollectorRun.pages), 0)
     used_here = await session.scalar(
         sa.select(pages_today).where(
@@ -247,24 +236,8 @@ async def build_budget(
         source.daily_page_budget - int(used_here or 0),
         settings.collector_daily_page_budget - int(used_all or 0),
     )
-    keys = [UsageLog.source_key == source.key]
-    keys += [
-        UsageLog.source_key.like(f"{prefix}%")
-        for prefix in SUBSOURCE_PREFIXES.get(source.key, ())
-    ]
-    spent = await session.scalar(
-        sa.select(sa.func.coalesce(sa.func.sum(UsageLog.cost_usd), 0)).where(
-            sa.or_(*keys),
-            UsageLog.created_at >= day,
-            sa.or_(UsageLog.model.is_(None), UsageLog.model.not_like("refused:%")),
-        )
-    )
-    usd = Decimal(source.daily_cost_cap_usd) - Decimal(spent or 0)
-    return Budget(
-        pages=max(pages, 0),
-        usd=max(usd, Decimal("0")),
-        deadline=now + deadline,
-    )
+    usd = await costs.source_budget_usd(session, source_key=source.key, now=now)
+    return Budget(pages=max(pages, 0), usd=usd, deadline=now + deadline)
 
 
 def _canonical_body(obs: Observation) -> bytes:

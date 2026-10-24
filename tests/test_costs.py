@@ -856,6 +856,27 @@ async def test_the_per_source_budget_is_the_column_minus_todays_spend(session):
     )
 
 
+async def test_a_parent_rows_budget_counts_its_sub_sources(session):
+    # serp_layer (cap 1.00, 03 §3) is budgeted for the run while ask records
+    # the sub-source the call was made for (search_brave); maps likewise. A
+    # sibling parent's sub-source does not count, nor does the parent's
+    # spend count against a sub-source.
+    await seed(session, "0.20", operation="serp_brave", source_key="search_brave")
+    await seed(session, "0.05", operation="serp_brave", source_key="serp_layer")
+    await seed(session, "0.30", operation="places_text_ids", source_key="maps_google")
+    left = await costs.source_budget_usd(session, source_key="serp_layer", now=NOW)
+    assert left == D("0.75")
+    left = await costs.source_budget_usd(session, source_key="maps", now=NOW)
+    assert left == D("1.10")
+    assert await costs.source_budget_usd(
+        session, source_key="search_brave", now=NOW
+    ) == D("0")  # its own column is 0: a sub-source is never the budgeted row
+    exact = await costs.spend(
+        session, since=costs.day_start(NOW), source_key="serp_layer"
+    )
+    assert exact.usd == D("0.05")
+
+
 async def test_the_answer_is_committed_even_when_its_job_row_is_not(session):
     # An instant job inserts its model_jobs row and calls inside one
     # transaction (04 §4.8): the money must not wait for that commit.

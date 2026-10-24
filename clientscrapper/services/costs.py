@@ -102,6 +102,15 @@ COST_CAP_KEY: Final = "cost_cap"
 SPEND_HIGH_KEY: Final = "spend_high"
 ALERT_KIND: Final = "alert:"
 
+# Parent rows whose dollar budget also counts their sub-sources' spend
+# (02 §2.1, 03 §1.2): a call is recorded with the sub-source it was made for
+# (search_brave), and the run is budgeted on the parent row (serp_layer).
+SUBSOURCE_PREFIXES: Final[Mapping[str, tuple[str, ...]]] = {
+    "serp_layer": ("search_",),
+    "directories": ("directories_",),
+    "maps": ("maps_",),
+}
+
 # The owner's switch that lets a SERP op borrow serp_reserve (default off).
 SERP_OVERFLOW_SOURCE: Final = "serp_layer"
 SERP_OVERFLOW_FLAG: Final = "serp_paid_overflow"
@@ -352,8 +361,11 @@ async def spend(
     family: Family | None = None,
     company_id: UUID | None = None,
     source_key: str | None = None,
+    with_subsources: bool = False,
 ) -> Spend:
-    """The spend recorded in ``[since, until)``, optionally narrowed."""
+    """The spend recorded in ``[since, until)``, optionally narrowed;
+    ``with_subsources`` widens ``source_key`` to a parent row's sub-sources
+    (``SUBSOURCE_PREFIXES``)."""
     where: list[sa.ColumnElement[bool]] = [UsageLog.created_at >= since]
     if until is not None:
         where.append(UsageLog.created_at < until)
@@ -366,7 +378,13 @@ async def spend(
     if company_id is not None:
         where.append(UsageLog.company_id == company_id)
     if source_key is not None:
-        where.append(UsageLog.source_key == source_key)
+        keys = [UsageLog.source_key == source_key]
+        if with_subsources:
+            keys += [
+                UsageLog.source_key.startswith(prefix, autoescape=True)
+                for prefix in SUBSOURCE_PREFIXES.get(source_key, ())
+            ]
+        where.append(sa.or_(*keys))
     row = (
         await session.execute(
             sa.select(
@@ -391,15 +409,20 @@ async def source_budget_usd(
     session: AsyncSession, *, source_key: str, now: datetime
 ) -> Decimal:
     """``Budget.usd`` of 03 §1.2: the column ``sources.daily_cost_cap_usd``
-    minus this source's spend today, never below zero; an unknown source has
-    nothing to spend."""
+    minus this source's spend today — a parent row's includes its
+    sub-sources' — never below zero; an unknown source has nothing to spend.
+    The one home of the rule: the runner's ``build_budget`` asks it."""
     cap = await session.scalar(
         sa.select(Source.daily_cost_cap_usd).where(Source.key == source_key)
     )
     if cap is None:
         return D0
     used = await spend(
-        session, since=day_start(now), until=day_end(now), source_key=source_key
+        session,
+        since=day_start(now),
+        until=day_end(now),
+        source_key=source_key,
+        with_subsources=True,
     )
     return max(D0, Decimal(cap) - used.usd)
 
@@ -1229,6 +1252,7 @@ __all__ = [
     "SERP_OVERFLOW_FLAG",
     "SERP_OVERFLOW_SOURCE",
     "SPEND_HIGH_KEY",
+    "SUBSOURCE_PREFIXES",
     "TOP_COMPANIES",
     "UNITS_PER_CALL",
     "UNIT_COUNTED",
