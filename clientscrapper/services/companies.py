@@ -770,9 +770,10 @@ async def _name_candidates(
     return _group_candidates((await session.execute(stmt)).all())
 
 
-async def _exact_name_candidates(
-    session: AsyncSession, key: str, *, city: str | None
-) -> list[NameCandidate]:
+async def _exact_name_candidates(session: AsyncSession, key: str) -> list[NameCandidate]:
+    """Every live company holding ``key`` as its name_key or an alias. The
+    city rule is ``best_name_match``'s alone (one home); the trigram query
+    filters cities in SQL only so other cities cannot crowd its 50 rows."""
     alias = sa.select(CompanyAlias.company_id).where(CompanyAlias.alias_key == key)
     stmt = sa.select(
         Company.id, Company.name_key, Company.city, Company.first_seen_at
@@ -780,8 +781,6 @@ async def _exact_name_candidates(
         sa.or_(Company.name_key == key, Company.id.in_(alias)),
         Company.state.not_in(("merged", "purged")),
     )
-    if city is not None:
-        stmt = stmt.where(sa.or_(Company.city.is_(None), Company.city == city))
     rows = (await session.execute(stmt)).all()
     # The query matched on name_key or an alias: either way the key is held.
     return [NameCandidate(r[0], (key,), r[2], r[3]) for r in rows]
@@ -800,7 +799,7 @@ async def _name_match(session: AsyncSession, keys: IdentityKeys) -> NameMatch:
     key = keys.name_key
     if key is None or not usable_name(key):
         return NameMatch(company_id=None, score=0.0)
-    exact = await _exact_name_candidates(session, key, city=keys.city)
+    exact = await _exact_name_candidates(session, key)
     if exact:
         return best_name_match(key, exact, city=keys.city)
     candidates = await _name_candidates(session, key, city=keys.city)
@@ -1338,7 +1337,7 @@ async def find_company(
     key = name_key(name or "")
     if not key:
         return NameMatch(company_id=None, score=0.0)
-    found = await _exact_name_candidates(session, key, city=city)
+    found = await _exact_name_candidates(session, key)
     found += await _name_candidates(session, key, city=city)
     rows = [(c.company_id, k, c.city, c.first_seen_at) for c in found for k in c.keys]
     match = best_name_match(key, _group_candidates(rows), city=city, guarded=False)
