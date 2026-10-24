@@ -65,11 +65,11 @@ from apscheduler.triggers.base import BaseTrigger
 from apscheduler.triggers.combining import OrTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
-from clientscrapper.collectors import erp_sync
+from clientscrapper.collectors import erp_sync, runner
 from clientscrapper.collectors.base import Collector
 from clientscrapper.collectors.runner import run_collector
 from clientscrapper.config import settings
-from clientscrapper.db.models import Heartbeat, Source
+from clientscrapper.db.models import CollectorRun, Heartbeat, Source
 from clientscrapper.db.session import engine, session_scope
 from clientscrapper.logs import setup_logging
 from clientscrapper.services import (
@@ -739,6 +739,45 @@ async def _catch_up_outcomes(now: datetime, scheduler: AsyncIOScheduler | None) 
         )
 
 
+async def reclaim_runs(
+    slots: tuple[JobSlot, ...] | None = None, *, now: datetime | None = None
+) -> int:
+    """Close the ``running`` collector runs of the cadences this scheduler
+    runs, as ``failed`` / ``abandoned``. Called once the scheduler lock is
+    taken: no other scheduler is alive, so such a row is a dead worker's (an
+    OOM kill, ``kill -9``) — and it held the source's one ``running`` slot
+    (``ux_collector_runs_one_running``) until its deadline plus the stale
+    margin, 2 h 30 min in which every ERP cadence was skipped
+    ``already_running`` and suppression went stale. Only (source, variant)
+    pairs of built slots: a run another process makes (the reader's
+    ``telegram_monitor.backfill``) is not touched. Returns how many."""
+    now = now or datetime.now(settings.tz)
+    pairs = sorted(
+        {
+            (slot.source_key, slot.variant or "")
+            for slot in (slots if slots is not None else job_table())
+            if slot.job is not None and slot.source_key is not None
+        }
+    )
+    if not pairs:
+        return 0
+    variant = sa.func.coalesce(CollectorRun.meta["variant"].astext, "")
+    async with session_scope() as session:
+        result = await session.execute(
+            sa.update(CollectorRun)
+            .where(
+                CollectorRun.status == "running",
+                sa.tuple_(CollectorRun.source_key, variant).in_(pairs),
+            )
+            .values(status="failed", error=runner.ABANDONED, finished_at=now)
+            .returning(CollectorRun.id)
+        )
+        closed = len(result.all())
+    if closed:
+        log.warning("a dead worker's collector runs were closed", extra={"runs": closed})
+    return closed
+
+
 async def source_crons() -> dict[str, str | None]:
     """``sources.key`` → ``cron``: the owner's cadence, read at start."""
     async with session_scope() as session:
@@ -921,6 +960,10 @@ async def run() -> None:
         remove_stop_signals(installed)
         log.info("worker stopped before it led")
         return
+    try:
+        await reclaim_runs()
+    except Exception as exc:
+        log.warning("dead runs not reclaimed", extra={"error": type(exc).__name__})
     try:
         crons = await source_crons()
     except Exception as exc:

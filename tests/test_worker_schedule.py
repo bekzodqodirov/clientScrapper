@@ -800,6 +800,41 @@ async def test_a_worker_that_loses_the_lock_pauses_its_scheduler(session, monkey
         await theirs.release()
 
 
+async def test_the_new_leader_closes_a_dead_workers_runs_only(session):
+    """An OOM-killed worker's 'running' erp_sync row held the source's one
+    running slot for 2 h 30 min: every ERP cadence was skipped
+    already_running and suppression went stale. The next leader closes it;
+    a run the reader makes (telegram_monitor.backfill) is not its to close."""
+    started = NOW - timedelta(minutes=10)
+    for key, variant in (("erp_sync", "delta"), ("telegram_monitor", "backfill")):
+        session.add(
+            m.CollectorRun(
+                source_key=key,
+                status="running",
+                started_at=started,
+                meta={
+                    "variant": variant,
+                    "deadline_at": (NOW + timedelta(hours=2)).isoformat(),
+                },
+            )
+        )
+    await session.commit()
+    assert await worker.reclaim_runs(now=NOW) == 1
+    rows = {
+        r.source_key: (r.status, r.error)
+        for r in await session.scalars(
+            sa.select(m.CollectorRun).execution_options(populate_existing=True)
+        )
+    }
+    assert rows == {
+        "erp_sync": ("failed", "abandoned"),
+        "telegram_monitor": ("running", None),
+    }
+    # The source's one running slot is free again (ux_collector_runs_one_running).
+    session.add(m.CollectorRun(source_key="erp_sync", status="running", started_at=NOW))
+    await session.commit()
+
+
 async def test_a_database_that_cannot_be_asked_is_no_other_leader(monkeypatch):
     """The lock lives in the database: unreachable, nobody else can hold it,
     so the worker runs — or health_job could not say «Baza javob bermayapti»."""
