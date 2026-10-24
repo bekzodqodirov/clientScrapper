@@ -17,6 +17,11 @@ The **raised problems** (``REPORTED_KEYS``, ``raise_problem``,
 verbatim from its branch (wt/t08 423d97b) so that T-09's feed sync writes
 exactly the ``runtime_flags`` rows T-08's ``gather`` reads; at the merge
 T-08's copy is the one kept.
+
+``erp_breaker_text`` (T-09) is the one home of the ERP breaker's owner line
+(06 §4.2 ``push_404`` / ``erp_redirect``): the feed sync says it at once
+(``TOLD_FIRST_ELSEWHERE``) and, at the merge, T-08's ``problems()`` renders
+both keys through it instead of its own copy of the words.
 """
 
 from __future__ import annotations
@@ -25,6 +30,7 @@ import re
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
+from html import escape
 from typing import Any, Final
 
 import sqlalchemy as sa
@@ -123,6 +129,25 @@ PROBLEM_FLAG_PREFIX: Final = "problem:"
 # (05 §B.1): the reason is the key, optionally «:<detail>».
 ERP_BREAKER_KEYS: Final = ("push_404", "erp_redirect")
 ERP_SOURCE: Final = "erp_sync"
+
+
+def erp_breaker_text(key: str, detail: str = "") -> str:
+    """The owner's line for an ERP breaker in force (06 §4.2): ``key`` is
+    ``push_404`` or ``erp_redirect``, ``detail`` what follows «<key>:» in
+    ``breaker_reason`` (the redirect's HTTP status)."""
+    if key == "push_404":
+        return (
+            "⛔ ERP kaliti yoki manba notoʻgʻri: 404. Kelgan arizalar → Reklama "
+            "havolalari → Agent → kalit; <code>.env</code> CRM_AGENT_KEY; "
+            "<code>make reload</code>; /yoq crm"
+        )
+    if key == "erp_redirect":
+        return (
+            f"⛔ ERP manzili yoʻnaltiryapti (HTTP {escape(detail or '3xx')}): "
+            "<code>.env</code> dagi CRM_BASE_URL <code>https://</code> bilan "
+            "boshlanishi kerak; <code>make reload</code>; /yoq crm"
+        )
+    raise ValueError(f"{key!r} is not an ERP breaker key")
 
 
 @dataclass(frozen=True, slots=True)

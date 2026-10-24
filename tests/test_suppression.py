@@ -6,6 +6,7 @@ there; the sync itself is ``tests/test_erp_feeds.py``.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -40,6 +41,16 @@ def test_the_vectors_both_repos_pin():
 def test_the_agent_side_vectors():
     assert hash_tail("test-secret", "900000001") == "d9d4ae601e164f812f1d"
     assert salt_id("test-secret") == "9caf06bb"
+
+
+@pytest.mark.parametrize(
+    "raw", ["+998 90 123 45 67", "1234567", "90123456", "9012345678"]
+)
+def test_the_hash_takes_the_nine_digit_tail_only(raw):
+    # One rule, one guard (services/keys.erp_phone_hash): a raw phone or a
+    # short tail would hash, match nothing and fail open without a sound.
+    with pytest.raises(ValueError):
+        hash_tail("k", raw)
 
 
 def test_the_fake_erp_hashes_as_the_agent_does():
@@ -95,6 +106,31 @@ def test_a_salt_mismatch_is_stale_however_new_the_pulls():
     assert (report.fresh, report.salt_ok, report.stale_since) == (False, False, None)
 
 
+def test_stale_since_counts_from_the_first_try_of_the_key():
+    tried = NOW - timedelta(hours=7)
+    never = SuppressionConfig(awaiting_salt_id=salt_id(KEY), awaiting_since=tried)
+    assert freshness(never, key=KEY, now=NOW, configured=True).stale_since == tried
+    # A marker another key left says nothing about this one.
+    other = SuppressionConfig(awaiting_salt_id="0badc0de", awaiting_since=tried)
+    assert freshness(other, key=KEY, now=NOW, configured=True).stale_since is None
+    # Aged stamps and a marker: the earlier moment.
+    both = SuppressionConfig(
+        salt_id=salt_id("the-old-key"),
+        last_full_at=NOW - timedelta(hours=40),
+        last_delta_at=NOW - timedelta(hours=1),
+        count=10,
+        awaiting_salt_id=salt_id(KEY),
+        awaiting_since=NOW - timedelta(hours=2),
+    )
+    assert freshness(both, key=KEY, now=NOW, configured=True).stale_since == (
+        NOW - timedelta(hours=14)
+    )
+    # A completed pull under this key: the marker is history, not staleness.
+    done = replace(cfg(1, 0.5), awaiting_salt_id=salt_id(KEY), awaiting_since=tried)
+    report = freshness(done, key=KEY, now=NOW, configured=True)
+    assert (report.fresh, report.stale_since) == (True, None)
+
+
 def test_the_feed_not_configured_is_fresh():
     # The «Boshqa» fallback: the XLSX import carries the gate (05 §B.3).
     assert suppression_fresh(None, key=KEY, now=NOW, configured=False)
@@ -132,6 +168,8 @@ def test_the_config_round_trips_and_reads_the_seed():
     assert SuppressionConfig.from_json(seeded) == SuppressionConfig()
     full = cfg(1, 0.5)
     assert SuppressionConfig.from_json(full.to_json()) == full
+    waiting = SuppressionConfig(awaiting_salt_id="9caf06bb", awaiting_since=NOW)
+    assert SuppressionConfig.from_json(waiting.to_json()) == waiting
     assert SuppressionConfig.from_json({"last_full_at": "garbage", "count": True}) == (
         SuppressionConfig()
     )

@@ -33,7 +33,6 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
-import hmac
 import logging
 import re
 from collections.abc import AsyncGenerator, Mapping, Sequence
@@ -50,7 +49,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from clientscrapper.config import Settings, settings
 from clientscrapper.db.models import Outcome, PushLog, RuntimeFlag, Source, Suppression
-from clientscrapper.services import costs, health
+from clientscrapper.services import costs, health, keys
 from clientscrapper.services.http import VERSION
 from clientscrapper.services.retry import Sleep, is_transient_http, with_backoff
 
@@ -107,6 +106,12 @@ UPSERT_CHUNK: Final = 1000
 # One nightly full pull (30 2 * * *) plus slack; one hourly delta plus slack.
 FULL_MAX_AGE_H: Final = 26
 DELTA_MAX_AGE_H: Final = 3
+# A full pull is due again once the last completed one is a day and half an
+# hour old (the nightly 30 2 * * * plus its run): from then on every delta
+# runs AS a full pull until one completes, so one failed, skipped or missed
+# night never holds the gate for a business day. At least one hourly delta
+# tick (15 * * * *) falls between this and FULL_MAX_AGE_H.
+FULL_DUE_AFTER: Final = timedelta(hours=24, minutes=30)
 ERP_SOURCE: Final = health.ERP_SOURCE
 # The ERP breaker (05 §B.1): sources.erp_sync.breaker_until; /yoq crm clears it.
 BREAKER_FOR: Final = timedelta(hours=6)
@@ -122,21 +127,16 @@ SHRUNK_PROBLEM: Final = "suppression_shrunk"
 SELFTEST_PROBLEM: Final = "suppression_selftest_failed"
 STALE_HIT_PROBLEM: Final = "suppression_stale_hit"
 
-# What the owner is told at once when a feed trips the breaker; the health
-# sweep repeats it (06 §4.2 TOLD_FIRST_ELSEWHERE). Same words as its line.
-PUSH_404_TEXT: Final = (
-    "⛔ ERP kaliti yoki manba notoʻgʻri: 404. Kelgan arizalar → Reklama "
-    "havolalari → Agent → kalit; <code>.env</code> CRM_AGENT_KEY; "
-    "<code>make reload</code>; /yoq crm"
-)
-ERP_REDIRECT_TEXT: Final = (
-    "⛔ ERP manzili yoʻnaltiryapti (HTTP {code}): <code>.env</code> dagi "
-    "CRM_BASE_URL <code>https://</code> bilan boshlanishi kerak; "
-    "<code>make reload</code>; /yoq crm"
-)
+# A feed's own push_404 carries this detail (``push_404:feed``): a feed 200
+# ends only the breaker a feed tripped. One a push tripped («push_404») may
+# have a cause no GET can see (the push path, a proxy refusing POST alone),
+# so it waits for /yoq crm or its 6 h (05 §B.1).
+FEED_TRIPPED: Final = "feed"
 
 FeedName = Literal["suppression", "outcomes"]
 SyncMode = Literal["full", "delta"]
+# Why a delta ran as a full pull.
+FullBecause = Literal["no_anchor", "full_due"]
 ContractCode = Literal["bad_request", "rule_changed", "runaway", "shape"]
 BreakerKey = Literal["push_404", "erp_redirect"]
 
@@ -228,16 +228,32 @@ class ErpClient:
         self, path: str, params: Mapping[str, str | int]
     ) -> dict[str, Any]:
         """One GET of a feed page: the JSON object of a 200, else
-        ``ErpHttpError``; a 200 that is not a JSON object is
-        ``FeedShapeError``."""
-        response = await self.client.get(path, params=dict(params), timeout=FEED_TIMEOUT)
+        ``ErpHttpError``; a 200 that is not a JSON object — or a body that
+        does not decode as its ``Content-Encoding`` says (a proxy's corrupt
+        gzip) — is ``FeedShapeError``, the body's sha256 logged (never the
+        body, 03 §2.2)."""
+        try:
+            response = await self.client.get(
+                path, params=dict(params), timeout=FEED_TIMEOUT
+            )
+        except httpx.DecodingError:
+            log.warning("erp feed: a body that does not decode", extra={"path": path})
+            raise FeedShapeError(f"{path}: the body does not decode") from None
         if response.status_code != httpx.codes.OK:
             raise ErpHttpError(response.status_code, _error_code(response))
         try:
             body = response.json()
         except ValueError:
-            raise FeedShapeError(f"{path}: the body is not JSON") from None
+            body = None
         if not isinstance(body, dict):
+            log.warning(
+                "erp feed: a 200 that is not a JSON object",
+                extra={
+                    "path": path,
+                    "body_sha256": hashlib.sha256(response.content).hexdigest(),
+                    "bytes": len(response.content),
+                },
+            )
             raise FeedShapeError(f"{path}: the body is not a JSON object")
         return body
 
@@ -282,13 +298,15 @@ def feeds_configured(config: Settings = settings) -> bool:
 
 
 def hash_tail(secret: str, tail9: str) -> str:
-    """``hmac_sha256(secret, tail9).hexdigest()[:20]`` — the feed's ``h``."""
-    return hmac.new(secret.encode(), tail9.encode(), hashlib.sha256).hexdigest()[:20]
+    """``hmac_sha256(secret, tail9).hexdigest()[:20]`` — the feed's ``h``.
+    The rule's home is ``keys.erp_phone_hash``, which refuses anything but
+    the nine-digit tail (a raw phone would hash, match nothing and fail open)."""
+    return keys.erp_phone_hash(secret, tail9)
 
 
 def salt_id(secret: str) -> str:
     """``sha256(secret)[:8]``: changes when the owner re-mints the key."""
-    return hashlib.sha256(secret.encode()).hexdigest()[:8]
+    return keys.erp_salt_id(secret)
 
 
 def fmt_since(dt: datetime) -> str:
@@ -471,7 +489,10 @@ class SuppressionConfig:
     (freshness), ``*_generated_at`` the ERP's (the next delta's anchor);
     ``count`` the distinct (kind, h) of the last completed, unshrunk full
     pull (the shrink rule's yardstick — never the table's row count, which
-    deltas only grow)."""
+    deltas only grow). ``awaiting_salt_id`` / ``awaiting_since``: the key the
+    agent is trying while no full pull has completed under it (none ever,
+    or a re-minted key), and since when — the moment the gate went stale,
+    which 06 §4.2's «critical after 6 h» counts from."""
 
     salt_id: str | None = None
     last_full_at: datetime | None = None
@@ -479,6 +500,8 @@ class SuppressionConfig:
     full_generated_at: datetime | None = None
     delta_generated_at: datetime | None = None
     count: int = 0
+    awaiting_salt_id: str | None = None
+    awaiting_since: datetime | None = None
 
     @classmethod
     def from_json(cls, raw: Any) -> SuppressionConfig:
@@ -486,6 +509,7 @@ class SuppressionConfig:
             return cls()
         salt = raw.get("salt_id")
         count = raw.get("count")
+        awaiting = raw.get("awaiting_salt_id")
         return cls(
             salt_id=salt if isinstance(salt, str) and salt else None,
             last_full_at=_stamp(raw.get("last_full_at")),
@@ -493,6 +517,8 @@ class SuppressionConfig:
             full_generated_at=_stamp(raw.get("full_generated_at")),
             delta_generated_at=_stamp(raw.get("delta_generated_at")),
             count=count if isinstance(count, int) and not isinstance(count, bool) else 0,
+            awaiting_salt_id=awaiting if isinstance(awaiting, str) and awaiting else None,
+            awaiting_since=_stamp(raw.get("awaiting_since")),
         )
 
     def to_json(self) -> dict[str, Any]:
@@ -506,7 +532,24 @@ class SuppressionConfig:
             "full_generated_at": iso(self.full_generated_at),
             "delta_generated_at": iso(self.delta_generated_at),
             "count": self.count,
+            "awaiting_salt_id": self.awaiting_salt_id,
+            "awaiting_since": iso(self.awaiting_since),
         }
+
+    def completed_under(self, key_salt: str) -> bool:
+        """A full pull has completed under this key."""
+        return self.last_full_at is not None and self.salt_id == key_salt
+
+    def delta_anchor(self) -> datetime | None:
+        """The later of the two ERP clocks (05 §B.2 step 1): a full pull is a
+        complete read as of its first page, so a delta after it starts there
+        and not at the older delta before it."""
+        stamps = [a for a in (self.delta_generated_at, self.full_generated_at) if a]
+        return max(stamps) if stamps else None
+
+    def full_due(self, now: datetime) -> bool:
+        """``FULL_DUE_AFTER`` has passed since the last completed full pull."""
+        return self.last_full_at is None or now - self.last_full_at > FULL_DUE_AFTER
 
 
 async def suppression_config(session: AsyncSession) -> SuppressionConfig:
@@ -550,7 +593,9 @@ def freshness(
     ``DELTA_MAX_AGE_H`` (a full pull counts as one), and the stored
     ``salt_id`` is the current key's. Feed not configured ⇒ fresh: the XLSX
     fallback carries the gate (05 §B.3). ``stale_since`` is the moment the
-    first limit ran out, when it can be known."""
+    first limit ran out — or, while no full pull has completed under this
+    key, the agent's first try with it (``awaiting_since``); None only
+    before any run has tried the key."""
     on = feeds_configured() if configured is None else configured
     full_at = cfg.last_full_at if cfg is not None else None
     delta_at = cfg.last_delta_at if cfg is not None else None
@@ -560,7 +605,8 @@ def freshness(
         return health.SuppressionHealth(
             True, full_at, delta_at, FULL_MAX_AGE_H, DELTA_MAX_AGE_H
         )
-    salt_ok = cfg is not None and cfg.salt_id is not None and cfg.salt_id == salt_id(key)
+    key_salt = salt_id(key)
+    salt_ok = cfg is not None and cfg.salt_id is not None and cfg.salt_id == key_salt
     full_ok = full_at is not None and now - full_at <= full_limit
     delta_ok = delta_at is not None and now - delta_at <= delta_limit
     ran_out = [
@@ -571,6 +617,13 @@ def freshness(
         )
         if at is not None and not ok
     ]
+    if (
+        cfg is not None
+        and not cfg.completed_under(key_salt)
+        and cfg.awaiting_salt_id == key_salt
+        and cfg.awaiting_since is not None
+    ):
+        ran_out.append(cfg.awaiting_since)
     return health.SuppressionHealth(
         fresh=full_ok and delta_ok and salt_ok,
         full_at=full_at,
@@ -613,41 +666,51 @@ def register_health_probe() -> None:
 
 
 def breaker_reason(key: BreakerKey, status: int) -> str:
-    """``push_404`` / ``erp_redirect:<status>`` (health reads «<key>[:<detail>]»)."""
-    return key if key == PUSH_404_PROBLEM else f"{key}:{status}"
+    """What a FEED writes: ``push_404:feed`` / ``erp_redirect:<status>``
+    (health reads «<key>[:<detail>]»; the redirect's detail is its status)."""
+    return f"{key}:{FEED_TRIPPED}" if key == PUSH_404_PROBLEM else f"{key}:{status}"
 
 
 async def trip_breaker(
     session: AsyncSession, key: BreakerKey, *, status: int, now: datetime
 ) -> None:
     """``sources.erp_sync.breaker_until = now + 6 h`` with the reason (05 §B.1).
-    The caller's transaction writes it."""
+    A push's ``push_404`` still in force keeps its reason: the feed's 404 is
+    the same fact, and only the push's own cure may end it. The caller's
+    transaction writes it."""
+    keep_push = sa.and_(
+        sa.literal(key == PUSH_404_PROBLEM),
+        Source.breaker_until > now,
+        Source.breaker_reason == PUSH_404_PROBLEM,
+    )
     await session.execute(
         sa.update(Source)
         .where(Source.key == ERP_SOURCE)
         .values(
-            breaker_until=now + BREAKER_FOR, breaker_reason=breaker_reason(key, status)
+            breaker_until=now + BREAKER_FOR,
+            breaker_reason=sa.case(
+                (keep_push, Source.breaker_reason), else_=breaker_reason(key, status)
+            ),
         )
     )
 
 
 async def clear_breaker(session: AsyncSession) -> bool:
-    """A feed that answered 200 proves the key, the source and the address:
-    an ERP breaker in force is over (B.5: «until a 2xx»). Another breaker
-    reason on the row is left alone. True when one was cleared."""
+    """A feed that answered 200 proves the key, the door and the address: a
+    breaker a FEED tripped (``push_404:feed``) is over, and so is any
+    ``erp_redirect`` (the push uses the same base URL). A push's own
+    ``push_404`` and every other reason on the row are left alone. True when
+    one was cleared."""
+    redirect = ERP_REDIRECT_PROBLEM
     result = await session.execute(
         sa.update(Source)
         .where(
             Source.key == ERP_SOURCE,
             Source.breaker_until.is_not(None),
             sa.or_(
-                *(
-                    sa.or_(
-                        Source.breaker_reason == k,
-                        Source.breaker_reason.startswith(k + ":"),
-                    )
-                    for k in health.ERP_BREAKER_KEYS
-                )
+                Source.breaker_reason == f"{PUSH_404_PROBLEM}:{FEED_TRIPPED}",
+                Source.breaker_reason == redirect,
+                Source.breaker_reason.startswith(redirect + ":"),
             ),
         )
         .values(breaker_until=None, breaker_reason=None)
@@ -657,11 +720,8 @@ async def clear_breaker(session: AsyncSession) -> bool:
 
 
 def breaker_text(key: BreakerKey, status: int) -> str:
-    return (
-        PUSH_404_TEXT
-        if key == PUSH_404_PROBLEM
-        else ERP_REDIRECT_TEXT.format(code=status)
-    )
+    """The owner's line — ``health``'s, the one home of its words."""
+    return health.erp_breaker_text(key, "" if key == PUSH_404_PROBLEM else str(status))
 
 
 async def tell_breaker(key: BreakerKey, *, status: int, now: datetime) -> bool:
@@ -686,13 +746,15 @@ class SyncReport:
     pages: int = 0
     entries: int = 0
     seen: int = 0
-    previous: int = 0
+    # A full pull's yardstick (the previous full pull's count); None on a delta.
+    previous: int | None = None
     deleted: int = 0
     retired_manual: int = 0
     salt_changed: bool = False
     selftest: bool | None = None
     since: str | None = None
     generated_at: str | None = None
+    why_full: FullBecause | None = None
 
     def as_meta(self) -> dict[str, Any]:
         """Every field that holds an answer (a ``selftest`` of False is one)."""
@@ -712,17 +774,27 @@ async def sync_suppression(
     Pages are committed as they arrive, so a pull that fails midway keeps
     what it upserted and deletes nothing. A delta whose first page carries a
     new ``salt_id`` applies nothing and comes back ``status='salt_changed'``:
-    the caller runs a full pull now. A failure is recorded (``health``'s
-    rows, the breaker, the owner) and raised."""
-    cfg = await suppression_config(session)
+    the caller runs a full pull now. A delta with no anchor, or while
+    ``FULL_DUE_AFTER`` has passed since the last completed full pull, runs AS
+    the full pull (``why_full``): the only walk that may delete is still the
+    one from nothing. A failure is recorded (``health``'s rows, the breaker,
+    the owner) and raised."""
+    cfg = await _await_key(session, await suppression_config(session), erp, now)
     params: dict[str, str | int] = {"limit": SUPPRESSION_LIMIT}
     walk: SyncMode = "full"
+    why: FullBecause | None = None
     if mode == "delta":
-        anchor = cfg.delta_generated_at or cfg.full_generated_at
-        if anchor is not None:
+        anchor = cfg.delta_anchor()
+        if anchor is None:
+            why = "no_anchor"
+        elif cfg.full_due(now):
+            why = "full_due"
+        else:
             walk = "delta"
             params["since"] = fmt_since(anchor - DELTA_OVERLAP)
-    report = SyncReport(mode=mode, walk=walk, since=_as_str(params.get("since")))
+    report = SyncReport(
+        mode=mode, walk=walk, since=_as_str(params.get("since")), why_full=why
+    )
     try:
         return await _apply_walk(session, erp, cfg, params, report, now, accept_shrink)
     except FeedError as exc:
@@ -732,6 +804,22 @@ async def sync_suppression(
 
 def _as_str(value: str | int | None) -> str | None:
     return None if value is None else str(value)
+
+
+async def _await_key(
+    session: AsyncSession, cfg: SuppressionConfig, erp: ErpClient, now: datetime
+) -> SuppressionConfig:
+    """While no full pull has completed under this client's key, the first
+    run that tries it says so (``awaiting_*``), committed before the walk so
+    a walk that fails keeps it: freshness then knows since when the gate is
+    stale. A later try keeps the first moment."""
+    key_salt = erp.salt_id
+    if cfg.completed_under(key_salt) or cfg.awaiting_salt_id == key_salt:
+        return cfg
+    marked = replace(cfg, awaiting_salt_id=key_salt, awaiting_since=now)
+    await _store_config(session, marked)
+    await session.commit()
+    return marked
 
 
 async def _apply_walk(
@@ -779,7 +867,14 @@ async def _apply_walk(
     else:
         await _store_config(
             session,
-            replace(cfg, salt_id=salt, last_delta_at=now, delta_generated_at=generated),
+            replace(
+                cfg,
+                salt_id=salt,
+                last_delta_at=now,
+                delta_generated_at=generated,
+                awaiting_salt_id=None,
+                awaiting_since=None,
+            ),
         )
     await _clear_feed_contract(session, FEED_SUPPRESSION)
     await session.commit()
@@ -887,6 +982,8 @@ async def _finish_full(
             last_delta_at=now,
             full_generated_at=generated,
             count=count,
+            awaiting_salt_id=None,
+            awaiting_since=None,
         ),
     )
     # (a) the stale hits are covered by this pull.
@@ -1078,6 +1175,7 @@ __all__ = [
     "DELTA_MAX_AGE_H",
     "ERP_KEY_HEADERS",
     "FEED_RULE",
+    "FULL_DUE_AFTER",
     "FULL_MAX_AGE_H",
     "MAX_PAGES",
     "OUTCOMES_LIMIT",

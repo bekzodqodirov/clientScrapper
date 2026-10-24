@@ -11,7 +11,9 @@ requests the fake saw. ``sources`` is migration-seeded configuration: the
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -417,6 +419,244 @@ async def test_the_collector_turns_a_salt_change_into_a_full_pull_in_the_same_ru
     assert set(await feed_rows(session)) == {h(n, "re-minted") for n in range(2)}
 
 
+async def test_a_failed_night_is_caught_up_by_the_next_delta(session, erp_row):
+    # 05 §B.2 / review: the 02:30 full pull fails (or is skipped, or the
+    # worker was down); every hourly delta succeeds. Without a catch-up the
+    # gate goes stale at 04:30 (26 h) and stays so the whole business day.
+    fake, erp = make(10)
+    d1 = NOW  # 02:30, night 1
+    await erp_feeds.sync_suppression(session, erp, mode="full", now=d1)
+    # 02:15 the next night: 23 h 45 min after the full pull — still a delta.
+    early = await erp_feeds.sync_suppression(
+        session, erp, mode="delta", now=d1 + timedelta(hours=23, minutes=45)
+    )
+    assert (early.walk, early.why_full) == ("delta", None)
+    # 02:30: the full pull fails, every retry of it.
+    fake.feed_modes[PATH] = ["feed_503"] * erp_feeds.FEED_ATTEMPTS
+    with pytest.raises(erp_feeds.ErpHttpError):
+        await erp_feeds.sync_suppression(
+            session, erp, mode="full", now=d1 + timedelta(hours=24)
+        )
+    # 03:15: the full pull is due — the delta runs as one, and deletes.
+    fake.entries.pop(0)
+    catch_up = d1 + timedelta(hours=24, minutes=45)
+    report = await erp_sync.run("delta", fetcher=a_fetcher(), now=catch_up, erp=erp)
+    assert report.status == "ok"
+    meta = report.meta["suppression"]
+    assert (meta["mode"], meta["walk"], meta["why_full"], meta["deleted"]) == (
+        "delta",
+        "full",
+        "full_due",
+        1,
+    )
+    assert "since" not in meta
+    cfg = await config(session)
+    assert (cfg.last_full_at, cfg.last_delta_at, cfg.count) == (catch_up, catch_up, 9)
+    # 05:15 — past 04:30, when the failed night would have stopped every push.
+    assert erp_feeds.suppression_fresh(
+        cfg, key=SECRET, now=d1 + timedelta(hours=26, minutes=45), configured=True
+    )
+    # And the next hour is a delta again.
+    after = await erp_feeds.sync_suppression(
+        session, erp, mode="delta", now=catch_up + timedelta(hours=1)
+    )
+    assert (after.walk, after.why_full) == ("delta", None)
+
+
+def test_the_catch_up_leaves_an_hourly_tick_before_the_limit():
+    due = erp_feeds.FULL_DUE_AFTER
+    assert due == timedelta(hours=24, minutes=30)
+    # The nightly cadence's own delta (02:15, 23 h 45 min on) stays a delta…
+    assert due > timedelta(hours=24)
+    # …and one hourly delta tick always falls before FULL_MAX_AGE_H.
+    assert due + timedelta(hours=1) <= timedelta(hours=erp_feeds.FULL_MAX_AGE_H)
+
+
+async def test_a_full_pull_moves_the_delta_anchor_on(session, erp_row):
+    fake, erp = make(2)
+    erp_clock = fake.clock
+    assert isinstance(erp_clock, ErpClock)
+    await erp_feeds.sync_suppression(session, erp, mode="full", now=NOW)
+    erp_clock.at = datetime(2026, 10, 23, 22, 0, tzinfo=UTC)
+    delta = await erp_feeds.sync_suppression(
+        session, erp, mode="delta", now=NOW + timedelta(minutes=30)
+    )
+    assert "previous" not in delta.as_meta()
+    # A full pull later on (the owner's --full): its first page's clock is
+    # the later of the two, and the next delta starts from it.
+    erp_clock.at = datetime(2026, 10, 24, 3, 0, tzinfo=UTC)
+    await erp_feeds.sync_suppression(
+        session, erp, mode="full", now=NOW + timedelta(hours=5)
+    )
+    fake.gets.clear()
+    await erp_feeds.sync_suppression(
+        session, erp, mode="delta", now=NOW + timedelta(hours=6)
+    )
+    assert params_seen(fake)[0]["since"] == "2026-10-24T02:50:00.000000Z"
+
+
+async def test_a_re_read_entry_moves_its_erp_at(session, erp_row):
+    fake, erp = make(1)
+    await erp_feeds.sync_suppression(session, erp, mode="full", now=NOW)
+    later = NOW.astimezone(UTC) + timedelta(hours=1)
+    fake.entries[0].at = later
+    await erp_feeds.sync_suppression(
+        session, erp, mode="delta", now=NOW + timedelta(hours=1)
+    )
+    row = (await feed_rows(session))[h(0)]
+    assert (row.erp_at, row.last_seen_at) == (later, NOW + timedelta(hours=1))
+
+
+def answers(fake: FakeErp, *first: httpx.Response) -> httpx.MockTransport:
+    """``first`` answered in order, then the fake."""
+    queue = list(first)
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if queue:
+            fake.requests.append(request)
+            return queue.pop(0)
+        return await fake.handler(request)
+
+    return httpx.MockTransport(handler)
+
+
+async def test_a_proxy_s_429_is_retried_and_never_bad_request(session, erp_row):
+    fake, _ = make(2)
+    busy = httpx.Response(429, text="slow down")
+    erp = ErpClient(BASE, SECRET, transport=answers(fake, busy, busy), sleep=no_sleep)
+    report = await erp_feeds.sync_suppression(session, erp, mode="full", now=NOW)
+    assert (report.status, report.entries, len(fake.requests)) == ("ok", 2, 3)
+    erp = ErpClient(BASE, SECRET, transport=answers(fake, *[busy] * 4), sleep=no_sleep)
+    with pytest.raises(erp_feeds.ErpHttpError) as caught:
+        await erp_feeds.sync_suppression(
+            session, erp, mode="full", now=NOW + timedelta(hours=1)
+        )
+    assert caught.value.status == 429
+    assert await raised(session) == {}
+    assert await breaker(session) == (None, None)
+
+
+async def test_a_salt_that_moves_inside_one_walk_is_shape(session, erp_row, monkeypatch):
+    monkeypatch.setattr(erp_feeds, "SUPPRESSION_LIMIT", 1)
+    fake, _ = make(3)
+    calls = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        answer = await fake.handler(request)
+        if calls == 2:
+            body = answer.json()
+            body["salt_id"] = "0badc0de"
+            return httpx.Response(200, json=body)
+        return answer
+
+    erp = ErpClient(BASE, SECRET, transport=httpx.MockTransport(handler), sleep=no_sleep)
+    with pytest.raises(erp_feeds.FeedShapeError):
+        await erp_feeds.sync_suppression(session, erp, mode="full", now=NOW)
+    assert (await raised(session))["feed_contract"]["detail"] == {
+        "code": "shape",
+        "feed": "suppression",
+    }
+    # Page 1 (the oldest entry) was applied; no pull is stored as completed.
+    assert set(await feed_rows(session)) == {h(2)}
+    assert (await config(session)).last_full_at is None
+
+
+async def test_a_body_that_does_not_decode_is_shape(session, erp_row):
+    def corrupt(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-encoding": "gzip", "content-type": "application/json"},
+            stream=httpx.ByteStream(b"not-gzip-at-all"),
+        )
+
+    erp = ErpClient(BASE, SECRET, transport=httpx.MockTransport(corrupt), sleep=no_sleep)
+    with pytest.raises(erp_feeds.FeedShapeError):
+        await erp_feeds.sync_suppression(session, erp, mode="full", now=NOW)
+    assert (await raised(session))["feed_contract"]["detail"]["code"] == "shape"
+    assert await breaker(session) == (None, None)
+
+
+async def test_a_200_that_is_not_json_logs_its_sha_never_its_body(
+    session, erp_row, caplog
+):
+    body = b"<html>+998 90 000 00 01</html>"
+
+    def html(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, headers={"content-type": "text/html"}, content=body)
+
+    erp = ErpClient(BASE, SECRET, transport=httpx.MockTransport(html), sleep=no_sleep)
+    with (
+        caplog.at_level("WARNING", logger="clientscrapper.services.erp_feeds"),
+        pytest.raises(erp_feeds.FeedShapeError),
+    ):
+        await erp_feeds.sync_suppression(session, erp, mode="full", now=NOW)
+    [record] = [r for r in caplog.records if "not a JSON object" in r.getMessage()]
+    assert record.__dict__["body_sha256"] == hashlib.sha256(body).hexdigest()
+    assert record.__dict__["bytes"] == len(body)
+    assert all("000 00 01" not in r.getMessage() for r in caplog.records)
+
+
+async def test_the_first_try_of_a_key_is_when_the_gate_went_stale(session, erp_row):
+    # 06 §4.2: suppression_stale is critical 6 h after it began. At the
+    # switch-over no pull has ever completed — the first try is that moment.
+    fake, erp = make(2)
+    fake.feed_modes[PATH] = "feed_503"
+    with pytest.raises(erp_feeds.ErpHttpError):
+        await erp_feeds.sync_suppression(session, erp, mode="full", now=NOW)
+    cfg = await config(session)
+    assert (cfg.awaiting_salt_id, cfg.awaiting_since) == ("9caf06bb", NOW)
+    report = erp_feeds.freshness(
+        cfg, key=SECRET, now=NOW + timedelta(hours=7), configured=True
+    )
+    assert (report.fresh, report.full_at, report.stale_since) == (False, None, NOW)
+    # A later failing try keeps the first moment.
+    with pytest.raises(erp_feeds.ErpHttpError):
+        await erp_feeds.sync_suppression(
+            session, erp, mode="delta", now=NOW + timedelta(hours=1)
+        )
+    assert (await config(session)).awaiting_since == NOW
+    # The first completed full pull ends the wait.
+    del fake.feed_modes[PATH]
+    await erp_feeds.sync_suppression(
+        session, erp, mode="delta", now=NOW + timedelta(hours=2)
+    )
+    cfg = await config(session)
+    assert (cfg.awaiting_salt_id, cfg.awaiting_since) == (None, None)
+    report = erp_feeds.freshness(
+        cfg, key=SECRET, now=NOW + timedelta(hours=2), configured=True
+    )
+    assert (report.fresh, report.stale_since) == (True, None)
+
+
+async def test_a_re_minted_key_is_stale_from_its_first_try(session, erp_row):
+    fake, erp = make(2)
+    await erp_feeds.sync_suppression(session, erp, mode="full", now=NOW)
+    fake.rotate_secret("re-minted")
+    erp2 = ErpClient(BASE, "re-minted", transport=fake.transport(), sleep=no_sleep)
+    # The new key's first delta finds the ERP down (and the salt never read).
+    fake.feed_modes[PATH] = "feed_503"
+    tried = NOW + timedelta(minutes=45)
+    with pytest.raises(erp_feeds.ErpHttpError):
+        await erp_feeds.sync_suppression(session, erp2, mode="delta", now=tried)
+    cfg = await config(session)
+    # Both stamps are minutes old; only the key is wrong.
+    report = erp_feeds.freshness(
+        cfg, key="re-minted", now=tried + timedelta(minutes=5), configured=True
+    )
+    assert (report.fresh, report.salt_ok, report.stale_since) == (False, False, tried)
+    # The old key still reads its own pull as fresh: the marker is the new key's.
+    assert erp_feeds.freshness(
+        cfg, key=SECRET, now=tried, configured=True
+    ) == erp_feeds.freshness(
+        replace(cfg, awaiting_salt_id=None, awaiting_since=None),
+        key=SECRET,
+        now=tried,
+        configured=True,
+    )
+
+
 # --- what a failure writes ------------------------------------------------------------
 
 
@@ -427,7 +667,10 @@ async def test_feed_rule_mismatch_stops(session, erp_row):
         await erp_feeds.sync_suppression(session, erp, mode="full", now=NOW)
     assert caught.value.code == "rule_changed"
     assert await feed_rows(session) == {}
-    assert await config(session) == SuppressionConfig()
+    # Nothing pulled; only the first try with this key is remembered.
+    assert await config(session) == SuppressionConfig(
+        awaiting_salt_id="9caf06bb", awaiting_since=NOW
+    )
     problem = (await raised(session))["feed_contract"]
     assert problem["detail"] == {"code": "rule_changed", "feed": "suppression"}
     assert problem["since"] == NOW.isoformat()
@@ -439,16 +682,21 @@ async def test_feed_404_is_push_404(session, erp_row, told):
     with pytest.raises(erp_feeds.ErpHttpError) as caught:
         await erp_feeds.sync_suppression(session, erp, mode="full", now=NOW)
     assert caught.value.status == 404
-    assert await breaker(session) == (NOW + timedelta(hours=6), "push_404")
+    assert await breaker(session) == (NOW + timedelta(hours=6), "push_404:feed")
     assert await feed_rows(session) == {}
-    assert told == [erp_feeds.PUSH_404_TEXT]
+    assert told == [
+        "⛔ ERP kaliti yoki manba notoʻgʻri: 404. Kelgan arizalar → Reklama "
+        "havolalari → Agent → kalit; <code>.env</code> CRM_AGENT_KEY; "
+        "<code>make reload</code>; /yoq crm"
+    ]
+    assert told[0] == health.erp_breaker_text("push_404")
     # A second 404 inside the 6 h: the breaker moves on, the owner is not
     # told twice (05 §B.1 «once per 6 h»).
     with pytest.raises(erp_feeds.ErpHttpError):
         await erp_feeds.sync_suppression(
             session, erp, mode="delta", now=NOW + timedelta(hours=1)
         )
-    assert await breaker(session) == (NOW + timedelta(hours=7), "push_404")
+    assert await breaker(session) == (NOW + timedelta(hours=7), "push_404:feed")
     assert len(told) == 1
     kinds = (await session.scalars(sa.select(ReminderLog.kind))).all()
     assert kinds == ["alert:push_404"]
@@ -469,7 +717,7 @@ async def test_a_proxy_s_401_and_403_are_push_404_too(session, erp_row, status):
     erp = ErpClient(BASE, SECRET, transport=httpx.MockTransport(deny), sleep=no_sleep)
     with pytest.raises(erp_feeds.ErpHttpError):
         await erp_feeds.sync_suppression(session, erp, mode="full", now=NOW)
-    assert await breaker(session) == (NOW + timedelta(hours=6), "push_404")
+    assert await breaker(session) == (NOW + timedelta(hours=6), "push_404:feed")
     # No owner notifier registered: nothing is claimed, so the first process
     # that can tell still tells.
     assert (await session.scalars(sa.select(ReminderLog.kind))).all() == []
@@ -484,8 +732,12 @@ async def test_feed_3xx_is_never_followed_and_is_erp_redirect(session, erp_row, 
     # One request: the redirect was not followed (the key not re-sent).
     assert len(fake.requests) == 1
     assert await breaker(session) == (NOW + timedelta(hours=6), "erp_redirect:308")
-    assert told == [erp_feeds.ERP_REDIRECT_TEXT.format(code=308)]
-    assert "HTTP 308" in told[0]
+    assert told == [
+        "⛔ ERP manzili yoʻnaltiryapti (HTTP 308): <code>.env</code> dagi "
+        "CRM_BASE_URL <code>https://</code> bilan boshlanishi kerak; "
+        "<code>make reload</code>; /yoq crm"
+    ]
+    assert told[0] == health.erp_breaker_text("erp_redirect", "308")
 
 
 async def test_feed_503_is_retried_not_push_404(session, erp_row):
@@ -539,7 +791,9 @@ async def test_feed_runaway_same_cursor(session, erp_row, monkeypatch):
     assert len(fake.gets) == 2
     assert (await raised(session))["feed_contract"]["detail"]["code"] == "runaway"
     # Nothing was deleted, the stored state did not move.
-    assert await config(session) == SuppressionConfig()
+    assert await config(session) == SuppressionConfig(
+        awaiting_salt_id="9caf06bb", awaiting_since=NOW
+    )
 
 
 async def test_more_pages_than_max_pages_is_a_runaway():
@@ -590,25 +844,62 @@ async def test_a_clean_walk_clears_its_own_feed_contract_only(session, erp_row):
     assert "feed_contract" not in await raised(session)
 
 
-async def test_a_200_ends_the_erp_breaker(session, erp_row):
-    fake, erp = make(1)
+async def set_breaker(session: AsyncSession, reason: str, until: datetime) -> None:
     await session.execute(
         sa.update(Source)
         .where(Source.key == "erp_sync")
-        .values(breaker_until=NOW + timedelta(hours=5), breaker_reason="push_404")
+        .values(breaker_until=until, breaker_reason=reason)
     )
     await session.commit()
+
+
+@pytest.mark.parametrize("reason", ["push_404:feed", "erp_redirect:308"])
+async def test_a_feed_200_ends_the_breaker_a_feed_could_see(session, erp_row, reason):
+    # The feed tripped it (its 404), or it is the base URL's (a redirect):
+    # a 200 on that URL with that key proves both cured (05 §B.5 «until a 2xx»).
+    fake, erp = make(1)
+    await set_breaker(session, reason, NOW + timedelta(hours=5))
     await erp_feeds.sync_suppression(session, erp, mode="full", now=NOW)
     assert await breaker(session) == (None, None)
-    # Another breaker on the row is not the feed's to end.
-    await session.execute(
-        sa.update(Source)
-        .where(Source.key == "erp_sync")
-        .values(breaker_until=NOW + timedelta(hours=5), breaker_reason="host_blocked:x")
-    )
-    await session.commit()
-    await erp_feeds.sync_suppression(session, erp, mode="delta", now=NOW)
-    assert await breaker(session) == (NOW + timedelta(hours=5), "host_blocked:x")
+
+
+@pytest.mark.parametrize("reason", ["push_404", "host_blocked:x"])
+async def test_a_feed_200_leaves_a_push_s_breaker_and_any_other(session, erp_row, reason):
+    # A push's 404 may have a cause no GET sees (its path, a proxy refusing
+    # POST alone): /yoq crm or its 6 h end it (05 §B.1), not the hourly delta.
+    fake, erp = make(1)
+    await set_breaker(session, reason, NOW + timedelta(hours=5))
+    await erp_feeds.sync_suppression(session, erp, mode="full", now=NOW)
+    assert await breaker(session) == (NOW + timedelta(hours=5), reason)
+
+
+async def test_a_feed_404_keeps_a_push_s_reason(session, erp_row, told):
+    fake, erp = make(1)
+    await set_breaker(session, "push_404", NOW + timedelta(hours=1))
+    fake.rotate_secret("somebody-re-minted-it")
+    with pytest.raises(erp_feeds.ErpHttpError):
+        await erp_feeds.sync_suppression(session, erp, mode="full", now=NOW)
+    # Moved on six hours, still the push's: a later feed 200 cannot end it.
+    assert await breaker(session) == (NOW + timedelta(hours=6), "push_404")
+    # Once it has run out, the feed's own 404 is a feed's breaker again.
+    with pytest.raises(erp_feeds.ErpHttpError):
+        await erp_feeds.sync_suppression(
+            session, erp, mode="full", now=NOW + timedelta(hours=7)
+        )
+    assert await breaker(session) == (NOW + timedelta(hours=13), "push_404:feed")
+
+
+async def test_a_page_one_shape_error_leaves_the_breaker_in_force(session, erp_row):
+    # The first page's salt and rule were read (the breaker's clear is pending
+    # in the transaction) when an entry turned out to carry a PII key: the
+    # failure rolls that back before it writes feed_contract.
+    fake, erp = make(2)
+    await set_breaker(session, "push_404:feed", NOW + timedelta(hours=5))
+    fake.feed_modes[PATH] = "feed_shape"
+    with pytest.raises(erp_feeds.FeedShapeError):
+        await erp_feeds.sync_suppression(session, erp, mode="full", now=NOW)
+    assert await breaker(session) == (NOW + timedelta(hours=5), "push_404:feed")
+    assert (await raised(session))["feed_contract"]["detail"]["code"] == "shape"
 
 
 # --- step 5 -----------------------------------------------------------------------
@@ -862,7 +1153,7 @@ async def test_a_failed_feed_fails_the_run_and_keeps_what_it_wrote(
     assert (report.status, report.error) == ("failed", "ErpHttpError")
     assert report.meta["feed_error"] == {"error": "ErpHttpError", "status": 404}
     # The runner rolled its session back; the breaker had been committed.
-    assert await breaker(session) == (NOW + timedelta(hours=6), "push_404")
+    assert await breaker(session) == (NOW + timedelta(hours=6), "push_404:feed")
     assert len(told) == 1
 
 
