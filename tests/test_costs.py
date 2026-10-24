@@ -1523,3 +1523,25 @@ async def test_spend_narrows_by_family_company_and_source(session):
     assert (await costs.spend(session, since=since, source_key="olx_business")).usd == D(
         "0.40"
     )
+
+
+async def test_attribution_to_rows_nobody_holds_survives_the_callers_rollback(session):
+    # The per-source budget (03 §1.2) and the per-company enrichment cap read
+    # this attribution: when nothing holds the referenced rows, ask's own
+    # transaction writes it, so a caller that later fails cannot erase it.
+    company = await new_company(session, "Namuna Plitka Savdo")
+    await costs.ask(
+        session,
+        operation="apify_olx",
+        est_usd=D("0.00199"),
+        call=Calls(),
+        price=lambda _: Priced(D("0.00199"), units=D(1), model="actor"),
+        now=NOW,
+        source_key="olx_business",
+        company_id=company,
+    )
+    await session.rollback()
+    [row] = await committed_rows()
+    assert (row["source_key"], row["company_id"]) == ("olx_business", company)
+    left = await costs.source_budget_usd(session, source_key="olx_business", now=NOW)
+    assert left == D("0.60") - D("0.00199")
