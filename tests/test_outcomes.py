@@ -910,6 +910,13 @@ async def test_the_rule_s_edges_and_who_may_be_re_pushed(world, session):
         .where(PushLog.id == no_payload.push_id)
         .values(payload=sa.null())
     )
+    # A JSON null is no body to re-send either.
+    json_null = await world.push(64, sent_at=edge, post=False, payload={})
+    await session.execute(
+        sa.update(PushLog)
+        .where(PushLog.id == json_null.push_id)
+        .values(payload=sa.text("'null'::jsonb"))
+    )
     await world.push(61, sent_at=edge, post=False, attempt=3)
     # Rule 5 already re-pushed this one once: the re-push is still unconfirmed.
     cid = await world.company(62)
@@ -927,10 +934,10 @@ async def test_the_rule_s_edges_and_who_may_be_re_pushed(world, session):
     await session.commit()
     await _nightly(world)
     report = await erp_feeds.reconcile_unconfirmed(session, world.erp, now=NOW)
-    assert report.unconfirmed == 5
+    assert report.unconfirmed == 6
     assert report.repushable == [at_30d.push_id, at_48.push_id]
     assert (await raised(session))["push_unconfirmed"]["detail"] == {
-        "n": 5,
+        "n": 6,
         "repushable": 2,
     }
     # Every one of them shows up in the ERP: the problem is cleared.
