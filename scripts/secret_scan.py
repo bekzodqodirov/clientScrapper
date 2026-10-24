@@ -59,7 +59,13 @@ REPO_LOCAL_ENV = frozenset(
 
 SECRETS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("anthropic key", re.compile(r"sk-ant-[A-Za-z0-9_-]{20,}")),
-    ("telegram bot token", re.compile(r"\b\d{8,10}:[A-Za-z0-9_-]{35}\b")),
+    # 07's \b…\b missed the commonest leak, the Bot API URL ("/bot<id>:…/",
+    # no boundary between "t" and the id) and a secret ending in "-" (no
+    # boundary after it): the edges say "no digit before, no token char after".
+    (
+        "telegram bot token",
+        re.compile(r"(?<!\d)\d{8,10}:[A-Za-z0-9_-]{35}(?![A-Za-z0-9_-])"),
+    ),
     # A StringSession is one long base64 run starting with "1"; inside a
     # longer base64 blob (a data: URI in a fixture) a "1" after "+" or "/" is
     # no start of a token, hence the look-behind instead of 07's \b ("=" is

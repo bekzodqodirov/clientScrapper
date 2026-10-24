@@ -30,8 +30,10 @@ import pytest
 from clientscrapper.config import settings
 from clientscrapper.userbot import main as userbot
 from tests.ast_tools import (
+    CLASSIFYING,
     PACKAGE,
     ROOT,
+    bound_name,
     called,
     dotted_name,
     functions,
@@ -271,7 +273,6 @@ OUTBOUND_TARGETS = re.compile(
 # (``f"https://{TG_HOST}/bot{token}/sendMessage"``). A bare host is allowed
 # where it classifies — compared, or listed in a table — and nowhere else.
 SENDER_HOST = re.compile(_HOST, re.IGNORECASE)
-CLASSIFYING = ast.Compare | ast.Set | ast.List | ast.Tuple | ast.Dict
 REQUIREMENTS = (ROOT / "requirements.txt", ROOT / "requirements-dev.txt")
 
 
@@ -801,22 +802,6 @@ def _top_level_assigns(tree: ast.Module) -> list[tuple[list[str], ast.expr]]:
     return found
 
 
-def _bound_name(
-    node: ast.AST, mine: set[str], aliases: dict[str, str], bound: Mapping[str, set[str]]
-) -> str | None:
-    """The bound host name a load reads: a plain name of this module, an
-    attribute through an imported module of ours, or a class attribute."""
-    if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
-        return node.id if node.id in mine else None
-    if isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Load):
-        resolved = resolve_attribute(node, aliases)
-        if resolved is not None:
-            module, name = resolved
-            return name if name in bound.get(module, set()) else None
-        return node.attr if node.attr in mine else None
-    return None
-
-
 def sender_host_names(trees: Mapping[str, ast.Module]) -> dict[str, set[str]]:
     """Per module (dotted name), the names bound at module or class level to
     a bare sender host: a literal, another such name, or one imported from a
@@ -834,7 +819,7 @@ def sender_host_names(trees: Mapping[str, ast.Module]) -> dict[str, set[str]]:
                     and isinstance(value.value, str)
                     and SENDER_HOST.fullmatch(value.value.strip()) is not None
                 )
-                alias = _bound_name(value, mine, aliases, bound)
+                alias = bound_name(value, mine, aliases, bound)
                 if set(targets) - mine and (host or alias):
                     mine.update(targets)
                     changed = True
@@ -858,7 +843,7 @@ def _host_offences(
             defining.update(id(n) for n in ast.walk(value))
     found: list[tuple[int, str]] = []
     for node in ast.walk(tree):
-        name = _bound_name(node, mine, aliases, bound)
+        name = bound_name(node, mine, aliases, bound)
         if name is None or id(node) in defining or not isinstance(node, ast.expr):
             continue
         if not isinstance(parent.get(id(node)), CLASSIFYING):

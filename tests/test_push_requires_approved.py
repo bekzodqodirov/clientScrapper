@@ -48,9 +48,11 @@ SYNTHETIC_ID = "cs:00000000-0000-0000-0000-000000000000:"
 DOOR = "_post"
 ENTRY = "push_one"
 DOOR_NAMES = ("post_lead", "PUSH_PATH")
-# The lead path as one token — a bare path, a URL, a template; the 404 alert
-# sentence that quotes it for the owner (05 §B.1) is prose and does not match.
-PUSH_LITERAL = re.compile(r"\S*/api/leads/in/\S*")
+# The lead path as one token — a bare path, one relative to the client's
+# base_url ("api/leads/in/agent" resolves to the same door), a URL, a
+# template, a concatenation; the 404 alert sentence that quotes it for the
+# owner (05 §B.1) is prose and does not match.
+PUSH_LITERAL = re.compile(r"\S*leads/in(?:/\S*)?")
 
 
 @dataclass(frozen=True, slots=True)
@@ -232,6 +234,17 @@ def test_the_detector_catches_each_shape():
     full = "U = 'https://erp.example.uz/api/leads/in/other'\n"
     assert found({"tools/doctor.py": full}) == [
         "tools/doctor.py:<module>: spells the lead path"
+    ]
+    # Relative to httpx's base_url, or built from pieces, it is the same door.
+    reviews = "services/reviews.py"
+    relative = (
+        "async def p(erp, j):\n    await erp.client.post('api/leads/in/agent', json=j)\n"
+    )
+    assert found({reviews: relative}) == [f"{reviews}:p: spells the lead path"]
+    pieces = "async def p(c, s):\n    await c.post('api/leads' + '/in/' + s)\n"
+    assert found({reviews: pieces}) == [f"{reviews}:p: spells the lead path"]
+    assert found({reviews: "U = 'leads/in'\n"}) == [
+        f"{reviews}:<module>: spells the lead path"
     ]
     # push_test only while it carries the synthetic id; anyone else never.
     real = PUSH_TEST_TOOL.replace(SYNTHETIC_ID, "cs:")

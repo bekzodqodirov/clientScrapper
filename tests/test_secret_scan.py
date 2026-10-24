@@ -57,6 +57,27 @@ def test_each_credential_shape_is_refused_and_never_printed(rule, value):
     assert value not in str(findings[0])
 
 
+# Split so this file holds no token the scanner would refuse.
+BOT_ID = "71234" + "56789"
+BOT_SECRET = "AAH" + "x" * 31
+
+
+@pytest.mark.parametrize(
+    ("text", "flagged"),
+    [
+        (f"https://api.telegram.org/bot{BOT_ID}:{BOT_SECRET}Q/getMe", True),
+        (f"TOKEN={BOT_ID}:{BOT_SECRET}-", True),  # a secret ending in "-"
+        (f"'{BOT_ID}:{BOT_SECRET}_'", True),
+        (f"TOKEN={BOT_ID}:{BOT_SECRET}Q", True),
+        (f"id 1{BOT_ID}:{BOT_SECRET}Q", False),  # 11 digits are no bot id
+        (f"TOKEN={BOT_ID}:{BOT_SECRET}QQ", False),  # 36 characters are no secret
+    ],
+    ids=["url", "dash", "underscore", "plain", "eleven-digits", "too-long"],
+)
+def test_a_bot_token_in_a_url_or_ending_in_a_dash(text, flagged):
+    assert (rules("services/x.py", text) == ["telegram bot token"]) is flagged
+
+
 def test_a_session_inside_a_longer_base64_blob_is_not_a_session():
     blob = "data:image/png;base64,iVBOR" + ("w0KGgo+" * 10) + "1" + "A" * 320
     assert rules("tests/fixtures/x/page.html", blob) == []

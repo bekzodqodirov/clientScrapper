@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import ast
 import functools
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -372,3 +372,30 @@ def resolve_attribute(
     if chain[0] not in aliases:
         return None
     return ".".join([aliases[chain[0]], *chain[1:-1]]), chain[-1]
+
+
+# Where a bare host only classifies (compared, or listed in a table) and no
+# URL is built on it.
+CLASSIFYING = ast.Compare | ast.Set | ast.List | ast.Tuple | ast.Dict
+
+
+def bound_name(
+    node: ast.AST,
+    mine: set[str],
+    aliases: dict[str, str],
+    bound: Mapping[str, set[str]],
+) -> str | None:
+    """The bound name a load reads, resolved where it was bound: a plain name
+    of this module (``mine`` includes what it imported), an attribute through
+    an imported module (``serp.BRAVE_URL`` reads serp's binding, ``httpx.URL``
+    nothing of ours), or an attribute of anything else — ``self.URL`` — read
+    as this module's class attribute."""
+    if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
+        return node.id if node.id in mine else None
+    if isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Load):
+        resolved = resolve_attribute(node, aliases)
+        if resolved is not None:
+            module, name = resolved
+            return name if name in bound.get(module, set()) else None
+        return node.attr if node.attr in mine else None
+    return None
