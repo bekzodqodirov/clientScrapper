@@ -14,6 +14,7 @@ import pytest
 import sqlalchemy as sa
 
 from clientscrapper.db.models import Evidence
+from clientscrapper.db.models import Observation as ObservationRow
 from clientscrapper.services import evidence
 from tests.fakes import T0, TASHKENT
 
@@ -225,7 +226,18 @@ async def test_a_rolled_back_store_leaves_no_file(session, tmp_path):
         root=tmp_path,
     )
     await session.rollback()
-    assert files(tmp_path) == []
+    # The next transaction on the same session commits: only its own file.
+    later = await evidence.store(
+        session,
+        source_key="directories",
+        url=URL + "?p=2",
+        body=b"<html>later</html>",
+        content_type="text/html",
+        fetched_at=T0,
+        root=tmp_path,
+    )
+    await session.commit()
+    assert files(tmp_path) == [later.raw_path]
 
 
 async def test_a_refused_savepoint_drops_only_its_own_file(session, tmp_path):
@@ -257,6 +269,32 @@ async def test_a_refused_savepoint_drops_only_its_own_file(session, tmp_path):
     assert files(tmp_path) == [kept.raw_path]
     count = await session.scalar(sa.select(sa.func.count()).select_from(Evidence))
     assert count == 1
+
+
+async def test_a_failed_flush_in_a_savepoint_drops_its_file(session, tmp_path):
+    # The flush's own subtransaction is what rolls back; the savepoint around it
+    # is only closed afterwards — the file must go all the same.
+    with pytest.raises(sa.exc.DataError):
+        async with session.begin_nested():
+            row = await evidence.store(
+                session,
+                source_key="directories",
+                url=URL,
+                body=BODY,
+                content_type="text/html",
+                fetched_at=T0,
+                root=tmp_path,
+            )
+            session.add(
+                ObservationRow(
+                    evidence_id=row.id,
+                    source_key="directories",
+                    parsed={"goods": "mato \x00"},  # jsonb refuses \u0000
+                )
+            )
+            await session.flush()
+    await session.commit()
+    assert files(tmp_path) == []
 
 
 async def test_the_same_bytes_in_a_new_tashkent_year_write_no_second_file(

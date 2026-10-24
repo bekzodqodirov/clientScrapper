@@ -164,12 +164,24 @@ def _write_after_commit(session: Session) -> None:
             log.warning("evidence file not written", extra={"raw": item.path.name})
 
 
+def _boundary(transaction: SessionTransaction) -> SessionTransaction:
+    """What a rollback of ``transaction`` undoes in the database: everything
+    since the nearest savepoint or the root. A failed flush rolls back its own
+    internal subtransaction, and the savepoint around it is then only closed,
+    so the subtransaction is all this event ever names."""
+    current: SessionTransaction | None = transaction
+    while current is not None and not (current.nested or current.parent is None):
+        current = current.parent
+    return current or transaction
+
+
 @event.listens_for(Session, "after_soft_rollback")
 def _drop_after_rollback(session: Session, previous: SessionTransaction) -> None:
     pending = session.info.get(_PENDING)
     if pending:
+        undone = _boundary(previous)
         session.info[_PENDING] = [
-            item for item in pending if not _within(item.transaction, previous)
+            item for item in pending if not _within(item.transaction, undone)
         ]
 
 

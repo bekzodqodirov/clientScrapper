@@ -811,9 +811,11 @@ async def test_a_url_no_row_can_hold_is_dropped_and_the_rest_kept(
     assert [p.name for p in tmp_path.rglob("*.gz")] == [ev.raw_path.split("/")[1]]
 
 
-class NulExcerpt(Directory):
-    """Page 1 parses fine; page 2 yields a row with a NUL character, which
-    Postgres refuses (a page with binary junk in it)."""
+class NulGoods(Directory):
+    """Page 1 parses fine; page 2 yields a row whose goods text carries a NUL
+    character (a page with binary junk in it). Its evidence row is accepted;
+    the server refuses its observations.parsed (jsonb has no \\u0000), which
+    aborts the transaction it runs in."""
 
     api_row = False
 
@@ -822,14 +824,14 @@ class NulExcerpt(Directory):
         found = Directory.parse_listing(body, url=url, fetched_at=fetched_at)
         if url.endswith("/katalog/2"):
             for obs in found:
-                obs.excerpt = "Namuna Tekstil XK \x00 optom"
+                obs.goods_text = "mato \x00 furnitura"
         return found
 
 
 async def test_a_group_the_database_refuses_is_dropped_and_the_rest_kept(
     session, directories, clock, tmp_path
 ):
-    report = await run(NulExcerpt, fetcher_for(directory_site(clock)), clock, tmp_path)
+    report = await run(NulGoods, fetcher_for(directory_site(clock)), clock, tmp_path)
     assert (report.status, report.error) == ("ok", None)
     [row] = await runs(session)
     assert (row.new_evidence, row.new_observations) == (1, 2)
