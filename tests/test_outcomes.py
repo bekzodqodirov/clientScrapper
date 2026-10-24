@@ -1333,16 +1333,19 @@ async def test_an_undone_merge_is_no_lineage(world, session):
         sa.update(MergeLog).values(undone_at=NOW - DAY, undone_by="owner:1")
     )
     await session.commit()
-    for pushed in (p, q):
-        world.fake.move(world.lead(pushed).id, "lost", reason="Qayta qilinmasin")
+    world.fake.move(world.lead(q).id, "lost", reason="Qayta qilinmasin")
     await world.walk()
-    # Each company's never-again sits on its own keys only.
+    # The target's never-again sits on its own keys only: the source left.
     assert await local(session) == {
-        ("lost", "phone_tail", p.tail, because(p)),
-        ("lost", "tg_username", "namuna_kanal", because(p)),
         ("lost", "phone_tail", q.tail, because(q)),
         ("lost", "tg_username", "namuna_bosh", because(q)),
     }
+    # And the source's own loss reads the source alone.
+    world.clock.set(NOW)
+    world.fake.move(world.lead(p).id, "lost", reason="Qayta qilinmasin")
+    await world.walk(now=NOW + timedelta(hours=1))
+    assert ("lost", "tg_username", "namuna_bosh", because(p)) not in await local(session)
+    assert ("lost", "tg_username", "namuna_kanal", because(p)) in await local(session)
 
 
 async def test_a_row_let_go_passes_to_a_merged_company_s_lineage(world, session):
