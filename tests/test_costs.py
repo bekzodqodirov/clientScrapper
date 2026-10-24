@@ -325,11 +325,17 @@ def test_anthropic_silence_refuses_claude_ops_only():
 # --- alerts (pure) ---------------------------------------------------------------------
 
 
-def alerts(day: str = "0", month: str = "0", **families: str) -> dict[str, str]:
+def alerts(
+    day: str = "0",
+    month: str = "0",
+    capped: frozenset[str] = frozenset(),
+    **families: str,
+) -> dict[str, str]:
     snap = costs.SpendSnapshot(
         day_usd=D(day),
         month_usd=max(D(month), D(day)),
         family_day_usd={f: D(v) for f, v in families.items()},  # type: ignore[misc]
+        capped=capped,
     )
     found = costs.spend_alerts(snap, daily_cap=CAP, monthly_cap=MONTH_CAP, alert_pct=80)
     return {a.key: a.text for a in found}
@@ -352,6 +358,17 @@ def test_cost_cap_holds_at_either_cap():
     assert "Kunlik xarajat 100%" in day["spend_high"]
     month = alerts(day="2", month="250")
     assert month["cost_cap"].startswith("💸 Oylik xarajat chegarasi ($250)")
+
+
+def test_cost_cap_holds_while_ask_refused_at_a_cap_below_it():
+    """ask refuses at spend + est ≥ cap: $9.95 spent and a $0.10 call refused
+    is the cap in force though the spend never reached $10."""
+    assert "cost_cap" not in alerts(day="9.95")
+    daily = alerts(day="9.95", capped=frozenset({costs.CAP_DAILY}))
+    assert daily["cost_cap"].startswith("💸 Kunlik xarajat chegarasi ($10)")
+    # The monthly cap names itself first, as decide() orders the rungs.
+    both = alerts(day="1", capped=frozenset({costs.CAP_DAILY, costs.CAP_MONTHLY}))
+    assert both["cost_cap"].startswith("💸 Oylik xarajat chegarasi ($250)")
 
 
 # === Postgres ==========================================================================
@@ -659,11 +676,14 @@ async def test_a_call_that_raised_after_dispatch_keeps_the_estimate_with_no_unit
     with pytest.raises(ConnectionResetError):
         await brave(session, calls=Calls(raises=ConnectionResetError()))
     first, second = await rows(session)
+    # The estimate stays counted and the row says the call failed — not a call
+    # still in flight (whose claim carries no model): 06 §4.2 anthropic_silence
+    # counts only failed attempts.
     assert (first["operation"], first["cost_usd"], first["units"], first["model"]) == (
         "classify",
         D("0.004"),
         D(0),
-        None,
+        "failed:TimeoutError",
     )
     # Brave's query was reserved as one unit before the call and given back.
     assert (second["operation"], second["cost_usd"], second["units"]) == (
@@ -671,6 +691,9 @@ async def test_a_call_that_raised_after_dispatch_keeps_the_estimate_with_no_unit
         D("0.005"),
         D(0),
     )
+    assert second["model"] == "failed:ConnectionResetError"
+    # Both still count against the caps: a failed call never undercounts.
+    assert (await costs.read_ledger(session, NOW)).day_usd == D("0.009")
 
 
 async def test_an_unknown_extract_model_refuses_every_classify(session, monkeypatch):
@@ -938,8 +961,8 @@ async def test_without_an_own_transaction_the_callers_savepoint_takes_the_row(
 
 
 async def test_anthropic_silence_refuses_claude_calls_while_health_says_so(session):
-    async def down(_: AsyncSession, __: datetime) -> bool:
-        return True
+    async def down(_: AsyncSession, now: datetime) -> datetime | None:
+        return now + timedelta(minutes=30)
 
     costs.set_anthropic_health(down)
     with pytest.raises(CostCapReached) as refused:
@@ -1193,8 +1216,8 @@ async def test_the_report_has_what_xarajat_prints(session):
     assert (report.daily_cap, report.monthly_cap) == (CAP, MONTH_CAP)
 
 
-async def _always_down(_: AsyncSession, __: datetime) -> bool:
-    return True
+async def _always_down(_: AsyncSession, now: datetime) -> datetime | None:
+    return now + timedelta(minutes=30)
 
 
 async def test_the_report_names_the_top_five_companies_by_spend(session):
@@ -1603,7 +1626,7 @@ async def test_the_yandex_window_is_read_on_the_tashkent_clock(session):
 
 
 async def test_a_broken_health_probe_does_not_stop_the_classifier(session):
-    async def broken(_: AsyncSession, __: datetime) -> bool:
+    async def broken(_: AsyncSession, __: datetime) -> datetime | None:
         raise RuntimeError("health probe")
 
     costs.set_anthropic_health(broken)

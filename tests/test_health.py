@@ -756,7 +756,7 @@ async def test_a_push_that_got_through_ends_the_failing_streak(session):
     assert status.push_failing_streak == 0
 
 
-async def test_anthropic_facts_skip_refusals_and_batch_claims(session):
+async def test_anthropic_facts_skip_refusals_claims_in_flight_and_batch_rows(session):
     def row(model, at, *, tokens=None, batch=False):
         return m.UsageLog(
             provider="anthropic",
@@ -771,9 +771,12 @@ async def test_anthropic_facts_skip_refusals_and_batch_claims(session):
     session.add_all(
         [
             row(settings.extract_model, NOW - timedelta(hours=5), tokens=900),
-            row(settings.extract_model, NOW - timedelta(hours=1)),  # failed attempt
+            # costs.ask marked this claim: its call raised.
+            row("failed:APITimeoutError", NOW - timedelta(hours=1)),
             row("refused:anthropic_silence", NOW - timedelta(minutes=5)),
             row(settings.batch_model, NOW - timedelta(minutes=2), batch=True),
+            # A claim whose call is still waiting for its answer.
+            row(None, NOW - timedelta(minutes=1)),
         ]
     )
     session.add(
@@ -980,6 +983,136 @@ async def test_cost_cap_told_by_ask_is_not_repeated_by_the_sweep_the_same_day(
     assert len(notify.sent) == 2
 
 
+class Undispatched:
+    """A call costs.ask must refuse before sending anything."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def __call__(self) -> int:
+        self.calls += 1
+        return 1
+
+
+async def _ask_classify(session, now, call=None) -> None:
+    await costs.ask(
+        session,
+        operation="classify",
+        est_usd=Decimal("0.10"),
+        call=call or Undispatched(),
+        price=lambda _: costs.Priced(cost_usd=Decimal("0.10"), input_tokens=400),
+        now=now,
+    )
+
+
+async def test_a_cap_ask_refuses_at_holds_until_its_day_is_over(session):
+    """costs.ask refuses at spend + est ≥ cap — the spend itself stays below
+    the cap — and tells cost_cap. The sweep must neither announce it
+    recovered while ask still refuses, nor say it twice; the daily cap's
+    recovery is the next morning's."""
+    session.add(
+        m.UsageLog(
+            provider="anthropic",
+            operation="verdict",
+            model=settings.verdict_model,
+            cost_usd=Decimal("9.95"),
+            input_tokens=900,
+            created_at=NOW - timedelta(hours=2),
+        )
+    )
+    await session.commit()
+    notify = Notify()
+    costs.set_cap_notifier(notify)
+    costs.clear_refusals()
+    try:
+        with pytest.raises(costs.CostCapReached) as refused:
+            await _ask_classify(session, NOW)
+        assert refused.value.code == costs.CAP_DAILY
+        assert notify.sent == [
+            "💸 Kunlik xarajat chegarasi ($10) — ertagacha pullik chaqiruvlar "
+            "toʻxtadi; kollektorlar bepul qismini davom ettiradi"
+        ]
+        later = NOW + timedelta(minutes=5)
+        status = await _gather(session, now=later)
+        assert status.spend.day_usd == Decimal("9.95")  # below the cap …
+        assert status.spend.capped == frozenset({costs.CAP_DAILY})  # … yet in force
+        found = health.problems(status)
+        [cap] = [p for p in found if p.key == "cost_cap"]
+        assert cap.text == notify.sent[0]
+        report = await health.tell(
+            session, found, notify, now=later, unjudged=health.unjudged(status)
+        )
+        assert "cost_cap" not in report.said + report.recovered + report.held
+        costs.clear_refusals()
+        with pytest.raises(costs.CostCapReached):  # still refused
+            await _ask_classify(session, later)
+        # The next Tashkent day the cap is over: one recovery, at 08:05.
+        morning = datetime(2026, 10, 25, 8, 5, tzinfo=TZ)
+        status = await _gather(session, now=morning)
+        assert status.spend.capped == frozenset()
+        found = health.problems(status)
+        assert "cost_cap" not in [p.key for p in found]
+        report = await health.tell(
+            session, found, notify, now=morning, unjudged=health.unjudged(status)
+        )
+        assert report.recovered == ("cost_cap", "spend_high")
+        lines = [line for text in notify.sent for line in text.splitlines()]
+        assert lines.count(health.recovery_text("cost_cap")) == 1
+    finally:
+        costs.set_cap_notifier(None)
+        costs.clear_refusals()
+
+
+async def test_a_monthly_cap_refusal_holds_all_month(session):
+    session.add(
+        m.UsageLog(
+            provider="anthropic",
+            operation="verdict",
+            model=settings.verdict_model,
+            cost_usd=Decimal("249.95"),
+            input_tokens=900,
+            created_at=datetime(2026, 10, 10, 12, 0, tzinfo=TZ),
+        )
+    )
+    await session.commit()
+    costs.clear_refusals()
+    try:
+        with pytest.raises(costs.CostCapReached) as refused:
+            await _ask_classify(session, NOW)
+        assert refused.value.code == costs.CAP_MONTHLY
+        for moment in (
+            NOW + timedelta(minutes=5),
+            datetime(2026, 10, 31, 23, 55, tzinfo=TZ),
+        ):
+            status = await _gather(session, now=moment)
+            [cap] = [p for p in health.problems(status) if p.key == "cost_cap"]
+            assert cap.text.startswith("💸 Oylik xarajat chegarasi ($250)")
+        november = datetime(2026, 11, 1, 9, 0, tzinfo=TZ)
+        status = await _gather(session, now=november)
+        assert "cost_cap" not in [p.key for p in health.problems(status)]
+    finally:
+        costs.clear_refusals()
+
+
+async def test_ask_holds_its_cost_cap_line_inside_quiet_hours(session):
+    """cost_cap is a warning: only critical problems ignore QUIET_HOURS. The
+    notifier the worker wires holds it at 23:30 (the batch submit's minute)
+    without claiming it, and says it at noon."""
+    from clientscrapper.worker import main as worker
+
+    notify = Notify()
+    worker.set_owner_notifier(notify)
+    try:
+        await costs._tell_cost_cap(costs.CAP_DAILY, NIGHT)
+        assert notify.sent == []
+        assert await _kinds(session) == []
+        await costs._tell_cost_cap(costs.CAP_DAILY, NOW)
+        assert len(notify.sent) == 1 and notify.sent[0].startswith("💸 Kunlik")
+        assert [k for k, _ in await _kinds(session)] == ["alert:cost_cap"]
+    finally:
+        worker.set_owner_notifier(None)
+
+
 async def test_two_speakers_at_once_say_a_line_once(session):
     """The worker's sweep and the bot's watchdog run the same tell at the
     same moment: the claim lets one of them speak."""
@@ -1035,7 +1168,7 @@ async def _silent_anthropic(session):
             m.UsageLog(
                 provider="anthropic",
                 operation="classify",
-                model=settings.extract_model,
+                model="failed:ConnectionError",
                 cost_usd=Decimal("0.001"),
                 created_at=NOW - timedelta(minutes=20),
             ),
@@ -1088,12 +1221,98 @@ async def test_concurrent_askers_share_one_probe(session):
     assert sorted(answers) == [False] + [True] * 7
 
 
+async def test_a_call_in_flight_is_not_a_silent_api(session):
+    """ask commits its claim before it calls; while the answer is on its way
+    another process's sweep must not count that claim as a failed attempt."""
+    session.add_all(
+        [
+            m.UsageLog(
+                provider="anthropic",
+                operation="classify",
+                model=settings.extract_model,
+                cost_usd=Decimal("0.001"),
+                input_tokens=500,
+                created_at=NOW - timedelta(hours=4),
+            ),
+            m.ModelJob(kind="classify", lane="instant", model="m", custom_id="cs-f-1"),
+        ]
+    )
+    await session.commit()
+    seen: dict[str, object] = {}
+
+    async def answering() -> int:
+        async with SessionLocal() as other:
+            status = await _gather(other, now=NOW + timedelta(seconds=2))
+            seen["facts"] = status.anthropic
+            seen["keys"] = [p.key for p in health.problems(status)]
+        return 1
+
+    assert (
+        await costs.ask(
+            session,
+            operation="classify",
+            est_usd=Decimal("0.001"),
+            call=answering,
+            price=lambda _: costs.Priced(cost_usd=Decimal("0.001"), input_tokens=480),
+            now=NOW,
+        )
+        == 1
+    )
+    assert seen["facts"] == AnthropicFacts(NOW - timedelta(hours=4), None, 1)
+    assert "anthropic_silence" not in seen["keys"]  # type: ignore[operator]
+
+
+async def test_a_refused_op_takes_the_next_probe_slot(session):
+    """A silence refusal is remembered until the next probe slot, not to the
+    hour: an op refused at 12:02 gets the slot that frees at 12:31."""
+    await _silent_anthropic(session)
+    costs.set_anthropic_health(health.anthropic_down_until)
+    costs.clear_refusals()
+    at = NOW + timedelta(minutes=1)
+    calls: list[str] = []
+
+    async def failing() -> int:
+        calls.append("fail")
+        raise ConnectionError("down")
+
+    async def answering() -> int:
+        calls.append("ok")
+        return 1
+
+    def price(_: int) -> costs.Priced:
+        return costs.Priced(cost_usd=Decimal("0.0005"), input_tokens=400)
+
+    async def ask(call, moment):
+        return await costs.ask(
+            session,
+            operation="classify",
+            est_usd=Decimal("0.0005"),
+            call=call,
+            price=price,
+            now=moment,
+        )
+
+    try:
+        with pytest.raises(ConnectionError):
+            await ask(failing, at)  # the 12:01 probe
+        with pytest.raises(costs.CostCapReached) as refused:
+            await ask(answering, at + timedelta(minutes=1))
+        assert refused.value.code == costs.ANTHROPIC_SILENCE
+        frees = at + health.ANTHROPIC_PROBE_INTERVAL  # 12:31
+        assert costs.refused_until("classify", at + timedelta(minutes=2)) == frees
+        assert await ask(answering, at + timedelta(minutes=34)) == 1  # 12:35
+        assert calls == ["fail", "ok"]
+    finally:
+        costs.set_anthropic_health(None)
+        costs.clear_refusals()
+
+
 async def test_the_switch_is_the_one_costs_ask_reads(session):
     """With the hook registered, the probe call goes through; when it fails
     too, the next Anthropic call in the silence is refused with the
     anthropic_silence code and never dispatched."""
     await _silent_anthropic(session)
-    costs.set_anthropic_health(health.anthropic_down)
+    costs.set_anthropic_health(health.anthropic_down_until)
     costs.clear_refusals()
     calls: list[int] = []
 

@@ -466,11 +466,12 @@ class Reported:
 @dataclass(frozen=True, slots=True)
 class AnthropicFacts:
     """``usage_log``'s Anthropic rows: the newest success (a row with real
-    tokens) and the newest instant-lane attempt (refusals excluded), and the
-    jobs waiting for the model."""
+    tokens) and the newest failed attempt (a claim ``costs.ask`` marked
+    ``failed:<error>`` — a call still in flight is neither), and the jobs
+    waiting for the model."""
 
     last_ok_at: datetime | None
-    last_attempt_at: datetime | None
+    last_failed_at: datetime | None
     pending_jobs: int
 
 
@@ -629,26 +630,26 @@ async def _backup_info(rows: Mapping[str, Heartbeat], now: datetime) -> BackupIn
 
 
 async def anthropic_facts(session: AsyncSession) -> AnthropicFacts:
-    not_refused = sa.or_(
-        UsageLog.model.is_(None),
-        sa.not_(UsageLog.model.startswith(costs.REFUSED_PREFIX)),
-    )
     base = (
         sa.select(UsageLog.created_at)
-        .where(UsageLog.provider == "anthropic", not_refused)
+        .where(UsageLog.provider == "anthropic")
         .order_by(UsageLog.created_at.desc())
         .limit(1)
     )
     last_ok = await session.scalar(base.where(UsageLog.input_tokens.is_not(None)))
-    # A batch submit's provisional rows carry no tokens until the result is
-    # applied: they are not failed attempts.
-    last_attempt = await session.scalar(base.where(UsageLog.batch.is_(False)))
+    # Only a claim whose call raised is a failed attempt. A claim without a
+    # model is a call in flight (or one cancelled, or one whose answer could
+    # not be settled), a batch submit's provisional rows wait for their
+    # results, and a refusal sent nothing: none of them says the API is silent.
+    last_failed = await session.scalar(
+        base.where(UsageLog.model.startswith(costs.FAILED_PREFIX, autoescape=True))
+    )
     pending = await session.scalar(
         sa.select(sa.func.count())
         .select_from(ModelJob)
         .where(ModelJob.status == "pending")
     )
-    return AnthropicFacts(last_ok, last_attempt, int(pending or 0))
+    return AnthropicFacts(last_ok, last_failed, int(pending or 0))
 
 
 async def reported_problems(session: AsyncSession, now: datetime) -> dict[str, Reported]:
@@ -924,12 +925,13 @@ async def gather(
 
 def anthropic_silent(facts: AnthropicFacts, now: datetime) -> bool:
     """06 §4.2 anthropic_silence: no successful call for ≥ 3 h while jobs
-    wait. Counted only once a call was *tried* after the last success: a day
-    whose calls were all refused at a cost cap is not a silent API, and a
-    fresh install that never called is not one either."""
-    if facts.pending_jobs <= 0 or facts.last_attempt_at is None:
+    wait. Counted only once a call *failed* after the last success: a day
+    whose calls were all refused at a cost cap is not a silent API, a call
+    still waiting for its answer is not one, and a fresh install that never
+    called is not one either."""
+    if facts.pending_jobs <= 0 or facts.last_failed_at is None:
         return False
-    if facts.last_ok_at is not None and facts.last_attempt_at <= facts.last_ok_at:
+    if facts.last_ok_at is not None and facts.last_failed_at <= facts.last_ok_at:
         return False
     since = facts.last_ok_at
     return since is None or now - since >= ANTHROPIC_SILENCE
@@ -1673,45 +1675,58 @@ class _AnthropicCache:
 _anthropic_cache = _AnthropicCache()
 
 
-async def _claim_probe(now: datetime) -> bool:
-    """Take the probe slot: True for one caller per ANTHROPIC_PROBE_INTERVAL,
-    across processes (a ``runtime_flags`` row updated only when its stamp is
-    old enough). Its own short transaction: the caller's may run for long."""
+async def _claim_probe(now: datetime) -> datetime | None:
+    """Take the probe slot, across processes (a ``runtime_flags`` row updated
+    only when its stamp is old enough): None for the one caller per
+    ANTHROPIC_PROBE_INTERVAL that got it, else when the slot frees. Its own
+    short transaction: the caller's may run for long."""
     stamp = {"at": now.isoformat()}
     insert = pg_insert(RuntimeFlag).values(
         key=ANTHROPIC_PROBE_FLAG, value=stamp, updated_by="worker:anthropic_probe"
     )
-    old_enough = (
-        RuntimeFlag.value["at"].astext.cast(sa.DateTime(timezone=True))
-        <= now - ANTHROPIC_PROBE_INTERVAL
-    )
+    stamped = RuntimeFlag.value["at"].astext.cast(sa.DateTime(timezone=True))
     stmt = insert.on_conflict_do_update(
         index_elements=[RuntimeFlag.key],
         set_={"value": insert.excluded.value, "updated_by": insert.excluded.updated_by},
-        where=old_enough,
+        where=stamped <= now - ANTHROPIC_PROBE_INTERVAL,
     ).returning(RuntimeFlag.key)
     async with _own_session() as own:
-        return (await own.execute(stmt)).first() is not None
+        if (await own.execute(stmt)).first() is not None:
+            return None
+        taken = await own.scalar(
+            sa.select(stamped).where(RuntimeFlag.key == ANTHROPIC_PROBE_FLAG)
+        )
+    frees = (taken or now) + ANTHROPIC_PROBE_INTERVAL
+    # A stamp from a clock ahead of this one must not refuse for longer than
+    # one interval; a free slot nobody took is asked again within the cache.
+    return min(max(frees, now + ANTHROPIC_CACHE), now + ANTHROPIC_PROBE_INTERVAL)
 
 
-async def anthropic_down(session: AsyncSession, now: datetime) -> bool:
-    """``costs.set_anthropic_health``'s check: True while anthropic_silence
-    holds — except for one call per ANTHROPIC_PROBE_INTERVAL, let through so a
-    success can end it. Without the probe the switch would latch: ask refuses
-    every Anthropic call, so no call ever succeeds again. The facts are
-    re-read at most every ANTHROPIC_CACHE in this process."""
+async def anthropic_down_until(session: AsyncSession, now: datetime) -> datetime | None:
+    """``costs.set_anthropic_health``'s check: while anthropic_silence holds,
+    the moment the next probe slot frees (ask refuses Anthropic calls and
+    remembers it until then) — except for one call per
+    ANTHROPIC_PROBE_INTERVAL, let through (None) so a success can end it.
+    Without the probe the switch would latch: ask refuses every Anthropic
+    call, so no call ever succeeds again. None when the API is not silent.
+    The facts are re-read at most every ANTHROPIC_CACHE in this process."""
     cache = _anthropic_cache
     if cache.at is None or not (timedelta(0) <= now - cache.at < ANTHROPIC_CACHE):
         cache.silent = anthropic_silent(await anthropic_facts(session), now)
         cache.at = now
     if not cache.silent:
-        return False
-    if await _claim_probe(now):
+        return None
+    frees = await _claim_probe(now)
+    if frees is None:
         log.info("anthropic_silence: one probe call let through")
         # The probe's outcome decides the next answer, not this cache.
         cache.at = None
-        return False
-    return True
+    return frees
+
+
+async def anthropic_down(session: AsyncSession, now: datetime) -> bool:
+    """:func:`anthropic_down_until` as a yes/no (``/holat``, tests)."""
+    return await anthropic_down_until(session, now) is not None
 
 
 def reset_anthropic_cache() -> None:

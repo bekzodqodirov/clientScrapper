@@ -92,9 +92,10 @@ _seams = _Seams()
 def set_owner_notifier(notify: health.OwnerNotify | None) -> None:
     """Who tells the owner: ``(text) -> delivered``. The recipient is fixed
     inside it (``OWNER_TELEGRAM_ID``) — there is no argument to point it at
-    anybody else (06 §4.3)."""
+    anybody else (06 §4.3). ``costs.ask`` tells cost_cap through it too, held
+    inside QUIET_HOURS like every warning (06 §4.2)."""
     _seams.notify = notify or _not_wired
-    costs.set_cap_notifier(notify)
+    costs.set_cap_notifier(notify, hold=health.in_quiet_hours)
 
 
 def set_backup_sender(send: Callable[[Path, str], Awaitable[bool]] | None) -> None:
@@ -625,8 +626,11 @@ async def source_crons() -> dict[str, str | None]:
 
 async def run() -> None:
     setup_logging("worker")
-    costs.set_anthropic_health(health.anthropic_down)
-    costs.set_cap_notifier(_seams.notify if _seams.notify is not _not_wired else None)
+    costs.set_anthropic_health(health.anthropic_down_until)
+    costs.set_cap_notifier(
+        _seams.notify if _seams.notify is not _not_wired else None,
+        hold=health.in_quiet_hours,
+    )
     try:
         crons = await source_crons()
     except Exception as exc:
