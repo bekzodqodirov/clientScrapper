@@ -358,6 +358,11 @@ def test_a_second_phones_column_is_read_too(tmp_path):
         (998900000080, ("900000080",), ()),
         (998900000081.0, ("900000081",), ()),
         (9.98900000082998e23, (), ("precision",)),
+        # Excel's 15 significant digits written back without a «.» or «E»:
+        # openpyxl hands an int, and 9989000000123456 is no longer in it.
+        (9989000000123450, (), ("precision",)),
+        (10**15, (), ("precision",)),
+        (999999999999999, ("999999999",), ()),
         (datetime(2026, 5, 12), (), ("not_text",)),
         (90.5, (), ("not_text",)),
         (True, (), ("not_text",)),
@@ -385,6 +390,35 @@ def test_a_file_that_is_not_an_export(tmp_path, name, data, code):
     with pytest.raises(BadFile) as caught:
         ci.read_rows(path)
     assert caught.value.code == code
+
+
+def test_a_file_that_is_not_there_is_not_called_broken(tmp_path, monkeypatch):
+    # The documented FILE=clients.xlsx used to land on /app/clients.xlsx in the
+    # container and be reported «buzilgan» — the owner re-downloads for ever.
+    (tmp_path / "dir.xlsx").mkdir()
+    cases = {
+        tmp_path / "nope.xlsx": "missing",
+        tmp_path / "dir.xlsx": "missing",
+        tmp_path / "file.xlsx" / "inside.csv": "missing",
+    }
+    (tmp_path / "file.xlsx").write_bytes(b"x")
+    for path, code in cases.items():
+        with pytest.raises(BadFile) as caught:
+            ci.read_rows(path)
+        assert caught.value.code == code, path
+    assert BadFile("missing").text() == "Fayl topilmadi."
+    # Present but not readable by the worker's user (copied in as root, 0600).
+    denied = tmp_path / "denied.xlsx"
+    denied.write_bytes(XLSX.read_bytes())
+
+    def refuse(self: Path) -> bytes:
+        raise PermissionError(13, "Permission denied", str(self))
+
+    monkeypatch.setattr(Path, "read_bytes", refuse)
+    with pytest.raises(BadFile) as caught:
+        ci.read_rows(denied)
+    assert caught.value.code == "denied"
+    assert BadFile("denied").text() == "Faylni oʻqishga ruxsat yoʻq."
 
 
 def test_empty_header_only_and_oversized_files(tmp_path):
@@ -598,9 +632,48 @@ async def test_a_file_with_fewer_rows_is_refused_until_confirmed(
     assert (await ci.plan_import(session, near)).refusal is None
 
 
+async def test_exactly_ninety_percent_is_not_refused(session, erp_row, tmp_path):
+    # The feed's own rule: seen ≥ 0.9 × count passes (erp_feeds.SHRINK_FLOOR).
+    cards = BOOK["cards"]
+    twenty = ci.read_rows(write_xlsx(tmp_path / "t.xlsx", book_rows(cards[:20])))
+    await imported(session, twenty)
+    for n, refusal in ((18, None), (17, "fewer")):
+        fewer = ci.read_rows(write_xlsx(tmp_path / f"{n}.xlsx", book_rows(cards[:n])))
+        plan = await ci.plan_import(session, fewer)
+        assert (plan.rows, plan.previous.rows, plan.refusal) == (n, 20, refusal)
+
+
+async def test_a_saved_views_export_is_cautioned(session, erp_row, tmp_path):
+    # A download of a saved view carries only its columns, and the clients
+    # screen's column picker never offers «Active»: a file without it came
+    # from a view, and a view may carry filters (exportColumns, d138b3bc).
+    view = write_xlsx(
+        tmp_path / "view.xlsx",
+        [["Code", "Name", "Phones"]]
+        + [[c["code"], c["name"], ", ".join(c["phones"])] for c in BOOK["cards"]],
+    )
+    export = ci.read_rows(view)
+    assert not export.has_active
+    plan = await ci.plan_import(session, export)
+    assert (plan.inactive, plan.without_phone, plan.cautions) == (None, 1, ("view",))
+    lines = ci.plan_lines(plan)
+    # No «0 tasi faol emas»: the file cannot say.
+    assert lines[0] == "Fayl: 23 ta mijoz qatori (1 tasida telefon yoʻq)."
+    assert lines[-1] == (
+        "⚠️ Faylda «Active» ustuni yoʻq: u saqlangan koʻrinishdan olingan va filtrli "
+        "boʻlishi mumkin. ERP → Mijozlar ekranidan koʻrinish tanlamasdan va filtrsiz "
+        "qayta yuklab oling."
+    )
+    # The ERP's plain download carries «Active»: no caution, the count is said.
+    plain = await ci.plan_import(session, ci.read_rows(XLSX))
+    assert ci.read_rows(XLSX).has_active
+    assert (plain.inactive, plain.cautions) == (1, ())
+
+
 async def test_the_first_import_and_the_cap_say_so(session, erp_row, tmp_path):
-    rows = [["Code", "Phones"]] + [
-        [f"N{n}", f"+998 90 000 {n // 100:02d} {n % 100:02d}"] for n in range(ci.MAX_ROWS)
+    rows = [["Code", "Phones", "Active"]] + [
+        [f"N{n}", f"+998 90 000 {n // 100:02d} {n % 100:02d}", "✓"]
+        for n in range(ci.MAX_ROWS)
     ]
     plan = await ci.plan_import(
         session, ci.read_rows(write_xlsx(tmp_path / "c.xlsx", rows))
@@ -729,6 +802,24 @@ async def test_the_tool_applies_and_refuses(session, erp_row, tmp_path):
     )
 
 
+async def test_the_tool_says_where_a_missing_file_belongs(session, erp_row, tmp_path):
+    path = tmp_path / "clients.xlsx"
+    code, lines = await import_clients.run(path, apply=True, now=NOW)
+    assert (code, lines) == (
+        1,
+        [
+            "clients.xlsx oʻqilmadi: Fayl topilmadi.",
+            f"Qidirilgan joy: {path}. Faylni serverdagi data/imports/ papkasiga "
+            "koʻchiring va make import-clients FILE=clients.xlsx bilan qayta ishga "
+            "tushiring.",
+        ],
+    )
+    # A relative name is shown where the container looked for it.
+    _, lines = await import_clients.run("yoq.xlsx", apply=False)
+    assert lines[1].startswith(f"Qidirilgan joy: {Path.cwd() / 'yoq.xlsx'}. ")
+    assert await ci.last_import(session) is None
+
+
 @pytest.mark.skipif(shutil.which("make") is None, reason="no make")
 def test_make_import_clients_passes_the_flags():
     def dry_run(*args: str) -> str:
@@ -745,6 +836,18 @@ def test_make_import_clients_passes_the_flags():
     assert dry_run("FILE=/data/imports/c.xlsx").endswith(tool)
     assert dry_run("FILE=/data/imports/c.xlsx", "APPLY=1", "ACCEPT_FEWER=1").endswith(
         f"{tool} --apply --accept-fewer"
+    )
+    # «=0» is off: the one override of the filtered-export refusal must not
+    # be switched on by a value that reads as «no».
+    assert dry_run("FILE=/data/imports/c.xlsx", "APPLY=0", "ACCEPT_FEWER=0").endswith(
+        tool
+    )
+    assert dry_run("FILE=/data/imports/c.xlsx", "ACCEPT_FEWER=yes").endswith(tool)
+    # A bare name is a file in data/imports/ (the container's /data/imports),
+    # which is how CLAUDE.md and the spec write it; a path is taken as given.
+    assert dry_run("FILE=c.xlsx").endswith(tool)
+    assert dry_run("FILE=./c.xlsx").endswith(
+        'python -m clientscrapper.tools.import_clients "./c.xlsx"'
     )
 
 
@@ -775,15 +878,20 @@ def test_every_owner_text_renders_clean():
         ),
         previous=previous,
         refusal="fewer",
-        cautions=("at_cap", "same_file"),
+        cautions=("view", "at_cap", "same_file"),
     )
     texts = ci.plan_lines(plan)
+    texts += ci.plan_lines(replace(plan, inactive=None))
     assert texts[-1].startswith("⛔ Faylda oʻtgan safardan kam qator (20 < 23)")
     assert "Oʻtgan import (24.10.2026): 23 qator, 44 ta raqam." in texts
     texts += [ci.applied_line(ci.Applied(1, 2, 3))]
     texts += [BadFile(code).text() for code in ci.BAD_FILE_TEXT]
     texts += [import_clients.DRY_RUN_TEXT, import_clients.ACCEPT_HINT_TEXT]
     texts += [import_clients.REFUSED_TEXT]
+    texts += [
+        hint.format(path="/app/clients.xlsx", name="clients.xlsx")
+        for hint in import_clients.HINT_TEXT.values()
+    ]
     assert {
         t: problems(t, rendered=True) for t in texts if problems(t, rendered=True)
     } == {}

@@ -1,11 +1,14 @@
 # VENDORED_FROM dailyJournal@6b1f67f miya/tools/import_clients.py
 """Load the ERP's client export as suppression (05 §B.3, 06 §3.3).
 
-    make import-clients FILE=/data/imports/clients.xlsx [APPLY=1] [ACCEPT_FEWER=1]
+    make import-clients FILE=clients.xlsx [APPLY=1] [ACCEPT_FEWER=1]
     python -m clientscrapper.tools.import_clients FILE [--apply] [--accept-fewer]
 
 The file is the ERP's **Mijozlar → XLSX**, downloaded from an unfiltered
-screen with no saved view, copied into the server's ``data/imports/``.
+screen with no saved view, copied into the server's ``data/imports/`` —
+the container's ``/data/imports/``, where ``make`` looks for a bare file
+name (a name with a «/» is passed as it stands). A file that is not there
+is said to be missing, with the place looked at, never «broken».
 Without ``--apply`` it prints what would happen and writes nothing; with it
 the new tails are written in one transaction. ``--accept-fewer`` lets one
 file with fewer rows than the previous import's through, after the owner
@@ -34,6 +37,18 @@ ACCEPT_HINT_TEXT = (
 )
 REFUSED_TEXT = "Hech narsa yozilmadi."
 CANNOT_READ_TEXT = "{name} oʻqilmadi: {why}"
+# What to do about a file the container cannot reach: the server's
+# data/imports/ is the only folder it sees (docker-compose.yml, ./data:/data).
+HINT_TEXT: dict[client_import.BadFileCode, str] = {
+    "missing": (
+        "Qidirilgan joy: {path}. Faylni serverdagi data/imports/ papkasiga "
+        "koʻchiring va make import-clients FILE={name} bilan qayta ishga tushiring."
+    ),
+    "denied": (
+        "Qidirilgan joy: {path}. Fayl bor, lekin dastur uni oʻqiy olmaydi: serverda "
+        "chmod a+r data/imports/{name} qiling va qayta ishga tushiring."
+    ),
+}
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -80,7 +95,12 @@ async def run(
             lines.append(client_import.applied_line(applied))
             return 0, lines
     except client_import.BadFile as exc:
-        return 1, [CANNOT_READ_TEXT.format(name=Path(path).name, why=exc.text())]
+        name = Path(path).name
+        lines = [CANNOT_READ_TEXT.format(name=name, why=exc.text())]
+        if exc.code in HINT_TEXT:
+            hint = HINT_TEXT[exc.code]
+            lines.append(hint.format(path=Path(path).absolute(), name=name))
+        return 1, lines
 
 
 async def _main(args: argparse.Namespace) -> int:

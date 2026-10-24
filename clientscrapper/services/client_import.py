@@ -21,9 +21,13 @@ to, but the phones of an ERP client card — and so how a cell is read:
   headers «Code, Name, Manager, Phones, Active» plus the owner's custom-field
   labels, one row per card, active AND inactive (the feed carries both), at
   most 5,000 rows (``CLIENT_EXPORT_CAP``). Only the «Phones» column is read —
-  the feed reads a card's ``phones`` list and nothing else, so a tail from
-  any other column could never retire. A file without that column (a saved
-  view that hides it) is refused.
+  of a client card the feed reads its ``phones`` list and nothing else, so a
+  tail from any other column could never retire. A file without that column
+  (a saved view that hides it) is refused. The feed's ``client`` rows also
+  come from two places no export carries — the phones of a person record
+  behind several codes (``crm_people``) and of every lead that became a
+  client (won, or attached to a code) — so during the fallback those numbers
+  are not suppressed by this file.
 * **A cell is the card's list joined with ", "**, so it is split back at
   ", " first and each element is read by the ERP's own rule for ONE phones
   value (``tails_of``, a copy of ``tailsSql`` in ``agent-feed.ts``). Read
@@ -42,6 +46,10 @@ to, but the phones of an ERP client card — and so how a cell is read:
   with fewer than ``SHRINK_FLOOR`` of the previous import's rows is refused
   until the owner confirms it (``accept_fewer``). The first import has no
   yardstick: the plan tells the owner to compare the count with the screen.
+  One more sign is in the header: the plain download always carries
+  «Active», a saved view's download never does (the screen's column picker
+  does not offer it), and a view may hold filters — so a file without
+  «Active» is cautioned (``view``) and its inactive count is not claimed.
 * **An import only adds.** A tail absent from the new file is not removed: a
   filtered export must not un-suppress anybody (fail closed). Rows already
   there from an earlier import get ``last_seen_at`` moved; a phone another
@@ -114,12 +122,12 @@ SHOWN_BAD: Final = 20
 SUFFIXES: Final = (".xlsx", ".csv")
 
 BadFileCode = Literal[
-    "type", "unreadable", "empty", "no_phones_column", "too_many_rows", "no_rows",
-    "no_phones",
+    "type", "missing", "denied", "unreadable", "empty", "no_phones_column",
+    "too_many_rows", "no_rows", "no_phones",
 ]  # fmt: skip
 Why = Literal["short", "no_digits", "precision", "not_text"]
 Refusal = Literal["fewer"]
-Caution = Literal["at_cap", "same_file"]
+Caution = Literal["view", "at_cap", "same_file"]
 
 
 class BadFile(Exception):
@@ -206,6 +214,11 @@ class ExportFile:
     rows: tuple[ExportRow, ...]
     sha256: str
 
+    @property
+    def has_active(self) -> bool:
+        """The file has an «Active» column: every row then says yes or no."""
+        return any(row.active is not None for row in self.rows)
+
 
 def _text(value: Any) -> str:
     """A cell that is not a phone column's, as text (the code, the mark)."""
@@ -220,8 +233,10 @@ def _phone_cell(value: Any) -> tuple[str, Why | None]:
     """A «Phones» cell as the ERP wrote it, or why it cannot be read — never
     whitespace-folded: a line break and a run of spaces are separators
     (``PHONE_SPLIT``). A number is what Excel made of a phone it was allowed
-    to retype: an integer is still its digits, a float past 15 significant
-    digits is not."""
+    to retype: a number below 10**15 is still its digits, one at or past it
+    is not — Excel keeps 15 significant digits, and writes the rounded
+    value back without a «.» when it is whole, which openpyxl reads as an
+    ``int``."""
     if value is None:
         return "", None
     if isinstance(value, str):
@@ -229,6 +244,8 @@ def _phone_cell(value: Any) -> tuple[str, Why | None]:
     if isinstance(value, bool | datetime | date):
         return "", "not_text"
     if isinstance(value, int):
+        if abs(value) >= EXACT_FLOAT_MAX:
+            return "", "precision"
         return str(value), None
     if isinstance(value, float):
         if not math.isfinite(value) or not value.is_integer():
@@ -291,7 +308,9 @@ def _columns(header: Sequence[Any], name: str) -> list[int]:
 def read_rows(path: str | Path, *, data: bytes | None = None) -> ExportFile:
     """The export's client rows (no database). ``data`` is the file's bytes
     when they are already in memory (the bot); ``path`` then only names it.
-    Raises ``BadFile``."""
+    Raises ``BadFile`` — ``missing`` when nothing is at ``path`` and
+    ``denied`` when it cannot be opened, never ``unreadable``: that one says
+    the FILE is broken, and the owner would download it again for ever."""
     path = Path(path)
     suffix = path.suffix.lower()
     if suffix not in SUFFIXES:
@@ -299,6 +318,10 @@ def read_rows(path: str | Path, *, data: bytes | None = None) -> ExportFile:
     if data is None:
         try:
             data = path.read_bytes()
+        except (FileNotFoundError, IsADirectoryError, NotADirectoryError) as exc:
+            raise BadFile("missing") from exc
+        except PermissionError as exc:
+            raise BadFile("denied") from exc
         except OSError as exc:
             raise BadFile("unreadable") from exc
     table = _xlsx_rows(data) if suffix == ".xlsx" else _csv_rows(data)
@@ -354,7 +377,7 @@ class FileTails:
     tails: tuple[str, ...]  # distinct, in the order the file first gives them
     bad: tuple[BadPhone, ...]
     rows: int
-    inactive: int
+    inactive: int | None  # None: the file has no «Active» column
     without_phone: int
 
 
@@ -380,7 +403,7 @@ def file_tails(export: ExportFile) -> FileTails:
         tails=tuple(seen),
         bad=tuple(bad),
         rows=len(export.rows),
-        inactive=inactive,
+        inactive=inactive if export.has_active else None,
         without_phone=without_phone,
     )
 
@@ -467,11 +490,14 @@ async def _store_last(session: AsyncSession, last: LastImport) -> None:
 class ImportPlan:
     sha256: str
     rows: int
-    inactive: int
+    inactive: int | None  # None: the file cannot say (no «Active» column)
     without_phone: int
     tails: tuple[str, ...]
-    new: tuple[str, ...]  # not yet a client phone_tail row
-    same: tuple[str, ...]  # already one, from any source
+    new: tuple[str, ...]  # not yet a clear client phone_tail row
+    # Already one, from any source. A feed row holds a hash, never compared
+    # here: after the switch-over its tail reads «yangi», is inserted, and
+    # the next full pull retires it (05 §B.2 step 5).
+    same: tuple[str, ...]
     bad: tuple[BadPhone, ...]
     previous: LastImport | None
     refusal: Refusal | None
@@ -514,6 +540,8 @@ async def plan_import(session: AsyncSession, export: ExportFile) -> ImportPlan:
     held = await _held(session, got.tails)
     previous = await last_import(session)
     cautions: list[Caution] = []
+    if not export.has_active:
+        cautions.append("view")
     if got.rows >= MAX_ROWS:
         cautions.append("at_cap")
     if previous is not None and previous.sha256 == export.sha256:
@@ -611,11 +639,13 @@ async def apply_import(
 
 BAD_FILE_TEXT: Final[dict[BadFileCode, str]] = {
     "type": "Faqat .xlsx yoki .csv fayl oʻqiladi (ERP → Mijozlar → XLSX).",
+    "missing": "Fayl topilmadi.",
+    "denied": "Faylni oʻqishga ruxsat yoʻq.",
     "unreadable": "Faylni ochib boʻlmadi: u buzilgan yoki .xlsx/.csv emas.",
     "empty": "Fayl boʻsh.",
     "no_phones_column": (
-        "«Phones» ustuni yoʻq. ERP → Mijozlar ekranidan filtrsiz va saqlangan "
-        "koʻrinishsiz (yoki «Phones» koʻrinadigan koʻrinish bilan) XLSX yuklab oling."
+        "«Phones» ustuni yoʻq. ERP → Mijozlar ekranidan koʻrinish tanlamasdan va "
+        "filtrsiz XLSX yuklab oling."
     ),
     "too_many_rows": (
         "Faylda {cap} tadan ortiq mijoz qatori bor, ERP eksporti esa {cap} tadan "
@@ -637,6 +667,11 @@ WHY_TEXT: Final[dict[Why, str]] = {
 }
 
 CAUTION_TEXT: Final[dict[Caution, str]] = {
+    "view": (
+        "⚠️ Faylda «Active» ustuni yoʻq: u saqlangan koʻrinishdan olingan va filtrli "
+        "boʻlishi mumkin. ERP → Mijozlar ekranidan koʻrinish tanlamasdan va filtrsiz "
+        "qayta yuklab oling."
+    ),
     "at_cap": (
         "⚠️ Faylda {cap} qator — ERP eksporti shu yerda toʻxtaydi: qolgan mijozlar "
         "faylga tushmagan boʻlishi mumkin."
@@ -663,6 +698,9 @@ PREVIOUS_TEXT: Final = "Oʻtgan import ({day}): {rows} qator, {tails} ta raqam."
 ROWS_TEXT: Final = (
     "Fayl: {rows} ta mijoz qatori ({inactive} tasi faol emas, "
     "{without_phone} tasida telefon yoʻq)."
+)
+ROWS_NO_ACTIVE_TEXT: Final = (
+    "Fayl: {rows} ta mijoz qatori ({without_phone} tasida telefon yoʻq)."
 )
 SUMMARY_TEXT: Final = "{n} ta telefon: {new} yangi, {same} bor, {bad} notoʻgʻri"
 BAD_LINE_TEXT: Final = "  {line}-qator {code}: «{value}» — {why}"
@@ -700,10 +738,15 @@ def plan_lines(plan: ImportPlan) -> list[str]:
     """The plan for the owner, one line each (the tool prints them, the bot
     sends them joined): counts, the phones that cannot be stored, the
     yardstick, the cautions and the refusal."""
-    lines = [
-        ROWS_TEXT.format(
+    rows = (
+        ROWS_NO_ACTIVE_TEXT.format(rows=plan.rows, without_phone=plan.without_phone)
+        if plan.inactive is None
+        else ROWS_TEXT.format(
             rows=plan.rows, inactive=plan.inactive, without_phone=plan.without_phone
-        ),
+        )
+    )
+    lines = [
+        rows,
         summary_line(plan),
         *_bad_lines(plan.bad),
     ]
