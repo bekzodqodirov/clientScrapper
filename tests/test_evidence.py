@@ -271,6 +271,22 @@ async def test_a_refused_savepoint_drops_only_its_own_file(session, tmp_path):
     assert count == 1
 
 
+async def test_a_released_savepoint_still_waits_for_the_root_commit(session, tmp_path):
+    async with session.begin_nested():
+        await evidence.store(
+            session,
+            source_key="directories",
+            url=URL,
+            body=BODY,
+            content_type="text/html",
+            fetched_at=T0,
+            root=tmp_path,
+        )
+    assert files(tmp_path) == []  # released, not committed
+    await session.rollback()
+    assert files(tmp_path) == []
+
+
 async def test_a_failed_flush_in_a_savepoint_drops_its_file(session, tmp_path):
     # The flush's own subtransaction is what rolls back; the savepoint around it
     # is only closed afterwards — the file must go all the same.
