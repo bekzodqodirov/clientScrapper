@@ -448,7 +448,7 @@ async def replay() -> Replayed:
     answers: dict[str, httpx.Response] = {}
     ledgers: dict[str, list[dict[str, Any]]] = {}
     async with httpx.AsyncClient(
-        transport=fake.transport(), base_url="http://erp.test"
+        transport=fake.transport(), base_url="https://erp.test"
     ) as c:
         for name in posts_in_order():
             capture = load(name)
@@ -502,7 +502,7 @@ async def test_the_fake_answers_every_post_as_the_erp_did():
 async def test_the_fake_s_suppression_set_is_the_erp_s():
     done = await replay()
     erp = erp_feeds.ErpClient(
-        "http://erp.test", readme_key(), transport=done.fake.transport()
+        "https://erp.test", readme_key(), transport=done.fake.transport()
     )
     async with erp:
         full = await erp.get_feed(erp_feeds.SUPPRESSION_PATH, {})
@@ -522,7 +522,7 @@ async def test_the_fake_s_suppression_set_is_the_erp_s():
 async def test_the_fake_s_outcome_rows_are_the_erp_s_modulo_ids_and_instants():
     done = await replay()
     erp = erp_feeds.ErpClient(
-        "http://erp.test", readme_key(), transport=done.fake.transport()
+        "https://erp.test", readme_key(), transport=done.fake.transport()
     )
     async with erp:
         rows = (await erp.get_feed(erp_feeds.OUTCOMES_PATH, {}))["rows"]
@@ -575,7 +575,7 @@ async def test_the_fake_walks_and_resumes_like_the_capture():
         fake.add_entry(by_h[h], kind, at=at(when), id=id_, n=n)
     transport = fake.transport()
     async with erp_feeds.ErpClient(
-        "http://erp.test", readme_key(), transport=transport
+        "https://erp.test", readme_key(), transport=transport
     ) as erp:
         full = await erp.get_feed(erp_feeds.SUPPRESSION_PATH, {})
         page1 = await erp.get_feed(erp_feeds.SUPPRESSION_PATH, {"limit": 5})
@@ -615,7 +615,7 @@ async def test_the_fake_refuses_what_the_erp_refused(name):
         headers["X-ERP-Key"] = readme_key()
     body = re.search(r"body '(.*)'\)", request)
     async with httpx.AsyncClient(
-        transport=fake.transport(), base_url="http://erp.test"
+        transport=fake.transport(), base_url="https://erp.test"
     ) as c:
         if method == "POST":
             content = body.group(1).encode() if body else b""

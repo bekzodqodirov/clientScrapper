@@ -226,6 +226,11 @@ class ErpClient:
     ) -> None:
         if not key.strip():
             raise ValueError("CRM_AGENT_KEY is empty")
+        # make doctor's rule (keys.erp_base_refusal): the key is never sent
+        # in clear, nor to the .env.example host.
+        refusal = keys.erp_base_refusal(base_url)
+        if refusal is not None:
+            raise ValueError(f"CRM_BASE_URL refused ({refusal}): the key is not sent")
         self._key = key
         self.sleep = sleep
         headers = {name: key for name in ERP_KEY_HEADERS}

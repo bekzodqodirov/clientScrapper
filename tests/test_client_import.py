@@ -47,7 +47,7 @@ from tests.test_uz_text import problems
 TASHKENT = ZoneInfo("Asia/Tashkent")
 NOW = datetime(2026, 10, 24, 10, 0, tzinfo=TASHKENT)
 SECRET = "test-secret"
-BASE = "http://erp.test"
+BASE = "https://erp.test"
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURE = ROOT / "tests" / "fixtures" / "client_import"
 XLSX = FIXTURE / "clients.xlsx"

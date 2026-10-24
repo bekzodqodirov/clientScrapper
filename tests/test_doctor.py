@@ -635,6 +635,54 @@ def test_the_salt_the_key_hashes_with_is_compared_with_the_feed_and_the_store():
     )
 
 
+def test_feeds_configured_with_the_erp_sync_row_off_is_a_warning():
+    """T-09's deferred note: the seed ships erp_sync off, and then no pull
+    ever runs — pushes are refused stale with no limit run out, so health's
+    suppression_stale never turns critical. The doctor says it."""
+
+    def erp_lines(env: dict[str, str], db: DbState) -> list[tuple[str, str]]:
+        return _levels(_check(env, db=db), "«erp_sync» manbasi")
+
+    off = DbState(True, "0001_initial", salt_id=None, erp_sync_enabled=False)
+    assert erp_lines(_crm_env(), off) == [
+        (
+            "warn",
+            "⚠️ ERP kaliti bor, lekin «erp_sync» manbasi oʻchiq: bostirish roʻyxati "
+            "yuklanmaydi va har bir push «stale» bilan toʻxtaydi — botda /manbalar "
+            "orqali yoqing.",
+        )
+    ]
+    on = DbState(True, "0001_initial", salt_id=None, erp_sync_enabled=True)
+    assert erp_lines(_crm_env(), on) == []
+    # Not read, or the «Boshqa» fallback (no feed to pull): nothing to say.
+    assert erp_lines(_crm_env(), DbState(True, "0001_initial")) == []
+    assert erp_lines(_crm_env(CRM_PUSH_SOURCE="other"), off) == []
+
+
+async def test_probe_database_reads_whether_erp_sync_is_on(session):
+    import os
+
+    import sqlalchemy as sa
+
+    url = os.environ.get("DATABASE_URL", "")
+    row = sa.text("SELECT enabled FROM sources WHERE key = 'erp_sync'")
+    before = (await session.execute(row)).scalar_one()
+    try:
+        for enabled in (False, True):
+            await session.execute(
+                sa.text("UPDATE sources SET enabled = :e WHERE key = 'erp_sync'"),
+                {"e": enabled},
+            )
+            await session.commit()
+            assert doctor.probe_database(url).erp_sync_enabled is enabled
+    finally:
+        await session.execute(
+            sa.text("UPDATE sources SET enabled = :e WHERE key = 'erp_sync'"),
+            {"e": before},
+        )
+        await session.commit()
+
+
 def keys_salt(secret: str) -> str:
     from clientscrapper.services import keys
 

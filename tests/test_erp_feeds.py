@@ -34,8 +34,9 @@ from clientscrapper.db.models import (
     Suppression,
 )
 from clientscrapper.db.session import SessionLocal
-from clientscrapper.services import costs, erp_feeds, health
+from clientscrapper.services import costs, erp_feeds, health, keys
 from clientscrapper.services.erp_feeds import ErpClient, SuppressionConfig
+from clientscrapper.tools import doctor
 from tests import fake_erp
 from tests.fake_erp import FakeErp
 from tests.fakes import FakeClock, Site, fetcher_for
@@ -43,7 +44,7 @@ from tests.fakes import FakeClock, Site, fetcher_for
 TASHKENT = ZoneInfo("Asia/Tashkent")
 NOW = datetime(2026, 10, 24, 2, 30, tzinfo=TASHKENT)
 SECRET = "test-secret"
-BASE = "http://erp.test"
+BASE = "https://erp.test"
 PATH = erp_feeds.SUPPRESSION_PATH
 
 
@@ -1220,6 +1221,52 @@ async def test_the_client_sends_both_key_headers_and_no_key_in_the_url():
 def test_an_empty_key_is_refused():
     with pytest.raises(ValueError):
         ErpClient(BASE, " ")
+
+
+@pytest.mark.parametrize(
+    ("base", "code"),
+    [
+        ("http://erp.test", "not_https"),
+        ("", "not_https"),
+        ("https://erp.example.uz", "placeholder"),
+        ("https://ERP.Example.UZ./", "placeholder"),
+    ],
+)
+def test_the_client_refuses_the_base_make_doctor_refuses(base, code):
+    """T-08 F3: one rule (keys.erp_base_refusal) for the doctor's probe and
+    the client — the key never travels in clear, nor to the .env.example
+    host that the settings default to."""
+    assert keys.erp_base_refusal(base) == code
+    assert doctor.is_placeholder(base) == (code == "placeholder")
+    with pytest.raises(ValueError, match=code) as refused:
+        ErpClient(base, SECRET)
+    assert SECRET not in str(refused.value)
+    assert keys.erp_base_refusal(BASE) is None
+
+
+async def test_a_run_on_the_placeholder_base_sends_nothing(session, erp_row, monkeypatch):
+    """The feeds configured but CRM_BASE_URL still the .env.example host: the
+    run fails (suppression goes stale, pushes are refused) and no request is
+    made — never a quiet skip, which would read as «not configured»."""
+    monkeypatch.setattr(settings, "crm_base_url", "https://erp.example.uz")
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:  # pragma: no cover
+        seen.append(request)
+        return httpx.Response(500)
+
+    monkeypatch.setattr(
+        erp_feeds,
+        "client_from_settings",
+        lambda config=settings: ErpClient(
+            config.crm_base_url,
+            config.crm_agent_key,
+            transport=httpx.MockTransport(handler),
+        ),
+    )
+    report = await erp_sync.run("delta", fetcher=a_fetcher(), now=NOW)
+    assert report.status == "failed"
+    assert seen == []
 
 
 def test_fmt_since_is_utc_with_z():

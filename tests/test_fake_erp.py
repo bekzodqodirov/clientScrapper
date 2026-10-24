@@ -20,7 +20,7 @@ from tests import fake_erp
 from tests.fake_erp import FakeErp, clamp_limit, decode_cursor, encode_cursor, parse_since
 
 SECRET = "test-secret"
-BASE = "http://erp.test"
+BASE = "https://erp.test"
 NOW = datetime(2026, 10, 24, 6, 0, tzinfo=UTC)
 EID = "cs:00000000-0000-4000-8000-000000000101:202610"
 

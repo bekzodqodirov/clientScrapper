@@ -2,7 +2,7 @@
 three routes the agent talks to.
 
     fake = FakeErp("test-secret")
-    erp = ErpClient("http://erp.test", "test-secret", transport=fake.transport())
+    erp = ErpClient("https://erp.test", "test-secret", transport=fake.transport())
 
 It copies the ERP on ``agent-feed`` (d138b3bc) rather than simplifying it:
 the cursor codec, ``parseSince``, ``clampLimit`` (ECMAScript ``Number``), the

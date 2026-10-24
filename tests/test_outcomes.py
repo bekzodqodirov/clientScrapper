@@ -53,7 +53,7 @@ TASHKENT = ZoneInfo("Asia/Tashkent")
 NOW = datetime(2026, 10, 24, 3, 0, tzinfo=TASHKENT)
 SECRET = "test-secret"
 OTHER_KEY = "other-key"
-BASE = "http://erp.test"
+BASE = "https://erp.test"
 PATH = erp_feeds.OUTCOMES_PATH
 DAY = timedelta(days=1)
 

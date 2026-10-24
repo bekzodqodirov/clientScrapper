@@ -162,9 +162,9 @@ NETWORK_TIMEOUT_SECONDS = 10.0
 # The feed read the doctor makes: one entry, keyed, never followed (05 §B.1).
 CRM_FEED_PATH = "/api/agent/suppression"
 CRM_DEFAULT_BASE_URL = "https://erp.example.uz"
-# The host .env.example (and the settings default) ship: example.uz is not a
-# reserved name, so whoever owns it would receive the key. Never probed.
-CRM_PLACEHOLDER_HOST = "erp.example.uz"
+# The host .env.example (and the settings default) ship; never probed. The
+# rule's home is services/keys (the ERP client refuses the same base).
+CRM_PLACEHOLDER_HOST = keys.ERP_PLACEHOLDER_HOST
 DOCTOR_USER_AGENT = "clientscrapper-doctor/1"
 SALT_ID = re.compile(r"[0-9a-f]{8}")
 # aiogram's exception classes, by name (the probe classifies whatever the Bot
@@ -193,6 +193,8 @@ class DbState:
     # sources.erp_sync.config.suppression.salt_id: the salt the last
     # completed full pull stored (None = never pulled, 05 §B.2 step 5).
     salt_id: str | None = None
+    # sources.erp_sync.enabled (None = not read): the seed ships it off.
+    erp_sync_enabled: bool | None = None
 
 
 TokenVerdict = Literal["ok", "refused", "unreachable"]
@@ -358,8 +360,7 @@ def crm_base_url(env: Mapping[str, str]) -> str:
 
 def is_placeholder(base_url: str) -> bool:
     """The .env.example host, still in place (or CRM_BASE_URL left blank)."""
-    host = (httpx.URL(base_url).host or "").lower().rstrip(".")
-    return host == CRM_PLACEHOLDER_HOST
+    return keys.is_erp_placeholder(base_url)
 
 
 def _crm(env: Mapping[str, str], state: CrmState | None) -> list[Finding]:
@@ -427,6 +428,23 @@ def _crm(env: Mapping[str, str], state: CrmState | None) -> list[Finding]:
         _warn(
             f"⚠️ ERP HTTP {status} qaytardi — keyinroq qaytadan tekshir "
             "(503 = ERP bazasi ishlamayapti)."
+        )
+    ]
+
+
+def _erp_source(env: Mapping[str, str], db: DbState | None) -> list[Finding]:
+    """The feeds configured while the ``erp_sync`` row is off (the seed ships
+    it off): no pull ever runs, the suppression list is never fresh and every
+    push is refused ``stale`` — with no limit run out, so suppression_stale
+    never turns critical. A warning, not a stop: the row is switched on from
+    the bot, which runs only after ``make up``."""
+    if not feeds_configured(env) or db is None or db.erp_sync_enabled is not False:
+        return []
+    return [
+        _warn(
+            "⚠️ ERP kaliti bor, lekin «erp_sync» manbasi oʻchiq: bostirish roʻyxati "
+            "yuklanmaydi va har bir push «stale» bilan toʻxtaydi — botda /manbalar "
+            "orqali yoqing."
         )
     ]
 
@@ -730,6 +748,7 @@ def check(
 
     # C16: the salt_id (T-08; 04 §13).
     found.extend(_salt(env, db, crm))
+    found.extend(_erp_source(env, db))
 
     rank = {"error": 0, "warn": 1, "info": 2}
     found.sort(key=lambda f: rank[f.level])
@@ -764,14 +783,15 @@ def probe_database(url: str) -> DbState:
             if row is None or row[0] is None:
                 return DbState(reachable=True)
             version = conn.execute("SELECT version_num FROM alembic_version").fetchone()
-            salt = conn.execute(
-                "SELECT config #>> '{suppression,salt_id}' FROM sources "
+            erp = conn.execute(
+                "SELECT config #>> '{suppression,salt_id}', enabled FROM sources "
                 "WHERE key = 'erp_sync'"
             ).fetchone()
             return DbState(
                 reachable=True,
                 version=version[0] if version else None,
-                salt_id=salt[0] if salt else None,
+                salt_id=erp[0] if erp else None,
+                erp_sync_enabled=bool(erp[1]) if erp else None,
             )
     except Exception as exc:
         return DbState(reachable=False, error=type(exc).__name__)
@@ -871,10 +891,9 @@ async def probe_crm(
     headers, never a redirect followed, never a POST. Only for an https://
     base — the key never travels in clear. Never raises; the key is never in
     a URL, a message or a log line — nor sent to the .env.example host."""
-    if not base_url.lower().startswith("https://"):
-        return CrmState(None, error="not_https")
-    if is_placeholder(base_url):
-        return CrmState(None, error="placeholder")
+    refusal = keys.erp_base_refusal(base_url)
+    if refusal is not None:
+        return CrmState(None, error=refusal)
     headers = {
         "X-GSR-Key": key,
         "X-ERP-Key": key,
