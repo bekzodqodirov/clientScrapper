@@ -1048,6 +1048,32 @@ async def test_refusals_at_the_cap_that_land_together_tell_the_owner_once(sessio
     assert await alert_rows(session) == [("alert:cost_cap", "cost_cap", NOW)]
 
 
+async def test_two_claims_of_one_alert_at_once_cannot_both_win(session, monkeypatch):
+    # Hold each claim right after its «is it due» read until the other has
+    # read too (or 0.3 s passed): without the claim lock both then write a
+    # claim; with it the second read waits for the first claim's commit.
+    real_due, reads = costs.alert_due, []
+
+    async def due_then_wait(s: AsyncSession, key: str, now: datetime) -> bool:
+        due = await real_due(s, key, now)
+        reads.append(key)
+        for _ in range(30):
+            if len(reads) >= 2:
+                break
+            await asyncio.sleep(0.01)
+        return due
+
+    monkeypatch.setattr(costs, "alert_due", due_then_wait)
+
+    async def claim() -> int | None:
+        async with session_scope() as own:
+            return await costs.claim_alert(own, "cost_cap", NOW)
+
+    won = await asyncio.gather(claim(), claim())
+    assert sorted(w is not None for w in won) == [False, True]
+    assert len(await alert_rows(session)) == 1
+
+
 async def test_a_cost_cap_health_already_told_is_not_told_again_by_ask(session):
     # fire_spend_alerts (health_job) and ask share the claim of alert:cost_cap.
     owner = Owner()
