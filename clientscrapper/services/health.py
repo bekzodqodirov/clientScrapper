@@ -1077,13 +1077,37 @@ def silent_sources(status: Status) -> list[tuple[SourceState, timedelta]]:
     return found
 
 
-def userbot_unauthorized(status: Status) -> str | None:
-    """The userbot's error code when it says it is not authorized, else None."""
+UserbotAuth = Literal["authorized", "unauthorized", "unknown"]
+
+
+def userbot_auth(status: Status) -> UserbotAuth | None:
+    """What the reader's last beat says about its account (T-13, 06 §2):
+    ``authorized: true`` / ``false``, or ``null`` — «unknown»: Telegram could
+    not be asked (a timeout, a 500, a long flood wait) and the reader asks
+    again each minute. Only «unauthorized» raises ``userbot_unauthorized``;
+    «unknown» neither raises it nor counts as its recovery (:func:`unjudged`),
+    and ``/holat`` shows it as such. None: the reader is off, unseen, or its
+    beat names no state."""
     userbot = status.components.get("userbot")
     if userbot is None or userbot.disabled or userbot.last_seen_at is None:
         return None
-    if userbot.detail.get("authorized") is not False:
+    if "authorized" not in userbot.detail:
         return None
+    authorized = userbot.detail["authorized"]
+    if authorized is None:
+        return "unknown"
+    if authorized is True:
+        return "authorized"
+    if authorized is False:
+        return "unauthorized"
+    return None
+
+
+def userbot_unauthorized(status: Status) -> str | None:
+    """The userbot's error code when it says it is not authorized, else None."""
+    if userbot_auth(status) != "unauthorized":
+        return None
+    userbot = status.components["userbot"]
     return str(userbot.detail.get("error") or "?")
 
 
@@ -1103,6 +1127,9 @@ def unjudged(status: Status) -> frozenset[str]:
         keys.add("suppression_stale")
     if not userbot_on(status):
         keys.update({"userbot_silent", "userbot_unauthorized", "no_signals_24h"})
+    elif userbot_auth(status) == "unknown":
+        # Telegram was not asked: the account is neither lost nor back.
+        keys.add("userbot_unauthorized")
     if not collectors_judged(status):
         keys.add("collector_silent")
     return frozenset(keys)

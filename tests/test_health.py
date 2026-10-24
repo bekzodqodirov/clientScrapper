@@ -469,6 +469,80 @@ def test_userbot_silence_and_dead_chats_are_not_said_twice_for_one_cause():
     assert [p.key for p in health.problems(status)] == ["userbot_unauthorized"]
 
 
+async def test_a_userbot_telegram_could_not_ask_is_unknown_not_lost_nor_back(session):
+    """T-13 beats ``authorized: null`` when Telegram did not answer the check:
+    no userbot_unauthorized, no «qayta ulandi» for an earlier one either —
+    the state is unknown, and /holat can say so (``userbot_auth``)."""
+    lost = healthy_status()
+    TRIGGERS["userbot_unauthorized"][0](lost)
+    assert health.userbot_auth(lost) == "unauthorized"
+    notify = Notify()
+    found = health.problems(lost)
+    await health.tell(session, found, notify, now=NOW, unjudged=health.unjudged(lost))
+    assert [p.key for p in found] == ["userbot_unauthorized"]
+    unknown = healthy_status()
+    unknown.components["userbot"] = _beat(
+        "userbot",
+        timedelta(minutes=1),
+        enabled=True,
+        authorized=None,
+        connected=False,
+        error="TimeoutError",
+    )
+    assert health.userbot_auth(unknown) == "unknown"
+    assert health.userbot_unauthorized(unknown) is None
+    assert health.problems(unknown) == []
+    assert "userbot_unauthorized" in health.unjudged(unknown)
+    later = NOW + timedelta(minutes=5)
+    report = await health.tell(
+        session, [], notify, now=later, unjudged=health.unjudged(unknown)
+    )
+    assert "userbot_unauthorized" not in report.recovered
+    # Signed in again: now it is back.
+    back = healthy_status()
+    back.components["userbot"] = _beat(
+        "userbot", timedelta(minutes=1), enabled=True, authorized=True
+    )
+    assert health.userbot_auth(back) == "authorized"
+    assert "userbot_unauthorized" not in health.unjudged(back)
+    report = await health.tell(
+        session, [], notify, now=later, unjudged=health.unjudged(back)
+    )
+    assert "userbot_unauthorized" in report.recovered
+
+
+def test_userbot_auth_reads_only_the_three_states():
+    status = healthy_status()  # an enabled beat that names no state
+    assert health.userbot_auth(status) is None
+    for value in ("false", 0, "no"):
+        status.components["userbot"] = _beat(
+            "userbot", timedelta(minutes=1), enabled=True, authorized=value
+        )
+        assert health.userbot_auth(status) is None
+        assert health.userbot_unauthorized(status) is None
+    off = healthy_status()
+    off.components["userbot"] = _beat(
+        "userbot", timedelta(minutes=1), enabled=False, authorized=False
+    )
+    assert health.userbot_auth(off) is None
+
+
+def test_the_erp_breaker_line_has_one_home():
+    """problems() renders push_404 / erp_redirect through erp_breaker_text,
+    the line the feed sync tells first (T-09): /holat and the alert agree."""
+    status = healthy_status()
+    status.erp_breaker_until = NOW + timedelta(hours=5)
+    status.erp_breaker_reason = "push_404:feed"
+    [problem] = health.problems(status)
+    assert problem.key == "push_404"
+    assert problem.text == health.erp_breaker_text("push_404")
+    status.erp_breaker_reason = "erp_redirect:308"
+    [problem] = health.problems(status)
+    assert problem.text == health.erp_breaker_text("erp_redirect", "308")
+    with pytest.raises(ValueError):
+        health.erp_breaker_text("collector_blocked")
+
+
 def test_a_userbot_switched_off_is_neither_silent_nor_judged():
     status = healthy_status()
     status.components["userbot"] = _beat("userbot", timedelta(days=9), enabled=False)
