@@ -58,6 +58,9 @@ files = [
     "scripts/check_compose_env.py",
     # T-01/T-02 review
     "scripts/revision_id.py",
+    # T-17
+    "clientscrapper/services/companies.py",
+    "clientscrapper/services/contacts.py",
 ]
 
 [tool.pytest.ini_options]
