@@ -176,24 +176,19 @@ def test_an_unpriced_estimate_is_refused_first(est):
 
 
 def test_the_order_is_month_then_day_then_family_then_operation():
-    # Each step removes the breach the previous step reported; the next rung
-    # must then be the one that answers.
+    # Each state breaches its rung AND every rung after it, so only the order
+    # decides the answer; each next state lifts the breach just reported.
+    anthropic_full = {
+        "classify": "0.30",  # at its allocation
+        "verdict": "2.25",  # 0.75 over: the whole model_reserve borrowed
+        "draft": "0.20",
+        "company_verdict": "1.50",
+        "enrich_search": "0.75",
+    }  # Σ 5.00 = FAMILY_CAPS["anthropic"]
     ladder = [
-        (
-            ledger(month="249.995", classify="0.30", verdict="2.25", other="5.00"),
-            "cost_cap_monthly",
-        ),
-        (ledger(classify="0.30", verdict="2.25", other="7.50"), "cost_cap_daily"),
-        (
-            ledger(
-                classify="0.30",
-                verdict="2.25",
-                draft="0.20",
-                company_verdict="1.50",
-                enrich_search="0.75",
-            ),
-            "cost_cap_family:anthropic",
-        ),
+        (ledger(month="249.995", other="5.00", **anthropic_full), "cost_cap_monthly"),
+        (ledger(other="5.00", **anthropic_full), "cost_cap_daily"),
+        (ledger(**anthropic_full), "cost_cap_family:anthropic"),
         (ledger(classify="0.30", verdict="2.25"), "cost_cap_op:classify"),
         (ledger(classify="0.29"), None),
     ]
@@ -756,8 +751,23 @@ async def test_batch_provisional_rows_are_updated_in_place(session):
     assert len(await rows(session)) == 4
 
 
-async def test_two_concurrent_calls_near_the_cap_cannot_both_pass(session):
+async def test_two_concurrent_calls_near_the_cap_cannot_both_pass(session, monkeypatch):
     await seed(session, "9.98")
+    # Hold each ask right after its ledger read until the other has read too
+    # (or 0.3 s passed): without the ledger lock both then decide on the same
+    # stale total; with it the second read waits for the first claim.
+    real_read, reads = costs.read_ledger, []
+
+    async def read_then_wait(s: AsyncSession, now: datetime) -> Ledger:
+        totals = await real_read(s, now)
+        reads.append(now)
+        for _ in range(30):
+            if len(reads) >= 2:
+                break
+            await asyncio.sleep(0.01)
+        return totals
+
+    monkeypatch.setattr(costs, "read_ledger", read_then_wait)
 
     async def one() -> str:
         # The answer costs its estimate, so whichever order the two run in,
@@ -779,6 +789,7 @@ async def test_two_concurrent_calls_near_the_cap_cannot_both_pass(session):
             return "passed"
 
     outcomes = await asyncio.gather(one(), one())
+    assert len(reads) == 2
     assert sorted(outcomes) == ["cost_cap_daily", "passed"]
     day = await costs.spend(session, since=costs.day_start(NOW), operations=["classify"])
     assert (day.calls, day.refused) == (1, 1)
