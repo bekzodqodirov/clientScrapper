@@ -9,7 +9,10 @@ per-host rate apply, and a metered (paid) host is refused, since the
 recorder has no cost gate. Writes ``<root>/<key>/<name>.<html|json|xml>``,
 ``<name>.headers.json`` (status, final URL and the response headers, with
 ``Set-Cookie``, ``Authorization`` and every key header stripped and every URL
-through ``scrub_url``), and one line per file in ``<root>/<key>/README.md``:
+through ``scrub_url``), and one line per file in ``<root>/<key>/README.md``.
+A scrubbed page's URL, final URL and header values go through the same
+``Scrubber`` as its body (a ``t.me/<person>`` path becomes the body's
+``namuna_NN``), and its ``content-length`` — the unscrubbed size — is dropped:
 
     file · date · url · sha256 · status · bytes · scrubbed: yes|no · note
 
@@ -35,8 +38,14 @@ from typing import Any, Final, Literal
 
 from clientscrapper.collectors.base import Budget
 from clientscrapper.config import settings
-from clientscrapper.services.http import Fetcher, FetchError, FetchResult, scrub_url
-from clientscrapper.tools.scrub_fixture import FixtureKind, needs_scrub, scrub_bytes
+from clientscrapper.services.http import Fetcher, FetchError, FetchResult
+from clientscrapper.services.urlsafe import scrub_url
+from clientscrapper.tools.scrub_fixture import (
+    FixtureKind,
+    Scrubber,
+    needs_scrub,
+    scrub_bytes,
+)
 
 ScrubMode = Literal["auto", "on", "off"]
 
@@ -82,12 +91,26 @@ def fixture_kind(result: FetchResult, *, json_mode: bool) -> FixtureKind:
     return "html"
 
 
-def stored_headers(headers: Mapping[str, str]) -> dict[str, str]:
-    return {
-        name.lower(): (scrub_url(value) if name.lower() == "location" else value)
-        for name, value in headers.items()
-        if name.lower() not in STRIPPED_HEADERS
-    }
+# Describes the bytes as they came, not the scrubbed file.
+SCRUBBED_DROPS: Final = frozenset({"content-length"})
+
+
+def stored_headers(
+    headers: Mapping[str, str], *, scrubber: Scrubber | None = None
+) -> dict[str, str]:
+    """The headers kept beside a fixture; with ``scrubber`` (a scrubbed page)
+    every value through it, with the body's mapping."""
+    kept: dict[str, str] = {}
+    for name, value in headers.items():
+        lowered = name.lower()
+        if lowered in STRIPPED_HEADERS:
+            continue
+        if scrubber is not None:
+            if lowered in SCRUBBED_DROPS:
+                continue
+            value = scrubber.meta(value)
+        kept[lowered] = scrub_url(value) if lowered == "location" else value
+    return kept
 
 
 def readme_line(
@@ -165,8 +188,11 @@ async def record(
     kind = fixture_kind(result, json_mode=json_mode)
     body = result.body
     scrubbed = scrub == "on" or (scrub == "auto" and needs_scrub(key, body))
-    if scrubbed:
-        body = scrub_bytes(body, kind=kind).body
+    scrubber = Scrubber() if scrubbed else None
+    shown_url, final_url = url, result.final_url
+    if scrubber is not None:
+        body = scrub_bytes(body, kind=kind, scrubber=scrubber).body
+        shown_url, final_url = scrubber.meta(url), scrubber.meta(final_url)
 
     folder = root / key
     folder.mkdir(parents=True, exist_ok=True)
@@ -174,11 +200,11 @@ async def record(
     path.write_bytes(body)
     headers_path = folder / f"{name}.headers.json"
     facts = {
-        "url": scrub_url(url),
-        "final_url": scrub_url(result.final_url),
+        "url": scrub_url(shown_url),
+        "final_url": scrub_url(final_url),
         "status": result.status,
         "fetched_at": result.fetched_at.isoformat(),
-        "headers": stored_headers(result.headers),
+        "headers": stored_headers(result.headers, scrubber=scrubber),
     }
     headers_path.write_text(
         json.dumps(facts, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
@@ -188,7 +214,7 @@ async def record(
     line = readme_line(
         file=path.name,
         day=now.astimezone(settings.tz).date().isoformat(),
-        url=url,
+        url=shown_url,
         sha256=sha,
         status=result.status,
         size=len(body),

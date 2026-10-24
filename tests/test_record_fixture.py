@@ -148,6 +148,46 @@ async def test_a_person_tier_page_is_scrubbed(clock, tmp_path):
     assert fake.seen[-1].request.headers["accept"] == "application/json"
 
 
+async def test_a_scrubbed_page_s_url_and_headers_use_the_body_mapping(clock, tmp_path):
+    tg = "https://t.me"
+    person = "namuna_person_90"
+    body = (
+        f'<html><title>Dilshod Rahimov</title><a href="{tg}/{person}">@{person}</a>'
+        " +998 90 000 00 47</html>"
+    ).encode()
+    answer = httpx.Response(
+        200,
+        headers={
+            "content-type": "text/html",
+            "link": f"<{tg}/{person}>; rel=canonical",
+        },
+        content=body,
+    )
+    fake = Site(clock, {f"{tg}/robots.txt": ALLOW_ALL, f"{tg}/{person}": answer})
+    done = await rf.record(
+        f"{tg}/{person}",
+        key="telegram_monitor",
+        name="profile",
+        fetcher=fetcher_for(fake),
+        now=clock.now(),
+        root=tmp_path,
+    )
+    assert done.path.read_text(encoding="utf-8") == (
+        f'<html><title>Seller 01</title><a href="{tg}/namuna_01">@namuna_01</a>'
+        " +998 90 000 00 01</html>"
+    )
+    stored = json.loads(done.headers_path.read_text(encoding="utf-8"))
+    assert (stored["url"], stored["final_url"]) == (f"{tg}/namuna_01", f"{tg}/namuna_01")
+    assert stored["headers"] == {
+        "content-type": "text/html",
+        "link": f"<{tg}/namuna_01>; rel=canonical",
+    }  # content-length described the unscrubbed bytes
+    readme = (tmp_path / "telegram_monitor" / "README.md").read_text(encoding="utf-8")
+    assert f"profile.html · 2026-10-24 · {tg}/namuna_01 · " in readme
+    everything = done.path.read_text() + done.headers_path.read_text() + readme
+    assert person not in everything and "Rahimov" not in everything
+
+
 async def test_scrub_off_keeps_the_bytes(clock, tmp_path):
     body = b'{"user": {"name": "Sardor"}}'
     fake = site(
