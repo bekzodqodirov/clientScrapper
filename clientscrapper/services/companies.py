@@ -11,15 +11,17 @@ hh.uz employer id. ``resolve_company`` turns it into one ``companies`` row:
    → Telegram username → website (folded by ``site_key``) → Instagram →
    platform ids. A hit on a merged company follows ``merged_into`` to the
    root. A later key that names a *different* company is a conflict: logged,
-   never merged, and the other company gets ``dup_of`` when the names are
-   close (the owner's 🔀).
+   never merged, never carried, and the other company gets ``dup_of`` when
+   the names are close (the owner's 🔀). The name is the last key: under an
+   exact hit, a name that is another company's is a conflict too.
 2. **Then the name** (§2.2): an exact ``name_key`` or alias wins, else
    rapidfuzz over ``loose_key`` on pg_trgm candidates — ≥ 90 attaches, 80–89
    creates a new company with ``dup_of``, < 80 creates. Generic-only names,
    short keys and pairs of person-shaped keys never fuzzy-match.
 3. **The winner absorbs the observation's identity** (``_carry_identity``):
    empty fields filled, phones and handles as contacts, platform ids as
-   ``company_ids``, the spelling as an alias.
+   ``company_ids``, the spelling as an alias — after an exact hit only when
+   it reads as the winner's own name (``_name_agrees``, MIYA's rule).
 
 Every key the observation carries is held under a transaction-scoped
 advisory lock before the lookup (MIYA's pattern, widened from the name to
@@ -29,8 +31,9 @@ both find nothing and both create.
 Merging (§2.5) re-points the source's rows onto the target and records every
 moved id in ``merge_log``, which is what makes ``unmerge`` (24 h) exact.
 
-What is not here: signals and the ``found`` candidate (T-18 plugs into
-``AFTER_RESOLVE``), enrichment, and the bot's 🔀 button (it calls
+What is not here: signals and the ``found`` candidate (T-18 plugs them in
+with ``register_after_resolve``), enrichment, the scheduler (``resolve_job``
+is the ``job`` of T-08's ``resolve`` slot), and the bot's 🔀 button (it calls
 ``merge_into(by='owner:<id>')``).
 """
 
@@ -38,11 +41,13 @@ from __future__ import annotations
 
 import logging
 import re
+import traceback
 import uuid
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
-from typing import Any, Final, Literal, Protocol
+from pathlib import Path
+from typing import Any, Final, Literal
 
 import sqlalchemy as sa
 from rapidfuzz import fuzz
@@ -85,6 +90,8 @@ from clientscrapper.services.normalise import (
 from clientscrapper.services.text import fold_apostrophes, to_latin
 
 log = logging.getLogger(__name__)
+# The package's own files, to name where a failure came through (_failure_facts).
+_PACKAGE_DIR: Final = Path(__file__).resolve().parents[1]
 
 # --- Bands (04 §2.2, re-tuned from MIYA's 85/70/10) ----------------------------
 
@@ -321,12 +328,16 @@ def identity_keys(parsed: Mapping[str, Any]) -> IdentityKeys:
     display = _text(company.get("name_raw"))
     if display is not None and len(display) < 2:
         display = None
+    # A vacancy names the employer by its hh id; a handle on it is the HR
+    # person's, and HR people are never kept (03 §2.7, 04 §2.4) — not as a
+    # contact, not as the firm's channel, not as a key.
+    hr_handles = kind == "vacancy"
     return IdentityKeys(
         stir=stir_key(_text(company.get("stir"))),
         phone_tails=tuple(p.tail for p in phones),
-        tg_username=username_key(_text(handles.get("telegram"))),
+        tg_username=None if hr_handles else username_key(_text(handles.get("telegram"))),
         site_key=site_key(domain) if domain else None,
-        instagram=instagram_key(_text(handles.get("instagram"))),
+        instagram=None if hr_handles else instagram_key(_text(handles.get("instagram"))),
         external_ids=tuple(external),
         name_key=key if key and not key.startswith(LABEL_PREFIX) else None,
         city=_text(company.get("city")),
@@ -529,15 +540,19 @@ def fuzzy_decision(match: NameMatch) -> FuzzyDecision:
 
 # Matched on the role folded to lower-case Latin (to_latin: ж → j, so
 # «менеджер» reads «menedjer»), so «Директор», «direktori» and «Director» are
-# one rank.
+# one rank. Rank 3 is the firm's head and owner only (04 §2.4): «bosh»
+# («chief») is not a head word — «bosh hisobchi», «bosh muhandis» are a chief
+# accountant and a chief engineer — and an assistant or secretary to the head
+# (``_NOT_THE_HEAD``) is not the head, whatever word follows.
+_HEAD: Final = re.compile(
+    r"direkt|director|\brahbar|\brakhbar|rukovod|owner|egasi|asoschi|uchredit|"
+    r"founder|\bceo\b|boshliq|prezident|vladel"
+)
+_NOT_THE_HEAD: Final = re.compile(
+    r"yordamchi|kotib|sekretar|secretar|pomosh|assist|referent"
+)
 _ROLE_RANKS: Final = (
-    (
-        3,
-        re.compile(
-            r"direkt|director|rahbar|rakhbar|rukovod|owner|egasi|asoschi|"
-            r"uchredit|founder|ceo|bosh\b|boshliq|prezident"
-        ),
-    ),
+    (3, _HEAD),
     (
         2,
         re.compile(
@@ -561,6 +576,8 @@ def role_rank(role: str | None) -> int:
         return 0
     folded = to_latin(fold_apostrophes(role)).lower()
     for rank, pattern in _ROLE_RANKS:
+        if rank == 3 and _NOT_THE_HEAD.search(folded):
+            continue
         if pattern.search(folded):
             return rank
     return 0
@@ -801,7 +818,11 @@ async def _name_match(session: AsyncSession, keys: IdentityKeys) -> NameMatch:
         return NameMatch(company_id=None, score=0.0)
     exact = await _exact_name_candidates(session, key)
     if exact:
-        return best_name_match(key, exact, city=keys.city)
+        match = best_name_match(key, exact, city=keys.city)
+        if match.company_id is not None:
+            return match
+        # Every holder of the exact name is in another city: other firms. This
+        # city's close names still get their trigram look.
     candidates = await _name_candidates(session, key, city=keys.city)
     return best_name_match(key, candidates, city=keys.city)
 
@@ -853,15 +874,47 @@ async def resolve_company(
     conflicts: list[tuple[str, uuid.UUID]] = []
     foreign: set[str] = set()
     for hit in hits:
-        if hit.company.id == winner.id or hit.company.state == "purged":
+        if hit.company.id == winner.id:
             continue
+        # The key is another company's: never carried. A purged company keeps
+        # its STIR and domain under the unique indexes, and its data is not
+        # collected again (06 §5.4) — but it is nobody's conflict or 🔀.
         foreign.add(hit.key)
+        if hit.company.state == "purged":
+            continue
         if (hit.how, hit.company.id) not in conflicts:
             conflicts.append((hit.how, hit.company.id))
             await _note_conflict(session, winner, hit)
 
+    learn_name = how in ("fuzzy", "new") or await _name_agrees(
+        session, winner, keys.name_key
+    )
+    if not learn_name and keys.name_key is not None:
+        # An exact key under another firm's name (a broker's phone, a misread
+        # number): the name is the ladder's last key, and when it names a
+        # different company that is a conflict like any other (04 §2.1).
+        other = await _name_match(session, keys)
+        if (
+            fuzzy_decision(other) == "attach"
+            and other.company_id is not None
+            and other.company_id != winner.id
+            and ("fuzzy", other.company_id) not in conflicts
+        ):
+            named = await session.get(Company, other.company_id)
+            if named is not None:
+                conflicts.append(("fuzzy", named.id))
+                await _note_conflict(
+                    session, winner, _Hit(how="fuzzy", key=keys.name_key, company=named)
+                )
+
     contact = await _carry_identity(
-        session, winner, keys, foreign=foreign, source_key=source_key, now=now
+        session,
+        winner,
+        keys,
+        foreign=foreign,
+        learn_name=learn_name,
+        source_key=source_key,
+        now=now,
     )
     return Resolution(
         company=winner,
@@ -888,6 +941,25 @@ def _new_company(keys: IdentityKeys, observation_id: int, *, now: datetime) -> C
         dup_of=None,
         dup_score=None,
     )
+
+
+async def _name_agrees(session: AsyncSession, company: Company, key: str | None) -> bool:
+    """Whether the observation's name reads as ``company``'s own (its name or
+    a spelling it holds, in the attach band). An exact key does not make a
+    name the company's: MIYA learns a spelling on a phone hit only when it
+    matches (``resolve_person``: ``best_match >= MATCH_THRESHOLD``), or one
+    wrong phone teaches a firm another firm's name for good. A company known
+    only by a label has no name to disagree with."""
+    if key is None:
+        return False
+    if company.name_key.startswith(LABEL_PREFIX):
+        return True
+    held = [company.name_key]
+    held += await _ids(
+        session,
+        sa.select(CompanyAlias.alias_key).where(CompanyAlias.company_id == company.id),
+    )
+    return any(_pair_score(key, k) >= AUTO_MERGE for k in held)
 
 
 async def _note_conflict(session: AsyncSession, winner: Company, hit: _Hit) -> None:
@@ -963,13 +1035,15 @@ async def _carry_identity(
     keys: IdentityKeys,
     *,
     foreign: set[str],
+    learn_name: bool,
     source_key: str,
     now: datetime,
 ) -> Contact | None:
     """Give ``company`` what the observation knows that it lacks (MIYA
     ``_backfill``): fields only where NULL, never a key that named another
-    company (``foreign``), phones and handles as contacts, platform ids, the
-    spelling. Returns the contact the observation is about."""
+    company (``foreign``), phones and handles as contacts, platform ids, and
+    the spelling when ``learn_name`` (``_name_agrees``). Returns the contact
+    the observation is about."""
     if keys.stir and company.stir is None and f"{keys.stir}" not in foreign:
         company.stir = keys.stir
     if keys.domain and company.website_domain is None and keys.site_key not in foreign:
@@ -998,7 +1072,7 @@ async def _carry_identity(
     for id_type, id_value in keys.external_ids:
         if f"ext:{id_type}:{id_value}" not in foreign:
             await _add_external_id(session, company, id_type, id_value, source_key)
-    if keys.name_key:
+    if keys.name_key and learn_name:
         await learn_alias(session, company, keys.display_name, source_key)
 
     url = keys.url
@@ -1137,17 +1211,25 @@ async def upsert_contact(
     if tier == "person" and source_url is None:
         raise ValueError("a person-tier contact needs its source_url")
     url = source_url[:2048] if source_url else None
-    rows = list(
+    every = list(
         await session.scalars(
             sa.select(Contact)
-            .where(Contact.company_id == company.id, Contact.anonymised_at.is_(None))
+            .where(Contact.company_id == company.id)
             .order_by(Contact.created_at, Contact.id)
         )
     )
-    # The row already holding this number (ux_contacts_company_phone): the
+    rows = [r for r in every if r.anonymised_at is None]
+    # The row already holding this number (ux_contacts_company_phone, which
+    # covers anonymised rows too — anonymise keeps a landline, 02 §4 R4): the
     # number can go nowhere else in the company.
     holder = next(
-        (r for r in rows if tail is not None and r.phone and phone_tail(r.phone) == tail),
+        (
+            r
+            for r in every
+            if e164 is not None
+            and r.phone is not None
+            and (r.phone == e164 or phone_tail(r.phone) == tail)
+        ),
         None,
     )
     match = _match_contact(
@@ -1159,14 +1241,15 @@ async def upsert_contact(
     )
 
     def company_row(*, phone_only: bool) -> Contact | None:
+        phone = e164 if holder is None else None
         handles = not phone_only and (username is not None or instagram is not None)
-        if e164 is None and not handles:
+        if phone is None and not handles:
             return None
         row = Contact(
             company_id=company.id,
             tier="company",
-            phone=e164,
-            phone_kind=kind,
+            phone=phone,
+            phone_kind=kind if phone is not None else None,
             telegram_username=None if phone_only else username,
             instagram=None if phone_only else instagram,
             legal_basis=legal_basis,
@@ -1813,8 +1896,20 @@ AfterResolve = Callable[
 ]
 # What runs inside the same transaction after each resolution: T-18 adds the
 # rule signals and the `found` candidate here (04 §0 «→ signals,
-# lead_candidates(found)»).
-AFTER_RESOLVE: tuple[AfterResolve, ...] = ()
+# lead_candidates(found)») through ``register_after_resolve``. Read when a
+# batch starts, never bound as a default, so a hook added at import time of
+# its module reaches every later ``resolve_job``.
+AFTER_RESOLVE: list[AfterResolve] = []
+
+
+def register_after_resolve(hook: AfterResolve) -> None:
+    """Run ``hook(session, observation, resolution, now)`` after every
+    resolution, inside its savepoint: a hook that raises costs that one
+    observation (``needs_review``), never the batch. Idempotent."""
+    if hook not in AFTER_RESOLVE:
+        AFTER_RESOLVE.append(hook)
+
+
 # Lock trouble, not data trouble: the row stays 'new' for the next run.
 _RETRYABLE_SQLSTATES: Final = frozenset({"40P01", "40001", "55P03"})
 
@@ -1844,6 +1939,28 @@ class ResolveReport:
 def _sqlstate(exc: BaseException) -> str | None:
     state = getattr(getattr(exc, "orig", None), "sqlstate", None)
     return state if isinstance(state, str) else None
+
+
+def _failure_facts(exc: BaseException) -> dict[str, str | None]:
+    """What a failed resolution may say in a log line: the exception's class,
+    the SQLSTATE and constraint, and the line of this package it came through
+    — never its message or traceback text. A database error's message carries
+    ``[parameters: …]``, the row being written: a person's name, role and
+    handle, which the redactor does not recognise (06 §5.1: the person tier
+    is never in logs; T-08's job events log the class alone for the same
+    reason)."""
+    diag = getattr(getattr(exc, "orig", None), "diag", None)
+    constraint = getattr(diag, "constraint_name", None)
+    frames = traceback.extract_tb(exc.__traceback__)
+    ours = [f for f in frames if f"{_PACKAGE_DIR}" in f.filename]
+    frame = ours[-1] if ours else (frames[-1] if frames else None)
+    where = f"{Path(frame.filename).name}:{frame.lineno}" if frame else None
+    return {
+        "error": type(exc).__name__,
+        "sqlstate": _sqlstate(exc),
+        "constraint": constraint if isinstance(constraint, str) else None,
+        "where": where,
+    }
 
 
 async def _resolve_one(
@@ -1886,15 +2003,21 @@ async def _resolve_one(
             report.rejected += 1
         except sa.exc.DBAPIError as exc:
             if _sqlstate(exc) not in _RETRYABLE_SQLSTATES:
-                log.exception("resolution failed", extra={"observation_id": obs_id})
+                log.error(
+                    "resolution failed",
+                    extra={"observation_id": obs_id, **_failure_facts(exc)},
+                )
                 values = {"status": "needs_review", "resolved_at": now}
                 report.needs_review += 1
             else:
                 skip.add(obs_id)
                 report.deferred += 1
                 return True
-        except Exception:
-            log.exception("resolution failed", extra={"observation_id": obs_id})
+        except Exception as exc:
+            log.error(
+                "resolution failed",
+                extra={"observation_id": obs_id, **_failure_facts(exc)},
+            )
             values = {"status": "needs_review", "resolved_at": now}
             report.needs_review += 1
         else:
@@ -1927,16 +2050,18 @@ async def resolve_batch(
     *,
     now: datetime,
     limit: int = RESOLVE_LIMIT,
-    after: Sequence[AfterResolve] = AFTER_RESOLVE,
+    after: Sequence[AfterResolve] | None = None,
 ) -> ResolveReport:
     """Resolve up to ``limit`` new observations, one transaction each, so one
     bad row costs only itself (it becomes ``needs_review``) and a backlog
-    never starves the other jobs."""
+    never starves the other jobs. ``after`` defaults to the registered
+    ``AFTER_RESOLVE`` hooks as they stand now."""
+    hooks = tuple(AFTER_RESOLVE if after is None else after)
     report = ResolveReport()
     skip: set[int] = set()
     for _ in range(limit):
         if not await _resolve_one(
-            session_factory, now=now, skip=skip, after=after, report=report
+            session_factory, now=now, skip=skip, after=hooks, report=report
         ):
             break
     return report
@@ -1945,48 +2070,14 @@ async def resolve_batch(
 async def resolve_job(
     *, now: datetime | None = None, limit: int = RESOLVE_LIMIT
 ) -> dict[str, int]:
-    """The scheduled job: its counts are the ``job:resolve_job`` heartbeat's
-    detail when the scheduler's wrapper records it (06 §4.1)."""
+    """The scheduled job (04 §0: every 2 min, ≤ 200 rows). It takes no
+    argument, so it is the ``job`` of the worker table's slot
+    ``JobSlot("resolve", ("every 2m",), "T-17")`` (worker/main.py, T-08),
+    whose listener records the ``job:resolve`` heartbeat ``{ok, error}``; the
+    counts are logged here (ids and counts only, 06 §4.5) and returned for
+    callers and tests."""
     report = await resolve_batch(now=now or datetime.now(settings.tz), limit=limit)
-    return report.as_dict()
-
-
-class _Scheduler(Protocol):
-    def add_job(self, func: Any, trigger: Any = ..., **kwargs: Any) -> Any: ...
-
-
-@dataclass(frozen=True, slots=True)
-class JobSpec:
-    id: str
-    func: Callable[[], Awaitable[Any]]
-    minutes: int
-
-
-# The worker's schedule for this module (04 §0). T-08's scheduler registers
-# it through ``register_jobs``; its wrapper records the job:<id> heartbeat.
-JOBS: Final = (JobSpec(id="resolve_job", func=resolve_job, minutes=2),)
-
-JobWrap = Callable[[str, Callable[[], Awaitable[Any]]], Callable[[], Awaitable[Any]]]
-
-
-def register_jobs(scheduler: _Scheduler, *, wrap: JobWrap | None = None) -> list[str]:
-    """Add ``JOBS`` to an APScheduler ``AsyncIOScheduler``: interval jobs,
-    one instance at a time, missed runs coalesced. ``wrap`` is the worker's
-    heartbeat wrapper (``job:<id>``). Returns the registered ids. The
-    trigger is named by APScheduler's alias, so this module imports nothing of
-    the (untyped) scheduler."""
-    ids: list[str] = []
-    for spec in JOBS:
-        func = wrap(spec.id, spec.func) if wrap is not None else spec.func
-        scheduler.add_job(
-            func,
-            "interval",
-            minutes=spec.minutes,
-            timezone=settings.tz,
-            id=spec.id,
-            max_instances=1,
-            coalesce=True,
-            replace_existing=True,
-        )
-        ids.append(spec.id)
-    return ids
+    counts = report.as_dict()
+    if report.claimed:
+        log.info("resolve_job", extra={"counts": counts})
+    return counts

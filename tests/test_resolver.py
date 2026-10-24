@@ -9,6 +9,10 @@ synthetic data only (07 §1.0).
 from __future__ import annotations
 
 import asyncio
+import inspect
+import io
+import json
+import logging
 import uuid
 from datetime import timedelta
 from typing import Any
@@ -18,6 +22,8 @@ import pytest
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from clientscrapper import logs
+from clientscrapper.collectors.base import Observation as Found
 from clientscrapper.config import settings
 from clientscrapper.db.models import (
     Company,
@@ -34,7 +40,9 @@ from clientscrapper.db.models import (
 )
 from clientscrapper.db.session import SessionLocal
 from clientscrapper.services import companies as c
+from clientscrapper.services.contacts import anonymise
 from clientscrapper.services.keys import name_key
+from clientscrapper.services.normalise import to_observation_json
 from tests.companies_fixtures import NOW, company, contact, count, observe, parsed
 
 SOURCE = "directories_goldenpages"
@@ -147,8 +155,25 @@ def test_usable_name_guards():
         ("ВЭД менеджер", 2),
         ("menejer", 1),
         ("менеджер по продажам", 1),
+        ("savdo boʻlimi boshligʻi", 1),
         ("hisobchi", 0),
         (None, 0),
+        # The firm's head and owner, in the three languages a role is written in.
+        ("bosh direktor", 3),
+        ("Генеральный директор", 3),
+        ("Владелец", 3),
+        ("doʻkon egasi", 3),
+        ("kompaniya rahbari", 3),
+        # «bosh» is «chief», not «head of the firm»; Russian says the same.
+        ("bosh hisobchi", 0),
+        ("Bosh buxgalter", 0),
+        ("bosh muhandis", 0),
+        ("Главный бухгалтер", 0),
+        # An assistant or secretary to the head is not the head.
+        ("Rahbar yordamchisi", 0),
+        ("direktor yordamchisi", 0),
+        ("Секретарь директора", 0),
+        ("помощник руководителя", 0),
     ],
 )
 def test_role_rank(role, rank):
@@ -186,30 +211,18 @@ def test_identity_keys_skip_phones_of_unknown_owner_outside_posts():
     assert keys.phone_tails == ()
 
 
-def test_jobs_register_with_the_scheduler():
-    class Recorder:
-        def __init__(self) -> None:
-            self.calls: list[tuple[Any, tuple[Any, ...], dict[str, Any]]] = []
-
-        def add_job(self, func: Any, *args: Any, **kwargs: Any) -> None:
-            self.calls.append((func, args, kwargs))
-
-    recorder = Recorder()
-    wrapped: list[str] = []
-
-    def wrap(job_id: str, func: Any) -> Any:
-        wrapped.append(job_id)
-        return func
-
-    assert c.register_jobs(recorder, wrap=wrap) == ["resolve_job"]
-    func, args, kwargs = recorder.calls[0]
-    assert func is c.resolve_job and args == ("interval",) and wrapped == ["resolve_job"]
-    assert {k: kwargs[k] for k in ("minutes", "id", "max_instances", "coalesce")} == {
-        "minutes": 2,
-        "id": "resolve_job",
-        "max_instances": 1,
-        "coalesce": True,
-    }
+def test_resolve_job_fills_the_worker_slot_as_it_is():
+    """T-08's table holds ``JobSlot("resolve", ("every 2m",), "T-17")`` and
+    calls its ``job`` with no argument (``Job = Callable[[], Awaitable]``);
+    its listener writes ``job:resolve``. The job takes nothing it needs."""
+    assert inspect.iscoroutinefunction(c.resolve_job)
+    params = inspect.signature(c.resolve_job).parameters.values()
+    assert all(
+        p.kind is inspect.Parameter.KEYWORD_ONLY and p.default is not p.empty
+        for p in params
+    )
+    # No second registration home beside the worker's table.
+    assert not hasattr(c, "register_jobs") and not hasattr(c, "JOBS")
 
 
 # --- Name bands against the database --------------------------------------------------
@@ -244,6 +257,10 @@ async def test_a_close_name_attaches(session):
     )
     assert second.score >= c.AUTO_MERGE
     assert len(await companies(session)) == 1
+    aliases = (
+        await session.execute(sa.select(CompanyAlias.company_id, CompanyAlias.alias))
+    ).all()
+    assert aliases == [(first.company.id, "Goʻzal Mebel Plus")]  # alias learned
 
 
 async def test_the_review_band_creates_a_new_company_with_dup_of(session):
@@ -296,6 +313,25 @@ async def test_a_name_in_another_city_is_another_company(session):
     assert len(await companies(session)) == 2
 
 
+async def test_an_exact_name_in_another_city_leaves_this_citys_attach_band(session):
+    # The exact holder is another city's firm; this city's close name is still
+    # looked for, and attaches (≥ 90).
+    here = await company(session, "Namuna Tekstil Savdo Plus", city="Toshkent")
+    await company(session, "Namuna Tekstil Savdo", city="Samarqand")
+    result = await resolve(session, parsed(name="Namuna Tekstil Savdo", city="Toshkent"))
+    assert (result.company.id, result.how, result.created) == (here.id, "fuzzy", False)
+    assert len(await companies(session)) == 2
+
+
+async def test_an_exact_name_in_another_city_leaves_this_citys_review_band(session):
+    here = await company(session, "Namuna Gilam", city="Toshkent")
+    await company(session, "Namuna Gilamlar", city="Samarqand")
+    result = await resolve(session, parsed(name="Namuna Gilamlar", city="Toshkent"))
+    assert result.created and result.duplicate_of is not None
+    assert (result.duplicate_of.id, result.company.dup_of) == (here.id, here.id)
+    assert len(await companies(session)) == 3
+
+
 # --- Exact keys -----------------------------------------------------------------------
 
 
@@ -339,6 +375,223 @@ async def test_a_conflicting_handle_is_not_carried(session):
     result = await resolve(session, parsed(stir="300000013", telegram="boshqa_mebel"))
     assert result.company.id == a.id and result.conflict == ("telegram", b.id)
     assert (await session.get(Company, a.id)).telegram_channel is None
+
+
+async def test_a_conflicting_site_is_not_carried(session):
+    a = await company(session, "Namuna Tekstil Savdo")
+    await contact(session, a, phone="+998900000051")
+    b = await company(session, "Boshqa Mebel Uyi", website_domain="namuna.example.uz")
+    result = await resolve(
+        session,
+        parsed(
+            name="Namuna Tekstil Savdo",
+            phones=(("+998900000051", "company"),),
+            website="https://namuna.example.uz",
+        ),
+    )
+    assert (result.company.id, result.how, result.conflict) == (
+        a.id,
+        "phone",
+        ("domain", b.id),
+    )
+    assert (await session.get(Company, a.id)).website_domain is None
+
+
+async def test_a_posters_telegram_id_outranks_a_stir_which_is_not_carried(session):
+    # 04 §2.6: the poster's Telegram id is MIYA's shortcut, before the STIR.
+    a = await company(session, "Namuna Tekstil Savdo")
+    await contact(session, a, tier="person", telegram_id=5100000009, full_name="Namuna")
+    b = await company(session, "Boshqa Mebel Uyi", stir="300000091")
+    result = await resolve(
+        session,
+        parsed(
+            kind="intent_post",
+            source_key="telegram_monitor",
+            tg_user_id=5100000009,
+            stir="300000091",
+        ),
+    )
+    assert (result.company.id, result.how, result.conflict) == (
+        a.id,
+        "telegram",
+        ("stir", b.id),
+    )
+    assert (await session.get(Company, a.id)).stir is None
+
+
+async def test_a_purged_companys_site_is_never_carried_nor_a_conflict(session):
+    a = await company(session, "Namuna Tekstil Savdo")
+    await contact(session, a, phone="+998900000052")
+    await company(
+        session, "[oʻchirilgan]", website_domain="namuna.example.uz", state="purged"
+    )
+    # ux_companies_domain still holds the purged row's domain: carrying it
+    # would refuse the whole observation.
+    result = await resolve(
+        session,
+        parsed(
+            name="Namuna Tekstil Savdo",
+            phones=(("+998900000052", "company"),),
+            website="https://namuna.example.uz",
+        ),
+    )
+    assert (result.company.id, result.how, result.conflicts) == (a.id, "phone", ())
+    assert (await session.get(Company, a.id)).website_domain is None
+
+
+async def test_a_purged_companys_stir_is_never_carried_nor_a_conflict(session):
+    a = await company(session, "Namuna Tekstil Savdo")
+    await contact(session, a, tier="person", telegram_id=5100000010, full_name="Namuna")
+    await company(session, "[oʻchirilgan]", stir="300000092", state="purged")
+    result = await resolve(
+        session,
+        parsed(
+            kind="intent_post",
+            source_key="telegram_monitor",
+            tg_user_id=5100000010,
+            stir="300000092",
+        ),
+    )
+    assert (result.company.id, result.how, result.conflicts) == (a.id, "telegram", ())
+    assert (await session.get(Company, a.id)).stir is None
+
+
+async def test_a_returning_poster_is_found_by_their_username(session):
+    first = await resolve(
+        session,
+        parsed(
+            kind="intent_post",
+            source_key="telegram_monitor",
+            name="Namuna Tekstil Savdo",
+            telegram="namuna_xaridor",
+        ),
+    )
+    # A later post: no Telegram id, no firm name — only the username, which
+    # sits on the poster's contact, not on companies.telegram_channel.
+    again = await resolve(
+        session,
+        parsed(
+            kind="intent_post", source_key="telegram_monitor", telegram="namuna_xaridor"
+        ),
+    )
+    assert first.company.telegram_channel is None
+    assert (again.company.id, again.how, again.created) == (
+        first.company.id,
+        "telegram",
+        False,
+    )
+
+
+async def test_a_second_instagram_account_is_found_through_its_contact(session):
+    target = await company(session, "Namuna Tekstil Savdo", instagram="namuna.tekstil")
+    # The same firm's second account: a company-tier contact, not the column.
+    first = await resolve(
+        session, parsed(name="Namuna Tekstil Savdo", instagram="namuna.tekstil.optom")
+    )
+    assert first.company.id == target.id
+    again = await resolve(session, parsed(instagram="namuna.tekstil.optom"))
+    assert (again.company.id, again.how, again.created) == (target.id, "instagram", False)
+
+
+async def test_an_anonymised_contacts_landline_names_nobody(session):
+    firm = await company(session, "Namuna Avto Qismlar", city="Toshkent")
+    # anonymise keeps a landline (02 §4 R4); it is no key any more (04 §2.1).
+    await contact(session, firm, tier="person", phone="+998712000071", anonymised_at=NOW)
+    result = await resolve(
+        session,
+        parsed(
+            name="Boshqa Firma Uyi",
+            city="Toshkent",
+            phones=(("+998712000071", "company"),),
+        ),
+    )
+    assert result.created and result.how == "new"
+
+
+async def test_the_winner_gains_only_the_fields_it_lacked(session):
+    firm = await company(session, "Namuna Tekstil Savdo")
+    await contact(session, firm, phone="+998900000022")
+    await resolve(
+        session,
+        parsed(
+            name="Namuna Tekstil Savdo",
+            city="Toshkent",
+            legal_form="MChJ",
+            phones=(("+998900000022", "company"),),
+        ),
+    )
+    await resolve(
+        session,
+        parsed(name="Namuna Tekstil Savdo", city="Samarqand", legal_form="XK"),
+    )
+    row = await session.get(Company, firm.id)
+    assert (row.city, row.legal_form) == ("Toshkent", "MChJ")
+
+
+async def test_an_exact_key_never_teaches_another_firms_name(session):
+    a = await company(session, "Namuna Tekstil Savdo")
+    # The firm's number is also its accountant's, who keeps another firm's books.
+    await contact(session, a, phone="+998900000061")
+    first = await resolve(
+        session, parsed(name="Boshqa Mebel Uyi", phones=(("+998900000061", "company"),))
+    )
+    assert (first.company.id, first.how) == (a.id, "phone")
+    assert await count(session, "company_aliases") == 0
+    again = await resolve(
+        session, parsed(name="Boshqa Mebel Uyi", phones=(("+998900000062", "company"),))
+    )
+    assert again.created and again.company.id != a.id
+
+
+async def test_an_exact_key_learns_a_spelling_of_its_own_name(session):
+    a = await company(session, "Namuna Tekstil Savdo")
+    await contact(session, a, phone="+998900000063")
+    result = await resolve(
+        session,
+        parsed(
+            name="ООО «Намуна Текстиль Савдо»", phones=(("+998900000063", "company"),)
+        ),
+    )
+    assert (result.company.id, result.how) == (a.id, "phone")
+    aliases = (await session.execute(sa.select(CompanyAlias.alias))).scalars().all()
+    assert aliases == ["ООО «Намуна Текстиль Савдо»"]
+
+
+async def test_an_exact_key_under_another_known_firms_name_is_a_conflict(session):
+    a = await company(session, "Namuna Tekstil Savdo")
+    await contact(session, a, phone="+998900000064")
+    b = await company(session, "Boshqa Mebel Uyi")
+    result = await resolve(
+        session, parsed(name="Boshqa Mebel Uyi", phones=(("+998900000064", "company"),))
+    )
+    # The phone wins (04 §2.1); the name, the ladder's last key, names B.
+    assert (result.company.id, result.how, result.conflict) == (
+        a.id,
+        "phone",
+        ("fuzzy", b.id),
+    )
+    assert await count(session, "company_aliases") == 0
+    assert await count(session, "merge_log") == 0
+
+
+async def test_a_labelled_poster_learns_the_name_it_later_gives(session):
+    first = await resolve(
+        session,
+        parsed(kind="intent_post", source_key="telegram_monitor", tg_user_id=5100000031),
+    )
+    assert first.company.name_key.startswith(c.LABEL_PREFIX)
+    named = await resolve(
+        session,
+        parsed(
+            kind="intent_post",
+            source_key="telegram_monitor",
+            tg_user_id=5100000031,
+            name="Namuna Tekstil Savdo",
+        ),
+    )
+    assert (named.company.id, named.how) == (first.company.id, "telegram")
+    aliases = (await session.execute(sa.select(CompanyAlias.alias))).scalars().all()
+    assert aliases == ["Namuna Tekstil Savdo"]
 
 
 async def test_a_landline_tail_needs_the_city(session):
@@ -440,6 +693,7 @@ async def test_a_purged_company_is_not_collected_again(session):
         parsed(name="Imex Services MChJ"),
         parsed(name="Namuna Kargo", website="https://gsrwms.uz/login"),
         parsed(kind="profile", name="Namuna Kanal", telegram="gsrlogistics"),
+        parsed(name="GSR Logistiqa"),  # q/k: equal only under loose_key
     ],
 )
 async def test_gsr_itself_never_becomes_a_company(session, body):
@@ -585,6 +839,149 @@ async def test_one_person_per_company_and_a_better_one_replaces_it(session):
     )
 
 
+async def test_an_equal_rank_never_replaces_the_person(session):
+    owner = await company(session, "Namuna Tekstil Savdo")
+    url = "https://t.me/namuna_optom/18235"
+    first = await c.upsert_contact(
+        session,
+        owner,
+        tier="person",
+        phone="+998900000017",
+        full_name="Namuna Bir",
+        role="menejer",
+        source_url=url,
+        now=NOW,
+    )
+    same = await c.upsert_contact(
+        session,
+        owner,
+        tier="person",
+        phone="+998900000018",
+        full_name="Namuna Ikki",
+        role="sotuv menejeri",
+        source_url=url,
+        now=NOW,
+    )
+    await session.refresh(first)
+    assert (first.tier, first.full_name, first.anonymised_at) == (
+        "person",
+        "Namuna Bir",
+        None,
+    )
+    assert (same.tier, same.full_name, same.phone) == ("company", None, "+998900000018")
+
+
+async def test_a_poster_whose_number_another_row_holds_leaves_it_there(session):
+    firm = await company(session, "Namuna Tekstil Savdo")
+    me = await contact(
+        session, firm, tier="person", telegram_id=5100000021, full_name="Namuna"
+    )
+    switchboard = await contact(session, firm, phone="+998900000021")
+    result = await resolve(
+        session,
+        parsed(
+            kind="intent_post",
+            source_key="telegram_monitor",
+            tg_user_id=5100000021,
+            phones=(("+998900000021", "person"),),
+        ),
+    )
+    assert (result.company.id, result.contact.id) == (firm.id, me.id)
+    phones = dict((await session.execute(sa.select(Contact.id, Contact.phone))).all())
+    assert phones == {me.id: None, switchboard.id: "+998900000021"}
+
+
+LANDLINE = "+998712000055"
+
+
+async def _a_replaced_person_kept_their_landline(session: AsyncSession) -> Company:
+    """A menejer who listed the office landline, replaced by a direktor: the
+    old row is anonymised and keeps the landline (02 §4 R4's SQL), and
+    ux_contacts_company_phone covers it still."""
+    firm = await company(session, "Namuna Tekstil Savdo", city="Toshkent")
+    for phone, name, role in (
+        (LANDLINE, "Namuna Bir", "menejer"),
+        ("+998900000056", "Namuna Ikki", "direktor"),
+    ):
+        await c.upsert_contact(
+            session,
+            firm,
+            tier="person",
+            phone=phone,
+            full_name=name,
+            role=role,
+            source_url="https://t.me/namuna_optom/1",
+            now=NOW,
+        )
+    return firm
+
+
+async def _contacts_now(session: AsyncSession) -> list[tuple[Any, ...]]:
+    rows = await session.execute(
+        sa.select(Contact.phone, Contact.full_name, Contact.anonymised_at.is_not(None))
+        .order_by(Contact.created_at, Contact.phone)
+        .execution_options(populate_existing=True)
+    )
+    return [tuple(r) for r in rows]
+
+
+BEFORE = [(LANDLINE, None, True), ("+998900000056", "Namuna Ikki", False)]
+
+
+async def test_a_directory_listing_an_anonymised_rows_landline(session):
+    firm = await _a_replaced_person_kept_their_landline(session)
+    assert await _contacts_now(session) == BEFORE
+    result = await resolve(
+        session,
+        parsed(
+            name="Namuna Tekstil Savdo", city="Toshkent", phones=((LANDLINE, "company"),)
+        ),
+    )
+    assert (result.company.id, result.contact) == (firm.id, None)
+    assert await _contacts_now(session) == BEFORE
+
+
+async def test_a_weaker_newcomer_with_an_anonymised_rows_landline(session):
+    firm = await _a_replaced_person_kept_their_landline(session)
+    row = await c.upsert_contact(
+        session,
+        firm,
+        tier="person",
+        phone=LANDLINE,
+        full_name="Namuna Uch",
+        role="menejer",
+        source_url="https://t.me/namuna_optom/3",
+        now=NOW,
+    )
+    assert row is None
+    assert await _contacts_now(session) == BEFORE
+
+
+async def test_a_new_person_with_an_anonymised_rows_landline(session):
+    firm = await _a_replaced_person_kept_their_landline(session)
+    live = await session.scalar(
+        sa.select(Contact).where(Contact.full_name == "Namuna Ikki")
+    )
+    anonymise(live, now=NOW)  # retention R5: nobody is the firm's person now
+    await session.flush()
+    row = await c.upsert_contact(
+        session,
+        firm,
+        tier="person",
+        phone=LANDLINE,
+        full_name="Namuna Uch",
+        role="direktor",
+        source_url="https://t.me/namuna_optom/3",
+        now=NOW,
+    )
+    assert row is not None and (row.tier, row.full_name, row.phone) == (
+        "person",
+        "Namuna Uch",
+        None,
+    )
+    assert await count(session, "contacts", "phone = :p", p=LANDLINE) == 1
+
+
 async def test_a_vacancy_never_yields_a_contact(session):
     result = await resolve(
         session,
@@ -595,6 +992,63 @@ async def test_a_vacancy_never_yields_a_contact(session):
         ),
     )
     assert result.contact is None and await count(session, "contacts") == 0
+
+
+def _found(kind: str, **fields: Any) -> Found:
+    return Found(
+        source=fields.pop("source", "hh_vacancies"),
+        source_ref=fields.pop("source_ref", "hh:1"),
+        url=fields.pop("url", "https://hh.uz/vacancy/1"),
+        fetched_at=NOW,
+        raw_sha256="",
+        kind=kind,  # type: ignore[arg-type]
+        **fields,
+    )
+
+
+async def test_a_vacancys_hr_handle_is_never_the_firms_channel(session):
+    # Through the real normaliser: person_telegram is a group poster's username
+    # (03 §1.2), the firm's channel only ever comes from ``telegram``.
+    vacancy = to_observation_json(
+        _found(
+            "vacancy",
+            company_name_raw="Namuna Tekstil Savdo MChJ",
+            person_name="Namuna HR",
+            person_role="HR menejer",
+            person_telegram="namuna_hr_dilnoza",
+        ),
+        collector_version="hh_vacancies@1",
+    )
+    assert vacancy["handles"]["telegram"] is None
+    post = to_observation_json(
+        _found(
+            "post",
+            source="telegram_monitor",
+            source_ref="-1001000000001:7",
+            url="https://t.me/namuna_optom/7",
+            person_telegram="namuna_xaridor",
+        ),
+        collector_version="telegram_monitor@1",
+    )
+    assert (post["kind"], post["handles"]["telegram"]) == (
+        "intent_post",
+        "namuna_xaridor",
+    )
+    result = await resolve(session, vacancy)
+    # A collector that did put a handle on a vacancy: still the HR person's.
+    again = await resolve(
+        session,
+        parsed(
+            kind="vacancy",
+            name="Namuna Tekstil Savdo MChJ",
+            telegram="namuna_hr_dilnoza",
+            instagram="namuna.hr",
+        ),
+    )
+    firm = await session.get(Company, result.company.id)
+    assert again.company.id == firm.id
+    assert (firm.telegram_channel, firm.instagram) == (None, None)
+    assert await count(session, "contacts") == 0
 
 
 async def test_a_posters_second_number_is_not_stored(session):
@@ -892,6 +1346,61 @@ async def test_two_unconfirmed_sites_do_not_refuse_the_merge(session):
     assert merged.website_domain == "namuna.example.com"
 
 
+async def test_a_merged_company_cannot_be_merged_again(session):
+    source = await company(session, "Namuna Bir Savdo")
+    first = await company(session, "Namuna Ikki Savdo")
+    other = await company(session, "Namuna Uch Savdo")
+    await c.merge_into(session, source, first, by="owner:111111111", now=NOW)
+    with pytest.raises(c.MergeRefused) as refused:
+        await c.merge_into(session, source, other, by="owner:111111111", now=NOW)
+    assert refused.value.reason == "source_merged"
+    assert await count(session, "merge_log") == 1
+
+
+async def _dup_of(session: AsyncSession, company_id: uuid.UUID) -> uuid.UUID | None:
+    return await session.scalar(
+        sa.select(Company.dup_of)
+        .where(Company.id == company_id)
+        .execution_options(populate_existing=True)
+    )
+
+
+async def test_a_proposal_about_the_source_follows_it_and_comes_back(session):
+    target = await company(session, "Namuna Tekstil Savdo")
+    source = await company(session, "Namuna Tekstil")
+    pointer = await company(session, "Namuna Tekstil Uyi", dup_of=source.id, dup_score=85)
+    await c.merge_into(session, source, target, by="owner:111111111", now=NOW)
+    assert await _dup_of(session, pointer.id) == target.id
+    entry = await session.scalar(sa.select(MergeLog))
+    assert entry.moved["dup_of"] == [str(pointer.id)]
+    await c.unmerge(session, entry.id, by="owner:111111111", now=NOW)
+    assert await _dup_of(session, pointer.id) == source.id
+
+
+async def test_unmerge_leaves_what_moved_on_since(session):
+    target = await company(session, "Namuna Tekstil Savdo")
+    source = await company(
+        session, "Namuna Tekstil", city="Toshkent", telegram_channel="namuna_tekstil"
+    )
+    elsewhere = await company(session, "Boshqa Mebel Uyi")
+    row = await contact(session, source, phone="+998900000043")
+    await c.merge_into(session, source, target, by="owner:111111111", now=NOW)
+    # Since the merge: the owner moved the contact on, enrichment re-read the city.
+    await session.execute(
+        sa.update(Contact).where(Contact.id == row.id).values(company_id=elsewhere.id)
+    )
+    await session.execute(
+        sa.update(Company).where(Company.id == target.id).values(city="Samarqand")
+    )
+    entry = await session.scalar(sa.select(MergeLog))
+    assert entry.carried == {"city": "Toshkent", "telegram_channel": "namuna_tekstil"}
+    await c.unmerge(session, entry.id, by="owner:111111111", now=NOW)
+    assert await _owner(session, Contact, row.id) == elsewhere.id
+    back = await session.get(Company, target.id, populate_existing=True)
+    # Still what was carried: given back. Changed since: kept.
+    assert (back.telegram_channel, back.city) == (None, "Samarqand")
+
+
 async def test_the_sources_open_candidate_is_excluded_beside_the_targets(session):
     target = await company(session, "Namuna Tekstil Savdo")
     source = await company(session, "Namuna Tekstil")
@@ -1177,6 +1686,73 @@ async def test_lock_trouble_leaves_the_row_new_for_the_next_run(session):
         == "new"
     )
     assert (await c.resolve_batch(now=NOW)).resolved == 1
+
+
+async def test_a_registered_hook_runs_inside_resolve_job(session, monkeypatch):
+    obs = await observe(session, parsed(name="Namuna Tekstil Savdo"))
+    await session.commit()
+    monkeypatch.setattr(c, "AFTER_RESOLVE", [])
+    ran: list[tuple[Any, ...]] = []
+
+    async def hook(s: AsyncSession, o: Observation, res: c.Resolution, now: Any) -> None:
+        ran.append((o.id, res.created, now))
+
+    c.register_after_resolve(hook)
+    c.register_after_resolve(hook)  # idempotent
+    registered = c.AFTER_RESOLVE
+    assert registered == [hook]
+    report = await c.resolve_job(now=NOW)
+    assert (report["resolved"], ran) == (1, [(obs.id, True, NOW)])
+
+
+async def test_a_failed_resolution_logs_no_person(session):
+    """06 §5.1: the person tier is never in logs. A database error's text
+    carries the row it refused (``[parameters: …]``) — here a person's name,
+    role and handle — so the line names the error, never its message."""
+    obs = await observe(session, parsed(name="Namuna Tekstil Savdo"))
+    await session.commit()
+
+    async def hook(s: AsyncSession, o: Observation, res: c.Resolution, now: Any) -> None:
+        s.add(
+            Contact(
+                company_id=res.company.id,
+                tier="person",  # no legal basis: ck_contacts_person_basis refuses it
+                full_name="Rustamjon Namunaviy",
+                role="direktor",
+                telegram_username="namuna_rustamjon",
+            )
+        )
+        await s.flush()
+
+    root = logging.getLogger()
+    level = root.level
+    stream = io.StringIO()
+    assert logs.setup_logging("worker", fmt="json", stream=stream, force=True)
+    try:
+        report = await c.resolve_batch(now=NOW, after=(hook,))
+    finally:
+        for handler in root.handlers[:]:
+            if isinstance(handler, logs.CsHandler):
+                root.removeHandler(handler)
+        root.setLevel(level)
+    assert report.needs_review == 1
+    out = stream.getvalue()
+    for word in ("Rustamjon", "Namunaviy", "namuna_rustamjon", "direktor", "parameters"):
+        assert word not in out, word
+    (line,) = [
+        json.loads(x)
+        for x in out.splitlines()
+        if json.loads(x)["msg"] == "resolution failed"
+    ]
+    assert {
+        k: line[k] for k in ("observation_id", "error", "sqlstate", "constraint")
+    } == {
+        "observation_id": obs.id,
+        "error": "IntegrityError",
+        "sqlstate": "23514",
+        "constraint": "ck_contacts_person_basis",
+    }
+    assert line["where"].startswith("companies.py:") and "exc" not in line
 
 
 async def test_the_job_stops_at_its_limit(session):
