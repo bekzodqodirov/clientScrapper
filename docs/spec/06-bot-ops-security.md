@@ -37,7 +37,7 @@ posts into a group.
 | `/manbalar` | One line per `sources` row, paged by 8 — schedulable rows (`cron IS NOT NULL`: `serp_layer`, `directories`, `maps`, …) first, then the attribution-only sub-source rows of 03 §2.1 (`search_brave`, `maps_2gis`, …): `{✅/⏸/⛔} {title_uz} · oxirgi {age} · bugun {pages}/{budget} sahifa · ${cost} · aniqlik {p}% ({pushes_30d}) · {avto/qoʻlda}`; buttons per row `src:<key>:t` (on/off) and `src:<key>:i` (last 5 `collector_runs`, breaker, paused reason) | `sources.enabled`; `src:<key>:a` sets `config.auto_push_forbidden=true` (owner can only forbid auto-push, never grant it — F-11 computes it; 05 §B.2 `source_precision_job` never flips `auto_push` on while the flag is set) |
 | `/chats` | MIYA `chats_keyboard` with one toggle: `{✅/❌} {👥/📢} {title} · {hit_7d} signal / {seen_7d} xabar`; `/chats qoʻsh @username` enqueues `chat_monitors(status='queued', priority=0)` (joined by `userbot/joiner.py`, still ≤ 3/day) | `chat_monitors.monitor_enabled`, `decided_by='owner'` |
 | `/holat` | §4.1 layout: processes, db, disk, backup, Anthropic, ERP (last push, last full/delta pull, breaker), per-source lines, queues, pushes today/cap, cost today/month, open problems each with its remedy line | — |
-| `/xarajat` | Today and month by `usage_log.provider` and `operation`; refusals = the `usage_log` rows `costs.ask` persists on a refusal (`cost_usd=0, units=0, model='refused:<code>'`, 04 §8 — the counter is never in-process: the bot is another process than the worker), counted per code; top 5 companies by spend (ids and names only), `% of DAILY_COST_CAP_USD` / `MONTHLY_COST_CAP_USD` | — |
+| `/xarajat` | Today and month by `usage_log.provider` and `operation`; refusals = the `usage_log` rows `costs.ask` persists on a refusal (`cost_usd=0, units=0, model='refused:<code>'`, 04 §8 — the counter is never in-process: the bot is another process than the worker), counted per code; top 5 companies by spend (ids and names only — the name is `companies.display_name`, which `costs.report` joins (`TOP_COMPANIES = 5`) and which is never a person's name, 04 §1.6; the rendering is T-21's), `% of DAILY_COST_CAP_USD` / `MONTHLY_COST_CAP_USD` | — |
 | `/toxtat [sabab]` | Global pause at once, no confirmation (a safety action): collectors fetch nothing, no paid call, no push, no card, no join. The userbot keeps its connection and keeps storing prefilter hits (no egress, no cost). Reply: «⏸ Toʻxtatildi. Davom ettirish: /yoq» | `runtime_flags('paused')` §6 |
 | `/yoq` | Confirm card «Davom ettiraymi?» `ps:y` / `ps:n`; `/yoq crm` clears `sources.erp_sync.breaker_until` after confirm `ps:c` | `runtime_flags`, `sources` |
 | `/import` | Reply `/import` to an XLSX/CSV, or send it with that caption: `client_import.plan` → «{n} ta telefon: {new} yangi, {same} bor, {bad} notoʻgʻri» → `im:<plan_id>:y|n`; plan kept in memory 10 min (restart = send again) | `suppression(kind='client', key_type='phone_tail', source='manual_import')` — clear tails (the future agent secret is unknown); a row is retired when a full pull brings the hash of the same tail (05 §B.2 step 5) |
@@ -180,7 +180,9 @@ _GRAMMAR: dict[str, re.Pattern[str]] = {
     "pt":  re.compile(r"^pt:(?P<ref>\d{1,19}):(?P<action>[yn])$"),
 }
 
-def parse(data: str) -> Callback | None: ...   # first full match wins; never guesses; None → handler answers «Bu tugma eskirgan»
+def parse(data: str) -> Callback | None: ...   # each pattern by re.fullmatch (with re.match, «^…$» also accepts a trailing
+                                               # newline: «rv:1:p\n» would parse); first full match wins; never guesses;
+                                               # None → handler answers «Bu tugma eskirgan»
 ```
 
 `tests/test_bot_callbacks.py` (the fence, F-08): `bot/keyboards.py` exports
@@ -191,7 +193,7 @@ builder with synthetic arguments, including the longest legal `source.key`, a 19
 `(kind, action)` the parser can return has a registered handler (`HANDLERS[kind][action]`, the
 dict the routers are built from) and every handler key is producible by some sample; (c) feeds
 200 random ASCII strings and MIYA-style near-misses (`rv:1:P`, `rv::p`, `mg:1:not-a-uuid`) and
-expects `None`. An unparsed `callback_data` is answered by nobody and the button spins 15 s
+expects `None` (a trailing newline, `rv:1:p\n`, among them). An unparsed `callback_data` is answered by nobody and the button spins 15 s
 (MIYA #937) — hence (a) and (b) together.
 
 ### 1.6 Delivery budget and quiet hours
@@ -338,12 +340,18 @@ services:
 volumes: { db_data: {} }
 ```
 
-No service publishes a port to the network; the only host binding is Postgres on `127.0.0.1`
+«Healthy» for the three app services means **running with a fresh heartbeat** (§4.1): as built
+(T-01) only `db` carries a container `healthcheck` (which `init` and every app service wait on); the
+skeleton processes write no heartbeat until T-08, and a heartbeat-based check now would mark all
+three unhealthy. T-08 decides whether to add one per app service (a `tools/healthcheck <component>`
+that reads `heartbeats.last_seen_at`) — Open question 9; §7.1 step 3 and 07 §3.1 read «healthy» this
+way until then. No service publishes a port to the network; the only host binding is Postgres on `127.0.0.1`
 for `make psql`. There is no `api` service in v1 (CLAUDE.md: FastAPI optional, not built). No
 reverse proxy, no TLS, no public DNS. `tests/test_compose.py` asserts: no `ports:` entry
 without the `127.0.0.1:` prefix, every app service has `mem_limit`, `env_file`, `depends_on
 init completed`, `restart: unless-stopped`, log rotation, and the service set is exactly
-`{db, init, worker, userbot, bot, searxng}`.
+`{db, init, worker, userbot, bot, searxng}` (built in the T-01/T-02 review together with
+`tests/test_requirements_pinned.py`, §5.6 — neither had a task in 07 §4.1).
 
 ### 3.2 `Dockerfile`
 
@@ -366,7 +374,7 @@ clientscrapper`, `CMD ["python", "-m", "clientscrapper.worker.main"]`. Image ≈
 | `doctor` | builds the image, runs `tools/doctor.py` with `.env` injected: every key of `EXPECTED_ENV_KEYS` present (a test keeps that tuple equal to `.env.example`), `POSTGRES_PASSWORD` inside `DATABASE_URL`, `OWNER_TELEGRAM_ID` numeric, `MANAGER_TELEGRAM_IDS` each reachable via `get_chat`, bot token via `get_me`, `TELETHON_*` when `USERBOT_ENABLED`, `CRM_BASE_URL` starts with `https://` (❌ otherwise: production's Caddy answers an `http://` request with a 308 the agent never follows, 05 §B.1) and, while `feeds_configured()`, answers `GET /api/agent/suppression?limit=1` (200 ok · 404 «kalit yoki manba yoʻq» warning when `CRM_PUSH_ENABLED=false`, error when true · 3xx error); during the «Boshqa» fallback the feed GET is skipped (that key reads nothing, 05 §B.3) and no POST is tried (it would land a lead), `ANTHROPIC_API_KEY` present (no call), `BACKUP_AGE_RECIPIENT` starts `age1` and `secrets/backup-key.txt` exists, RAM ≥ 4 GB, swap ≥ 1 GB, free disk ≥ `DISK_MIN_FREE_GB`, `age`/`pg_dump` binaries, `DIGEST_TIME` inside `REVIEW_HOURS`. Exit 1 on any ❌ |
 | `up` | `env` → `doctor` (skip with `SKIP_DOCTOR=1`) → `compose up -d --build db init` → `compose up -d --build worker userbot bot` |
 | `migrate` | `compose run --rm init alembic upgrade head` |
-| `revision m="…"` / `downgrade` | Alembic autogenerate / `-1` |
+| `revision m="…"` / `downgrade` | Alembic autogenerate, minting `000N_<slug>` through `scripts/revision_id.py` and `alembic.ini` `file_template = %%(rev)s` (02 §5) / `-1` |
 | `userbot-login` | `compose run --rm -it userbot python -m clientscrapper.tools.userbot_login` |
 | `backup` / `backup-key` / `backup-key-show` / `restore FILE= [DRY=1] [FORCE=1]` | MIYA verbatim (§4.4) |
 | `update` | `backup` (fails = stop) → `git pull --ff-only` → `compose stop worker userbot bot` → `up IN_UPDATE=1` → `docker image prune -f` → «Yangilandi. Botda /holat ni tekshir.» |
@@ -375,7 +383,9 @@ clientscrapper`, `CMD ["python", "-m", "clientscrapper.worker.main"]`. Image ≈
 | `purge --company <uuid> \| --phone <tail9> \| --tg-user <id> [--apply]` | `tools/purge.py` (§5.4) |
 | `reload` | `compose up -d --force-recreate worker userbot bot` after editing `.env` |
 | `logs` / `ps` / `psql` / `bot` / `worker` / `userbot` | tails and shells |
-| `test` / `lint` / `fmt` / `typecheck` / `check` | `pytest -q` · `ruff check .` · `ruff format .` · `mypy` (files list in `pyproject.toml`: `services/`, `bot/callbacks.py`, `userbot/`, `logs.py`) |
+| `test` / `lint` / `fmt` / `typecheck` / `check` | `pytest -q` · `ruff check .` · `ruff format .` · `mypy` (the strict `files` list in `pyproject.toml`, 07 §2.3) |
+| `db-test` | a throwaway `postgres:16` on `127.0.0.1:${DB_PORT:-5433}`: creates `cs_test` (migrated to head) and `cs_test_rt` (for `test_migrations`' round trip) and prints both URLs as the line to run (`DATABASE_URL=… CS_MIGRATION_DATABASE_URL=… CS_REQUIRE_DB=1 make test`) |
+| `hooks` | links `scripts/pre-push.sh` into git's hooks directory (`git rev-parse --git-path hooks`, so a worktree shares it) |
 
 ### 3.4 `.env.example` (complete; defaults as shown; blank = must be filled or feature off)
 
@@ -563,18 +573,18 @@ alive speaks; neither repeats the other.
 | `suppression_stale_hit` | warning | the outcomes feed reports a push `outcome='dropped', reason='suppressed'` — the ERP's belt refused a phone our gate passed: our copy was stale, or the client card holds a 7–8-digit number the feed can never carry as a hash (05 §A.8). The tail is written to local `suppression` at once (02 §2.11), so the same number is never pushed again; cleared by the next completed full pull (no extra pull is forced — the nightly one is already due) | «⚠️ ERP {n} ta pushni «bostirilgan» deb qaytardi — bu raqamlar endi bizda ham yopiq; tungi toʻliq yuklashdan keyin bu ogohlantirish oʻchadi» |
 | `userbot_silent` | warning | userbot beat > `USERBOT_STALE_MINUTES`, not disabled | «⚠️ Telegram oʻquvchi {age} jim — `make userbot`» |
 | `flood_breaker` | warning | `runtime_flags.flood_until > now` | «⚠️ Telegram FloodWait ({seconds} s) — oʻquvchi {until} gacha qoʻshilmaydi/oʻqimaydi (jonli xabarlar davom etadi)» |
-| `collector_blocked` | warning | any `sources.breaker_until > now` with reason 403/429 | «⚠️ {title}: sayt bloklayapti (403/429) — {until} gacha toʻxtadi» |
-| `collector_silent` | warning | enabled source with cron, `last_run_at` older than 2× its interval | «⚠️ {title} {age} ishlamadi — `/manbalar`» |
-| `cost_cap` | warning, told first by `costs.ask` | today ≥ `DAILY_COST_CAP_USD` or month ≥ monthly cap | «💸 Kunlik xarajat chegarasi ($10) — ertagacha pullik chaqiruvlar toʻxtadi; kollektorlar bepul qismini davom ettiradi» |
+| `collector_blocked` | warning | any `sources.breaker_until > now` with reason `host_blocked:<host>` (the runner writes it beside `paused_until`, same reason, 03 §1.1) | «⚠️ {title}: sayt bloklayapti (403/429) — {until} gacha toʻxtadi» |
+| `collector_silent` | warning | enabled source with cron, `last_run_at` older than 2× its interval — **excluding** sources that are disabled, paused (`paused_until > now`), breaker-paused or globally paused (`/toxtat`): a skipped run writes its `collector_runs(status='skipped')` row but never beats (03 §1.2) | «⚠️ {title} {age} ishlamadi — `/manbalar`» |
+| `cost_cap` | warning, told first by `costs.ask` (once per Tashkent day through `costs.claim_alert`, 04 §8; delivered by the notifier T-08 registers with `costs.set_cap_notifier`) | today ≥ `DAILY_COST_CAP_USD` or month ≥ monthly cap | «💸 Kunlik xarajat chegarasi ($10) — ertagacha pullik chaqiruvlar toʻxtadi; kollektorlar bepul qismini davom ettiradi» |
 | `spend_high` | warning | ≥ `SPEND_ALERT_PCT` of either cap | «⚠️ Xarajat {pct}% ga yetdi (${d}/${cap})» |
 | `no_signals_24h` | warning | userbot enabled, ≥ 1 chat on, zero `interactions` in 24 h | «⚠️ 24 soatda bitta ham Telegram signal yoʻq — chatlar oʻlikmi? `/chats`» |
 | `push_failing` | warning | 3 consecutive candidates failed on 5xx (the ERP's 503 «unavailable» included) or a connection error after their three in-attempt tries | «⚠️ ERP javob bermayapti ({n} ta push muvaffaqiyatsiz)» |
 | `push_unconfirmed` | warning | a delivered `push_log` row (`sent` or `unknown`, not superseded) older than 48 h that no outcomes walk has shown — checked only while the feeds are configured and that night's `cursor` and `recent` walks completed (02 §2.10 rule 5); rule 5 re-pushes each such id once by itself | «⚠️ {n} ta push 48 soatdan beri ERPda koʻrinmadi — bir marta qayta yuborildi; qolganini `/push tekshir` bilan koʻring» |
-| `feed_contract` | warning | one key for every contract break of 05 §B.2 / §B.6 — 05's `feed_bad_request`, `feed_rule_changed`, `feed_runaway` and `FeedShapeError` fold into it with `{code}` ∈ `bad_request` (an ERP 400; the detail carries its `bad_cursor` / `bad_since`) / `rule_changed` / `runaway` (past `MAX_PAGES`, or a `next` equal to the cursor just sent) / `shape` (non-JSON, a missing key, a row with a PII key) | «⚠️ ERP feed shakli oʻzgardi ({code}) — dasturchi kerak» |
+| `feed_contract` | warning | one key for every contract break of 05 §B.2 / §B.6, which raise only this key, with `{code}` ∈ `bad_request` (an ERP 400, or any 4xx but 401/403/404; the detail carries its `bad_cursor` / `bad_since`) / `rule_changed` / `runaway` (past `MAX_PAGES`, or a `next` equal to the cursor just sent) / `shape` (`FeedShapeError`: non-JSON, a missing key, a row with a PII key). `feed_rule_changed`, `feed_shape` and `feed_503` are only fake-ERP modes (05 §B.4), never keys | «⚠️ ERP feed shakli oʻzgardi ({code}) — dasturchi kerak» |
 | `suppression_shrunk` | warning | full pull < 90 % of previous count | «⚠️ ERP roʻyxati {pct}% ga qisqardi — oʻchirish toʻxtatildi» |
 | `review_backlog` | warning | ≥ 30 candidates in `review` older than 72 h | «⚠️ {n} ta karta 3 kundan beri kutmoqda — /lidlar» |
 | `anthropic_failing` | warning | ≥ 5 `API_FAILURES` in 1 h | «⚠️ Anthropic javob bermayapti ({code})» |
-| `anthropic_silence` | warning | no successful Anthropic call for ≥ 3 h (MIYA `ANTHROPIC_SILENCE`) while `model_jobs(status='pending')` exist; while it holds, `costs.ask` refuses `anthropic` ops with code `anthropic_silence` (04 §8 step 6) — signals queue, nothing is lost | «⚠️ Anthropic {age} jim — tasnif navbatda ({n} ta); kalit va status.anthropic.com ni tekshiring» |
+| `anthropic_silence` | warning | no successful Anthropic call for ≥ 3 h (MIYA `ANTHROPIC_SILENCE`) while `model_jobs(status='pending')` exist; while it holds, `costs.ask` refuses `anthropic` ops with code `anthropic_silence` (04 §8 step 6; the check is the one T-08 registers with `costs.set_anthropic_health`) — signals queue, nothing is lost. Because `ask` then refuses the very call that would prove the API back, the problem latches unless the check has a probe path outside `ask` (T-08, 04 Q12) | «⚠️ Anthropic {age} jim — tasnif navbatda ({n} ta); kalit va status.anthropic.com ni tekshiring» |
 | `batch_stuck` | warning | a `model_jobs` Message Batch older than 26 h without `processing_status='ended'` (04 §4.8; after 3 attempts the instant lane takes the jobs) | «⚠️ Tungi batch {age} tugamadi ({batch_id}) — `make worker` loglari; ertaga Sonnet oʻzi oladi» |
 | `pii_leak` | warning | a validator found a raw `+998\d{9}`, `@\w{5,}` or 14-digit run in a model output field (04 §4.7: field dropped, job flagged) — a stop-the-line bug per 07 R13 | «⚠️ Model javobida shaxsiy maʼlumot chiqdi ({n} ta, maydon tashlandi) — dasturchi kerak» |
 | `backup_unconfigured` / `backup_stale` | warning | no recipient / newest older than `BACKUP_MAX_AGE_HOURS` | «⚠️ Zaxira sozlanmagan — `make backup-key`» / «⚠️ Oxirgi zaxira {age}» |
@@ -588,7 +598,9 @@ This table is the one list of keys: 04 §8 raises `spend_high` (its former `cost
 `suppression_stale`, `suppression_shrunk`, `suppression_stale_hit`; `tests/test_health.py`
 fails on a key raised anywhere that is not a row here. Critical problems ignore `QUIET_HOURS`.
 `TOLD_FIRST_ELSEWHERE = {cost_cap, push_404, erp_redirect, flood_breaker}` (their own job says it at once; the
-sweep repeats after `ALERT_REPEAT_HOURS`).
+sweep repeats after `ALERT_REPEAT_HOURS`). `cost_cap` and `spend_high` are said once per Tashkent day by
+`costs` (04 §8) — the repeat rule and that rule disagree for `cost_cap`; T-08 reconciles them (04 Q11:
+recommended, the money keys keep once a day).
 Dead-man: the worker GETs `DEADMAN_PING_URL` every `DEADMAN_PING_MINUTES` from `heartbeat_job`
 (a healthchecks.io-style monitor with a 15-minute grace; the free tier is UNVERIFIED — check
 the plan before relying on it). This is the only alarm that does not depend on the bot.
@@ -624,16 +636,26 @@ outside watcher watches the worker).
 
 JSON lines (`LOG_FORMAT=json`), ids and counts only. `RedactBodies` drops extras named
 `text, body, raw_text, transcript, draft, phone, phones, note, payload, headers, key, secret,
-token, session, html, quote, bio`. A second filter, `RedactPatterns`, rewrites `msg` and
-`exc`:
+token, session, html, quote, bio`. A second filter, `RedactPatterns`, renders the message once
+(`msg % args`, stored back with no args, so no formatter can re-insert an argument) and rewrites it,
+the traceback, the stack and **the value of every other extra** — strings, the strings inside lists,
+tuples and dicts (keys too), the `str()` of anything JSON cannot carry; under a key-header key a value
+becomes `<key>`, under a body-shaped key `<redacted>`; numbers, booleans and None are ids and stay.
+Applied in this order (as built, T-01/T-02 review and seam review):
 
 | pattern | replacement |
 |---|---|
-| `\+?998[\s-]?\d{2}[\s-]?\d{3}[\s-]?\d{2}[\s-]?\d{2}` | `<phone>` |
-| `(?i)(x-gsr-key|x-erp-key|authorization|x-api-key)[=:]\s*\S+` | `\1=<key>` |
 | `sk-ant-[A-Za-z0-9_-]{20,}` · `\d{8,10}:[A-Za-z0-9_-]{35}` · `(?i)telethon_session=\S+` | `<secret>` |
+| `(?i)(x-gsr-key|x-erp-key|proxy-authorization|authorization|x-api-key)["']?\s*[=:]\s*` then an optional `bearer|basic|digest|token|api-key|bot` word and the value, quoted (`'…'`/`"…"`, as a dict's repr prints it) or not | `\1=<key>` (the whole value, the scheme word too — `[=:]\s*\S+` stopped at «Bearer» and logged the credential after it) |
 | `postgresql(\+\w+)?://([^:/]+):([^@]+)@` | `postgresql\1://\2:***@` |
-| `@[A-Za-z][A-Za-z0-9_]{4,31}` (outside URLs) | `@…` |
+| `keywords.EMAIL_RE` (before the handle rule can eat its «@domain») | `<email>` |
+| `keywords.PHONE_RE` — the normaliser's pattern, not a `+998`-only one: «93 517 22 84», «(93) 517-22-84» and nine bare digits are phones (it over-matches, the safe direction for a log) | `<phone>` |
+| `keywords.IG_RE` | the label kept, the handle → `…` («insta: …») |
+| `@[A-Za-z][A-Za-z0-9_]{4,}` (outside URLs: a DSN's «@host» or a link's «user@» is not a handle) | `@…` |
+
+PHONE_RE, EMAIL_RE and IG_RE are imported from `collectors/keywords.py` (§5.2's one-home rule holds
+for the redactor too); `tests/test_logs.py` runs every phone shape of `test_normalise`'s table that
+`parse_phones` reads through a real JSON handler and asserts `parse_phones(line) == []`.
 
 Logged: component, job id, counts, durations, HTTP status, host, `source_key`, `company_id`,
 `candidate_id`, `external_id`, `push_log.id`, error codes, `usage_log` cost. Never logged:
@@ -689,9 +711,13 @@ the batch lane; there is no `services/batch.py`) accept only `Pseudonymised` and
 `tests/test_pseudonyms.py` (round trip, idempotence, stable numbering across a bundle, golden
 Uzbek/Russian/Cyrillic cases); `tests/test_pseudonymised_requests.py` — `tests/conftest.py`
 installs an `httpx.MockTransport` on the Anthropic client for the whole suite that fails any
-test whose request body matches `PHONE_RE`/`TG_RE`; `tests/test_imports_fence.py` (AST) allows
-`import anthropic` only in `services/extraction.py`, `services/model_jobs.py`,
-`services/costs.py`, and `import telethon` only in `userbot/`, `tools/userbot_login.py`.
+test whose request body matches `PHONE_RE`/`TG_RE`; `tests/test_imports_fence.py` (AST, as built in the T-04 integration) holds the
+`anthropic` half: `import anthropic` only in `services/extraction.py`, `services/model_jobs.py`,
+`services/costs.py`; the `telethon` half — only in `userbot/` and `tools/userbot_login.py` — lives in
+`tests/test_collector_imports.py::test_telethon_is_imported_only_by_the_reader` (07 §1.2; one rule,
+one test), and T-15 extends these files rather than adding new ones. `httpx` opens a connection only in
+its four homes (`services/http.py`, `serp.py`, `erp_feeds.py`, `crm_push.py`), package-wide.
+`EMAIL_RE` is defined in `collectors/keywords.py` beside the other three (03 §1.4).
 
 ### 5.3 No outbound contact, ever
 
@@ -718,9 +744,14 @@ async def execute(session, plan, *, requested_by) -> PurgeResult     # one trans
 
 Deleted: `contacts`, `observations`, `interactions` of the subject's `tg_user_id`,
 `model_jobs.request/pseudonyms`, `evidence` raw files whose only rows belong to the subject,
-`company_aliases`, `company_ids`, open `lead_candidates`/`lead_reviews`, `sheet_rows`
+`company_aliases`, `company_ids`, open `lead_candidates`/`lead_reviews` — **except a candidate with
+`push_log` rows**, which `push_log.candidate_id ON DELETE RESTRICT` keeps on purpose (the append-only
+ledger keeps its candidate, 02 §2.10): such a candidate moves to a terminal state instead —
+`suppressed`, pointing at the `legal`/`dnc` row the purge writes (`suppressed_by`, 02 §2.9), or
+`excluded` with `exclude_reason='owner'` for any other purge reason — `sheet_rows`
 (tombstoned). Anonymised: `push_log.payload := NULL`, `companies.display_name := '[oʻchirilgan]'`
-and `state='purged'` when the whole company goes. Kept: `outcomes`, `purge_log` (hash only),
+and `state='purged'` when the whole company goes (a company row is never deleted; a merged source's
+`merged_into` is cleared in the same UPDATE, 02 §2.4). Kept: `outcomes`, `purge_log` (hash only),
 `usage_log`, and hashed `suppression` rows; with `reason='legal_request'` or `'dnc'` a
 `suppression(legal|dnc)` row is written for every key the subject had, so the same company
 cannot be re-created by the next observation. The plan card shows counts, never names.
@@ -753,7 +784,8 @@ outcomes and feed entries.
   (`tests/test_compose.py`). Postgres reachable only from the compose network and `127.0.0.1`.
 - Processes run as uid 10001; `secrets/` is read-only in app containers; `data/` is 0750.
 - Dependencies: every line in `requirements.txt` and `requirements-dev.txt` is `name==x.y.z`
-  (`tests/test_requirements_pinned.py`); starting set from MIYA: `SQLAlchemy==2.0.36`,
+  (`tests/test_requirements_pinned.py`, built in the T-01/T-02 review: exact pins, the dev file
+  includes the runtime one, no heavy or out-of-scope package); starting set from MIYA: `SQLAlchemy==2.0.36`,
   `alembic==1.14.0`, `psycopg[binary,pool]==3.2.3`, `APScheduler==3.11.0`, `httpx==0.28.1`,
   `anthropic==0.122.0`, `aiogram==3.30.0`, `Telethon==1.44.0`, `rapidfuzz==3.14.5`,
   `pydantic==2.10.4`, `pydantic-settings==2.7.1`, `openpyxl==3.1.5` (versions as of MIYA's
@@ -782,12 +814,12 @@ weights, 02 AC 1); nothing here waits for a `0002`. The table says where 06 read
 
 1. VPS per §3.5; `ufw` enabled; Docker installed; repo cloned; `make env`; fill `.env`; `chmod 600 .env`.
 2. `make backup-key`; secret key stored off-server (two places); `BACKUP_AGE_RECIPIENT` set.
-3. `make doctor` green; `make up`; `make ps` shows db, worker, userbot, bot healthy; `/holat` from the owner account answers.
+3. `make doctor` green; `make up`; `make ps` shows db healthy and worker, userbot, bot running, each with a fresh heartbeat (§3.1: the app containers carry no healthcheck of their own unless T-08 adds heartbeat-based ones); `/holat` from the owner account answers.
 4. BotFather: bot created, group joining disabled; owner and every manager `/start` the bot; `make doctor` shows each manager id reachable.
 5. Reader account: SIM aged ≥ 30 days (§2, 03 §2.3), 2FA, `make userbot-login`, `make reload`, `/chats` lists the 3 seed chats within 24 h.
-6. ERP (fullprompt `agent-feed` deployed — the build stamp at `/api/version` is newer than the merge; no migration, so the count proves nothing): the owner's five steps of 05 §A.14 done — key minted, «Qayta qilinmasin» in the dictionary, routing rules A and B present, `kub` mapped after the first test push, `agent_no_contact_reasons` matches the label; `make push-test` → 200 (a new `external_id` each run); `CRM_PUSH_ENABLED=true`; first delta pull shows a non-zero suppression count in `/holat`.
-7. Fallback if `agent-feed` is not deployed: `CRM_PUSH_SOURCE=other`, `make import-clients FILE=clients.xlsx APPLY=1`, `PUSH_DAILY_CAP=10`.
-8. Billing: Anthropic monthly limit $150 and e-mail alert at $100; Google Cloud budget $5/month with hard cap; Brave $5 credit only (the code side is 33 queries/day and ≤ 1,000/month in `costs.ask`, 03 §1.3 / 04 §8 — past the credit the card is charged silently); Apify prepaid ≤ $20.
+6. ERP (fullprompt `agent-feed` deployed — the build stamp at `/api/version` is newer than the merge; no migration, so the count proves nothing): the owner's five steps of 05 §A.14 done — key minted, «Qayta qilinmasin» in the dictionary, routing rules A and B present, `kub` mapped after the first test push, `agent_no_contact_reasons` matches the label; `make push-test` → 200 (a new `external_id` each run); `CRM_PUSH_ENABLED=true`; first delta pull shows a non-zero suppression count in `/holat`; the read-only count of client cards whose `phones` is not a JSON array is known (07 §5.3 — on `agent-feed` such a card is never suppressed, 05 §A.13).
+7. Fallback if `agent-feed` is not deployed: the same count first (on production one such card makes every push land nowhere, 05 §B.3); `CRM_PUSH_SOURCE=other`, `make import-clients FILE=clients.xlsx APPLY=1` (exported from an unfiltered client screen, 03 §2.2), `PUSH_DAILY_CAP=10`.
+8. Billing: Anthropic monthly limit $150 and e-mail alert at $100; Google Cloud budget $5/month with hard cap; Brave $5 credit only (the code side is 32 queries/day — 0.165 under the ≥ rule — and ≤ 1,000/month in `costs.ask`, 03 §1.3 / 04 §8 — past the credit the card is charged silently); Apify prepaid ≤ $20.
 9. `DEADMAN_PING_URL` configured and a test alert received on the owner's phone; `make backup` run once by hand and the file seen in Telegram; `make restore … DRY=1` on the file.
 10. Legal: pd.gov.uz registration filed (owner); `docs/huquqiy-memo.md` §4 checklist signed off; managers briefed on `docs/sotuv-playbook.md` §2 (own account, 10:00–17:00, opt-out line).
 11. Week 1 settings: `REVIEW_DAILY_CAP=20`, `PUSH_DAILY_CAP=10`, one manager in `MANAGER_TELEGRAM_IDS`; raise after the first weekly review.
@@ -815,6 +847,7 @@ weights, 02 AC 1); nothing here waits for a `0002`. The table says where 06 read
 6. Co-location with MIYA on one VPS: acceptable with separate projects (§3.5), or a second VPS from day 1?
 7. Should `/qidir` be available to managers (shows suppression kind, which reveals «client of ours» for a phone)? Recommended: yes — that is exactly what stops a wrong call.
 8. `QUIET_HOURS=21:00-08:00` for warnings; the owner may prefer MIYA's `23:30-07:30` so evening pushes' failures are seen the same night.
+9. **App-service healthchecks (T-08).** §3.1's compose gives only `db` a healthcheck; «healthy» for worker, userbot and bot is «running + a fresh heartbeat». Add a heartbeat-based container healthcheck per app service (`tools/healthcheck <component>` reading `heartbeats.last_seen_at`) so `make ps` and `docker compose up --wait` say it — recommended once each process beats — or keep the heartbeat as the only signal?
 
 ## Acceptance criteria
 
@@ -878,3 +911,12 @@ Not applied here (other files' homes): 2, 5, 11, 16, 20–23, 25, 26, 28, 32, 36
 **T-07 fourth review (2026-10-24)** — fullprompt `agent-feed` moved to `d138b3bc` (DECISIONS #1476–#1477; 05 §A.0):
 
 - §4.6 «Duplicate pushes suspected»: the orphan after a 503 half-way names the one known input-driven cause that repeats on every attempt — a body of tens of MB (about 40 MB of JSON, measured in postgres), which the agent's few-KB bodies cannot reach. The fourth review's other fix (an `external_id` too long for the ledger's index stored as `sha256:<hex>`) needs nothing here: the agent's ids are 46 bytes.
+
+**Wave 1 as built (2026-10-24)** — folded from the wave-1 build notes, the T-02 review and the seam review, checked against `docker-compose.yml`, `Makefile`, `logs.py`, `services/costs.py`, `services/http.py`, `tests/test_imports_fence.py` and `tests/test_collector_imports.py` at `f8c3303`; the door wording against fullprompt `agent-feed` `d138b3bc`:
+
+- §1.2/§1.4 `/xarajat` names come from `companies.display_name` (rendering is T-21's). §1.5 the command grammar is parsed with `re.fullmatch` — `^…$` under `re.match` accepts a trailing newline.
+- §3.1 «healthy» means running plus a fresh heartbeat (the app services carry no container healthcheck; Q9), with `test_compose`/`test_requirements_pinned`. §3.3 `make revision` (`scripts/revision_id.py`, `000N_<slug>`), `make test`'s files, `make db-test`, the hooks.
+- §4.2: `collector_blocked` reads `breaker_until` (the breaker writes both columns); `collector_silent` excludes disabled, paused, breaker-paused and globally paused sources (a skipped run never beats); `cost_cap` is one `claim_alert` claim, delivered through `set_cap_notifier`; `feed_contract`'s codes named as 05 §B.2 names them; `anthropic_silence` latches while `ask` refuses every Anthropic op (04 Q12); the repeat conflict with `ALERT_REPEAT_HOURS` noted (04 Q11).
+- §4.5 the redactor as built: the key-header row scheme-aware (`x-gsr-key | x-erp-key | proxy-authorization | authorization | x-api-key`), phones by `keywords.PHONE_RE`, `EMAIL_RE` → `<email>`, `IG_RE` → the handle masked. §5.2 `test_imports_fence.py` holds the anthropic half, the telethon half lives in `test_collector_imports` (telethon also allowed in `tools/userbot_login.py`), the httpx homes are package-wide, `EMAIL_RE` lives in `keywords.py`.
+- §5.4 a purged company's candidate that has `push_log` rows (RESTRICT) is not deleted: it moves to `suppressed`, or to `excluded` (`owner`) for other reasons, and `merged_into` pointing at the company is cleared (decided here). §5.6 pinned requirements. §7.1 steps 3, 6, 7 and 8 (Brave 32/day).
+- Open question 9 added: app-service healthchecks.

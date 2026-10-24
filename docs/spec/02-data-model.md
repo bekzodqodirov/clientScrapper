@@ -12,33 +12,39 @@ Scope: every table of the shared contract, its DDL, who writes and reads it, the
 | Enumerations | **CHECK constraints**, never native enums. Allowed values are frozen tuples in `clientscrapper/db/enums.py` and rendered with `sql_list()` (MIYA `models.py` `_sql_list` / `SheetRow` pattern). A migration keeps its own frozen copy; `tests/test_enums_frozen.py` holds the two equal. `pg_enum()` stays in `base.py` unused. |
 | Names | `ix_<table>_<cols>` index, `ux_<table>_<what>` unique (partial) index, `uq_<table>_<cols>` unique constraint, `ck_<table>_<rule>` check, `fk_<table>_<col>` foreign key, `pk_<table>`. MIYA names every constraint explicitly; we do the same and additionally set `Base.metadata.naming_convention` so an autogenerate diff is empty. Inline column CHECKs written unnamed in this document are declared in the ORM as `CheckConstraint(..., name="ck_<table>_<column>")`. |
 | Numbers | Cost `numeric(12,6)` USD; volume `numeric(12,3)` m³; score `smallint 0–100`. Never float for money. |
-| FK hygiene | Every FK with `CASCADE`/`SET NULL` has an index (MIYA WP-23). `tests/test_fk_indexes.py` walks `Base.metadata`. |
+| FK hygiene | Every FK with `CASCADE`/`SET NULL`/`RESTRICT` has an index (MIYA WP-23; RESTRICT is checked on every parent delete too). `tests/test_fk_indexes.py` walks `Base.metadata`. **No CHECK spans an `ON DELETE SET NULL`/`SET DEFAULT` column** (fullprompt #809: the referential action runs, the CHECK then fails the parent's DELETE): such a rule is a RESTRICT FK or a trigger instead (§2.4 `merged_into`, §2.9 `trg_lead_candidates_suppressed`); `tests/test_migrations.py::test_no_check_spans_a_set_null_foreign_key_column` reads the catalog. |
+| Key CHECKs | A column «stored only as its key» reads `col IS NOT DISTINCT FROM cs_key(col)`, never `col = cs_key(col)`: the key functions answer NULL for what they refuse, and a CHECK reads the NULL of `x = NULL` as passed. A NULL column stays legal (§2.4, §2.8, §2.12). |
 | PII placement | Person-tier fields live only in `contacts`; transiently in `interactions.sender_*`, `observations.parsed`, `push_log.payload`, `model_jobs.pseudonyms` — each with a retention step (§4). `tests/test_pii_columns.py` keeps an allowlist of such columns; any other column whose name matches `phone|name|username|bio|email` fails the test. |
 | Append-only | `push_log`, `outcomes`, `merge_log`, `purge_log`, `usage_log` refuse `DELETE` through trigger `cs_append_only` (retention nulls columns, never deletes rows). |
 
 ## 1. Key normalisation — one home
 
-Python (`clientscrapper/services/keys.py`) is the writer of every normalised key; SQL mirrors exist for CHECKs, generated columns and ad-hoc queries. `tests/test_keys.py` runs both over one fixture list and demands equality.
+Python (`clientscrapper/services/keys.py`) is the writer of every normalised key and the home of every function below — the phone ones too (`phone_e164`, `phone_tail`, `phone_kind`), with `site_key`, `loose_key`, `instagram_key`, `stir_key`, `name_key` and `MOBILE_CODES`/`LANDLINE_CODES`; `services/normalise.py` re-exports the three phone functions (04 §1.1 spells them as its own) and turns free text into these keys. SQL mirrors exist for CHECKs, generated columns and ad-hoc queries. `tests/test_keys.py` runs both over one fixture list and demands equality.
 
 ```python
 def phone_tail(raw: str | None) -> str | None:
     """Digits only; >= 9 digits -> last 9, else None. Identical to the ERP's inboundPhoneDigits."""
 
-def phone_e164(raw: str | None) -> str | None:
-    """'+998XXXXXXXXX'. A bare 9-digit UZ number gets +998; landlines/short codes kept; otherwise None."""
+def phone_e164(raw: str | None, *, city: str | None = None) -> str | None:
+    """'+998XXXXXXXXX' for a UZ number of exactly 9 national digits (04 §1.1 rules 1–8: a bare
+    9-digit number gets +998; 7 digits only when city is Toshkent); '+<digits>' for a foreign one;
+    otherwise None. A UZ number needs nine national digits, so no short code is ever produced."""
 
 def phone_kind(e164: str) -> Literal["mobile", "landline", "short", "unknown"]:
-    """+9989x/+9983x/+9987x/+9988x -> mobile; +99871/+99861… -> landline; <7 digits -> short."""
+    """By the two digits after +998 (04 §1.1, keys.MOBILE_CODES / LANDLINE_CODES): 33 77 88 90 91
+    93 94 95 97 98 99 -> mobile; 61 62 65 66 67 69 70–79 except 77 -> landline; 20/50/55 -> unknown until 04 Q4
+    confirms them; < 7 national digits -> short (never produced from phone_e164's output — the
+    value stays in the enum for a hand-entered contact); a foreign number or an unlisted code -> unknown."""
 
 def username_key(raw: str | None) -> str | None:
-    """Strip https://, www., t.me/, telegram.me/, '@', anything from '/', '?', '#'; lowercase;
-    must match ^[a-z0-9_]{5,32}$ and not end with 'bot'."""
+    """Strip https://, www., t.me/, telegram.me/ (the prefix in either case, ASCII only), '@',
+    anything from '/', '?', '#'; lowercase; must match ^[a-z0-9_]{5,32}$ and not end with 'bot'."""
 
 def instagram_key(raw: str | None) -> str | None:
     """Strip instagram.com/, '@', trailing '/', query; lowercase; ^[a-z0-9._]{1,30}$."""
 
 def domain_key(raw: str | None) -> str | None:
-    """urlsplit host (or the raw string when no scheme); lowercase; IDNA-encode; strip leading 'www.';
+    """urlsplit host (or the raw string when no scheme); lowercase; IDNA-encode; strip every leading 'www.';
     None for social/marketplace hosts (instagram.com, t.me, telegram.me, facebook.com, olx.uz,
     uzum.uz, youtube.com, wa.me) — those are handles, not websites."""
 
@@ -47,7 +53,7 @@ def stir_key(raw: str | None) -> str | None:
     v1 validates shape only."""
 
 def name_key(raw: str) -> str:
-    """fold_apostrophes -> transliterate (Cyrillic->Latin) -> lower -> strip «»“”" -> strip legal forms
+    """fold_apostrophes -> transliterate (Cyrillic->Latin) -> lower -> drop diacritics -> strip «»“”" -> strip legal forms
     (MChJ, OOO, ООО, LLC, QK, AJ, XK, ChP, ЧП, IP, ИП, YaTT, SP, ТОО) -> collapse spaces. From services/text.py."""
 
 def erp_phone_hash(secret: str, tail9: str) -> str:
@@ -67,7 +73,8 @@ CREATE FUNCTION cs_phone_tail(raw text) RETURNS text LANGUAGE sql IMMUTABLE STRI
 CREATE FUNCTION cs_username_key(raw text) RETURNS text LANGUAGE sql IMMUTABLE STRICT AS $$
   SELECT CASE WHEN u ~ '^[a-z0-9_]{5,32}$' AND u !~ 'bot$' THEN u END
   FROM (SELECT lower(regexp_replace(regexp_replace(trim(raw),
-          '^([A-Za-z]+://)?(www\.)?(t\.me/|telegram\.me/)?@?', ''), '[/?#].*$', '')) AS u) s $$;
+          '^([A-Za-z]+://)?([Ww][Ww][Ww]\.)?([Tt]\.[Mm][Ee]/|[Tt][Ee][Ll][Ee][Gg][Rr][Aa][Mm]\.[Mm][Ee]/)?@?',
+          ''), '[/?#].*$', '')) AS u) s $$;
 
 CREATE FUNCTION cs_domain_key(raw text) RETURNS text LANGUAGE sql IMMUTABLE STRICT AS $$
   SELECT CASE WHEN h ~ '^[a-z0-9-]+(\.[a-z0-9-]+)+$'
@@ -83,7 +90,7 @@ CREATE FUNCTION cs_append_only() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN RAISE EXCEPTION '% is append-only', TG_TABLE_NAME; END $$;
 ```
 
-(SQL `cs_domain_key` does not IDNA-encode; Python stores the encoded value, so the CHECK `website_domain = cs_domain_key(website_domain)` holds for stored values.)
+Two designed differences between `domain_key` and `cs_domain_key`, both so a stored value is a fixed point of its CHECK `website_domain IS NOT DISTINCT FROM cs_domain_key(website_domain)`: SQL does not IDNA-encode (Python stores the encoded value), and SQL strips **one** leading `www.` while Python strips every one — `cs_domain_key('www.www.x.uz')` is `www.x.uz`, whose own key is `x.uz`, so the SQL function is not idempotent and a byte-exact mirror would write a row its CHECK refuses. A later migration may make the SQL strip `'^(www\.)+'` (§5); until then Python never writes such a value. `cs_username_key` matches the scheme, `www.` and the `t.me`/`telegram.me` host in either case as ASCII classes (not the `i` flag), the same letters Python folds.
 
 ## 2. Tables
 
@@ -121,6 +128,7 @@ CREATE TABLE sources (
 
 Seeded in `0001` — **23 rows**, `enabled=false` unless stated. **Schedulable units** (the runner reads `enabled/paused_until/daily_page_budget/daily_cost_cap_usd` by `Collector.key`, 03 §1.2): `telegram_monitor`, `instagram_discovery`, `olx_business`, `uzum_sellers`, `directories` (family `directory`), `hh_vacancies`, `exhibitors`, `maps` (family `maps`), `brand_dealers`, `serp_layer` (family `search`), `registry_lookup`, `erp_sync`, `manual`, `enrich_site` (family `search`, `enabled=true`, `cron=NULL`: pages fetched by enrichment, 04 §3). **Attribution-only sub-sources** (`cron=NULL`, never scheduled; they exist so `evidence.source_key`, `observations.source_key`, `contacts.source_key` and `usage_log.source_key` can name the engine or directory that produced a row): `directories_goldenpages`, `directories_yellowpages`, `directories_glotr`, `directories_prom`, `maps_2gis`, `maps_google`, `search_brave`, `search_yandex`, `search_searxng`. `erp_sync.config = {"suppression":{"salt_id":null,"last_full_at":null,"last_delta_at":null,"count":0},"outcomes":{"cursor":null,"last_at":null}}`.
 Auto-push rule stored here: `auto_push` may be true only when `pushes_30d >= 15 AND precision_30d >= 0.60` — `source_precision_job` (05 §B.2) flips it both ways weekly, except that it never flips it **on** while `config.auto_push_forbidden` is true (the owner's `src:<key>:a` in 06 §1.2 can only forbid, never grant).
+A parent row's dollar budget counts its sub-sources' spend: `Budget.usd = daily_cost_cap_usd − spend(source_key, with_subsources=True)` (`costs.source_budget_usd`, the one home), where `costs.SUBSOURCE_PREFIXES = {"serp_layer": ("search_",), "directories": ("directories_",), "maps": ("maps_",)}` — a call is recorded under the sub-source it was made for (`search_brave`) and budgeted on the parent (`serp_layer`), and the runner refuses a paid call attributed to anything but the run's row or one of those sub-sources (03 §1.2 `UnattributedCall`). A host breaker (03 §1.1) writes **both** pause pairs on the run's row: `paused_until` (the runner skips the row) and `breaker_until` (06 §4.2 `collector_blocked` reads it), each with reason `host_blocked:<host>`; on `erp_sync`, `breaker_until` is also the push/feed breaker (`push_404`, `erp_redirect`, 02 §2.10 rule 4).
 W/R: 0001 seed, bot `/manbalar` (enabled, paused), worker (`last_run_at`, breaker, precision, auto_push, config cursors) / scheduler, collectors, gate, `/holat`.
 
 ### 2.2 `collector_runs` — one row per collector execution
@@ -142,7 +150,7 @@ CREATE TABLE collector_runs (
   new_signals      integer NOT NULL DEFAULT 0,
   cost_usd         numeric(12,6) NOT NULL DEFAULT 0,
   error            text,                                      -- an error code (timeout|host_blocked|budget|…), never a body; a host breaker ends the run status='failed', error='host_blocked' (there is no 'blocked' status)
-  meta             jsonb NOT NULL DEFAULT '{}'::jsonb,         -- runner extras: {unchanged, skipped_robots, note, truncated, variant} (03 §1.2); live smoke runs write note='smoke'
+  meta             jsonb NOT NULL DEFAULT '{}'::jsonb,         -- runner extras (03 §1.2): unchanged, skipped_robots, truncated (evidence stored without a file), and when set: note, variant, fetch_truncated (answers cut at 5 MB), captcha, duplicates, serp_hits, dropped {bad_evidence, bad_observation}, exhausted (pages|usd|deadline|cost_cap|refused|model_unavailable), refused (the costs.ask code), blocked_hosts, problem, sources (per sub-source counts), deadline_at; live smoke runs write note='smoke'
   CONSTRAINT ck_collector_runs_finished CHECK (finished_at IS NULL OR finished_at >= started_at)
 );
 CREATE INDEX ix_collector_runs_source_started ON collector_runs (source_key, started_at DESC);
@@ -195,8 +203,8 @@ CREATE TABLE companies (
   city             text,
   region           text,
   address          text CHECK (length(address) <= 300),
-  website_domain   text CHECK (website_domain = cs_domain_key(website_domain)),
-  telegram_channel text CHECK (telegram_channel = cs_username_key(telegram_channel)),   -- the @company channel
+  website_domain   text CHECK (website_domain IS NOT DISTINCT FROM cs_domain_key(website_domain)),
+  telegram_channel text CHECK (telegram_channel IS NOT DISTINCT FROM cs_username_key(telegram_channel)),   -- the @company channel
   instagram        text CHECK (instagram = lower(instagram)),                            -- the company account
   registry_status  text NOT NULL DEFAULT 'unknown' CHECK (registry_status IN ('unknown','active','inactive','liquidated')),
   registered_on    date,
@@ -209,7 +217,7 @@ CREATE TABLE companies (
   is_state_body    boolean NOT NULL DEFAULT false,
   state            text NOT NULL DEFAULT 'new' CHECK (state IN ('new','active','excluded','client','suppressed','merged','purged')),
   exclude_reason   text,
-  merged_into      uuid REFERENCES companies(id) ON DELETE SET NULL,
+  merged_into      uuid REFERENCES companies(id) ON DELETE RESTRICT,   -- RESTRICT: ck_companies_merged spans it (§0)
   dup_of           uuid REFERENCES companies(id) ON DELETE SET NULL,   -- resolver's 80–89 fuzzy band (04 §2.2): the «🔀 Birlashtir» proposal; cleared by merge or by the owner
   dup_score        smallint CHECK (dup_score BETWEEN 0 AND 100),        -- no CHECK pairing it with dup_of: ON DELETE SET NULL clears dup_of alone
   verdict          jsonb,                                -- last RelevanceVerdict (model output only)
@@ -262,7 +270,7 @@ CREATE TABLE contacts (
   phone             text CHECK (phone ~ '^\+[1-9][0-9]{6,14}$'),
   phone_tail        char(9) GENERATED ALWAYS AS (cs_phone_tail(phone)) STORED,
   phone_kind        text CHECK (phone_kind IN ('mobile','landline','short','unknown')),
-  telegram_username text CHECK (telegram_username = cs_username_key(telegram_username)),
+  telegram_username text CHECK (telegram_username IS NOT DISTINCT FROM cs_username_key(telegram_username)),
   telegram_id       bigint,
   instagram         text CHECK (instagram = lower(instagram)),
   email             text CHECK (email ~ '^[^@[:space:]]+@[^@[:space:]]+$'),
@@ -290,7 +298,7 @@ CREATE INDEX ix_contacts_tg_username ON contacts (telegram_username) WHERE teleg
 CREATE INDEX ix_contacts_tg_id       ON contacts (telegram_id) WHERE telegram_id IS NOT NULL;
 CREATE INDEX ix_contacts_instagram   ON contacts (instagram) WHERE instagram IS NOT NULL;
 ```
-Rules: `ux_contacts_one_person` is the "one person per company" law; a second decision maker replaces the first (old row anonymised, not deleted). Company-tier rows hold switchboard phones, `info@`, the @company handle. `google_place` id_value is the only thing kept from Places for longer than 30 days (policy): a Places phone copied into `contacts` (`source_key='maps_google'`) is cleared by retention step R4b (§4) unless a push already used it. A poster's personal Telegram id is person-tier — `contacts.telegram_id`, never `company_ids` (`ID_TYPES` has no `tg_user`). W/R: resolver (`services/companies.py`), enrichment, bot `edit_phone` / `/stir`, merge, retention / scorer, card, push, suppression gate.
+Rules: **a company row is never deleted** — purge sets `state='purged'` (06 §5.4) — so `merged_into` is `ON DELETE RESTRICT` and `ck_companies_merged` is the lineage rule; a merge target is pinned by `merge_log.target_company_id` RESTRICT as well. Purging a merged source sets `state='purged'` **and** `merged_into = NULL` in the same UPDATE, or the CHECK refuses it. `ux_contacts_one_person` is the "one person per company" law; a second decision maker replaces the first (old row anonymised, not deleted). Company-tier rows hold switchboard phones, `info@`, the @company handle. `google_place` id_value is the only thing kept from Places for longer than 30 days (policy): a Places phone copied into `contacts` (`source_key='maps_google'`) is cleared by retention step R4b (§4) unless a push already used it. A poster's personal Telegram id is person-tier — `contacts.telegram_id`, never `company_ids` (`ID_TYPES` has no `tg_user`). W/R: resolver (`services/companies.py`), enrichment, bot `edit_phone` / `/stir`, merge, retention / scorer, card, push, suppression gate.
 
 ### 2.5 `observations` — one parsed finding, before resolution
 
@@ -346,7 +354,7 @@ CREATE INDEX ix_observations_name_key ON observations ((parsed->>'name_key'));
   "collector_version": "telegram_monitor@1"
 }
 ```
-Validators: `name_key` recomputed from `company.name_raw`; `phones[].e164`/`kind` recomputed; `excerpt ≤ 600`; any 14-digit run anywhere → the field is dropped and `hints.pinfl_dropped=true`; `person` is kept only when `kind ∈ {intent_post, profile, vacancy, registry}` (a directory entry names a firm, not a person). W/R: collectors (via normaliser) / resolver (`resolve_job`), retention.
+Validators (`normalise.to_observation_json`, the only writer): `name_key` recomputed from `company.name_raw` — except for a person-shaped name, which moves to `person.name` and is replaced by `'<source label> <external id>'` (03 §2.5: `OLX sotuvchi <olx_user_id>`, `Uzum sotuvchi <uzum_shop_slug>`) with `name_key = null`: two such labels would fuzzy-match each other and merge two sellers, while the external id resolves them exactly; `phones[].e164`/`kind` recomputed; `excerpt ≤ 600`; a 14-digit run — a maximal run of **exactly** 14 digits, so a 17-digit 2GIS firm id or Graph user id survives — anywhere → the field is dropped and `hints.pinfl_dropped=true`; `person` is kept only when `kind ∈ {intent_post, profile, vacancy, registry, seller}` (`normalise.PERSON_KINDS`; `seller` so a person-shaped OLX `user.name` has a place to live — a directory entry names a firm, not a person); the whole tree is storable — no U+0000, lone surrogates → U+FFFD (`text.storable`), non-finite floats → null, and `hints.volume_m3` treats NaN/∞ as no volume. W/R: collectors (via normaliser) / resolver (`resolve_job`), retention.
 
 
 #### Observation kinds across sections (mapping)
@@ -355,17 +363,20 @@ Validators: `name_key` recomputed from `company.name_raw`; `phones[].e164`/`kind
 
 | 03 `Observation.kind` | collector family | stored `parsed.kind` |
 |---|---|---|
-| `post` | telegram_monitor | `intent_post` |
+| `post` | telegram_monitor, a group post | `intent_post` |
+| `post` | telegram_monitor, a channel's own post (`attrs.chat_type='channel'`) | `profile` |
 | `company` | instagram_discovery, telegram about (E3) | `profile` |
 | `company` | directories, maps, exhibitors (company card) | `directory_entry` |
 | `company` | brand_dealers | `dealer_page` |
-| `company` | registry lookups (E4) | `registry` |
+| `company` | registry lookups (E4), tenders | `registry` |
+| `company` | a page fetched under a `search_*` engine row | `directory_entry` |
+| `company` | any other source (`enrich_site`, a fetched company site) | `profile` |
 | `company` | olx_business / uzum_sellers seller profile | `seller` |
 | `listing` | olx_business, marketplaces, B2B catalogues | `listing` |
 | `vacancy` | hh_vacancies | `vacancy` |
 | `exhibitor` | exhibitors | `exhibitor` |
 | `place` | maps | `place` |
-| `serp_hit` | serp_layer | not an observation: it only enqueues a URL for the owning collector (`sources.config.queue`) and is kept as `evidence` with `source_key='search_*'` |
+| `serp_hit` | serp_layer | not an observation (`normalise.NOT_OBSERVATIONS`; `parsed_kind` raises): it only enqueues a URL for the owning collector (`sources.config.queue`) and is kept as `evidence` with `source_key='search_*'` — the card or site fetch that follows emits the observation (04 §1.6) |
 | `suppression`, `outcome` | erp_sync | not observations: written straight to `suppression` / `outcomes` (05 §B.2) |
 
 Rows whose `source_key = 'maps_google'` get `expires_at = fetched_at + 30 d` instead of the default 180 d (Maps terms); R4b clears any phone copied from them that produced no push.
@@ -446,6 +457,7 @@ CREATE TABLE scoring_weights (
   approved_by    text,
   approved_at    timestamptz,
   PRIMARY KEY (version, key),
+  CONSTRAINT ck_scoring_weights_approved CHECK ((approved_by IS NULL) = (approved_at IS NULL)),
   CONSTRAINT ck_scoring_weights_key CHECK (key IN (
     'vol_container','vol_stated_3plus','vol_stated_1_3','vol_wholesale_bulky','vol_marketplace_velocity',
     'vol_vacancy_import','vol_exhibitor','vol_directory_wholesale','cn_origin','cn_sector_prior',
@@ -485,9 +497,9 @@ CREATE INDEX ix_scoring_weights_approved ON scoring_weights (version) WHERE appr
 | neg_state_body | negative | −20 | — | `davlat|ГУП|министер|hokimiyat|maktab|shifoxona` |
 | flag_competitor, flag_supplier_cn | gate | 0 | — | evidence for an exclusion; no points |
 
-Group caps sum to 100. `score = max(0, min(100, Σ capped positive groups) + Σ negatives)`; a signal past `expires_at` counts `points × decayed_factor`. `tests/test_weights_seed.py`: every key in both tuples has exactly one row in version 1, caps sum to 100, version 1 is approved.
+Group caps sum to 100. `score = max(0, min(100, Σ capped positive groups) + Σ negatives)`; a signal past `expires_at` counts `points × decayed_factor`. `tests/test_weights_seed.py`: every key in both tuples has exactly one row in version 1, caps sum to 100, version 1 is approved (by the activation UPDATE of the next paragraph, §5).
 
-**Versioning rules.** A version is a complete set (one row per key). Active version = `max(version) WHERE approved_at IS NOT NULL`. Activation = one `UPDATE … SET approved_by, approved_at WHERE version = $1` after `services/scoring.validate_version()` (completeness, caps, each weight within ±30 % of the previous version unless `proposed_by` starts with `owner:`). Trigger `cs_scoring_weights_frozen` (BEFORE UPDATE OR DELETE) refuses any change other than setting `approved_*` once `approved_at IS NOT NULL`. `/vazn key points` copies the active version into `version+1`, applies the change and approves it. `lead_candidates.weights_version` + `score_breakdown` make every score reproducible. W/R: 0001 seed, bot `/vazn`, `tools/fit_weights.py` / `score_job`.
+**Versioning rules.** A version is a complete set (one row per key). Active version = `max(version) WHERE approved_at IS NOT NULL`. Activation = one `UPDATE … SET approved_by, approved_at WHERE version = $1` after `services/scoring.validate_version()` (completeness, caps, each weight within ±30 % of the previous version unless `proposed_by` starts with `owner:`). Trigger `cs_scoring_weights_frozen` (BEFORE UPDATE OR DELETE) refuses every DELETE and, once `approved_at IS NOT NULL`, **any** change to the row (`NEW IS DISTINCT FROM OLD`): no un-approve/edit/re-approve, no move to another version, no edit of `key`, `note`, `proposed_by` or `created_at`, no second approval — `approved_*` can be set only while `approved_at IS NULL`, and `ck_scoring_weights_approved` sets them together. An INSERT into an approved version is not refused by a trigger: the primary key blocks additions to version 1 (every key exists), and completeness of a later version is `validate_version`'s job (T-18). `/vazn key points` copies the active version into `version+1`, applies the change and approves it. `lead_candidates.weights_version` + `score_breakdown` make every score reproducible. W/R: 0001 seed, bot `/vazn`, `tools/fit_weights.py` / `score_job`.
 
 ### 2.8 `suppression` — the do-not-contact set
 
@@ -507,8 +519,8 @@ CREATE TABLE suppression (
   CONSTRAINT ck_suppression_phone_tail CHECK (key_type <> 'phone_tail' OR key ~ '^[0-9]{9}$'),
   CONSTRAINT ck_suppression_phone_hash CHECK (key_type <> 'phone_hash' OR (key ~ '^[0-9a-f]{20}$' AND salt_id IS NOT NULL)),
   CONSTRAINT ck_suppression_stir       CHECK (key_type <> 'stir' OR key ~ '^[0-9]{9}$'),
-  CONSTRAINT ck_suppression_username   CHECK (key_type <> 'tg_username' OR key = cs_username_key(key)),
-  CONSTRAINT ck_suppression_domain     CHECK (key_type <> 'domain' OR key = cs_domain_key(key)),
+  CONSTRAINT ck_suppression_username   CHECK (key_type <> 'tg_username' OR key IS NOT DISTINCT FROM cs_username_key(key)),
+  CONSTRAINT ck_suppression_domain     CHECK (key_type <> 'domain' OR key IS NOT DISTINCT FROM cs_domain_key(key)),
   CONSTRAINT ck_suppression_erp_kinds  CHECK (kind NOT IN ('client','lost') OR source IN ('erp_feed','outcomes','manual_import')),
   CONSTRAINT ck_suppression_cooldown   CHECK ((kind = 'cooldown') = (expires_at IS NOT NULL)),
   CONSTRAINT uq_suppression_key UNIQUE (kind, key_type, key)
@@ -517,6 +529,8 @@ CREATE INDEX ix_suppression_lookup    ON suppression (key_type, key);
 CREATE INDEX ix_suppression_feed_seen ON suppression (last_seen_at) WHERE source = 'erp_feed';
 CREATE INDEX ix_suppression_expiry    ON suppression (expires_at) WHERE expires_at IS NOT NULL;
 ```
+
+No SQL shape CHECK exists for the `instagram`, `tg_user_id` and `company_id` key types (there is no SQL Instagram mirror, by design — `services/suppression.py` writes them through `keys.instagram_key` and typed ids); `phone_tail`, `phone_hash`, `stir`, `tg_username` and `domain` have theirs.
 
 Kinds: `client`/`lost` from the ERP feed (hashed phones, `source='erp_feed'`), from outcomes (`won`/`landed_client`/`dropped_suppressed` → `client`, `lost_no_contact` → `lost`; clear `phone_tail` and, for `lost`, the company's other keys; `source='outcomes'`, `reason='outcome:<external_id>'` or `'erp_belt:<external_id>'` — recomputed from the company's current labels, so a label that changes retracts its rows, §2.11) or from the XLSX fallback (`make import-clients` / `/import`: clear `phone_tail`, `source='manual_import'`, 05 §B.3 — retired by the first successful full pull, 05 §B.2 step 5); `dnc` («yozmang», owner button), `bounced` (wrong number ×2 — the first time is `reason='wrong_number_1'` on a `cooldown` of 30 d, the second makes it permanent), `legal` (removal request), `competitor`, `manager_veto` («bu bizga kerak emas»), `b2c`, `cooldown` (lost for price: 180 d).
 
@@ -555,8 +569,9 @@ CREATE TABLE lead_candidates (
   CONSTRAINT ck_lead_candidates_excluded CHECK (state <> 'excluded' OR exclude_reason IS NOT NULL),
   CONSTRAINT ck_lead_candidates_pushed   CHECK (state <> 'pushed' OR (external_id IS NOT NULL AND pushed_at IS NOT NULL)),
   CONSTRAINT ck_lead_candidates_approved CHECK (state NOT IN ('approved','pushed') OR (approved_at IS NOT NULL AND approved_by IS NOT NULL)),
-  CONSTRAINT ck_lead_candidates_scored   CHECK (state NOT IN ('scored','review','approved','pushed') OR score IS NOT NULL),
-  CONSTRAINT ck_lead_candidates_suppressed CHECK (state <> 'suppressed' OR suppressed_by IS NOT NULL)
+  CONSTRAINT ck_lead_candidates_scored   CHECK (state NOT IN ('scored','review','approved','pushed') OR score IS NOT NULL)
+  -- no CHECK on suppressed_by (§0: it is ON DELETE SET NULL); trigger trg_lead_candidates_suppressed (§2.16) refuses
+  -- the step INTO 'suppressed' without a pointer, and lets the FK's own SET NULL pass later
 );
 CREATE UNIQUE INDEX ux_lead_candidates_open ON lead_candidates (company_id)
   WHERE state IN ('found','enriching','scored','review','approved','hold');
@@ -605,7 +620,7 @@ CREATE INDEX ix_lead_reviews_candidate ON lead_reviews (candidate_id);
 | hold | scored, excluded, suppressed | a new signal re-scores; a manager's `/tel` phone re-scores at once; manager answers `said_no` → suppressed + suppression(dnc), `wrong_or_b2c` → excluded(b2c); 365 d without a signal → row deleted (company kept, R6) |
 | pushed · rejected · excluded · suppressed | — | terminal for this row |
 
-A new candidate for the same company may be created only when no open one exists (`ux_lead_candidates_open`) **and**: after `pushed` — the outcome is terminal or absent for 90 d, a new signal is newer than `pushed_at`, and the month differs; after `rejected` — 180 d passed and a new signal arrived; after `suppressed` — the suppression row is gone; after `excluded` with `competitor|supplier_cn|liquidated` — never (owner can clear the company flag by hand).
+A new candidate for the same company may be created only when no open one exists (`ux_lead_candidates_open`) **and**: after `pushed` — the outcome is terminal or absent for 90 d, a new signal is newer than `pushed_at`, and the month differs; after `rejected` — 180 d passed and a new signal arrived; after `suppressed` — the suppression row is gone (`suppressed_by IS NULL` on a `suppressed` candidate means exactly that: four writers retire suppression rows — R6, the ERP full pull, the `manual_import` retirement, the outcomes retractions — and the FK's `SET NULL` keeps the candidate); after `excluded` with `competitor|supplier_cn|liquidated` — never (owner can clear the company flag by hand).
 
 **Review state machine** (`services/reviews.py`, MIYA `approvals.py` shape + `merged`; one machine for both `kind`s): `pending` (created by `review_cards_job` — every 2 min inside `REVIEW_HOURS`, 06 §1.6 — from candidates in state `review`; a `kind='manager'` row is created by the owner's `handoff` answer) → `asked` (card sent; `expires_at = asked_at + 72 h`) → `approved | declined | merged` (one tap) or `expired` (sweep; owner card: candidate → `hold`, `hold_until = now + 7 d`, re-asked at most twice, `reminder_log(kind='review_expired', ref=candidate_id)`; manager card: digest line «Menejer javob bermadi»). `later` keeps `asked` and adds 24 h; `edit_phone` keeps `asked`, updates the contact and re-renders. Owner answers `push`/`handoff` → `approved`; `decline`/`dnc`/`not_b2b`/`competitor` → `declined`; `merge` → `merged`. Manager answers (06 §1.7): `contacted` → `approved` (the candidate stays `hold` until `/tel`); `said_no`/`wrong_or_b2c`/`no_reply` → `declined`. The callback-data grammar (`rv:<review_id>:<a>` with one-letter codes, `mh:*` for manager cards) is 06 §1.5's, not restated here; `tests/test_bot_callbacks.py` demands the parser accept every button the keyboards build. W/R: `review_cards_job`, bot / bot, `/lidlar`, `/holat`.
 
@@ -616,7 +631,7 @@ CREATE TABLE push_log (
   id              bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   external_id     text NOT NULL CHECK (external_id ~ '^cs:[0-9a-f-]{36}:[0-9]{6}$'),
   attempt         smallint NOT NULL CHECK (attempt BETWEEN 1 AND 3),
-  candidate_id    uuid NOT NULL REFERENCES lead_candidates(id) ON DELETE RESTRICT,
+  candidate_id    uuid NOT NULL REFERENCES lead_candidates(id) ON DELETE RESTRICT,   -- deliberate: the append-only ledger keeps its candidate (R6 and purge skip/settle such rows, §4, 06 §5.4)
   company_id      uuid NOT NULL REFERENCES companies(id) ON DELETE RESTRICT,
   phone_tail      char(9) NOT NULL CHECK (phone_tail ~ '^[0-9]{9}$'),
   endpoint        text NOT NULL,                        -- '/api/leads/in/agent' | '/api/leads/in/other'
@@ -630,7 +645,7 @@ CREATE TABLE push_log (
   finished_at     timestamptz,
   superseded_at   timestamptz,                          -- 0002_erp_contract: set by rule 5's re-push or by /push tekshir; frees ux_push_log_delivered without rewriting status/http_status
   CONSTRAINT uq_push_log_external_attempt UNIQUE (external_id, attempt),
-  CONSTRAINT ck_push_log_sent CHECK ((status <> 'sent' OR http_status BETWEEN 200 AND 299)                                       -- sent ⇒ 2xx
+  CONSTRAINT ck_push_log_sent CHECK ((status <> 'sent' OR http_status BETWEEN 200 AND 299)                                       -- sent ⇒ 2xx or no HTTP answer (rule 5b: a NULL passes)
                                  AND (http_status IS NULL OR http_status NOT BETWEEN 200 AND 299 OR status IN ('sent','unknown')))   -- 2xx ⇒ sent | unknown (unparseable 2xx body: 'unknown', error='http_2xx_badbody')
 );
 CREATE UNIQUE INDEX ux_push_log_delivered ON push_log (external_id) WHERE status IN ('sent','unknown') AND superseded_at IS NULL;   -- predicate widened by 0002_erp_contract (0001 has no superseded_at clause)
@@ -731,10 +746,13 @@ correction can LOWER the row's `at`, which only the `since` walks catch). Eviden
 `call` and `telegram` by anybody (a call from 2 minutes before the arrival); `note`, `stage` and
 `followup` only by the responsible person — the lead's current owner or the arrival's assignee,
 anybody when both are NULL; the «📞 Bogʻlandim» button's note by whoever pressed it — but a press by
-the responsible person first clears the landing's today booking (every agent lead is booked for
-today), and that audit row is `followup` evidence, earlier than the note, so such a press reads
-`contact_kind='followup'`; the note decides (`note`) only when the presser is not responsible (the
-office on a seller's lead) or the date was already moved past today (05 §A.4). So
+the responsible person first clears the lead's booking when it is today or earlier, and that audit row
+is `followup` evidence, earlier than the note, so such a press reads `contact_kind='followup'`. A
+CREATED agent lead is always booked for today, so the routed seller's press on it reads `followup`; a
+JOINED push lands on an existing lead whose `next_action_at` stays whatever it was — NULL or a future
+date clears nothing and the press reads `note`, today or earlier is cleared and reads `followup`. The
+note decides (`note`) also when the presser is not responsible (the office on a seller's lead) or the
+date was already moved past today (05 §A.4). So
 `stale_open` (30 d) really means «nobody the ERP can see called»; for a
 fallback (`other`) push the look-back is 7 days, so after day 7 it means «unknown». A `joined` push
 into a conversation contacted in the last 24 h never gets a `contacted_at` (it lands
@@ -748,6 +766,20 @@ dictionary existed), which the ERP returns verbatim; `derive_label` is unaffecte
 `no_contact` decides first. So lost rows are `lost_no_contact` or `lost_other`; the regex classes
 match labels only, and `lost_not_importer` / `lost_wrong_number` / `lost_competitor` / `lost_small` /
 `lost_price` need the owner's dictionary labels (01 §7 question 1).
+
+**A renamed dictionary label** (verified on `agent-feed` `d138b3bc`): `saveLostReason` UPDATEs
+`lost_reasons.label` in place, and the feed's `lost_reason` compares each lead's stored text with the
+CURRENT labels (or the setting). After a rename every old lead carrying the old text comes back with
+`lost_reason: null` — unless `agent_no_contact_reasons` lists that text — whenever a walk next reads
+it (its `at` does not move, so the monthly `year` walk, or any later touch of the lead). Recomputed
+naïvely, `lost_price`/`lost_not_importer`/`lost_small`/`lost_wrong_number`/`lost_competitor` would
+turn `lost_other` and `apply_effects` would retract their 180-/365-day cooldowns and shift precision.
+So the outcomes upsert (T-10, before `derive_label`) reads such a row as **unchanged**: a lost row
+whose `lost_reason` goes from a label to `null` while `stage_kind` stays `lost` and `closed_at` is
+unchanged keeps its stored `lost_reason` and label (`label_changed_at` does not move, `apply_effects`
+retracts nothing); `raw` still stores the row verbatim. The owner rule «deactivate + create, never
+rename» (05 §A.14 step 2) stays the first defence; this rule is what keeps a rename that happened
+anyway from reopening companies.
 
 **Side effects are derived, not appended** (`services/outcomes.apply_effects(session, company_id)`,
 same transaction as the upsert, run for every company a page touched). The desired set is computed
@@ -784,7 +816,7 @@ CREATE TABLE interactions (
   tg_chat_id          bigint NOT NULL,
   tg_message_id       bigint NOT NULL,
   sender_id           bigint,
-  sender_username     text CHECK (sender_username = cs_username_key(sender_username)),
+  sender_username     text CHECK (sender_username IS NOT DISTINCT FROM cs_username_key(sender_username)),
   sender_name         text CHECK (length(sender_name) <= 120),
   sender_bio          text CHECK (length(sender_bio) <= 300),
   text                text CHECK (length(text) <= 4000),
@@ -965,21 +997,34 @@ CREATE TRIGGER trg_append_only BEFORE DELETE ON usage_log FOR EACH ROW EXECUTE F
 CREATE FUNCTION cs_scoring_weights_frozen() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
   IF TG_OP = 'DELETE' THEN RAISE EXCEPTION 'scoring_weights is append-only'; END IF;
-  IF OLD.approved_at IS NOT NULL AND (NEW.points, NEW.group_cap, NEW.decay_days, NEW.decayed_factor, NEW.group_key)
-       IS DISTINCT FROM (OLD.points, OLD.group_cap, OLD.decay_days, OLD.decayed_factor, OLD.group_key)
+  IF OLD.approved_at IS NOT NULL AND NEW IS DISTINCT FROM OLD   -- the whole row, not five weight columns
   THEN RAISE EXCEPTION 'approved scoring_weights version % is frozen', OLD.version; END IF;
   RETURN NEW;
 END $$;
 CREATE TRIGGER trg_scoring_weights_frozen BEFORE UPDATE OR DELETE ON scoring_weights FOR EACH ROW EXECUTE FUNCTION cs_scoring_weights_frozen();
+CREATE FUNCTION cs_candidate_suppressed_by() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF NEW.state = 'suppressed' AND NEW.suppressed_by IS NULL
+     AND (TG_OP = 'INSERT' OR OLD.state IS DISTINCT FROM 'suppressed') THEN
+    RAISE EXCEPTION USING ERRCODE = 'check_violation', TABLE = 'lead_candidates',
+      CONSTRAINT = 'trg_lead_candidates_suppressed',
+      MESSAGE = 'lead_candidates: a candidate enters state suppressed only with suppressed_by ("trg_lead_candidates_suppressed")';
+  END IF;
+  RETURN NEW;
+END $$;
+CREATE TRIGGER trg_lead_candidates_suppressed BEFORE INSERT OR UPDATE OF state ON lead_candidates FOR EACH ROW EXECUTE FUNCTION cs_candidate_suppressed_by();
 ```
+
+`trg_lead_candidates_suppressed` replaces the CHECK this table once carried (`ck_lead_candidates_suppressed`, §0): it refuses only the step INTO `suppressed` without a pointer (errcode 23514, like a CHECK), so the FK's own `SET NULL`, when the suppression row is retired, leaves the state alone.
 
 ## 3. Evidence files on disk
 
 - Root `EVIDENCE_DIR=/data/evidence` (compose volume `evidence:/data/evidence`, uid 10001, mode 0750). Path `<yy>/<sha256>.gz`, `yy` = two-digit year of `fetched_at` in Tashkent, `sha256` = hash of the **raw** bytes before gzip (level 6). Written to `<path>.tmp` then `os.replace` — a crash never leaves a half file.
 - One file per distinct body: the same bytes at two URLs are two `evidence` rows and one file. Deletion only when no row with `raw_path IS NOT NULL` shares the `sha256`.
-- Cap 2 MB per body; larger bodies get `raw_path=NULL`, `excerpt` and `bytes` still recorded, `evidence.meta.truncated=true` on the row and the count in the run's `meta.truncated`.
+- Two caps: the fetch reads at most **5 MB** of an answer (03 §1.1; a cut answer is `FetchResult.truncated`, counted in the run's `meta.fetch_truncated`), and the store keeps a file only for a body of at most **2 MB** — larger bodies, and every cut one, get `raw_path=NULL`, `excerpt` and `bytes` still recorded, `evidence.meta.truncated=true` on the row and the count in the run's `meta.truncated`.
+- A file is written only for a row its transaction inserted, and only after that transaction commits (`after_commit`); a rollback of the transaction or of the savepoint the row was stored in drops the write, so no file exists that no row points to. A crash between the commit and the write leaves a row whose file is missing (harmless: `open_raw` answers None, the excerpt still quotes; the next store of the same bytes heals it, `keep_raw`). Nothing yet sweeps an orphan `<path>.tmp` left by a crash mid-write — the retention task (T-31) owns that sweep.
 - Not part of `pg_dump` backups (MIYA `backup.py` unchanged). Losing the directory loses nothing a card or ERP note needs — `url`, `fetched_at`, `excerpt` live in the row. Optional `restic` to object storage is an ops choice (§9).
-- API: `services/evidence.store(session, *, source_key, url, body: bytes, content_type, fetched_at, source_ref, excerpt, title, lang, published_at, collector_run_id) -> Evidence`; `open_raw(evidence) -> bytes | None`; `purge_raw(evidence) -> bool`.
+- API: `services/evidence.store(session, *, source_key, url, body: bytes, content_type, fetched_at, source_ref, excerpt, title, lang, published_at, collector_run_id, meta, root) -> Evidence` (the existing row when the same bytes at the same URL were stored before — evidence is immutable); `open_raw(evidence, *, root) -> bytes | None`; `purge_raw(session, evidence, *, now, root) -> bool` — it takes the session because it must check whether another row still shares the file before unlinking it.
 
 ## 4. Retention (`retention_job`, daily 04:15 Tashkent; each step its own transaction and its own `purge_log(subject_kind='retention')` row)
 
@@ -992,17 +1037,17 @@ CREATE TRIGGER trg_scoring_weights_frozen BEFORE UPDATE OR DELETE ON scoring_wei
 | R4b Places phones 30 d | Maps terms: no caching beyond 30 d | `UPDATE contacts c SET phone = NULL, phone_kind = NULL WHERE c.source_key = 'maps_google' AND c.phone IS NOT NULL AND c.collected_at < now() - interval '30 days' AND NOT EXISTS (SELECT 1 FROM push_log p WHERE p.company_id = c.company_id AND p.status IN ('sent','unknown'))` — a phone the ERP already received stays (the lead exists there); both columns go together because of `ck_contacts_phone_kind` |
 | R4 unanswered leads 90 d | company-tier only | candidates `pushed` with `pushed_at < now() - 90 d` and outcome `label IN ('open_untouched','stale_open','dropped_capped','dropped_other')` or no outcome row → `services/contacts.anonymise(contact)`: `full_name, role, telegram_id, email, telegram_username, instagram := NULL; phone := NULL WHERE tier='person' AND phone_kind='mobile'; anonymised_at := now()` |
 | R5 excluded persons 30 d | company-tier only | person-tier contacts of companies whose open candidate is `excluded`/`rejected` for 30 d, or company `state='excluded'` → `anonymise(contact)` |
-| R6 ledgers | | `UPDATE push_log SET payload = NULL WHERE sent_at < now() - 90 d AND payload IS NOT NULL`; `UPDATE model_jobs SET request = NULL, pseudonyms = NULL WHERE status IN ('applied','failed','fallback') AND coalesce(applied_at, created_at) < now() - 30 d`; `DELETE FROM collector_runs WHERE started_at < now() - 180 d`; `DELETE FROM reminder_log WHERE sent_at < now() - 90 d`; `DELETE FROM lead_candidates WHERE state = 'hold' AND updated_at < now() - 365 d`; `DELETE FROM suppression WHERE kind = 'cooldown' AND expires_at < now() - 30 d` |
+| R6 ledgers | | `UPDATE push_log SET payload = NULL WHERE sent_at < now() - 90 d AND payload IS NOT NULL`; `UPDATE model_jobs SET request = NULL, pseudonyms = NULL WHERE status IN ('applied','failed','fallback') AND coalesce(applied_at, created_at) < now() - 30 d`; `DELETE FROM collector_runs WHERE started_at < now() - 180 d`; `DELETE FROM reminder_log WHERE sent_at < now() - 90 d`; `DELETE FROM lead_candidates WHERE state = 'hold' AND updated_at < now() - 365 d AND NOT EXISTS (SELECT 1 FROM push_log p WHERE p.candidate_id = lead_candidates.id)` (`push_log.candidate_id` is RESTRICT on purpose — the append-only ledger keeps its candidate; the bare statement is refused by `fk_push_log_candidate_id`; `tests/test_constraints.py::R6_HOLD_SWEEP` pins this text and T-31's `test_retention` uses it); `DELETE FROM suppression WHERE kind = 'cooldown' AND expires_at < now() - 30 d` |
 | R7 never | | `suppression` (non-cooldown), `outcomes`, `purge_log`, `merge_log`, `usage_log` rows (payload-free) |
 | Immediate | legal / DNC | `purge.plan_company(company_id)` → owner confirms → `execute`; leaves `suppression(legal|dnc)` hashes and the `purge_log` row |
 
 ## 5. Alembic plan
 
 - `alembic/env.py` = MIYA's minus the pgvector `render_item`; imports `clientscrapper.db.models` to populate `Base.metadata`; `compare_type=True, compare_server_default=True`. `alembic.ini` as MIYA (ruff post-write hook, URL from settings). The compose `init` service runs `alembic upgrade head`; `worker`, `bot`, `userbot` `depends_on: init: condition: service_completed_successfully`.
-- **`0001_initial`** (`revision="0001_initial"`, `down_revision=None`): `upgrade()` in this order — extension `pg_trgm`; functions (`cs_phone_tail`, `cs_username_key`, `cs_domain_key`, `cs_touch_updated_at`, `cs_append_only`, `cs_scoring_weights_frozen`); tables exactly in the order of §2 (`sources, collector_runs, evidence, companies, company_aliases, company_ids, contacts, observations, model_jobs, signals, scoring_weights, suppression, lead_candidates, lead_reviews, push_log, outcomes, interactions, chat_monitors, heartbeats, usage_log, reminder_log, runtime_flags, merge_log, purge_log, sheet_rows` — 25 tables; `runtime_flags`, `companies.dup_of/dup_score`, `lead_reviews.kind`, `chat_monitors.status/priority`, `evidence.meta`, `interactions.fwd_from_peer_id` are day-1 columns, not a `0002`); triggers; `op.bulk_insert` of the 23 `sources` rows (§2.1) and the 26 `scoring_weights` version-1 rows (`proposed_by='seed'`, `approved_by='seed'`, `approved_at=now()`). `downgrade()` drops in reverse, then functions, then the extension. The migration carries its own frozen tuples (CHECK lists) — `tests/test_enums_frozen.py` compares them with `db/enums.py`.
-- Later migrations: `000N_<slug>.py`, one concern each; widening a CHECK = `op.drop_constraint` + `op.create_check_constraint` with the new tuple, plus the tuple change in `enums.py` in the same commit; new source = a data migration inserting the `sources` row; new weight version = never a migration (runtime through `/vazn` or `fit_weights`).
-- **`0002_erp_contract`** (T-10, the first task that needs it; 05 §B.2, 2026-10-24 «T-07 as built»): `outcomes.no_contact boolean NOT NULL DEFAULT false`; `push_log.superseded_at timestamptz`; `ux_push_log_delivered` dropped and recreated `WHERE status IN ('sent','unknown') AND superseded_at IS NULL`. Additive only; `0001_initial` is not edited (T-02 shipped it). The DDL blocks of §2.10/§2.11 show the state after `0002`, marked in their comments; `test_migrations`/`compare_metadata` run against head.
-- `tests/test_migrations.py` (needs postgres; skips loudly, never silently): on an empty scratch database `upgrade head`, then `alembic.autogenerate.compare_metadata(ctx, Base.metadata) == []`, then `downgrade base` leaves zero tables in `public`, then `upgrade head` again.
+- **`0001_initial`** (`revision="0001_initial"`, `down_revision=None`): `upgrade()` in this order — extension `pg_trgm`; the **7** functions (`cs_phone_tail`, `cs_username_key`, `cs_domain_key`, `cs_touch_updated_at`, `cs_append_only`, `cs_scoring_weights_frozen`, `cs_candidate_suppressed_by`); tables exactly in the order of §2 (`sources, collector_runs, evidence, companies, company_aliases, company_ids, contacts, observations, model_jobs, signals, scoring_weights, suppression, lead_candidates, lead_reviews, push_log, outcomes, interactions, chat_monitors, heartbeats, usage_log, reminder_log, runtime_flags, merge_log, purge_log, sheet_rows` — 25 tables; `runtime_flags`, `companies.dup_of/dup_score`, `lead_reviews.kind`, `chat_monitors.status/priority`, `evidence.meta`, `interactions.fwd_from_peer_id` are day-1 columns, not a `0002`); triggers; `op.bulk_insert` of the 23 `sources` rows (§2.1, rendered as literals so `alembic upgrade head --sql` works) and the 26 `scoring_weights` version-1 rows inserted **unapproved** (`proposed_by='seed'`), then approved the way every later version is — the activation UPDATE of §2.7, `UPDATE scoring_weights SET approved_by='seed', approved_at=now() WHERE version=1` (it also keeps `--sql` free of a server-side `now()` inside the insert). `downgrade()` drops in reverse, then functions, then the extension. `0001` was edited in place by the T-01/T-02 review **before it ran anywhere** (its docstring lists every departure from the first draft of this file — all folded into the DDL above); from now on it is frozen and every change is a new migration. The migration carries its own frozen tuples (CHECK lists) — `tests/test_enums_frozen.py` compares them with `db/enums.py`.
+- Later migrations: `000N_<slug>.py`, one concern each, minted by `make revision m="…"` — `scripts/revision_id.py` gives the id (N = one past the highest number in `alembic/versions`; a gap stays a gap) and `alembic.ini` `file_template = %%(rev)s` makes the file `<id>.py`; widening a CHECK = `op.drop_constraint` + `op.create_check_constraint` with the new tuple, plus the tuple change in `enums.py` in the same commit; new source = a data migration inserting the `sources` row (`tenders`, phase 2 in 03 §3, is **not** among the 23 seeded rows: the FK refuses `source_key='tenders'` and `tests/test_sources_seed.py` pins both facts — its row arrives with a data migration in the task that builds the collector); new weight version = never a migration (runtime through `/vazn` or `fit_weights`). Known follow-up: `cs_domain_key` may strip `'^(www\.)+'` (§1) in a later migration.
+- **`0002_erp_contract`** (T-10, the first task that needs it; 05 §B.2, 2026-10-24 «T-07 as built»): `outcomes.no_contact boolean NOT NULL DEFAULT false`; `push_log.superseded_at timestamptz`; `ux_push_log_delivered` dropped and recreated `WHERE status IN ('sent','unknown') AND superseded_at IS NULL`. Additive only, on top of the reviewed `0001_initial`, unchanged by that review. The DDL blocks of §2.10/§2.11 show the state after `0002`, marked in their comments; `test_migrations`/`compare_metadata` run against head.
+- `tests/test_migrations.py` (needs postgres; skips loudly, never silently): on an empty scratch database `upgrade head` gives the counts of §10 AC 1; `compare_metadata(ctx, Base.metadata) == []`; **and** `Base.metadata.create_all` builds every table in a probe schema inside a rolled-back transaction, and every constraint (`pg_get_constraintdef`), index (`pg_get_indexdef`) and column default must equal the migration's as the server prints them — `alembic check` misses a flipped operator inside a CHECK; `upgrade head --sql` builds the same schema and seeds; no CHECK spans a SET NULL FK (§0); then `downgrade base` leaves zero tables in `public`, then `upgrade head` again.
 
 ## 6. SQLAlchemy layout
 
@@ -1080,13 +1125,16 @@ Follow-on rows the `won` label produces (same transaction as the upsert, §2.11)
 6. Evidence directory backup: excluded from `pg_dump` backups by design; is a weekly `restic` copy wanted (≈ 1–3 GB/year)?
 7. Is the Sheets mirror (`sheet_rows`) part of v1 or dropped from `0001`?
 8. May `MANAGER_TELEGRAM_IDS` answer review cards (`lead_reviews.by_telegram_id` ≠ owner), or owner only in v1?
+9. `brand_dealers` is seeded at `daily_cost_cap_usd = 0` while 03 §3 says its spend is «inside serp». If it pays Brave under its own `source_key`, `Budget.can_spend` refuses every query; if it spends under `serp_layer`, the per-source budget no longer says who spent. Decide before T-33: (a) it calls `SerpClient` attributing to `serp_layer`'s sub-sources — recommended, one SERP budget; (b) give it a cap of its own.
+10. `enrich_site` is seeded with 150 pages/day, while 04 §3 E2 draws its 150 pages from `sources.registry_lookup.daily_page_budget` — two budgets for one fetch. Decide before T-19 which row E2 counts against (recommended: `enrich_site`, the row its evidence carries).
+11. `erp_sync.title_uz` is «ERP (fullprompt)» — the repository's codename on an owner screen (`/manbalar`). Recommended: «ERP (GSR)» in the data migration that next touches `sources`.
 
 ## 10. Acceptance criteria
 
-1. `alembic upgrade head` on an empty PG16 creates 25 tables, 6 functions, 1 extension and seeds 23 `sources` rows and 26 `scoring_weights` rows; `compare_metadata` returns `[]`; `downgrade base` then `upgrade head` both succeed (`tests/test_migrations.py`).
+1. `alembic upgrade head` on an empty PG16 creates 25 tables, 7 functions, 1 extension and seeds 23 `sources` rows and 26 `scoring_weights` rows; `compare_metadata` returns `[]`; `downgrade base` then `upgrade head` both succeed (`tests/test_migrations.py`).
 2. `tests/test_enums_frozen.py`: every CHECK tuple in `0001` equals its `db/enums.py` tuple; `SIGNAL_KEYS ∪ DERIVED_KEYS` equals the `scoring_weights` key CHECK; version 1 has one row per key, group caps sum to 100, and is approved.
 3. `tests/test_keys.py`: Python `phone_tail/username_key/domain_key` agree with `cs_*` SQL functions on ≥ 40 fixtures (Cyrillic, `t.me/`, `www.`, IDN, bots, short numbers).
-4. Constraint tests, each shown red by dropping the constraint in a string-edited copy: second live person-tier contact per company refused; person-tier row without `legal_basis/source_url/collected_at` refused; `full_name` containing a 14-digit run refused; two `sent|unknown` rows for one `external_id` refused; a `push_log` row with `http_status=200` and `status='failed'` refused while `status='unknown'` is accepted; a second live `kind='manager'` review for one candidate refused while a live `kind='owner'` one beside it is accepted; a `chat_monitors` row `status='joined'` with `joined_at` NULL refused; `pushed` candidate without `external_id` refused; `phone_hash` suppression without `salt_id` refused; `excerpt` > 600 refused; `interactions` row with empty `prefilter_hit` refused; `UPDATE scoring_weights SET points` on an approved version refused; `DELETE FROM push_log` refused.
+4. Constraint tests, each shown red by dropping the constraint in a string-edited copy: second live person-tier contact per company refused; person-tier row without `legal_basis/source_url/collected_at` refused; `full_name` containing a 14-digit run refused; two `sent|unknown` rows for one `external_id` refused; a `push_log` row with `http_status=200` and `status='failed'` refused while `status='unknown'` is accepted; a second live `kind='manager'` review for one candidate refused while a live `kind='owner'` one beside it is accepted; a `chat_monitors` row `status='joined'` with `joined_at` NULL refused; `pushed` candidate without `external_id` refused; `phone_hash` suppression without `salt_id` refused; `excerpt` > 600 refused; `interactions` row with empty `prefilter_hit` refused; every change to an approved `scoring_weights` row refused (points, version, key, note, un-approval, re-approval) and a half approval (`approved_by` without `approved_at`) refused; a candidate entering `suppressed` without `suppressed_by` refused while retiring its suppression row keeps it; a merge target cannot be deleted from under its sources; a value the key function refuses (`'Mixed Case!!'`, `'not a domain'`) is refused in every key column while NULL is accepted; `DELETE FROM push_log` refused.
 5. `tests/test_candidate_states.py` and `tests/test_review_states.py` enumerate `TRANSITIONS`; every illegal move raises; `ux_lead_candidates_open` refuses a second open candidate per company.
 6. `tests/test_push_idempotency.py` against a fake ERP: crash between claim and response leaves `sending` → reconciled to `unknown` → no second send; 404 trips `sources.erp_sync.breaker_until`; 5xx: three in-attempt tries, then `failed`, then ≤ 3 attempts with the same `payload_sha256` after the 05 §B.1 delays; a read timeout lands as `unknown` with ONE POST (no resend inside the attempt) and the fake's late landing then promotes it to `sent`; a 503 is retried inside the attempt and lands once; a 2xx with an unparseable body lands as `unknown`; a `sent` row with no outcome after 48 h is superseded and re-pushed exactly once (rule 5) and a second 48 h re-pushes nothing; `/push tekshir` on a 2xx row supersedes it (never `failed`); a different body under the same `external_id` is refused.
 7. `tests/test_outcomes_labels.py`: `derive_label` table-driven over all 16 labels, including the 14-day boundary on `contacted_at` and the 30-day boundary on `pushed_at` (not `at`) in Asia/Tashkent, `no_contact` deciding `lost_no_contact`, `stage_kind='won'` deciding `won` (a revived lead with `client_id` set is not won), every `dropped` reason; `apply_effects` (`suppression(client, phone_tail, source='outcomes')` for `won`, `landed_client` and `dropped_suppressed`, `lost` rows on every key for `lost_no_contact`, `bounced ×2`, `is_competitor`) asserted, and the retractions: a revived lost lead, a won lead moved back to open and a changed label each remove exactly the rows their old label justified, while `bounced`, `is_competitor` and person-written rows stay; a feed row whose `external_id` has no `push_log` row writes nothing.
@@ -1142,3 +1190,11 @@ Not applied here (other files' homes): 10, 13, 14, 18, 19 (02's `/dnc`, `/vazn`,
 - §2.10 rule 4: the ERP's 503 «normally» means no ledger row — a ledger row can commit while its answer is lost (the retry is a replay; the arrival shows as `created`, never contacted), and a repeating half-way failure adds a lenta note per POST (05 §A.13 (i), (iii)).
 - §2.10 rule 7: the in-flight chain is per copy of the landing module (one lander per channel) and its wait has no bound (05 §A.13 (iv)).
 - §2.11: a «📞 Bogʻlandim» press by the responsible person reads `followup` — the booking it clears before writing its note is earlier evidence — and `note` only when the presser is not responsible or the date was already moved; a never-contacted `created` row may be a lost-answer arrival.
+
+**Wave 1 as built (2026-10-24)** — folded from the wave-1 build (T-01…T-06 integration notes, the T-02 review fixes `69b9493`, the seam review), each checked against the code at `f8c3303` (`alembic/versions/0001_initial.py`, `db/models/`, `services/keys.py`, `services/normalise.py`, `services/evidence.py`, `services/costs.py`); §2.11 also against fullprompt `agent-feed` `d138b3bc` (the verify:final mismatches):
+
+- §0, §1: key CHECKs read `col IS NOT DISTINCT FROM cs_key(col)`; no CHECK on a SET NULL FK column (`companies.merged_into` is RESTRICT, `trg_lead_candidates_suppressed` replaces `ck_lead_candidates_suppressed` — fullprompt #809's rule). `services/keys.py` is the one home of the key functions (`normalise.py` re-exports the phone ones); `phone_kind` names its mobile codes (33 77 88 90 91 93 94 95 97 98 99; 20/50/55 read `unknown` until verified; 70–79 except 77 are landlines) and refuses all-equal subscriber digits; `cs_username_key`'s prefix is case-blind like `username_key`; `domain_key` strips every leading `www.` and `cs_domain_key` one — the two designed differences are stated, the SQL follow-up is a later migration.
+- §2.1 a parent row's budget counts its sub-sources (`SUBSOURCE_PREFIXES`); the breaker writes `paused_until` and `breaker_until`. §2.4 `merged_into` RESTRICT, «a company is never deleted; purge clears `merged_into`». §2.5 validators as built (a PINFL is a maximal run of exactly 14 digits, a replacement label carries `name_key` NULL, `seller` is a person kind, `serp_hit`/`suppression`/`outcome` are not observations) and the mapping rows. §2.7 `ck_scoring_weights_approved` and the whole-row freeze; version 1 is inserted unapproved, then approved. §2.8, §2.12 the `IS NOT DISTINCT FROM` CHECKs, and that no instagram shape CHECK exists beyond `lower()`. §2.9, §2.16 the trigger and `cs_candidate_suppressed_by()`; what `suppressed_by` NULL means. §2.10 `candidate_id` RESTRICT; `sent ⇒ 2xx or no HTTP answer`.
+- §2.11: only a CREATED lead is booked for today (a joined one keeps its date). A renamed lost-reason label comes back `null` for old leads (`saveLostReason` renames in place) — decided here, without the owner: the outcomes upsert keeps the stored `lost_reason` and label when the reason goes from a label to `null` with `stage_kind` still `lost` and `closed_at` unchanged (05 §B.6).
+- §3 two caps (5 MB per fetch, 2 MB per evidence file; `fetch_truncated` vs `truncated`), the file written after the commit, `purge_raw(session, evidence, *, now, root)`; orphan `.tmp` files are T-31's. §4 R6's hold sweep keeps a candidate that has `push_log` rows. §5 seven functions; `0001` was edited in place by the review before it ran anywhere and is frozen now; `make revision`; `tenders` needs a data migration; `test_migrations` as built. §10 AC 1 and AC 4 follow.
+- Open questions 9–11 added: `brand_dealers` seeded at $0/day, `enrich_site` vs `registry_lookup` pages, the «ERP (fullprompt)» title.

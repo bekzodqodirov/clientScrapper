@@ -255,7 +255,9 @@ inherits the belt, the silent clock or a row in the outcomes feed.
    owner unchanged, `updated_at` touched, the owner pushed «🔁 Qayta yozdi». Two open leads on one
    number refuse to join (a new lead is created);
 8. otherwise a **new lead**: owner by the taqsimot rules (`manba = agent`, the mapped `kub`, else the
-   first «N kub|куб|m3|м3|m³» in name + landed note — `textVolume`), `next_action_at` = today
+   first «N kub|куб|m3|м3|m³|м³» in name + landed note — `textVolume`, flags `iu`; the FIRST match
+   alone decides: `parseMeasure` turns a first «0 kub», or a number ≥ 100000, into no volume — so no
+   windowed rule matches — and never looks at a later match), `next_action_at` = today
    (Tashkent), `company` = the body's `company`/`firma` cut at 200, mapped answers written in their
    own catch, the lenta note, then the ledger row, then «🆕 Yangi lid · Agent (qidiruv)».
 
@@ -277,14 +279,17 @@ in its own catch, so a Telegram failure never changes the answer.
   and the button's push reaches the lead's owner or, for an unowned lead, the office); `stage` and
   `followup` (a stage move, a cleared follow-up — both only by that same responsible person; an owner
   change alone is not contact). **What a «📞 Bogʻlandim» press reads as**: `markContactedFromBot`
-  (`inbound-notify.ts`) first clears the landing's own booking when it is today or earlier
-  (`setFollowUp(lead, null)` — every agent lead is booked for today, `next_action_at` = Tashkent today),
-  and only then writes the note. That clear is an `audit_log` row `after.nextActionAt = null`, which is
-  `followup` evidence when the presser is the responsible person, and it is EARLIER than the note
-  (`firstContactSql` orders by `(at, kind)`, and `followup` sorts before `note` even on a tie). So a
-  press by the responsible person — the routed seller, or anybody on an unowned lead — reads
-  `contact_kind='followup'`; the note decides (`note`) only when the presser is not responsible (the
-  office on a seller's lead) or the date was already moved past today. Likewise a stage change through
+  (`inbound-notify.ts`) first clears the lead's booking when it is today or earlier
+  (`setFollowUp(lead, null)`), and only then writes the note. Only a CREATED lead is booked for today
+  (`createLead`, `nextActionAt: tashkentDay()`); a JOINED push lands on an existing lead whose
+  `next_action_at` stays whatever it was. That clear is an `audit_log` row `after.nextActionAt = null`,
+  which is `followup` evidence when the presser is the responsible person, and it is EARLIER than the
+  note (`firstContactSql` orders by `(at, kind)`, and `followup` sorts before `note` even on a tie). So
+  a press by the responsible person — the routed seller, or anybody on an unowned lead — on a created
+  lead reads `contact_kind='followup'`; on a joined lead it reads `followup` when its date was today or
+  earlier and `note` when it was NULL or in the future (nothing is cleared); the note also decides
+  (`note`) when the presser is not responsible (the office on a seller's lead) or the date was already
+  moved past today. Likewise a stage change through
   the card's ✏️ form clears today's booking in the SAME audit row (`clearsFollowUp`), so it reads
   `followup`; a move on the board or the card's stage control (`moveLead`, whose audit row carries
   only `stageId`/`lostReason`) reads `stage`. (The ERP's own test of the note calls `addActivity`
@@ -313,7 +318,8 @@ is sent (httpx sends it); `Cache-Control: private, no-store`; an ETag is set (30
 |---|---|---|---|
 | 200 | JSON (§A.7, §A.9) | — | — |
 | 400 | `{"error":"bad_cursor"}` / `{"error":"bad_since"}` | a cursor or `since` the caller got wrong | bug: `feed_contract` code `bad_request`, never retried |
-| 404 | `Not found`, text/plain | door off, key wrong or absent, `X-ERP-Key` only, unknown path — and any failure while **no** key was sent | `push_404` breaker |
+| 404 | `Not found`, text/plain — written by the two agent routes and `/api/leads/in/[source]` | door off, key wrong or absent, `X-ERP-Key` only, an unknown `[source]` — and any failure while **no** key was sent | `push_404` breaker |
+| 404 | Next's own 404 page (HTML) | a path no route handles: a wrong path under `CRM_BASE_URL`, or `/api/agent/*` on a build without `agent-feed` | `push_404` breaker — the same behaviour; the fake and the contract checks require `text/plain` only for the routes above, never for an unknown path |
 | 503 | `{"error":"unavailable"}` | the database failed — at the key lookup (only to a caller that SENT `X-GSR-Key`) or during the page | back off and retry; never `push_404` |
 
 ### A.6 Cursor, `since`, `limit`
@@ -365,10 +371,15 @@ Copied from the stored capture `suppression_full.json` (07 §1.0), the first of 
 - `kind = client`: every phone on every client card, **active or inactive**; every phone on a
   PERSON record (CRM → Odamlar) that holds at least one client code; the phone of every lead that
   became a client (on a `won` stage, or carrying a `client_id` — attaching does not copy the lead's
-  phone onto the card). `kind = lost`: a lead on a `lost` stage whose `lost_reason`, normalised, is
+  phone onto the card). A card or `crm_people` row whose `phones` is not a JSON array (typed by hand,
+  an old import) is read as having **no phones** — by the feed, the belt, the client step and the XLSX
+  export alike (`CASE WHEN jsonb_typeof(phones) = 'array' …`): fail-open, its numbers are never
+  suppressed and an agent push on one becomes a new lead with a «🆕» push (A.13; the day-1 count is
+  07 §5.3). `kind = lost`: a lead on a `lost` stage whose `lost_reason`, normalised, is
   one of the setting's labels (§A.10). Normalisation on both sides: every run of JavaScript `\s`
   (no-break space included) → one space, trimmed, lower case.
-- **Which tails one phones value yields**: its whole last nine digits; the last nine of each part
+- **Which tails one phone text yields** (one element of a card's `phones` list — never the list
+  joined): its whole last nine digits; the last nine of each part
   when it holds several numbers (split at `, ; / | \`, a line break (LF or CR), a run of two or
   more spaces or tabs, or spaces/tabs before `+`; `PHONE_SPLIT_PG`) — only a part of nine digits or
   more; and inside a part of **16 to 120** digits (the client import keeps a multi-number cell as one
@@ -429,7 +440,7 @@ Exactly **15 fields**:
 | `lead_id` | the lead it became or joined (uuid; `null` when dropped or `client`) |
 | `client_id` | the lead's client once won or attached, else the client it was recognised as (uuid or `null`) |
 | `stage_kind`, `stage_name` | the lead's stage NOW (`open` / `won` / `lost`, the owner's name for it); `null` without a lead |
-| `lost_reason` | the text chosen at the move (≤ 200) **only when it is a label** — one of the owner's lost-reason dictionary rows (active or retired) or a label of `agent_no_contact_reasons`, compared normalised. A seller's free text is `null` (captured: `post_created_lost_free.json` → `null`) |
+| `lost_reason` | the text chosen at the move (≤ 200) **only when it is a label** — one of the owner's lost-reason dictionary rows as they read NOW (active or retired, i.e. deactivated) or a label of `agent_no_contact_reasons`, compared normalised. A seller's free text is `null` (captured: `post_created_lost_free.json` → `null`). A RENAMED dictionary row (`saveLostReason` UPDATEs `lost_reasons.label` in place) no longer matches the old text, so every old lead carrying it comes back `null` unless the setting lists that text — at the next read of the row (its `at` does not move: the monthly `year` walk, or a later touch); 02 §2.11 keeps such a row's stored label |
 | `no_contact` | `true` when the lead is lost with a reason `agent_no_contact_reasons` lists — the ERP's own answer; the agent keeps no copy of the setting |
 | `closed_at` | when the lead was decided |
 | `contacted_at`, `contact_kind` | the FIRST contact after the arrival (§A.4): `call` / `telegram` / `note` / `stage` / `followup` |
@@ -467,8 +478,14 @@ spelling stays listed (old leads keep the text chosen at the move).
 - Seed row `{ key: 'agent', name: 'Agent (qidiruv)', sortOrder: 190 }`, written by the `migrate`
   service's `pnpm db:seed` on deploy.
 - **CRM → ⋯ → Kelgan arizalar → «Reklama havolalari»**: the agent's door shows no `/ariza` and no bot
-  link (a person through them is not the agent), only the webhook URL; its key is sent in the page
-  data only to `admin.settings.manage` (it also READS the client phone hashes); others see `on/off`.
+  link (a person through them is not the agent). Each door card has ONE toggle, inside the
+  «Platformaning o'z formasi» fold, and the fold is drawn only for `admin.settings.manage` (the key
+  also READS the client phone hashes): with the door ON it shows the webhook URL, the key and
+  «O'chirish», which clears the secret so every route 404s; with the door OFF, «Yoqish va kalit
+  yaratish» mints a NEW key. There is no rotate button — a re-mint is «O'chirish» then «Yoqish», which
+  kills the old key for every sender. Other viewers receive `on` in the page data, but the fold is not
+  drawn for them. The screen lists ACTIVE sources only (`inboundDoors`): deactivating the source itself
+  happens in the CRM settings' source list and removes its card from this screen.
 - Lead forms offer every source but the agent's (`personPickableSources`).
 
 ### A.12 Tests as built
@@ -531,8 +548,14 @@ store. Red proofs (fullprompt DECISIONS): 16 for the build (#1458), 21 for the f
   (one ledger row, not one lead) — and its wait has no bound: a first delivery that never settles (a
   statement on a dead connection) holds every later delivery of that id until the ERP restarts. Each
   waiter holds only its HTTP request, so the agent's read timeout ends that try as `unknown` (§B.1).
-- Re-minting the key rotates `salt_id` and makes the old key 404 at once on every route; deactivating
-  the `agent` source on the doors screen makes everything 404.
+- A card (or a `crm_people` row) whose `phones` is not a JSON array is read as having no phones on
+  `agent-feed` (A.7): fail-open — its numbers are never suppressed, and an agent push on one becomes a
+  new lead with a «🆕» push. Production `7bea3051` fails the other way (§B.3 Door row). Count such rows
+  on day 1 (07 §5.3).
+- Re-minting the key (the door's «O'chirish» then «Yoqish va kalit yaratish», A.11) rotates `salt_id`
+  and makes the old key 404 at once on every route; turning the door off, or deactivating the `agent`
+  source in the CRM settings' source list (which also removes it from the doors screen), makes
+  everything 404.
 
 ### A.14 Still to do on the ERP side, and the owner's steps
 
@@ -546,8 +569,9 @@ Owner's steps after the deploy (Uzbek; the same five as AGENT-FEED.md §0):
 
 1. **CRM → ⋯ → Kelgan arizalar → «Reklama havolalari» → «Agent (qidiruv)» → «Platformaning oʻz
    formasi» → «Yoqish va kalit yaratish».** Chiqqan kalitni agent serveridagi `.env` faylga
-   `CRM_AGENT_KEY` qilib qoʻying (chatga yozmang). Kalitni qayta yaratsangiz, eskisi darhol ishlamay
-   qoladi va agent butun roʻyxatni qaytadan oladi.
+   `CRM_AGENT_KEY` qilib qoʻying (chatga yozmang). Eshik allaqachon yoqilgan boʻlsa, koʻrsatilgan
+   kalitni nusxalang — yangisini faqat «Oʻchirish» → «Yoqish» bilan yarating: shunda eskisi hamma
+   yuboruvchi uchun darhol ishlamay qoladi va agent butun roʻyxatni qaytadan oladi.
 2. **CRM → ⋯ → CRM sozlamalari → «Yoʻqotish sabablari»**: «Qayta qilinmasin» sababini qoʻshing.
    **Diqqat:** roʻyxat hozir boʻsh boʻlsa, birinchi sabab qoʻshilgan zahoti lidni yoʻqotishda faqat
    roʻyxatdagi sabablarni tanlash mumkin boʻladi — jamoa hozir ishlatadigan sabablarni ham oʻsha
@@ -557,15 +581,23 @@ Owner's steps after the deploy (Uzbek; the same five as AGENT-FEED.md §0):
    kimga = yuk boʻyicha sotuvchilar; B qoida — manba `agent`, kubsiz, kimga = qolgan sotuvchilar
    (yoki umumiy navbatga qoldiring). A ni B dan yuqoriga, ikkalasini ham umumiy qoidalardan yuqoriga
    qoʻying.
-4. Agent bitta sinov arizasini yuboradi (`make push-test`). Keyin shu ekranning **«Forma savollari»
-   → «Reklamadan kelgan yangi savollar»** roʻyxatida `kub` → **Kub (m³)** qiling (agent `kub` ni
-   faqat mijozning oʻzi yozgan hajm uchun yuboradi; taxminiy hajm izohda qoladi va lidning kubiga
-   yozilmaydi); xohlasangiz
+4. Agent bitta sinov arizasini yuboradi (`make push-test`; u har bir kalitni sinov qiymati bilan
+   yuboradi, `kub` = 1 ham). Keyin shu ekranning **«Forma savollari» → «Reklamadan kelgan yangi
+   savollar»** roʻyxatida `kub` → **Kub (m³)** qiling (agent `kub` ni faqat mijozning oʻzi yozgan
+   hajm uchun yuboradi; taxminiy hajm izohda qoladi va lidning kubiga yozilmaydi). Bu roʻyxat faqat
+   soʻnggi 30 kunda kelgan arizalardagi savollarni koʻrsatadi: biror kalit koʻrinmasa, uni
+   «Savolni qo'lda qo'shish» qatori orqali qoʻshing; xohlasangiz
    `stir`, `imports`, `score` ni lidning maxsus maydonlariga bogʻlang (avval maydonni yarating);
    `firma`, `telegram`, `instagram`, `website`, `address`, `evidence`, `utm_source` → **«Izohda
    qolsin»** (firma nomi lidning «Kompaniya» maydoniga baribir yoziladi).
 5. **Boshqaruv → Sozlamalar → `agent_no_contact_reasons`**: 2-qadamdagi sabab nomi bilan bir xil
    ekanini tekshiring (standart: `Qayta qilinmasin`; bir nechta boʻlsa `;` bilan).
+
+The list under step 4 is `seenKeys()` (`field-map.ts`): only the pair keys arrivals carried in the
+last 30 days (`lead_intakes.fields`). An ordinary push carries only the keys its company has, so
+`make push-test` gives its synthetic company a value for every optional key (§B.1) — each then
+appears once; a key that dropped off the list (30 days without an arrival carrying it) is added by
+hand through «Savolni qo'lda qo'shish» (`routing.mapManual`).
 
 Routing reads the mapped `kub` first and otherwise the first «N kub» of name + landed note
 (`mapped.volumeM3 ?? textVolume(name, note)` in `landOnce` — VERIFIED from the code, 2026-10-24).
@@ -699,9 +731,11 @@ routes it by that figure (1, 3, 28 or 80; rule A, A.14) — and is **never** sen
 `kub` becomes the lead's «Kub (m³)», the seller's «📦 N kub» and the won deal's quoted volume (A.2),
 and a guess must not stand there as the customer's figure. `textVolume` reads the FIRST
 «N kub|куб|m3|м3|m³|м³» of name + landed note, and NEGA TOPILDI comes first: a quote that carries its
-own «N kub» routes by the customer's number, before the HAJM line. The routing test asserts
-`TEXT_VOLUME_RE` over `name + "\n" + landed_note(p)` gives the stated volume, or the band's low end
-when no earlier text carries a number.
+own «N kub» routes by the customer's number, before the HAJM line. The FIRST match alone decides:
+the ERP's `parseMeasure` turns a first «0 kub», or a number ≥ 100000, into no volume (no windowed
+rule matches) and never looks at a later match. The routing test asserts `TEXT_VOLUME_RE` over
+`name + "\n" + landed_note(p)`, with `parseMeasure`'s range applied to the first match, gives the
+stated volume, or the band's low end when no earlier text carries a number.
 
 **Gate and transport** (02 §2.10 items 1–7 are the law for the gate; the attempt scheme and the
 outcome mapping below are owned HERE — 02 §2.10 rule 4 and 07 §1.6 point to this table):
@@ -789,7 +823,12 @@ rule-5 re-push), count for none of `cap`, `phone_recent`, `company_recent`. A `c
 refusal is silent (the job runs again); every other refusal writes a `lead_reviews` note.
 
 `make push-test` (`tools/push_test.py`): mints a **fresh synthetic company per run** — a new uuid4,
-`display_name='TEST agent — oʻchiring'`, one company-tier `contacts` row with `TEST_PHONE`, an
+`display_name='TEST agent — oʻchiring'`, a visibly synthetic value for **every optional key** of
+`PushPayload` (`kub: "1"` as a stated volume — so rule A routes it, and once `kub` is mapped it lands
+as the test lead's quoted volume — STIR `300000099`, `telegram`/`instagram` `namuna_test`, `website`
+`test.example.uz`, an address, `imports`, `evidence`), so that every key arrives once and appears
+on the ERP's «Reklamadan kelgan yangi savollar» list (A.14 step 4; `seenKeys()` lists only keys
+arrivals carried in the last 30 days), one company-tier `contacts` row with `TEST_PHONE`, an
 `approved` candidate (`approved_by='owner:push-test'`, `score=0` with `score_breakdown.gates.test=true`
 so no scorer or card ever touches it) — and pushes it through `push_one` with exactly two checks
 skipped: 04 §7 item 13 (score ≥ 60) and 04 §6 gate 1 `is_b2b` (a synthetic company has neither a
@@ -800,7 +839,11 @@ exists, which the outcomes read needs (rows whose `external_id` the agent never 
 §B.2). It prints the HTTP status, the `external_id` and the company uuid (for `tools/purge`).
 `TEST_PHONE` must be a number **outside the client book and outside every «Qayta qilinmasin» lead**,
 or the push lands silently as `dropped/suppressed` (still 200); `make push-test` refuses to run when
-the local gate already suppresses it. Used for step 4 of A.14 and 07 §5.6.
+the local gate already suppresses it. Used for step 4 of A.14 and 07 §5.6. It reaches the ERP only
+through `push_one`, so it needs no exemption from the push guard (07 §1.2): the exemption that
+`tests/test_push_requires_approved.py` carries as built (T-04) — `tools/push_test.py` calling `_post`
+directly with the zero-uuid id `cs:00000000-0000-0000-0000-000000000000:<yyyymm>` — is the pre-T-07
+design, a fixed id that would replay silently on a month's second run; T-28 deletes it.
 
 ### B.2 `services/erp_feeds.py`
 
@@ -847,8 +890,10 @@ def suppression_fresh(cfg: SuppressionConfig | None, *, key: str, now: datetime)
 `null`. Each page is validated before it is yielded: suppression pages carry `mode, generated_at,
 salt_id, rule, entries, next, resume`; outcomes pages `generated_at, rows, next, resume`; a missing
 key, non-JSON or a non-list → `FeedShapeError`. More than `max_pages`, or a `next` equal to the cursor
-just sent → `FeedContract('runaway')`. HTTP answers (A.5): 404 → the same misconfiguration as a push
-404 (breaker, `push_404`, stop); 3xx → as a push 3xx (never followed; breaker, `erp_redirect`,
+just sent → `FeedContract('runaway')`. HTTP answers (A.5): 404 — and a 401/403, which the ERP never
+sends but a proxy in front of it might, decided here once for both feeds — → the same misconfiguration
+as a push 404 (breaker, `push_404`, stop; any other 4xx on a feed is `feed_contract` code
+`bad_request`); 3xx → as a push 3xx (never followed; breaker, `erp_redirect`,
 stop); 400 → `feed_contract` code `bad_request` with the ERP's
 `bad_cursor`/`bad_since` in the detail, stop, never retried; 503 and other 5xx / transport errors →
 `with_backoff(attempts=4, base=2, cap=60)`, then the run is `failed` (the freshness gate reports it);
@@ -982,10 +1027,10 @@ A flip is one digest line. `/holat` prints the three numbers per source.
 
 | Item | Fallback | Switch-over |
 |---|---|---|
-| Door | `CRM_PUSH_SOURCE=other`; `CRM_AGENT_KEY` = the **«Boshqa»** door's secret (owner mints it on the same screen); body always carries `utm_source=clientscrapper` (right after the note, §B.1); `push_log.endpoint='/api/leads/in/other'`, `source_key_sent='other'`. That door is an ordinary advert door: no belt, the 15-minute reminder fires, its pushes count in the people's per-phone cap, a client is recognised only when exactly one active card holds the phone (A.3 step 6), and a landing that throws is still answered **200** with no ledger row — possibly with an orphan lead standing (§B.1), which a later re-push through `agent` joins. Production without `agent-feed` also still throws on text after (or, for a NUL in the name or phone, at) `createLead`: an emoji at a UTF-16 cut, a NUL anywhere (a text column refuses it, and `ref`'s jsonb refuses `\u0000`) and a lone surrogate (jsonb) — `text_len` (§B.1) keeps every value under the cut and `well_formed` drops every NUL and lone surrogate, so none of the three can happen | set `CRM_PUSH_SOURCE=agent`, replace `CRM_AGENT_KEY`, restart `worker`. Candidates already `pushed` are **not** re-pushed by hand (same `channel`, so a replay); rule 5 re-pushes only a push the outcomes feed never shows |
+| Door | `CRM_PUSH_SOURCE=other`; `CRM_AGENT_KEY` = the **«Boshqa»** door's secret (on the same screen: another platform may already be posting to «Boshqa», so if its door is ON, copy the key shown — a re-mint is «O'chirish» then «Yoqish va kalit yaratish», which kills the old key for every sender, A.11); body always carries `utm_source=clientscrapper` (right after the note, §B.1); `push_log.endpoint='/api/leads/in/other'`, `source_key_sent='other'`. That door is an ordinary advert door: no belt, the 15-minute reminder fires, its pushes count in the people's per-phone cap, a client is recognised only when exactly one active card holds the phone (A.3 step 6), and a landing that throws is still answered **200** with no ledger row — possibly with an orphan lead standing (§B.1), which a later re-push through `agent` joins. Production without `agent-feed` also still throws on text after (or, for a NUL in the name or phone, at) `createLead`: an emoji at a UTF-16 cut, a NUL anywhere (a text column refuses it, and `ref`'s jsonb refuses `\u0000`) and a lone surrogate (jsonb) — `text_len` (§B.1) keeps every value under the cut and `well_formed` drops every NUL and lone surrogate, so none of the three can happen. One failure the agent cannot avoid: production's `activeClientsByPhone` runs `jsonb_array_elements_text(phones)` unguarded over every active card, so ONE card whose `phones` is not a JSON array makes every arrival with a phone throw before `createLead` — on «Boshqa» that is 200 with nothing recorded, for every push (whether production holds such a card is UNVERIFIED; the read-only count of 07 §5.3 runs before the fallback) | set `CRM_PUSH_SOURCE=agent`, replace `CRM_AGENT_KEY`, restart `worker`. Candidates already `pushed` are **not** re-pushed by hand (same `channel`, so a replay); rule 5 re-pushes only a push the outcomes feed never shows |
 | Feeds | **not configured** (`feeds_configured()` false): the «Boshqa» key reads nothing — every GET would be 404 and trip the `push_404` breaker — so no feed call is made | the first suppression full pull and the outcomes `year` walk run on the day of the switch |
 | Routing | the `other` door is also where a bot `?start=ad_<unknown or agent>` deep link and a hand-posted form with an unknown or `agent` source land (`inboundSourceKey`; an unknown `/ariza?manba=` goes to «Sayt» — `formSourceKey`, the same `: 'sayt'` fallback in production `7bea3051`); a rule `manba=other` + keyword `clientscrapper` routes agent arrivals to the cargo managers. VERIFIED from the code: the keyword is a case-insensitive «contains» over name + the landed note (`matchRoute` over `[name, note]`, and the note carries the `utm_source: clientscrapper` line within the 1000 cut, §B.1); still confirm once with `make push-test` (07 §5.6) | delete that rule after switch-over |
-| Suppression | `make import-clients FILE=clients.xlsx` (ERP **Mijozlar → XLSX**); `services/client_import.py` stores `suppression(kind='client', key_type='phone_tail', source='manual_import')` — clear tails, because the future agent secret is unknown and hashes would not match. Lost leads invisible; `/holat` says «yoʻqotilgan lidlar roʻyxati yoʻq». Weekly re-import. These tails are the **only** guard for a multi-code client: the «Boshqa» door has no belt and knows a client only when exactly one active card holds the phone (A.3 step 6), so a phone on two codes would land as a new lead | a full pull retires each `manual_import` row whose tail's hash it carries (§B.2 step 5); tails it does not carry stay until the owner removes them |
+| Suppression | `make import-clients FILE=clients.xlsx` (ERP **Mijozlar → XLSX**, the column «Phones» — exported from an unfiltered screen with no saved view, ≤ 5,000 rows, inactive cards included; 03 §2.2 has the export's shape and the per-element tail rule); `services/client_import.py` stores `suppression(kind='client', key_type='phone_tail', source='manual_import')` — clear tails, because the future agent secret is unknown and hashes would not match. Lost leads invisible; `/holat` says «yoʻqotilgan lidlar roʻyxati yoʻq». Weekly re-import. These tails are the **only** guard for a multi-code client: the «Boshqa» door has no belt and knows a client only when exactly one active card holds the phone (A.3 step 6), so a phone on two codes would land as a new lead | a full pull retires each `manual_import` row whose tail's hash it carries (§B.2 step 5); tails it does not carry stay until the owner removes them |
 | Outcomes | none; labels stay `pending`, precision NULL, `auto_push` impossible; a fallback push's fate is unknown until the switch | the `year` walk reads the fallback months through the `other` + `utm_source` clause (A.9); rule 5 then re-pushes, through the `agent` door, the ones the ERP never recorded (≤ 30 d old, payload kept) |
 | Reminder | the ERP's 15-min reminder **fires** for `other` arrivals — tell the owner; keep `PUSH_DAILY_CAP ≤ 10` during the fallback. The binding «no reminder for agent leads» holds only on the `agent` door — owner decision 01 §7 question 4 (open question 15) | — |
 
@@ -1052,11 +1097,14 @@ the captured fixtures (07 §1.7) and this fake change together.
   def encode_cursor(at_us: str, id_: str, n: int) -> str:            # at_us 'YYYY-MM-DDTHH:MM:SS.ffffffZ'
       return base64.urlsafe_b64encode(f"{at_us}|{id_}|{n}".encode()).decode().rstrip("=")
   def decode_cursor(raw: str | None) -> tuple[str, str, int] | None | Literal["invalid"]:
-      # padding restored; 2 parts (n = 0) or 3; at ~ CURSOR_AT and a real calendar date; id a uuid
-      # (lower-cased); n ^\d{1,6}$ — else "invalid"
+      # '' or None → None (absent); padding restored; 2 parts (n = 0) or 3; at ~ CURSOR_AT and its
+      # first 19 characters survive the round trip through a real instant (a rolled date '02-30' AND an
+      # invalid time 'T24:00:00Z' or ':60' are refused); id a uuid (lower-cased); n ^\d{1,6}$ — else "invalid"
   def parse_since(raw: str | None) -> str | None | Literal["invalid"]:
+      # '' or None → None (absent: `since=` with no value is mode 'full');
       # ^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d{1,6})?)?(Z|[+-]\d{2}:?\d{2})$, real date, h ≤ 23,
-      # m ≤ 59, s ≤ 59 → UTC with six fraction digits; '0', a date alone, a naive time, a space
+      # m ≤ 59, s ≤ 59, and the offset itself in range (Date.parse NaN on +24:00, +12:60, +1260; +23:59
+      # is accepted) → UTC with six fraction digits; '0', a date alone, a naive time, a space
       # where '+' was → "invalid"
   def clamp_limit(raw: str | None) -> int:   # the ERP's expression (A.6): n = floor(js_number(raw)); NaN, 0 or -0 → 1000; then clamp to [1, 5000]
       # js_number = ECMAScript StringToNumber (what Number(raw) does): absent → the ERP reads q.get('limit') = null → 0;
@@ -1168,7 +1216,7 @@ SUPPRESSION (full, salt changed)              OUTCOMES (nightly)
 | «Boshqa» fallback door answers 200 to a landing that threw | invisible until the switch-over; then the `year` walk finds no row and rule 5 re-pushes once through `agent` | `push_unconfirmed` while it is open |
 | Feed returns a PII key | `FeedShapeError`, run `failed`, problem `feed_contract` (code `shape`) | alert (contract breach) |
 | Full pull shrinks > 10 % | no delete; `suppression_shrunk` | alert; runbook 06 §4.6 |
-| A lost-reason **dictionary** label renamed, the setting unchanged | renaming never rewrites `leads.lost_reason` (the text chosen at the move): old leads keep their spelling, stay in the feed and keep `no_contact=true` while the setting lists it (A.10). NEW «never again» losses under the renamed label are not in the setting: they never enter the suppression feed and arrive with `no_contact=false` (their `lost_reason` is still sent — it is a dictionary label) | the owner doc says «deactivate + create»; the fix is to list the new spelling in `agent_no_contact_reasons` too (06 §4.6) |
+| A lost-reason **dictionary** label renamed, the setting unchanged | `saveLostReason` UPDATEs the label in place and never rewrites `leads.lost_reason` (the text chosen at the move): old leads keep their spelling, stay in the suppression feed and keep `no_contact=true` while the setting lists it (A.10) — but the outcomes feed compares their text with the CURRENT labels, so their `lost_reason` comes back `null` at the next read (the `year` walk or a later touch). The agent keeps such a row's stored label — a lost row whose `lost_reason` goes from a label to `null` with `stage_kind` still `lost` and `closed_at` unchanged is read as unchanged (02 §2.11), so no 180-/365-day cooldown is retracted and precision does not shift. NEW «never again» losses under the renamed label are not in the setting: they never enter the suppression feed and arrive with `no_contact=false` (their `lost_reason` is still sent — it is a dictionary label) | the owner doc says «deactivate + create, never rename» (A.14 step 2); the fix is to list the new spelling in `agent_no_contact_reasons` too (06 §4.6) |
 | The **setting** `agent_no_contact_reasons` changed | old leads whose text is no longer listed leave the feed at the next full pull (`suppression_shrunk` if > 10 %) and `no_contact` turns false for them; a label ADDED brings its old leads in only through a full pull (A.7) | runbook 06 §4.6 «Feed shrank» |
 | Owner changes a funnel stage's KIND | invisible to the delta and to `since` reads of older rows; the nightly full pull and the monthly `year` walk see it | nothing |
 | Owner maps `kub` late | early arrivals route by the note's «N kub» (a band's `BAND_HAJM` words included), only a push with no number by rule B; a band is never printed as a quote either way (A.14) | none |
@@ -1288,3 +1336,14 @@ others point here):
 - Header, A.0 (14 commits, 42 files +4370/−79, AGENT-FEED.md 443 lines, the fourth review's gates 676 files / 7642 tests by the build session's report, red proofs 16 + 21 + 16 + 12 + 5, a new bullet stating the fix for the agent: an `external_id` the ledger's unique index refuses for its size — only one over 2,048 UTF-8 bytes can be; postgres takes about 2,680 incompressible bytes — is stored as `sha256:` + hex SHA-256, lands, replays, and never appears in the outcomes feed; the agent's 46-byte ids are not affected, so the push, reconcile and outcomes logic are unchanged); A.1 (`inbound.ts`, `clip.ts`, docs and tests rows; integration test 1445 lines, `intake-id.test.ts`).
 - A.2: two `external_id`s that differ only by NUL vs U+FFFD or by which lone surrogate are one id, and `ref` keys that differ only that way collapse to one key keeping the last value (the agent's payload tests already keep both out, 07 §1.6); the `external_id` paragraph gains the 46 bytes, the `cs:` filter and the hashed spelling; the replay-fence paragraph names #1476 and the one known input-driven repeating cause — a body of tens of MB (about 40 MB of JSON, measured in postgres), 503 on every retry plus a lenta note each, out of the agent's reach. A.13 (iii) and the B.6 half-way row follow.
 - A.12: `intake-id.test.ts`, the long-id integration cases and the control, 5 red proofs (#1477). B.4: the fake does not model the `sha256:` spelling (the agent's ids are 46 bytes); the fixtures stay valid at `d138b3bc`. Acceptance criteria restated at the new head.
+
+**Wave 1 as built (2026-10-24)** — the ten verify:final mismatches, each re-read in fullprompt `agent-feed` at `d138b3bc` (read-only), plus the wave-1 build's push-test note:
+
+- A.3 step 8 and B.1: `textVolume` matches `kub|куб|m3|м3|m³|м³` (flags `iu`) and the FIRST match alone decides through `parseMeasure` (a first «0 kub» or a number ≥ 100000 is no volume; a later match is never read); the routing test applies that range.
+- A.4: only a CREATED lead is booked for today (`createLead`); a joined push keeps the lead's date, so a «📞 Bogʻlandim» by the responsible person reads `followup` on a created lead, and on a joined one `followup` only when its date was today or earlier, else `note`.
+- A.5: the 404 row split — `Not found` text/plain from the two agent routes and `/api/leads/in/[source]`, Next's own HTML 404 for a path no route handles; both trip `push_404`, and `text/plain` is required only of the former.
+- A.7, A.13, B.3: a `phones` value that is not a JSON array reads as no phones on `agent-feed` (fail-open — never suppressed, a push on it is a new lead); production `7bea3051` throws on it instead (Door row); tails are derived per element, never from the joined list; day-1 count in 07 §5.3.
+- A.9, B.6: `saveLostReason` renames a label in place, so old leads' `lost_reason` comes back `null` at the next read; the agent keeps the stored label (02 §2.11).
+- A.11, A.13, A.14 step 1, B.3 Door row: the doors fold is drawn only for `admin.settings.manage`; there is no rotate button — a re-mint is «Oʻchirish» then «Yoqish va kalit yaratish» and kills the old key for every sender, so an existing «Boshqa» key is copied, not re-minted (owner text in Uzbek).
+- A.14 step 4 and B.1: `seenKeys()` lists only keys arrivals carried in the last 30 days, so `make push-test` now gives every optional key a synthetic value (`kub: "1"` included) and a dropped key is added by hand through the «Savolni qo'lda qo'shish» row (decided here, without the owner); the zero-uuid `_post` exemption the T-04 guard carries is the pre-T-07 design and T-28 deletes it.
+- B.2: a feed 404 — and a proxy's 401/403 — is `push_404`; any other 4xx is `feed_contract` `bad_request`; 3xx as a push's. B.3 Suppression row: the XLSX «Phones» column from an unfiltered screen with no saved view, ≤ 5,000 rows, inactive cards included. B.4 codec comments: an empty value means absent, the cursor's time survives a round trip (`T24:00:00Z` and `:60` refused), the `since` offset itself in range (`+24:00`, `+12:60`, `+1260` refused).
