@@ -23,6 +23,11 @@ Built here (T-08):
   ``backup_counts`` the drill compares with;
 * ``restore_drill`` — ``RESTORE_DRILL_DAY`` 05:00.
 
+Built by later tasks and registered here: the five ERP feed cadences, read
+from ``collectors/erp_sync.JOBS`` (T-09's suppression delta/full, T-10's
+outcomes/quarter/year walks), each ``run_collector(ErpSync, variant=…)``;
+and ``resolve`` (T-17, ``services/companies.resolve_job``, every 2 minutes).
+
 Every job's outcome is also recorded as a ``job:<id>`` heartbeat by an
 APScheduler listener (04 §0: «every job … beats job:<id>»). Crons are
 standard crontab read by ``services/crontab`` (day-of-week 0 = Sunday — never
@@ -48,7 +53,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, time, timedelta, tzinfo
 from pathlib import Path
 from time import monotonic
-from typing import Any
+from typing import Any, Final
 
 import httpx
 import sqlalchemy as sa
@@ -58,13 +63,22 @@ from apscheduler.triggers.base import BaseTrigger
 from apscheduler.triggers.combining import OrTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
+from clientscrapper.collectors import erp_sync
 from clientscrapper.collectors.base import Collector
 from clientscrapper.collectors.runner import run_collector
 from clientscrapper.config import settings
 from clientscrapper.db.models import Source
 from clientscrapper.db.session import engine, session_scope
 from clientscrapper.logs import setup_logging
-from clientscrapper.services import backup, costs, crontab, health, restore_drill
+from clientscrapper.services import (
+    backup,
+    companies,
+    costs,
+    crontab,
+    erp_feeds,
+    health,
+    restore_drill,
+)
 from clientscrapper.services import http as http_layer
 from clientscrapper.services.lifecycle import idle_until_stopped, run_main
 
@@ -158,6 +172,25 @@ def _collector(
     )
 
 
+# The notes the table carries for the ERP cadences (03 §3, 05 §B.2).
+_ERP_NOTES: Final[Mapping[str, str]] = {"outcomes": "cursor + recent walks"}
+
+
+def _erp_sync_slot(erp: erp_sync.ErpJob) -> JobSlot:
+    """One ERP cadence of ``erp_sync.JOBS`` as a built slot: the delta is the
+    row's own cron (``sources.erp_sync.cron``), the others are variants."""
+    return JobSlot(
+        id=erp.id,
+        triggers=(erp.cron,),
+        task=erp.task,
+        job=collector_job(erp_sync.ErpSync, erp.variant),
+        source_key=erp_sync.ErpSync.key,
+        variant=erp.variant,
+        primary=erp.variant == "delta",
+        note=_ERP_NOTES.get(erp.variant, ""),
+    )
+
+
 def job_table() -> tuple[JobSlot, ...]:
     """Every job of the spec, built or a slot (see the module docstring)."""
     drill_day = settings.restore_drill_day
@@ -168,20 +201,9 @@ def job_table() -> tuple[JobSlot, ...]:
         JobSlot("backup", (_at(settings.backup_time_parsed),), "T-08", backup_job),
         JobSlot("restore_drill", (f"0 5 * * {drill_day}",), "T-08", restore_drill_job),
         # --- 03 §3: collectors --------------------------------------------------
-        _collector(
-            "erp_sync_delta", "15 * * * *", "T-09", "erp_sync", "delta", primary=True
-        ),
-        _collector("erp_sync_full", "30 2 * * *", "T-09", "erp_sync", "full"),
-        _collector(
-            "erp_sync_outcomes",
-            "0 3 * * *",
-            "T-10",
-            "erp_sync",
-            "outcomes",
-            note="cursor + recent walks",
-        ),
-        _collector("erp_sync_quarter", "20 3 * * 0", "T-10", "erp_sync", "quarter"),
-        _collector("erp_sync_year", "40 3 1 * *", "T-10", "erp_sync", "year"),
+        # The ERP feeds (T-09 suppression, T-10 outcomes): erp_sync.JOBS is the
+        # one statement of their ids, crons and variants.
+        *(_erp_sync_slot(erp) for erp in erp_sync.JOBS),
         JobSlot(
             "telegram_monitor",
             ("*/15 * * * *",),
@@ -227,7 +249,7 @@ def job_table() -> tuple[JobSlot, ...]:
             "T-16",
             note="every 30 min 00:30–08:00",
         ),
-        JobSlot("resolve", ("every 2m",), "T-17"),
+        JobSlot("resolve", ("every 2m",), "T-17", companies.resolve_job),
         JobSlot("score", ("every 15m",), "T-18", wakes_on="cs_interaction"),
         JobSlot("review_cards", ("every 2m",), "T-21", note="sends inside REVIEW_HOURS"),
         JobSlot("enrich", ("*/10 7-21 * * *",), "T-24", note="every 10 min 07:00–22:00"),
@@ -654,14 +676,18 @@ async def source_crons() -> dict[str, str | None]:
 
 def wire() -> None:
     """The hooks every worker process registers — the scheduler and a one-off
-    run alike (``make backup``): the Anthropic switch costs.ask reads, and
-    the cap notifier with health's quiet hours. The owner bot's seams (the
+    run alike (``make backup``): the Anthropic switch costs.ask reads, the
+    cap notifier with health's quiet hours, and the suppression freshness
+    probe health judges ``suppression_stale`` by. The owner bot's seams (the
     notifier, the backup sender, T-20) are wired through the same setters."""
     costs.set_anthropic_health(health.anthropic_down_until)
     costs.set_cap_notifier(
         _seams.notify if _seams.notify is not _not_wired else None,
         hold=health.in_quiet_hours,
     )
+    # suppression_stale is judged through the feed sync's own freshness rule
+    # (T-09); unregistered, the key stays unjudged (06 §4.2).
+    erp_feeds.register_health_probe()
 
 
 async def backup_now(*, now: datetime | None = None) -> int:

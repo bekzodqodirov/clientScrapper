@@ -19,10 +19,11 @@ import pytest
 import sqlalchemy as sa
 from apscheduler.events import JobExecutionEvent
 
+from clientscrapper.collectors import erp_sync
 from clientscrapper.collectors.base import Collector, Observation
 from clientscrapper.config import settings
 from clientscrapper.db import models as m
-from clientscrapper.services import costs, crontab, health
+from clientscrapper.services import companies, costs, crontab, erp_feeds, health
 from clientscrapper.worker import main as worker
 
 TZ = ZoneInfo("Asia/Tashkent")
@@ -71,7 +72,28 @@ SPEC: tuple[tuple[str, tuple[str, ...], str], ...] = (
     ("digest", ("0 9 * * *",), "T-35"),  # DIGEST_TIME 09:00
     ("retention", ("15 4 * * *",), "T-31"),
 )
-BUILT = {"heartbeat", "health", "backup", "restore_drill"}
+BUILT = {
+    "heartbeat",
+    "health",
+    "backup",
+    "restore_drill",
+    # T-09 / T-10: the ERP feeds, through run_collector(ErpSync, variant=…).
+    "erp_sync_delta",
+    "erp_sync_full",
+    "erp_sync_outcomes",
+    "erp_sync_quarter",
+    "erp_sync_year",
+    # T-17: the resolver.
+    "resolve",
+}
+# The ERP slots and the ErpSync variant each runs (03 §3, 05 §B.2).
+ERP_VARIANTS = {
+    "erp_sync_delta": "delta",
+    "erp_sync_full": "full",
+    "erp_sync_outcomes": "outcomes",
+    "erp_sync_quarter": "quarter",
+    "erp_sync_year": "year",
+}
 WAKES = {"telegram_monitor", "classify", "score"}  # NOTIFY cs_interaction (04 §0)
 
 
@@ -92,6 +114,57 @@ def test_only_built_jobs_are_registered_and_slots_import_nothing():
             True,
             3600,
         )
+
+
+def test_the_erp_slots_are_erp_sync_jobs_and_every_variant_is_erpsync_s():
+    """One statement of the ERP cadences (collectors/erp_sync.JOBS); the table
+    reads it, and every variant it schedules is one ErpSync runs."""
+    table = {s.id: s for s in worker.job_table()}
+    assert {j.id: (j.cron, j.variant, j.task) for j in erp_sync.JOBS} == {
+        slot_id: (table[slot_id].triggers[0], variant, table[slot_id].task)
+        for slot_id, variant in ERP_VARIANTS.items()
+    }
+    for slot_id, variant in ERP_VARIANTS.items():
+        slot = table[slot_id]
+        assert (slot.source_key, slot.variant) == ("erp_sync", variant)
+        assert slot.variant in erp_sync.VARIANTS
+        assert slot.primary == (variant == "delta")
+
+
+async def test_each_erp_slot_runs_erpsync_with_its_variant(monkeypatch):
+    ran: list[tuple[type, str | None]] = []
+
+    async def record(cls, *, fetcher, now, variant=None, **kw):
+        ran.append((cls, variant))
+
+    monkeypatch.setattr(worker, "run_collector", record)
+    table = {s.id: s for s in worker.job_table()}
+    try:
+        for slot_id in ERP_VARIANTS:
+            job = table[slot_id].job
+            assert job is not None
+            await job()
+    finally:
+        await worker.shared_fetcher().aclose()
+        worker._shared.fetcher = None
+    assert ran == [(erp_sync.ErpSync, v) for v in ERP_VARIANTS.values()]
+
+
+def test_the_resolver_is_the_resolve_slot_s_job():
+    [slot] = [s for s in worker.job_table() if s.id == "resolve"]
+    assert slot.job is companies.resolve_job
+    scheduler = worker.build_scheduler()
+    job = scheduler.get_job("resolve")
+    assert job is not None and job.func is companies.resolve_job
+    assert (job.max_instances, job.coalesce) == (1, True)
+
+
+def test_wire_registers_the_suppression_probe():
+    """suppression_stale is unjudged until the feed sync's probe is
+    registered (06 §4.2); the worker registers it at start (T-09)."""
+    health.set_suppression_probe(None)
+    worker.wire()
+    assert health._probes.suppression is erp_feeds.suppression_probe
 
 
 def test_every_trigger_of_the_table_parses():
@@ -201,6 +274,7 @@ def _isolated(monkeypatch, tmp_path):
     # worker.wire() (backup_now) registers process-wide hooks.
     costs.set_anthropic_health(None)
     costs.set_cap_notifier(None)
+    health.set_suppression_probe(None)
 
 
 class Notify:
@@ -225,7 +299,7 @@ async def test_heartbeat_beats_the_worker_and_pings_the_dead_man(session, monkey
     await worker.heartbeat_job(scheduler, transport=transport)
     await worker.heartbeat_job(scheduler, transport=transport)  # within 5 minutes
     row = (await health.beats(session))["worker"]
-    assert row.detail == {"jobs": 4}
+    assert row.detail == {"jobs": len(BUILT)}
     assert seen == ["https://hc.example.uz/ping/namuna"]
     monkeypatch.setattr(worker._deadman, "last", worker._deadman.last - 301)
     await worker.heartbeat_job(scheduler, transport=transport)
