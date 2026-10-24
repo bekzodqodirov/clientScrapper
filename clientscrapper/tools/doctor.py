@@ -261,6 +261,16 @@ def _model_prices(env: Mapping[str, str]) -> list[Finding]:
             )
             continue
         source = role.price_key if override.strip() else "usage.py"
+        if price.input == 0 and price.output == 0:
+            # costs.ask refuses a paid call estimated at $0 as unpriced.
+            found.append(
+                _error(
+                    f"❌ {role.key}={model}: narxi $0 ({source}) — bunday narx bilan har "
+                    f"bir chaqiruv ({role.label_uz}) rad etiladi. {role.price_key} ni "
+                    "boʻshat yoki haqiqiy narxni yoz."
+                )
+            )
+            continue
         found.append(
             _info(
                 f"✅ {role.key}={model}: kirish ${_usd(price.input)} · chiqish "

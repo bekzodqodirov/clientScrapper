@@ -17,13 +17,22 @@ claim), a process killed mid-call leaves its estimate counted, and the answer's
 real price later updates that same row in place (``usage_log`` refuses DELETE,
 not UPDATE). The lock covers the ledger read only, never the call.
 
+ask's own transactions never wait on the caller. The attribution columns are
+foreign keys, and their check waits on a referenced row that the caller holds
+``FOR UPDATE`` (every job claims its rows that way, 04 §0) while the caller
+waits on ask: a deadlock Postgres cannot see. So the own transaction first
+takes ``FOR KEY SHARE NOWAIT`` on each referenced row and writes only the
+columns it got; the rest is written in the caller's transaction once the
+money is final, and lands when the caller commits.
+
 The two budget layers run in a fixed order: a collector's ``Budget.can_spend``
 first (per source: ``source_budget_usd`` = ``sources.daily_cost_cap_usd`` minus
 the source's spend today), then ``ask``. ``ask`` never reads the per-source cap.
 
-A free call (``est_usd == 0``) skips the money rungs: at the daily cap paid
-calls stop while the collectors carry on with the free part (06 §4.2
-``cost_cap``). Free ops are capped by their query counts instead.
+Only a call that is free by definition (``usage.free_call``) skips the money
+rungs: at the daily cap paid calls stop while the collectors carry on with the
+free part (06 §4.2 ``cost_cap``), and the free ops are capped by their query
+counts instead. A paid call estimated at $0 is refused as unpriced.
 
 Days and months are the business calendar in ``TIMEZONE`` (Asia/Tashkent):
 every function takes ``now`` and rows are stamped with it.
@@ -45,11 +54,12 @@ import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from clientscrapper.config import settings, within
-from clientscrapper.db.models import ReminderLog, Source, UsageLog
+from clientscrapper.db.models import Company, ReminderLog, Source, UsageLog
 from clientscrapper.db.session import session_scope
 from clientscrapper.services.usage import (
     ALLOCATIONS,
     CALLABLE,
+    COUNTED_OPERATIONS,
     DAILY_UNIT_CAPS,
     FAMILIES,
     FAMILY,
@@ -63,6 +73,8 @@ from clientscrapper.services.usage import (
     Family,
     Operation,
     Priced,
+    free_call,
+    round_usd,
 )
 
 log = logging.getLogger(__name__)
@@ -98,10 +110,13 @@ SERP_OVERFLOW_FLAG: Final = "serp_paid_overflow"
 # claim step is serialised on it (milliseconds; never held across a call).
 LEDGER_LOCK: Final = 0x63730006
 
-# Ops whose cap is a count: their claim reserves one unit before the call.
-UNIT_COUNTED: Final[frozenset[Operation]] = frozenset(DAILY_UNIT_CAPS) | frozenset(
-    MONTHLY_UNIT_CAPS
-)
+# Ops whose cap or price is a count: their claim reserves one unit before the
+# call and the settled row keeps at least it.
+UNIT_COUNTED: Final[frozenset[Operation]] = COUNTED_OPERATIONS
+# How long ask's own transaction may wait on any lock once it holds the
+# ledger lock. Nothing it does should wait at all (the foreign keys are taken
+# NOWAIT); this bounds what nobody foresaw instead of hanging every ask.
+OWN_LOCK_TIMEOUT: Final = "2s"
 # FAMILY keyed by plain strings: ledger rows carry the operation as text.
 _FAMILY_OF: Final[Mapping[str, Family]] = {str(op): f for op, f in FAMILY.items()}
 
@@ -242,11 +257,18 @@ def decide(
 ) -> str | None:
     """The refusal code for this call, or None to let it through — 04 §8's
     rungs in their order. Money rungs refuse at ``spend + est ≥ cap`` (reaching
-    a cap exactly is over it) and are skipped for a free call; unit rungs
-    refuse at ``units + 1 > cap``. ``local_time`` is ``now`` in TIMEZONE."""
+    a cap exactly is over it) and are skipped only for a call that is free by
+    definition at $0 (``usage.free_call``); unit rungs refuse at
+    ``units + 1 > cap``. ``local_time`` is ``now`` in TIMEZONE."""
     if est_usd is None or not est_usd.is_finite():
         return UNPRICED
     family = FAMILY[operation]
+    totals = ledger.op(operation)
+    if est_usd == 0 and not free_call(operation, month_units_before=totals.month_units):
+        # A paid call priced at nothing (an estimate from no tokens, a 0/0
+        # price override, a Places request past the free tier) is not priced:
+        # letting it past the money rungs would bypass the hard cap.
+        return UNPRICED
     if est_usd > 0:
         if ledger.month_usd + est_usd >= monthly_cap:
             return CAP_MONTHLY
@@ -256,7 +278,6 @@ def decide(
             return CAP_FAMILY + family
         if not _op_fits(operation, est_usd, ledger, serp_overflow=serp_overflow):
             return CAP_OP + operation
-    totals = ledger.op(operation)
     day_units = DAILY_UNIT_CAPS.get(operation)
     if day_units is not None and totals.day_units + UNITS_PER_CALL > day_units:
         return CAP_DAY_OP + operation
@@ -465,65 +486,105 @@ async def _anthropic_is_down(session: AsyncSession, now: datetime) -> bool:
 # Indirection for tests: the transaction of ask's own.
 _own_session: Callable[[], AbstractAsyncContextManager[AsyncSession]] = session_scope
 
+_LOCK_LEDGER: Final = sa.select(sa.func.pg_advisory_xact_lock(LEDGER_LOCK))
+_UNSET: Final = object()
+_LOCK_NOT_AVAILABLE: Final = "55P03"
 
-def _is_foreign_key(exc: sa.exc.IntegrityError) -> bool:
-    return getattr(exc.orig, "sqlstate", None) == "23503"
+
+class _ClaimNotVisible(Exception):
+    """The settle found no claim row: it sits uncommitted in the caller's
+    transaction, so the settle must be written there too."""
+
+
+def _sqlstate(exc: BaseException) -> str | None:
+    return getattr(getattr(exc, "orig", None), "sqlstate", None)
+
+
+def _referenced(column: str) -> sa.ColumnElement[Any]:
+    """The key ``usage_log.<column>`` references, read off the schema."""
+    (fk,) = UsageLog.__table__.c[column].foreign_keys
+    return fk.column
+
+
+async def _key_shared(session: AsyncSession, wanted: Mapping[str, Any]) -> dict[str, Any]:
+    """The attribution columns this transaction may write without waiting.
+
+    Each referenced row is taken ``FOR KEY SHARE NOWAIT``; holding that lock,
+    the write's foreign-key check cannot wait. A row another transaction holds
+    ``FOR UPDATE`` (the model_jobs row a job claimed) or has not committed yet
+    is left out, for the caller's transaction to write later."""
+    got: dict[str, Any] = {}
+    for column, value in wanted.items():
+        key = _referenced(column)
+        probe = (
+            sa.select(key)
+            .where(key == value)
+            .with_for_update(read=True, key_share=True, nowait=True)
+        )
+        try:
+            async with session.begin_nested():
+                found = await session.scalar(probe)
+        except sa.exc.OperationalError as exc:
+            if _sqlstate(exc) != _LOCK_NOT_AVAILABLE:
+                raise
+            continue
+        if found is not None:
+            got[column] = value
+    return got
 
 
 async def _write[X](
     session: AsyncSession,
-    body: Callable[[AsyncSession, bool], Awaitable[X]],
+    body: Callable[[AsyncSession], Awaitable[X]],
     *,
     what: str,
     lock: bool,
+    own: bool = True,
 ) -> tuple[X, bool]:
-    """``body(s, attributed)`` in a transaction of its own, so a later failure
-    of the caller cannot roll the spend back. A foreign key the caller has not
-    committed yet (an instant job's model_jobs row) is retried without the
-    attribution columns — the money is what must be committed — and the
-    caller adds them afterwards. When no own transaction can be had, the
-    caller's savepoint takes it (MIYA ``_record``). Returns (value, attributed).
-    """
-    lock_stmt = sa.select(sa.func.pg_advisory_xact_lock(LEDGER_LOCK))
-    try:
+    """``body(s)`` in a transaction of its own, so a later failure of the
+    caller cannot roll the spend back; returns (value, True). The own
+    transaction takes the ledger lock first when ``lock`` and never waits on a
+    row lock past ``OWN_LOCK_TIMEOUT``. With ``own=False`` (the claim already
+    sits in the caller's transaction, where no other one can see it), or when
+    no own transaction can be had, the caller's savepoint takes it (MIYA
+    ``_record``): (value, False)."""
+    if own:
         try:
-            async with _own_session() as own:
+            async with _own_session() as s:
                 if lock:
-                    await own.execute(lock_stmt)
-                return await body(own, True), True
-        except sa.exc.IntegrityError as exc:
-            if not _is_foreign_key(exc):
-                raise
-        async with _own_session() as own:
-            if lock:
-                await own.execute(lock_stmt)
-            return await body(own, False), False
-    except Exception as exc:
-        log.warning(
-            "usage ledger written in the caller's transaction",
-            extra={"what": what, "error": type(exc).__name__},
-        )
+                    await s.execute(_LOCK_LEDGER)
+                await s.execute(
+                    sa.select(sa.func.set_config("lock_timeout", OWN_LOCK_TIMEOUT, True))
+                )
+                return await body(s), True
+        except Exception as exc:
+            log.warning(
+                "usage ledger written in the caller's transaction",
+                extra={"what": what, "error": type(exc).__name__},
+            )
     # The caller's transaction outlives this call, so an xact lock would be
     # held across the API call: take the session lock and give it back.
     if lock:
         await session.execute(sa.select(sa.func.pg_advisory_lock(LEDGER_LOCK)))
     try:
         async with session.begin_nested():
-            value = await body(session, True)
+            value = await body(session)
             await session.flush()
     finally:
         if lock:
             await session.execute(sa.select(sa.func.pg_advisory_unlock(LEDGER_LOCK)))
-    return value, True
+    return value, False
 
 
 def _attribution(
     *,
-    company_id: UUID | None,
-    model_job_id: int | None,
-    collector_run_id: int | None,
+    source_key: str | None = None,
+    company_id: UUID | None = None,
+    model_job_id: int | None = None,
+    collector_run_id: int | None = None,
 ) -> dict[str, Any]:
     values = {
+        "source_key": source_key,
         "company_id": company_id,
         "model_job_id": model_job_id,
         "collector_run_id": collector_run_id,
@@ -531,39 +592,88 @@ def _attribution(
     return {k: v for k, v in values.items() if v is not None}
 
 
-def _priced_values(p: Priced, *, keep_cost: Decimal) -> dict[str, Any]:
-    cost = p.cost_usd
+@dataclass(slots=True)
+class _Attributions:
+    """Per usage_log row: the attribution it should carry and what is stored."""
+
+    wanted: dict[int, dict[str, Any]] = field(default_factory=dict)
+    stored: dict[int, dict[str, Any]] = field(default_factory=dict)
+
+    def note(
+        self, row_id: int, wanted: Mapping[str, Any], stored: Mapping[str, Any]
+    ) -> None:
+        self.wanted[row_id] = dict(wanted)
+        self.stored.setdefault(row_id, {}).update(stored)
+
+    def missing(self, row_id: int) -> dict[str, Any]:
+        have = self.stored.get(row_id, {})
+        return {
+            k: v
+            for k, v in self.wanted.get(row_id, {}).items()
+            if have.get(k, _UNSET) != v
+        }
+
+
+async def _attribute_in_caller(session: AsyncSession, rows: _Attributions) -> None:
+    """The attribution ask's own transactions could not take: written in the
+    caller's transaction once the money is final, so it lands when the caller
+    commits; the committed money stands either way. One savepoint per column,
+    so one bad value does not cost the others."""
+    for row_id in list(rows.wanted):
+        for column, value in rows.missing(row_id).items():
+            try:
+                async with session.begin_nested():
+                    await session.execute(
+                        sa.update(UsageLog)
+                        .where(UsageLog.id == row_id)
+                        .values({column: value})
+                    )
+            except Exception as exc:
+                log.warning(
+                    "usage attribution not recorded",
+                    extra={"column": column, "error": type(exc).__name__},
+                )
+
+
+def _valid_cost(cost: Decimal | None) -> Decimal | None:
     if cost is None or not cost.is_finite() or cost < 0:
-        log.warning(
-            "an answer could not be priced; the estimate stays", extra={"model": p.model}
-        )
-        cost = keep_cost
+        return None
+    return cost
+
+
+def _answer_costs(answers: Sequence[Priced], estimate: Decimal) -> list[Decimal]:
+    """Each row's cost: its own price, or — for an answer that could not be
+    priced (None, NaN, negative) — an equal share of what the estimate has
+    left, so the rows together never fall below the claim (04 §8: the cap
+    never undercounts, an unknown price counts as over it)."""
+    valid = [_valid_cost(p.cost_usd) for p in answers]
+    unpriced = sum(1 for cost in valid if cost is None)
+    share = D0
+    if unpriced:
+        log.warning("an answer could not be priced; the estimate stays")
+        priced = sum((cost for cost in valid if cost is not None), D0)
+        share = round_usd(max(D0, estimate - priced) / unpriced)
+    return [share if cost is None else cost for cost in valid]
+
+
+def _units(value: Decimal, floor: Decimal) -> Decimal:
+    usable = value if value.is_finite() and value >= 0 else D0
+    return max(usable, floor)
+
+
+def _priced_values(
+    p: Priced, cost: Decimal, *, min_units: Decimal = D0
+) -> dict[str, Any]:
     return {
         "model": p.model,
         "input_tokens": p.input_tokens,
         "output_tokens": p.output_tokens,
         "cache_read_tokens": p.cache_read_tokens,
         "cache_write_tokens": p.cache_write_tokens,
-        "units": p.units,
+        "units": _units(p.units, min_units),
         "batch": p.batch,
         "cost_usd": cost,
     }
-
-
-async def _attribute_in_caller(
-    session: AsyncSession, rows: Sequence[tuple[int, Mapping[str, Any]]]
-) -> None:
-    """Attribution that only the caller's transaction can see yet: it lands
-    when the caller commits; the committed money stands either way."""
-    try:
-        async with session.begin_nested():
-            for row_id, values in rows:
-                if values:
-                    await session.execute(
-                        sa.update(UsageLog).where(UsageLog.id == row_id).values(**values)
-                    )
-    except Exception as exc:
-        log.warning("usage attribution not recorded", extra={"error": type(exc).__name__})
 
 
 # --- ask -----------------------------------------------------------------------
@@ -585,11 +695,13 @@ async def ask[T](
     """One paid call, or ``CostCapReached`` before anything is sent.
 
     ``est_usd`` is the caller's priced estimate (``usage.anthropic_cost_usd`` /
-    ``usage.unit_cost``; ``None`` = unpriced, refused). It is claimed before the
-    call, so it should not be below what the call can cost (estimate output at
-    ``max_tokens``). ``price(result)`` turns the answer into its row — or one row
-    per job for a batch submit (provisional, settled by ``settle_provisional``).
-    If ``call()`` raises, the claim stays at ``est_usd`` with ``units=0`` and the
+    ``usage.unit_cost``; ``None`` = unpriced, refused, and so is $0 for a call
+    that is not free by definition). It is claimed before the call, so it
+    should not be below what the call can cost (estimate output at
+    ``max_tokens``). ``price(result)`` turns the answer into its row — or one
+    row per job for a batch submit (provisional, settled by
+    ``settle_provisional``); an answer it cannot price keeps the estimate. If
+    ``call()`` raises, the claim stays at ``est_usd`` with ``units=0`` and the
     exception propagates. A refusal is persisted as a ``usage_log`` row
     (``cost_usd=0, units=0, model='refused:<code>'``) and remembered in this
     process until the next hour."""
@@ -605,14 +717,15 @@ async def ask[T](
         raise CostCapReached(held[1], operation)
 
     down = FAMILY[operation] == "anthropic" and await _anthropic_is_down(session, now)
-    attribution = _attribution(
+    wanted = _attribution(
+        source_key=source_key,
         company_id=company_id,
         model_job_id=model_job_id,
         collector_run_id=collector_run_id,
     )
     counted = operation in UNIT_COUNTED
 
-    async def claim(s: AsyncSession, attributed: bool) -> tuple[str | None, int]:
+    async def claim(s: AsyncSession) -> tuple[str | None, int, dict[str, Any]]:
         totals = await read_ledger(s, now)
         overflow = FAMILY[operation] == "serp" and await serp_overflow(s)
         code = decide(
@@ -625,6 +738,7 @@ async def ask[T](
             serp_overflow=overflow,
             anthropic_down=down,
         )
+        attach = await _key_shared(s, wanted)
         row = UsageLog(
             provider=PROVIDER[operation],
             operation=operation,
@@ -632,95 +746,108 @@ async def ask[T](
             units=UNITS_PER_CALL if code is None and counted else D0,
             batch=False,
             cost_usd=est_usd if code is None and est_usd is not None else D0,
-            source_key=source_key,
             created_at=now,
-            **(attribution if attributed else {}),
+            **attach,
         )
         s.add(row)
         await s.flush()
-        return code, row.id
+        return code, row.id, attach
 
-    (code, claim_id), claim_attributed = await _write(
+    (code, claim_id, attached), claim_own = await _write(
         session, claim, what="claim", lock=True
     )
+    rows = _Attributions()
+    rows.note(claim_id, wanted, attached)
     if code is not None:
         _refused[operation] = (next_hour(now), code)
         log.info("paid call refused", extra={"op": operation, "code": code})
+        await _attribute_in_caller(session, rows)
         if code in CAP_ALERT_CODES:
             await _tell_cost_cap(code, now)
         raise CostCapReached(code, operation)
 
     try:
         result = await call()
-    except (Exception, asyncio.CancelledError):
+    except asyncio.CancelledError:
         # Dispatched or not, the estimate stays counted: never undercount.
         if counted:
-            await _release_units(session, claim_id)
+            await _release_units(session, claim_id, own=claim_own)
+        raise
+    except Exception:
+        if counted:
+            await _release_units(session, claim_id, own=claim_own)
+        await _attribute_in_caller(session, rows)
         raise
 
     priced = price(result)
-    rows = [priced] if isinstance(priced, Priced) else list(priced)
-    if not rows:
+    answers = [priced] if isinstance(priced, Priced) else list(priced)
+    if not answers:
         log.warning(
             "price() returned no row; the estimate stays", extra={"op": operation}
         )
+        await _attribute_in_caller(session, rows)
         return result
-    keep = est_usd if est_usd is not None else D0
-    attrs = [
-        {
-            **attribution,
-            **_attribution(
-                company_id=p.company_id,
-                model_job_id=p.model_job_id,
-                collector_run_id=None,
-            ),
-        }
-        for p in rows
+    estimate = est_usd if est_usd is not None else D0
+    cost_of = _answer_costs(answers, estimate)
+    wants = [
+        wanted | _attribution(company_id=p.company_id, model_job_id=p.model_job_id)
+        for p in answers
     ]
+    rows.note(claim_id, wants[0], {})
 
-    async def settle(s: AsyncSession, attributed: bool) -> list[int]:
-        ids = [claim_id]
-        first = _priced_values(rows[0], keep_cost=keep)
-        await s.execute(
+    async def settle(s: AsyncSession) -> list[tuple[int, dict[str, Any]]]:
+        first = _priced_values(
+            answers[0], cost_of[0], min_units=UNITS_PER_CALL if counted else D0
+        )
+        attach = await _key_shared(s, rows.missing(claim_id))
+        updated = await s.scalar(
             sa.update(UsageLog)
             .where(UsageLog.id == claim_id)
-            .values(**first, **(attrs[0] if attributed else {}))
+            .values(**first, **attach)
+            .returning(UsageLog.id)
         )
-        for p, attr in zip(rows[1:], attrs[1:], strict=True):
+        if updated is None:
+            raise _ClaimNotVisible(claim_id)
+        written = [(claim_id, attach)]
+        for p, cost, want in zip(answers[1:], cost_of[1:], wants[1:], strict=True):
+            more = await _key_shared(s, want)
             extra = UsageLog(
                 provider=PROVIDER[operation],
                 operation=operation,
-                source_key=source_key,
                 created_at=now,
-                **_priced_values(p, keep_cost=D0),
-                **(attr if attributed else {}),
+                **_priced_values(p, cost),
+                **more,
             )
             s.add(extra)
             await s.flush()
-            ids.append(extra.id)
-        return ids
+            written.append((extra.id, more))
+        return written
 
     try:
-        ids, settled_attributed = await _write(session, settle, what="settle", lock=False)
+        settled, _ = await _write(
+            session, settle, what="settle", lock=False, own=claim_own
+        )
     except Exception as exc:
         log.error(
             "usage not settled; the estimate stays",
             extra={"op": operation, "error": type(exc).__name__},
         )
+        await _attribute_in_caller(session, rows)
         return result
-    if not (claim_attributed and settled_attributed):
-        await _attribute_in_caller(session, list(zip(ids, attrs, strict=True)))
+    for (row_id, stored), want in zip(settled, wants, strict=True):
+        rows.note(row_id, want, stored)
+    await _attribute_in_caller(session, rows)
     return result
 
 
-async def _release_units(session: AsyncSession, claim_id: int) -> None:
-    async def body(s: AsyncSession, _: bool) -> None:
+async def _release_units(session: AsyncSession, claim_id: int, *, own: bool) -> None:
+    async def body(s: AsyncSession) -> None:
         await s.execute(
             sa.update(UsageLog).where(UsageLog.id == claim_id).values(units=D0)
         )
 
     try:
-        await _write(session, body, what="release", lock=False)
+        await _write(session, body, what="release", lock=False, own=own)
     except Exception as exc:
         # The unit stays reserved: an overcount, the safe direction.
         log.warning("claimed unit not released", extra={"error": type(exc).__name__})
@@ -737,7 +864,8 @@ async def settle_provisional(
     """A batch result's real tokens and price, written over the job's
     provisional row (04 §4.8) in the caller's transaction — the one that
     applies the result. True when a provisional row was updated; False when
-    none was found and a row was inserted instead (the spend is never lost)."""
+    none was found and a row was inserted instead (the spend is never lost).
+    A result that cannot be priced keeps the provisional estimate."""
     row_id = await session.scalar(
         sa.select(UsageLog.id)
         .where(
@@ -752,21 +880,24 @@ async def settle_provisional(
     )
     if row_id is None:
         log.warning("no provisional usage row", extra={"model_job_id": model_job_id})
+        [cost] = _answer_costs([priced], D0)
         session.add(
             UsageLog(
                 provider=PROVIDER[operation],
                 operation=operation,
                 model_job_id=model_job_id,
                 created_at=now,
-                **_priced_values(priced, keep_cost=D0),
+                **_priced_values(priced, cost),
             )
         )
         await session.flush()
         return False
     keep = await session.scalar(sa.select(UsageLog.cost_usd).where(UsageLog.id == row_id))
-    values = _priced_values(priced, keep_cost=_dec(keep))
+    [cost] = _answer_costs([priced], _dec(keep))
     await session.execute(
-        sa.update(UsageLog).where(UsageLog.id == row_id).values(**values)
+        sa.update(UsageLog)
+        .where(UsageLog.id == row_id)
+        .values(**_priced_values(priced, cost))
     )
     return True
 
@@ -916,47 +1047,104 @@ async def _tell_cost_cap(code: str, now: datetime) -> None:
         log.warning("cost_cap alert not told", extra={"error": type(exc).__name__})
 
 
-# --- /xarajat (06 §1.4) ----------------------------------------------------------
+# --- /xarajat (06 §1.2, §1.4) ---------------------------------------------------
 
 
 @dataclass(frozen=True, slots=True)
 class OpLine:
+    """One operation's (or provider's) recorded calls and money, and its
+    refusal rows counted per code (``refused:<code>`` without the prefix)."""
+
     calls: int = 0
     units: Decimal = D0
     usd: Decimal = D0
     refused: int = 0
+    refused_by_code: Mapping[str, int] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class UsageLines:
+    """The same rows twice: by ``usage_log.operation`` and by ``provider``."""
+
+    by_operation: Mapping[str, OpLine]
+    by_provider: Mapping[str, OpLine]
+
+
+def _fold(
+    lines: dict[str, OpLine],
+    key: str,
+    n: int,
+    units: Decimal,
+    usd: Decimal,
+    code: str | None,
+) -> None:
+    line = lines.get(key, OpLine())
+    if code is None:
+        lines[key] = OpLine(
+            line.calls + n,
+            line.units + units,
+            line.usd + usd,
+            line.refused,
+            line.refused_by_code,
+        )
+        return
+    codes = dict(line.refused_by_code)
+    codes[code] = codes.get(code, 0) + n
+    lines[key] = OpLine(line.calls, line.units, line.usd, line.refused + n, codes)
+
+
+async def usage_lines(
+    session: AsyncSession, *, since: datetime, until: datetime
+) -> UsageLines:
+    code = sa.case(
+        (_REFUSED, sa.func.substr(UsageLog.model, len(REFUSED_PREFIX) + 1)), else_=None
+    )
+    rows = await session.execute(
+        sa.select(
+            UsageLog.provider,
+            UsageLog.operation,
+            code,
+            sa.func.count(),
+            sa.func.sum(UsageLog.units),
+            sa.func.sum(UsageLog.cost_usd),
+        )
+        .where(UsageLog.created_at >= since, UsageLog.created_at < until)
+        .group_by(UsageLog.provider, UsageLog.operation, code)
+    )
+    by_operation: dict[str, OpLine] = {}
+    by_provider: dict[str, OpLine] = {}
+    for provider, operation, refusal, n, units, usd in rows.all():
+        for lines, key in ((by_operation, operation), (by_provider, provider)):
+            _fold(lines, key, int(n), _dec(units), _dec(usd), refusal)
+    return UsageLines(by_operation=by_operation, by_provider=by_provider)
 
 
 async def operation_lines(
     session: AsyncSession, *, since: datetime, until: datetime
 ) -> dict[str, OpLine]:
-    rows = await session.execute(
-        sa.select(
-            UsageLog.operation,
-            sa.func.count().filter(_NOT_REFUSED),
-            sa.func.sum(UsageLog.units).filter(_NOT_REFUSED),
-            sa.func.sum(UsageLog.cost_usd).filter(_NOT_REFUSED),
-            sa.func.count().filter(_REFUSED),
-        )
-        .where(UsageLog.created_at >= since, UsageLog.created_at < until)
-        .group_by(UsageLog.operation)
-    )
-    return {
-        op: OpLine(int(calls or 0), _dec(units), _dec(usd), int(refused or 0))
-        for op, calls, units, usd, refused in rows.all()
-    }
+    return dict((await usage_lines(session, since=since, until=until)).by_operation)
+
+
+@dataclass(frozen=True, slots=True)
+class TopCompany:
+    company_id: UUID
+    name: str
+    usd: Decimal
 
 
 @dataclass(frozen=True, slots=True)
 class SpendReport:
-    """Today and this month per operation, with the refusal counts and the
-    most expensive companies of the day: what /xarajat and the digest print."""
+    """Today and this month per operation and per provider, with the refusals
+    counted per code and the most expensive companies of the day: what
+    /xarajat and the digest print."""
 
     day: Mapping[str, OpLine]
     month: Mapping[str, OpLine]
     daily_cap: Decimal
     monthly_cap: Decimal
-    top_companies: tuple[tuple[UUID, Decimal], ...] = ()
+    day_by_provider: Mapping[str, OpLine] = field(default_factory=dict)
+    month_by_provider: Mapping[str, OpLine] = field(default_factory=dict)
+    top_companies: tuple[TopCompany, ...] = ()
 
     @staticmethod
     def total(lines: Mapping[str, OpLine], family: Family | None = None) -> Decimal:
@@ -973,29 +1161,44 @@ class SpendReport:
     def refusals(lines: Mapping[str, OpLine]) -> int:
         return sum(line.refused for line in lines.values())
 
+    @staticmethod
+    def refusals_by_code(lines: Mapping[str, OpLine]) -> dict[str, int]:
+        codes: dict[str, int] = {}
+        for line in lines.values():
+            for refusal, n in line.refused_by_code.items():
+                codes[refusal] = codes.get(refusal, 0) + n
+        return codes
 
-async def report(session: AsyncSession, *, now: datetime, top: int = 3) -> SpendReport:
+
+# 06 §1.2: «top 5 companies by spend (ids and names only)».
+TOP_COMPANIES: Final = 5
+
+
+async def report(
+    session: AsyncSession, *, now: datetime, top: int = TOP_COMPANIES
+) -> SpendReport:
     start, end = day_start(now), day_end(now)
+    usd = sa.func.sum(UsageLog.cost_usd).label("usd")
     companies = await session.execute(
-        sa.select(UsageLog.company_id, sa.func.sum(UsageLog.cost_usd).label("usd"))
-        .where(
-            UsageLog.created_at >= start,
-            UsageLog.created_at < end,
-            UsageLog.company_id.is_not(None),
-            _NOT_REFUSED,
-        )
-        .group_by(UsageLog.company_id)
-        .order_by(sa.desc("usd"))
+        sa.select(UsageLog.company_id, Company.display_name, usd)
+        .join(Company, Company.id == UsageLog.company_id)
+        .where(UsageLog.created_at >= start, UsageLog.created_at < end, _NOT_REFUSED)
+        .group_by(UsageLog.company_id, Company.display_name)
+        .order_by(usd.desc(), UsageLog.company_id)
         .limit(top)
     )
+    day = await usage_lines(session, since=start, until=end)
+    month = await usage_lines(session, since=month_start(now), until=month_end(now))
     return SpendReport(
-        day=await operation_lines(session, since=start, until=end),
-        month=await operation_lines(
-            session, since=month_start(now), until=month_end(now)
-        ),
+        day=day.by_operation,
+        month=month.by_operation,
         daily_cap=settings.daily_cost_cap_usd,
         monthly_cap=settings.monthly_cost_cap_usd,
-        top_companies=tuple((cid, _dec(usd)) for cid, usd in companies.all()),
+        day_by_provider=day.by_provider,
+        month_by_provider=month.by_provider,
+        top_companies=tuple(
+            TopCompany(cid, name, _dec(total)) for cid, name, total in companies.all()
+        ),
     )
 
 
@@ -1019,12 +1222,16 @@ __all__ = [
     "OPERATIONS",
     "OP_WINDOW",
     "OP_WINDOWS",
+    "OWN_LOCK_TIMEOUT",
     "PROVIDER",
     "REFUSED_PREFIX",
     "RESERVES",
     "SERP_OVERFLOW_FLAG",
     "SERP_OVERFLOW_SOURCE",
     "SPEND_HIGH_KEY",
+    "TOP_COMPANIES",
+    "UNITS_PER_CALL",
+    "UNIT_COUNTED",
     "UNPRICED",
     "CostCapReached",
     "Ledger",
@@ -1037,6 +1244,8 @@ __all__ = [
     "SpendAlert",
     "SpendReport",
     "SpendSnapshot",
+    "TopCompany",
+    "UsageLines",
     "alert_due",
     "ask",
     "clear_refusals",
@@ -1062,4 +1271,5 @@ __all__ = [
     "source_budget_usd",
     "spend",
     "spend_alerts",
+    "usage_lines",
 ]

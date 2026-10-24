@@ -198,3 +198,48 @@ def test_the_pricing_module_loads_without_the_settings():
     )
     assert out.returncode == 0, out.stderr
     assert out.stdout.strip() == "[]"
+
+
+def test_only_the_free_ops_and_the_places_free_tier_are_free_by_definition():
+    paid = sorted(usage.CALLABLE - usage.FREE_OPERATIONS - {"places_details_contact"})
+    assert [op for op in paid if usage.free_call(op, month_units_before=0)] == []
+    assert all(
+        usage.free_call(op, month_units_before=10**6) for op in usage.FREE_OPERATIONS
+    )
+    # Places Details: the first 1,000 a calendar month are free (03 §1.3).
+    assert usage.free_call("places_details_contact", month_units_before=999)
+    assert not usage.free_call("places_details_contact", month_units_before=1000)
+    assert usage.unit_cost("places_details_contact", 1, month_units_before=999) == 0
+    assert usage.unit_cost("places_details_contact", 1, month_units_before=1000) == (
+        D("0.020")
+    )
+
+
+def test_every_counted_cap_and_the_places_tier_are_counted_per_call():
+    counted = set(usage.COUNTED_OPERATIONS)
+    assert counted == {
+        "serp_brave",
+        "serp_yandex_night",
+        "serp_searxng",
+        "serp_ddg",
+        "places_text_ids",
+        "places_details_contact",
+        "twogis_api",
+    }
+    assert set(usage.DAILY_UNIT_CAPS) | set(usage.MONTHLY_UNIT_CAPS) <= (
+        usage.COUNTED_OPERATIONS
+    )
+
+
+def test_the_settings_strip_a_model_id_as_the_doctor_reads_it():
+    loaded = Settings(
+        _env_file=None,  # type: ignore[call-arg]
+        extract_model=f" {EXTRACT} \t",
+        verdict_model=f"{VERDICT} ",
+        batch_model=f"\t{BATCH}",
+    )
+    assert (loaded.extract_model, loaded.verdict_model, loaded.batch_model) == (
+        EXTRACT,
+        VERDICT,
+        BATCH,
+    )

@@ -31,7 +31,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from clientscrapper.config import settings
 from clientscrapper.db import enums
 from clientscrapper.db.models import UsageLog
-from clientscrapper.db.session import SessionLocal
+from clientscrapper.db.session import SessionLocal, session_scope
 from clientscrapper.services import costs, usage
 from clientscrapper.services.costs import CostCapReached, Ledger, OpTotals, decide
 from clientscrapper.services.usage import Priced
@@ -40,6 +40,7 @@ TZ = ZoneInfo("Asia/Tashkent")
 NOW = datetime(2026, 10, 23, 14, 23, tzinfo=TZ)
 NOON = time(12, 0)
 EXTRACT = usage.DEFAULT_MODELS["EXTRACT_MODEL"]
+VERDICT = usage.DEFAULT_MODELS["VERDICT_MODEL"]
 BATCH = usage.DEFAULT_MODELS["BATCH_MODEL"]
 CAP = D("10")
 MONTH_CAP = D("250")
@@ -222,8 +223,10 @@ def test_a_serp_op_borrows_serp_reserve_only_with_the_owners_switch():
 
 
 def test_brave_stops_where_its_allocation_is_reached():
-    # 0.165 = 33 × $0.005, and reaching an allocation is over it: the 32nd
-    # query passes, the 33rd (spend 0.160 + 0.005 = 0.165) is refused.
+    # 07 §1.9 pins both 0.165 and «reaching a cap is over it», so 32 queries a
+    # day pass and the 33rd (spend 0.160 + 0.005 = 0.165) is refused — not the
+    # «33 queries/day» the spec writes beside the number (a contradiction in
+    # the spec; 32 × 31 days still stays under the $5 / 1,000-query credit).
     assert code("serp_brave", "0.005", ledger(serp_brave="0.155")) is None
     assert (
         code("serp_brave", "0.005", ledger(serp_brave="0.160"))
@@ -245,6 +248,32 @@ def test_a_free_call_skips_the_money_rungs():
     assert code("serp_searxng", "0", capped) is None
     assert code("places_text_ids", "0", capped) is None
     assert code("serp_searxng", "0.01", capped) == "cost_cap_monthly"
+
+
+PAID = sorted(usage.CALLABLE - usage.FREE_OPERATIONS - {"places_details_contact"})
+
+
+@pytest.mark.parametrize("operation", PAID)
+def test_a_paid_call_estimated_at_zero_is_unpriced(operation):
+    # $0 is no price for a call that costs money; past a cap it would skip
+    # every money rung (04 §8 (1)–(5) have no exception for a zero estimate).
+    assert code(operation, "0", ledger(), local_time=time(3)) == "unpriced"
+    assert code(operation, "0", ledger(month="300", other="20")) == "unpriced"
+    assert code(operation, "0.001", ledger(month="300", other="20")) == (
+        "cost_cap_monthly"
+    )
+
+
+def test_places_details_are_free_only_inside_the_months_free_tier():
+    def places(month_units: int, day: str = "0") -> Ledger:
+        details = OpTotals(month_units=D(month_units))
+        return ledger(month=day, other=day, places_details_contact=details)
+
+    assert code("places_details_contact", "0", places(999)) is None  # the 1,000th
+    assert code("places_details_contact", "0", places(1000)) == "unpriced"
+    assert code("places_details_contact", "0.02", places(1000)) is None
+    # Inside the tier a $0 request runs even at the daily cap, like a free op.
+    assert code("places_details_contact", "0", places(5, day="10")) is None
 
 
 def test_brave_is_refused_at_the_1001st_query_of_the_month():
@@ -973,18 +1002,47 @@ async def test_spend_high_fires_once_per_tashkent_day(session):
     assert [k for k, _, _ in await alert_rows(session)] == ["alert:spend_high"] * 2
 
 
-async def test_the_report_has_what_xarajat_prints(session):
+async def new_company(session: AsyncSession, name: str) -> uuid.UUID:
     company = (
         await session.execute(
             sa.text(
                 "INSERT INTO companies (display_name, name_key) "
-                "VALUES ('Namuna Tekstil Savdo', 'namuna tekstil savdo') RETURNING id"
-            )
+                "VALUES (:n, lower(:n)) RETURNING id"
+            ),
+            {"n": name},
         )
     ).scalar_one()
     await session.commit()
+    return company  # type: ignore[no-any-return]
+
+
+async def spent_on(session: AsyncSession, company: uuid.UUID, usd: str) -> None:
+    await costs.ask(
+        session,
+        operation="classify",
+        est_usd=D(usd),
+        call=Calls(),
+        price=lambda _: Priced(D(usd), model=EXTRACT),
+        now=NOW,
+        company_id=company,
+    )
+
+
+async def test_the_report_has_what_xarajat_prints(session):
+    company = await new_company(session, "Namuna Tekstil Savdo")
     await classify(session, "0.001", company_id=company)
     await brave(session)
+    costs.set_anthropic_health(_always_down)
+    with pytest.raises(CostCapReached):
+        await costs.ask(
+            session,
+            operation="verdict",
+            est_usd=D("0.011"),
+            call=Calls(),
+            price=lambda _: Priced(D("0.011")),
+            now=NOW.replace(hour=16),
+        )
+    costs.set_anthropic_health(None)
     await seed(session, "1.00", operation="apify_olx", at=NOW - timedelta(days=3))
     await seed(session, "10.00")
     with pytest.raises(CostCapReached):
@@ -992,7 +1050,11 @@ async def test_the_report_has_what_xarajat_prints(session):
 
     report = await costs.report(session, now=NOW)
     assert report.day["classify"] == costs.OpLine(
-        calls=1, units=D(0), usd=D("0.000114"), refused=1
+        calls=1,
+        units=D(0),
+        usd=D("0.000114"),
+        refused=1,
+        refused_by_code={"cost_cap_daily": 1},
     )
     assert report.day["serp_brave"] == costs.OpLine(calls=1, units=D(1), usd=D("0.005"))
     assert "apify_olx" not in report.day
@@ -1000,6 +1062,464 @@ async def test_the_report_has_what_xarajat_prints(session):
     assert report.total(report.day, "anthropic") == D("0.000114")
     assert report.total(report.day) == D("10.005114")
     assert report.total(report.month) == D("11.005114")
-    assert report.refusals(report.day) == 1
-    assert report.top_companies == ((company, D("0.000114")),)
+    assert report.refusals(report.day) == 2
+    # 06 §1.2: refusals counted per code, and the lines by provider too.
+    assert report.refusals_by_code(report.day) == {
+        "cost_cap_daily": 1,
+        "anthropic_silence": 1,
+    }
+    assert report.day_by_provider == {
+        "anthropic": costs.OpLine(
+            calls=1,
+            units=D(0),
+            usd=D("0.000114"),
+            refused=2,
+            refused_by_code={"cost_cap_daily": 1, "anthropic_silence": 1},
+        ),
+        "brave": costs.OpLine(calls=1, units=D(1), usd=D("0.005")),
+        "other": costs.OpLine(calls=1, units=D(0), usd=D("10.00")),
+    }
+    assert report.month_by_provider["apify"] == costs.OpLine(
+        calls=1, units=D(0), usd=D("1.00")
+    )
+    assert report.top_companies == (
+        costs.TopCompany(company, "Namuna Tekstil Savdo", D("0.000114")),
+    )
     assert (report.daily_cap, report.monthly_cap) == (CAP, MONTH_CAP)
+
+
+async def _always_down(_: AsyncSession, __: datetime) -> bool:
+    return True
+
+
+async def test_the_report_names_the_top_five_companies_by_spend(session):
+    spenders = [await new_company(session, f"Namuna Savdo {n}") for n in range(1, 7)]
+    for n, company in enumerate(spenders, start=1):
+        await spent_on(session, company, f"0.00{n}")  # 1 spends least, 6 most
+    refused_only = await new_company(session, "Namuna Faqat Rad")
+    await seed(session, "10.00")
+    with pytest.raises(CostCapReached):
+        await classify(session, company_id=refused_only)
+
+    report = await costs.report(session, now=NOW)
+    assert costs.TOP_COMPANIES == 5
+    assert [(c.name, c.usd) for c in report.top_companies] == [
+        (f"Namuna Savdo {n}", D(f"0.00{n}")) for n in (6, 5, 4, 3, 2)
+    ]
+    assert [c.company_id for c in report.top_companies] == spenders[:0:-1]
+    # A company that only has a refusal row spent nothing: it is no top spender.
+    every = await costs.report(session, now=NOW, top=10)
+    assert refused_only not in [c.company_id for c in every.top_companies]
+    assert len(every.top_companies) == 6
+
+
+# --- ask never waits on its caller (04 §0: jobs claim rows FOR UPDATE) ------------
+
+
+async def new_job(
+    session: AsyncSession, kind: str = "verdict", lane: str = "instant"
+) -> int:
+    job = (
+        await session.execute(
+            sa.text(
+                "INSERT INTO model_jobs (kind, lane, model, custom_id) "
+                "VALUES (:k, :l, :m, :c) RETURNING id"
+            ),
+            {"k": kind, "l": lane, "m": BATCH, "c": f"cs-{uuid.uuid4()}"},
+        )
+    ).scalar_one()
+    await session.commit()
+    return job  # type: ignore[no-any-return]
+
+
+async def committed_rows() -> list[dict[str, Any]]:
+    """What another process sees right now."""
+    async with SessionLocal() as other:
+        return await rows(other)
+
+
+async def searxng_elsewhere() -> str:
+    """An unrelated ask in another session: it needs the ledger lock too."""
+    async with SessionLocal() as other:
+        return await free(other, "serp_searxng")  # type: ignore[no-any-return]
+
+
+async def test_rows_the_caller_holds_for_update_never_stall_ask(session):
+    company = await new_company(session, "Namuna Mebel Import")
+    job = await new_job(session)
+    run = (
+        await session.execute(
+            sa.text(
+                "INSERT INTO collector_runs (source_key) "
+                "VALUES ('olx_business') RETURNING id"
+            )
+        )
+    ).scalar_one()
+    await session.commit()
+    held = {
+        "model_jobs": ("id", job),
+        "companies": ("id", company),
+        "collector_runs": ("id", run),
+        "sources": ("key", "olx_business"),
+    }
+    async with SessionLocal() as caller:
+        # The job claims its rows, as every job does (04 §0).
+        for table, (key, value) in held.items():
+            claimed = await caller.scalar(
+                sa.text(f"SELECT 1 FROM {table} WHERE {key} = :v FOR UPDATE SKIP LOCKED"),
+                {"v": value},
+            )
+            assert claimed == 1, table
+        verdict = asyncio.create_task(
+            costs.ask(
+                caller,
+                operation="verdict",
+                est_usd=D("0.030"),
+                call=Calls(),
+                price=lambda _: Priced(D("0.011"), model=VERDICT, input_tokens=2500),
+                now=NOW,
+                source_key="olx_business",
+                company_id=company,
+                model_job_id=job,
+                collector_run_id=run,
+            )
+        )
+        bystander = asyncio.create_task(searxng_elsewhere())
+        done, _ = await asyncio.wait({verdict, bystander}, timeout=5)
+        seen_before_commit = await committed_rows()
+        await caller.commit()  # lets a stalled ask go, so a red run ends
+        await asyncio.wait({verdict, bystander}, timeout=10)
+        assert done == {verdict, bystander}
+        assert verdict.result() == "ok" and bystander.result() == "ok"
+    # The money was committed by ask's own transaction, not the caller's.
+    assert sorted(
+        (r["operation"], r["cost_usd"], r["model_job_id"]) for r in seen_before_commit
+    ) == [("serp_searxng", D(0), None), ("verdict", D("0.011"), None)]
+    [first] = [r for r in await committed_rows() if r["operation"] == "verdict"]
+    assert (first["source_key"], first["company_id"], first["model_job_id"]) == (
+        "olx_business",
+        company,
+        job,
+    )
+    assert first["collector_run_id"] == run
+
+
+async def test_the_night_batch_returns_while_its_jobs_are_claimed(session):
+    for _ in range(3):
+        await new_job(session, "company_verdict", "batch")
+    async with SessionLocal() as caller:
+        jobs = (
+            (
+                await caller.execute(
+                    sa.text(
+                        "SELECT id FROM model_jobs WHERE status = 'pending' "
+                        "AND kind = 'company_verdict' ORDER BY id LIMIT 100 "
+                        "FOR UPDATE SKIP LOCKED"
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        submit = asyncio.create_task(
+            costs.ask(
+                caller,
+                operation="company_verdict",
+                est_usd=D("0.045"),
+                call=Calls("msgbatch_1"),
+                price=lambda _: [
+                    Priced(D("0.015"), model=BATCH, batch=True, model_job_id=j)
+                    for j in jobs
+                ],
+                now=NOW.replace(hour=23, minute=30),
+            )
+        )
+        done, _ = await asyncio.wait({submit}, timeout=5)
+        seen_before_commit = await committed_rows()
+        await caller.commit()
+        await asyncio.wait({submit}, timeout=10)
+        assert done == {submit} and submit.result() == "msgbatch_1"
+    assert [r["cost_usd"] for r in seen_before_commit] == [D("0.015")] * 3
+    assert [r["model_job_id"] for r in await committed_rows()] == list(jobs)
+
+
+async def test_a_lock_nobody_foresaw_costs_seconds_not_every_ask(session, monkeypatch):
+    # Should a referenced row ever be written without its NOWAIT probe, the
+    # own transaction gives up after OWN_LOCK_TIMEOUT and the caller's
+    # savepoint takes the row: slow, never a hang of every ask.
+    async def unprobed(_: AsyncSession, wanted: Any) -> dict[str, Any]:
+        return dict(wanted)
+
+    monkeypatch.setattr(costs, "_key_shared", unprobed)
+    job = await new_job(session)
+    async with SessionLocal() as caller:
+        await caller.execute(
+            sa.text("SELECT 1 FROM model_jobs WHERE id = :i FOR UPDATE"), {"i": job}
+        )
+        verdict = asyncio.create_task(
+            costs.ask(
+                caller,
+                operation="verdict",
+                est_usd=D("0.011"),
+                call=Calls(),
+                price=lambda _: Priced(D("0.011"), model=VERDICT),
+                now=NOW,
+                model_job_id=job,
+            )
+        )
+        done, _ = await asyncio.wait({verdict}, timeout=8)
+        await caller.commit()
+        await asyncio.wait({verdict}, timeout=10)
+        assert done == {verdict} and verdict.result() == "ok"
+    [row] = await committed_rows()
+    assert (row["cost_usd"], row["model_job_id"]) == (D("0.011"), job)
+
+
+async def test_a_claim_in_the_callers_savepoint_is_settled_there(session, monkeypatch):
+    entries = 0
+
+    @asynccontextmanager
+    async def once_unavailable() -> AsyncIterator[AsyncSession]:
+        nonlocal entries
+        entries += 1
+        if entries == 1:  # the claim's attempt only
+            raise sa.exc.OperationalError("connect", {}, Exception("pool timeout"))
+        async with session_scope() as s:
+            yield s
+
+    monkeypatch.setattr(costs, "_own_session", once_unavailable)
+    await costs.ask(
+        session,
+        operation="verdict",
+        est_usd=D("0.030"),
+        call=Calls(),
+        price=lambda _: Priced(D("0.011"), model=VERDICT, input_tokens=2500),
+        now=NOW,
+    )
+    await session.commit()
+    [row] = await committed_rows()
+    assert (row["model"], row["cost_usd"], row["input_tokens"]) == (
+        VERDICT,
+        D("0.011"),
+        2500,
+    )
+
+
+async def test_a_unit_claimed_in_the_callers_savepoint_is_given_back_there(
+    session, monkeypatch
+):
+    entries = 0
+
+    @asynccontextmanager
+    async def once_unavailable() -> AsyncIterator[AsyncSession]:
+        nonlocal entries
+        entries += 1
+        if entries == 1:
+            raise sa.exc.OperationalError("connect", {}, Exception("pool timeout"))
+        async with session_scope() as s:
+            yield s
+
+    monkeypatch.setattr(costs, "_own_session", once_unavailable)
+    with pytest.raises(ConnectionResetError):
+        await brave(session, calls=Calls(raises=ConnectionResetError()))
+    await session.commit()
+    [row] = await committed_rows()
+    assert (row["operation"], row["cost_usd"], row["units"]) == (
+        "serp_brave",
+        D("0.005"),
+        D(0),
+    )
+
+
+# --- the money rungs and the counters cannot be talked past -------------------------
+
+
+async def test_a_paid_call_estimated_at_zero_never_passes_a_cap(session):
+    await seed(session, "12.00")
+    for operation, real in [
+        ("classify", "0.05"),
+        ("verdict", "0.20"),
+        ("serp_brave", "0.005"),
+        ("apify_olx", "0.10"),
+    ]:
+        calls = Calls()
+        with pytest.raises(CostCapReached) as refused:
+            await costs.ask(
+                session,
+                operation=operation,  # type: ignore[arg-type]
+                est_usd=D(0),
+                call=calls,
+                price=lambda _, r=real: Priced(D(r), units=D(1)),  # type: ignore[misc]
+                now=NOW,
+            )
+        assert (refused.value.code, calls.n) == ("unpriced", 0), operation
+    day = await costs.spend(session, since=costs.day_start(NOW))
+    assert (day.usd, day.calls, day.refused, day.unpriced) == (D("12.00"), 1, 4, 4)
+
+
+async def test_the_count_caps_do_not_wait_for_the_price_callback(session):
+    # A natural callback prices the answer and leaves Priced.units at its
+    # default 0: the claim's one unit stays, so the counters still count.
+    for i in range(40):
+        await costs.ask(
+            session,
+            operation="serp_ddg",
+            est_usd=D(0),
+            call=Calls(),
+            price=lambda _: Priced(D(0)),
+            now=NOW.replace(second=i % 60),
+        )
+    with pytest.raises(CostCapReached) as refused:
+        await free(session, "serp_ddg")
+    assert refused.value.code == "cost_cap_day_op:serp_ddg"
+    one = usage.unit_cost("serp_brave", 1)
+    for _ in range(3):
+        await costs.ask(
+            session,
+            operation="serp_brave",
+            est_usd=one,
+            call=Calls(),
+            price=lambda _: Priced(one, model="web"),
+            now=NOW,
+        )
+    assert await costs.month_units(session, operation="serp_brave", now=NOW) == D(3)
+
+
+async def test_places_details_count_their_free_tier_in_ask(session):
+    await seed(session, "0", operation="places_details_contact", units="998")
+
+    async def details(est: str) -> Any:
+        return await costs.ask(
+            session,
+            operation="places_details_contact",
+            est_usd=D(est),
+            call=Calls(),
+            price=lambda _: Priced(D(est), model="places.details"),  # units forgotten
+            now=NOW,
+        )
+
+    await details("0")  # the 999th
+    await details("0")  # the 1,000th: the last free one
+    units = await costs.month_units(session, operation="places_details_contact", now=NOW)
+    assert units == D(1000)
+    with pytest.raises(CostCapReached) as refused:
+        await details("0")
+    assert refused.value.code == "unpriced"
+    costs.clear_refusals()
+    assert await details("0.020") == "ok"
+
+
+@pytest.mark.parametrize("cost", [None, D("NaN"), D("Infinity"), D("-0.01")])
+async def test_an_answer_that_cannot_be_priced_keeps_the_estimate(session, cost):
+    await costs.ask(
+        session,
+        operation="verdict",
+        est_usd=D("0.030"),
+        call=Calls(),
+        price=lambda _: Priced(cost, model=VERDICT, input_tokens=2500, output_tokens=600),
+        now=NOW,
+    )
+    [row] = await rows(session)
+    assert (row["cost_usd"], row["model"], row["input_tokens"]) == (
+        D("0.030"),
+        VERDICT,
+        2500,
+    )
+
+
+async def test_a_batch_row_that_cannot_be_priced_takes_what_the_estimate_left(session):
+    jobs = [await new_job(session, "company_verdict", "batch") for _ in range(3)]
+    await costs.ask(
+        session,
+        operation="company_verdict",
+        est_usd=D("0.045"),
+        call=Calls("msgbatch_1"),
+        price=lambda _: [
+            Priced(D("0.015"), model=BATCH, batch=True, model_job_id=jobs[0]),
+            Priced(None, model=BATCH, batch=True, model_job_id=jobs[1]),
+            Priced(D("NaN"), model=BATCH, batch=True, model_job_id=jobs[2]),
+        ],
+        now=NOW,
+    )
+    stored = await rows(session)
+    assert [(r["model_job_id"], r["cost_usd"]) for r in stored] == [
+        (jobs[0], D("0.015")),
+        (jobs[1], D("0.015")),
+        (jobs[2], D("0.015")),
+    ]
+
+
+async def test_a_batch_result_that_cannot_be_priced_keeps_its_provisional_cost(session):
+    job = await new_job(session, "company_verdict", "batch")
+    await costs.ask(
+        session,
+        operation="company_verdict",
+        est_usd=D("0.015"),
+        call=Calls("msgbatch_1"),
+        price=lambda _: [Priced(D("0.015"), model=BATCH, batch=True, model_job_id=job)],
+        now=NOW,
+    )
+    unpriced = Priced(None, model=BATCH, batch=True, input_tokens=4000, output_tokens=600)
+    assert await costs.settle_provisional(
+        session, model_job_id=job, priced=unpriced, now=NOW + timedelta(hours=8)
+    )
+    [row] = await rows(session)
+    assert (row["cost_usd"], row["input_tokens"]) == (D("0.015"), 4000)
+
+
+async def test_the_monthly_cap_tells_the_owner_the_monthly_cost_cap(session):
+    owner = Owner()
+    costs.set_cap_notifier(owner)
+    await seed(session, "250.00", at=datetime(2026, 10, 2, 9, 0, tzinfo=TZ))
+    with pytest.raises(CostCapReached) as refused:
+        await classify(session)
+    assert refused.value.code == "cost_cap_monthly"
+    assert owner.told == [
+        "💸 Oylik xarajat chegarasi ($250) — oy oxirigacha pullik chaqiruvlar "
+        "toʻxtadi; kollektorlar bepul qismini davom ettiradi"
+    ]
+    assert await alert_rows(session) == [("alert:cost_cap", "cost_cap", NOW)]
+
+
+async def test_the_yandex_window_is_read_on_the_tashkent_clock(session):
+    # 23:30 UTC is 04:30 in Tashkent: inside the night window, 23:30 is not.
+    assert (
+        await free(
+            session, "serp_yandex_night", now=datetime(2026, 10, 22, 23, 30, tzinfo=UTC)
+        )
+        == "ok"
+    )
+    # 06:00 UTC is 11:00 in Tashkent: outside it, though 06:00 is inside.
+    with pytest.raises(CostCapReached) as refused:
+        await free(
+            session, "serp_yandex_night", now=datetime(2026, 10, 23, 6, 0, tzinfo=UTC)
+        )
+    assert refused.value.code == "op_window:serp_yandex_night"
+
+
+async def test_a_broken_health_probe_does_not_stop_the_classifier(session):
+    async def broken(_: AsyncSession, __: datetime) -> bool:
+        raise RuntimeError("health probe")
+
+    costs.set_anthropic_health(broken)
+    await classify(session)
+    assert [r["model"] for r in await rows(session)] == [EXTRACT]
+
+
+async def test_spend_narrows_by_family_company_and_source(session):
+    company = await new_company(session, "Namuna Oyna Savdo")
+    await seed(session, "0.40", operation="apify_olx", source_key="olx_business")
+    await classify(session, "0.001", company_id=company)
+    await seed(session, "0.005", operation="serp_brave")
+    since = costs.day_start(NOW)
+    assert (await costs.spend(session, since=since)).usd == D("0.405114")
+    assert (await costs.spend(session, since=since, family="apify")).usd == D("0.40")
+    assert (await costs.spend(session, since=since, family="anthropic")).usd == D(
+        "0.000114"
+    )
+    assert (await costs.spend(session, since=since, company_id=company)).usd == D(
+        "0.000114"
+    )
+    assert (await costs.spend(session, since=since, source_key="olx_business")).usd == D(
+        "0.40"
+    )

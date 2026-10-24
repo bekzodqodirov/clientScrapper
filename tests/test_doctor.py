@@ -9,6 +9,8 @@ from pathlib import Path
 
 from dotenv import dotenv_values
 
+from clientscrapper.config import Settings
+from clientscrapper.services import usage
 from clientscrapper.tools import doctor
 from clientscrapper.tools.doctor import DbState
 
@@ -215,3 +217,25 @@ def test_the_allocations_table_is_printed():
         "apify_uzum 0.60",
         "   proxy $1.00: proxy_uzum 1.00",
     ]
+
+
+def test_a_zero_price_is_an_error_because_every_call_would_be_refused():
+    env = _filled()
+    env["EXTRACT_MODEL_PRICE"] = "0/0"
+    [error] = _errors(_check(env))
+    assert error.startswith(
+        f"❌ EXTRACT_MODEL={env['EXTRACT_MODEL']}: narxi $0 (EXTRACT_MODEL_PRICE)"
+    )
+    env["EXTRACT_MODEL_PRICE"] = "0/0.50"  # only one half free: still priced
+    assert _errors(_check(env)) == []
+
+
+def test_a_stray_space_in_a_model_id_reads_alike_in_the_doctor_and_at_runtime(
+    monkeypatch,
+):
+    env = _filled()
+    env["EXTRACT_MODEL"] = f"{env['EXTRACT_MODEL']} "
+    assert _errors(_check(env)) == []
+    monkeypatch.setenv("EXTRACT_MODEL", env["EXTRACT_MODEL"])
+    runtime = Settings(_env_file=None)  # type: ignore[call-arg]
+    assert usage.resolve_price(runtime.extract_model) is not None

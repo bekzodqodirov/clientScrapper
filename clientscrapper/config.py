@@ -236,6 +236,14 @@ class Settings(BaseSettings):
     def _upper_level(cls, v: object) -> object:
         return v.strip().upper() if isinstance(v, str) else v
 
+    @field_validator("extract_model", "verdict_model", "batch_model")
+    @classmethod
+    def _strip_model(cls, v: str) -> str:
+        # A quoted «"claude-… "» in .env must price like the doctor reads it:
+        # an id with a stray space is in no price table, so every call to it
+        # would be refused as unpriced while the doctor said ✅.
+        return v.strip()
+
     @field_validator("extract_model_price", "verdict_model_price", "batch_model_price")
     @classmethod
     def _validate_price(cls, v: str) -> str:

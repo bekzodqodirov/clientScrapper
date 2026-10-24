@@ -78,7 +78,11 @@ ALLOCATIONS: Final[Mapping[Operation, Decimal]] = {
     "draft": D("0.20"),
     "enrich_search": D("0.75"),
     "model_reserve": D("0.75"),
-    # SERP 1.00 — Brave 0.165 = 33 × $0.005, below the $5 monthly credit
+    # SERP 1.00. Brave 0.165 (07 §1.9 pins it) keeps it under the $5 monthly
+    # credit; reaching an allocation is over it (04 §8 rung 5, the same ≥ as
+    # the daily cap), so 32 queries a day pass: 0.160 + 0.005 is refused. The
+    # «33 queries» beside this number in 03 §1.3 / 07 §1.9 is 0.165 / 0.005,
+    # which the ≥ rule never reaches.
     "serp_brave": D("0.165"),
     "serp_yandex_night": D("0"),
     "serp_searxng": D("0"),
@@ -167,7 +171,8 @@ CALLABLE: Final[frozenset[Operation]] = frozenset(
 )
 
 # Query counts per call for the ops whose cap is a count (03 §1.3): one call
-# is one query, so ``costs.ask`` reserves one unit before the call.
+# is one query, so ``costs.ask`` reserves one unit before the call and keeps
+# at least that one when the answer is priced.
 UNITS_PER_CALL: Final = D(1)
 # The free ops' daily caps of 03 §1.3 — free calls skip the money rungs, so
 # their cap is a count.
@@ -381,6 +386,28 @@ APIFY_USD_PER_UNIT: Final[Mapping[Operation, Decimal]] = {
 FREE_OPERATIONS: Final[frozenset[Operation]] = frozenset(
     {"serp_yandex_night", "serp_searxng", "serp_ddg", "places_text_ids", "twogis_api"}
 )
+# Every op whose cap or price is a count of calls: the count caps above and
+# the Places Details free tier. ``costs.ask`` claims one unit per call for
+# these, so the count never waits for a price callback to remember it.
+COUNTED_OPERATIONS: Final[frozenset[Operation]] = (
+    frozenset(DAILY_UNIT_CAPS)
+    | frozenset(MONTHLY_UNIT_CAPS)
+    | frozenset({"places_details_contact"})
+)
+
+
+def free_call(operation: Operation, *, month_units_before: Decimal | int) -> bool:
+    """Is this call free by definition — not by the caller's estimate? A free
+    op, or a Places Details request inside the month's free tier
+    (``month_units_before`` = the op's units this calendar month, claims of
+    calls in flight included). Only such a call may skip the money rungs."""
+    if operation in FREE_OPERATIONS:
+        return True
+    if operation == "places_details_contact":
+        return D(month_units_before) < PLACES_DETAILS_FREE_PER_MONTH
+    return False
+
+
 # A proxy GB is priced as 1,000 MB: if the provider bills 1,024 MB, this
 # overcounts, which is the safe direction for a cap.
 MB_PER_GB: Final = D(1000)
@@ -494,6 +521,7 @@ __all__ = [
     "APIFY_USD_PER_UNIT",
     "BRAVE_USD_PER_QUERY",
     "CALLABLE",
+    "COUNTED_OPERATIONS",
     "DAILY_UNIT_CAPS",
     "DEFAULT_MODELS",
     "FAMILIES",
@@ -518,6 +546,7 @@ __all__ = [
     "Priced",
     "Provider",
     "anthropic_cost_usd",
+    "free_call",
     "parse_price",
     "price_for",
     "priced_anthropic",
