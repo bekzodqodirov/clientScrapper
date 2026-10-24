@@ -12,21 +12,28 @@ nowhere else: never a URL, never a log line.
 them back (the agent never decodes one; the fake ERP does). ``sync_suppression``
 applies a walk to ``suppression`` (05 §B.2 steps 1–5): a FULL pull — ``limit``
 and nothing else, the only walk that may delete — and a DELTA — ``since`` the
-previous read's ERP ``generated_at`` minus ten minutes, additive only, aborted
-for a full pull when the key was re-minted (a new ``salt_id``).
+later ERP ``generated_at`` of the previous reads minus ten minutes, additive
+only, aborted for a full pull when the key was re-minted (a new ``salt_id``).
+A delta runs AS the full pull when none has completed yet or the last one is
+older than ``FULL_DUE_AFTER``: one failed or missed night is caught up within
+the hour instead of holding every push until the next night.
 
 ``suppression_fresh`` is THE home of feed freshness (``FULL_MAX_AGE_H``,
 ``DELTA_MAX_AGE_H``): the push gate, 04's gate, 06 §4.2's
 ``suppression_stale`` and ``/holat`` all ask it and none restates the hours.
+``freshness`` also says since when the gate is stale — a limit that ran out,
+or the first try of a key no full pull has completed under — which 06 §4.2's
+«critical after 6 h» counts from.
 
 What a failure writes is what ``services/health`` reads (06 §4.2): a 404 (or a
 proxy's 401/403) is the push's misconfiguration — ``sources.erp_sync`` breaker
-``push_404`` for 6 h, the owner told once per 6 h; a 3xx is ``erp_redirect``
-the same way; a 400, a changed hash rule, a runaway walk and a body of the
-wrong shape are ``feed_contract`` with their code in the detail; a 503 or any
-5xx is retried (``with_backoff``, 4 tries) and then only fails the run — the
-freshness probe reports it, never ``push_404``. A full pull that shrank past
-10 % deletes nothing and raises ``suppression_shrunk``.
+``push_404`` (``push_404:feed``: a later feed 200 ends it) for 6 h, the owner
+told once per 6 h; a 3xx is ``erp_redirect`` the same way; a 400, a changed
+hash rule, a runaway walk and a body of the wrong shape are ``feed_contract``
+with their code in the detail; a 503 or any 5xx is retried (``with_backoff``,
+4 tries) and then only fails the run — the freshness probe reports it, never
+``push_404``. A full pull that shrank past 10 % deletes nothing and raises
+``suppression_shrunk``.
 """
 
 from __future__ import annotations

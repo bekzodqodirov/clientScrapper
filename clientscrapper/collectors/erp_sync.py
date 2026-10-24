@@ -12,7 +12,9 @@ report in ``meta.suppression``. While the feeds are not configured (the
 Two cadences here (T-09); the outcomes walks join with T-10:
 
 * ``delta`` — ``15 * * * *`` (the row's own ``cron``): additive; a new
-  ``salt_id`` on its first page makes it a full pull at once;
+  ``salt_id`` on its first page makes it a full pull at once, and so does a
+  last full pull older than ``erp_feeds.FULL_DUE_AFTER`` (the catch-up of a
+  failed or missed night);
 * ``full`` — ``30 2 * * *``: the only walk that deletes.
 
 ``JOBS`` is what the scheduler (worker/main.py, T-08) registers: id, cron and

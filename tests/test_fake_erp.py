@@ -351,23 +351,23 @@ async def test_an_orphan_s_retry_joins_it():
 async def test_the_join_reads_the_lead_s_phone_as_the_erp_does():
     # inbound.ts inboundMatch: right(digits(leads.phone), 9) = the arrival's
     # nine, an OPEN stage, updated_at > now − 30 d (strict). Checked on a real
-    # agent-feed ERP (review, 2026-10-24): a lead stored «+998 90 000 60 13»
-    # and a POST of «+998 90 000 6013» → joined.
+    # agent-feed ERP (review, 2026-10-24): a lead stored with spaces and a POST
+    # of the same number grouped otherwise → joined.
     clock = [NOW]
     fake = FakeErp(SECRET, clock=lambda: clock[0])
-    formatted = fake.add_lead("+998 90 000 60 13", at=NOW - timedelta(days=29))
-    await post(fake, body(eid="cs:j:1", phone="+998 90 000 6013"))
+    formatted = fake.add_lead("+998 90 000 00 63", at=NOW - timedelta(days=29))
+    await post(fake, body(eid="cs:j:1", phone="+998 90 000 0063"))
     assert (fake.intakes["cs:j:1"].outcome, fake.intakes["cs:j:1"].lead_id) == (
         "joined",
         formatted.id,
     )
     # The lead the ERP creates keeps the phone as it was sent.
-    await post(fake, body(eid="cs:j:2", phone=" +998 (90) 000-60-14 "))
+    await post(fake, body(eid="cs:j:2", phone=" +998 (90) 000-00-64 "))
     created = fake.lead_of("cs:j:2")
-    assert created is not None and created.phone == "+998 (90) 000-60-14"
+    assert created is not None and created.phone == "+998 (90) 000-00-64"
     # Exactly 30 days without a touch: no longer joined (> since, strict).
-    stale = fake.add_lead("998900006015", at=NOW - timedelta(days=30))
-    await post(fake, body(eid="cs:j:3", phone="900006015"))
+    stale = fake.add_lead("998900000065", at=NOW - timedelta(days=30))
+    await post(fake, body(eid="cs:j:3", phone="900000065"))
     assert fake.intakes["cs:j:3"].outcome == "created"
     assert fake.lead_of("cs:j:3") is not stale
 
