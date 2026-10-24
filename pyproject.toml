@@ -1,0 +1,46 @@
+[project]
+name = "clientscrapper"
+version = "0.1.0"
+description = "GSR Logistics client-finding agent"
+requires-python = ">=3.12"
+
+[tool.ruff]
+line-length = 90
+target-version = "py312"
+extend-exclude = [".venv", "venv", "alembic/versions", "tests/fixtures"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "C4", "SIM", "RUF"]
+ignore = [
+    # Deliberately multilingual: Uzbek ʻ/ʼ, Cyrillic keywords, en dashes in
+    # prose. The ambiguous-unicode rules flag all of it as a typo.
+    "RUF001",
+    "RUF002",
+    "RUF003",
+]
+
+[tool.mypy]
+# The strict gate (07 §2.3): pure modules only. Each new pure module joins
+# `files` in the task that adds it; bot handlers, Telethon code and Alembic
+# stay outside (imported modules are analysed, their own errors not reported).
+python_version = "3.12"
+strict = true
+follow_imports = "silent"
+warn_unreachable = true
+files = [
+    "clientscrapper/config.py",
+    "clientscrapper/logs.py",
+    "clientscrapper/db",
+    "clientscrapper/services/lifecycle.py",
+    "clientscrapper/tools/doctor.py",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+filterwarnings = ["error::DeprecationWarning:clientscrapper.*"]
+markers = [
+    "live: real network, run only from the VPS with LIVE=1 (make smoke)",
+    "slow: seeds large data; runs only with CS_RUN_SLOW=1",
+]

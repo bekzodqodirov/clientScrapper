@@ -1,0 +1,59 @@
+# VENDORED_FROM dailyJournal@6b1f67f docker-compose.yml
+# 06 §3.1. No service publishes a port to the network: the only host binding
+# is Postgres on 127.0.0.1 for `make psql`.
+name: clientscrapper
+# A VPS that runs for a year must not fill its disk with container logs.
+x-logging: &log { driver: json-file, options: { max-size: "10m", max-file: "3" } }
+x-app: &app
+  build: .
+  # unless-stopped, not on-failure: on-failure containers are NOT restored
+  # after a VPS reboot. Every process idles rather than exits when it has
+  # nothing to do, so this never becomes a restart loop.
+  restart: unless-stopped
+  env_file: .env
+  logging: *log
+  environment: { TZ: "${TIMEZONE:-Asia/Tashkent}" }
+  volumes: [ "./data:/data", "./secrets:/app/secrets:ro" ]
+  depends_on:
+    db:   { condition: service_healthy }
+    init: { condition: service_completed_successfully }
+services:
+  db:
+    image: postgres:16            # plain postgres: no pgvector, no embeddings in this project
+    restart: unless-stopped
+    # Under memory pressure the kernel picks something else than the database.
+    oom_score_adj: -500
+    mem_limit: 1536m
+    logging: *log
+    environment: { POSTGRES_USER: "${POSTGRES_USER:-clientscrapper}", POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?required}", POSTGRES_DB: "${POSTGRES_DB:-clientscrapper}", TZ: "${TIMEZONE:-Asia/Tashkent}" }
+    command: ["postgres", "-c", "shared_buffers=384MB", "-c", "work_mem=16MB", "-c", "timezone=Asia/Tashkent", "-c", "log_min_duration_statement=2000"]
+    volumes: [ "db_data:/var/lib/postgresql/data" ]
+    ports: [ "127.0.0.1:${DB_PORT:-5433}:5432" ]   # localhost only; 5433 because MIYA may hold 5432 on the same VPS
+    healthcheck: { test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-clientscrapper} -d ${POSTGRES_DB:-clientscrapper}"], interval: 5s, timeout: 5s, retries: 20 }
+  # A fresh clone has no ./data or ./secrets (both gitignored), so Docker
+  # creates the bind-mount roots root-owned while every app container runs as
+  # uid 10001. This runs once, as root, hands them over, then migrates. The
+  # chown is best-effort: on Docker Desktop the mount is already permissive
+  # and chown can fail outright, and every app service waits on this one
+  # *completing successfully*.
+  init:
+    build: .
+    user: root
+    env_file: .env
+    logging: *log
+    depends_on: { db: { condition: service_healthy } }
+    volumes: [ "./data:/data", "./secrets:/secrets" ]
+    command: ["sh", "-c", "mkdir -p /data/evidence /data/backups /data/imports && { chown -R 10001:10001 /data /secrets || echo 'chown skipped'; } && su -s /bin/sh clientscrapper -c 'alembic upgrade head'"]
+    restart: "no"
+  worker:  { <<: *app, mem_limit: 2g,   cpus: 2.0, command: ["python", "-m", "clientscrapper.worker.main"] }
+  userbot: { <<: *app, mem_limit: 768m, cpus: 0.5, command: ["python", "-m", "clientscrapper.userbot.main"] }
+  bot:     { <<: *app, mem_limit: 512m, cpus: 0.5, command: ["python", "-m", "clientscrapper.bot.main"] }
+  searxng:                         # optional: docker compose --profile searxng up -d
+    image: searxng/searxng:2026.10.1      # UNVERIFIED tag — pin the current one on day 1
+    profiles: ["searxng"]
+    restart: unless-stopped
+    mem_limit: 512m
+    logging: *log
+    volumes: [ "./searxng:/etc/searxng:ro" ]   # settings.yml: json format on, limiter off, engines duckduckgo,startpage,mojeek,brave; Google/Bing disabled (03 §2.1)
+    # no ports: reachable only as http://searxng:8080 inside the compose network
+volumes: { db_data: {} }

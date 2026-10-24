@@ -1,0 +1,16 @@
+# Secrets and server state live on the server only (06 §3.5).
+.env
+secrets/
+data/
+searxng/
+
+# Local tooling
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+# CI's docker job writes this next to the checkout (07 §2.1)
+compose.json

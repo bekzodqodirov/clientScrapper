@@ -1,0 +1,26 @@
+# MIYA's pins (dailyJournal@6b1f67f requirements.txt) minus the embedding stack,
+# FastAPI, document parsing and Google APIs: no part of v1 uses them.
+
+# --- Settings -----------------------------------------------------------------
+pydantic==2.10.4
+pydantic-settings==2.7.1
+
+# --- Database -----------------------------------------------------------------
+SQLAlchemy==2.0.36
+alembic==1.14.0
+psycopg[binary,pool]==3.2.3
+
+# --- Scheduling ---------------------------------------------------------------
+APScheduler==3.11.0
+
+# --- HTTP (collectors, ERP push and feeds) --------------------------------------
+httpx==0.28.1
+
+# --- Model, owner bot, reader account -------------------------------------------
+anthropic==0.122.0
+aiogram==3.30.0
+Telethon==1.44.0
+
+# --- Resolution and imports ---------------------------------------------------
+rapidfuzz==3.14.5
+openpyxl==3.1.5

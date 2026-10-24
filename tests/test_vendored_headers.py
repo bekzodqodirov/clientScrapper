@@ -1,0 +1,155 @@
+"""Every file copied from MIYA says where it came from (07 §1.2, memo §4).
+
+The skeleton is copied, not imported. A ``# VENDORED_FROM dailyJournal@<sha>
+<path>`` header on line 1–3 is what lets a later sync diff each file against a
+MIYA checkout. ``VENDORED`` mirrors the AS-IS/ADAPT rows of
+``docs/kod-audit-miya.md`` §1 under the names the spec gives them; a file is
+checked once it exists, and ``REQUIRED_NOW`` lists the ones the built tasks
+must already have, so the guard can never pass by finding nothing.
+"""
+
+from __future__ import annotations
+
+import re
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+MIYA_SHA = "6b1f67f"
+HEADER = re.compile(
+    r"^# VENDORED_FROM dailyJournal@(?P<sha>[0-9a-f]{7,40}) (?P<path>\S+)$"
+)
+
+# target in this repo -> source in MIYA (dailyJournal@6b1f67f).
+VENDORED: dict[str, str] = {
+    # Settings, logging, db plumbing, migrations
+    "clientscrapper/config.py": "miya/config.py",
+    "clientscrapper/logs.py": "miya/logs.py",
+    "clientscrapper/db/__init__.py": "miya/db/__init__.py",
+    "clientscrapper/db/base.py": "miya/db/base.py",
+    "clientscrapper/db/session.py": "miya/db/session.py",
+    "alembic/env.py": "alembic/env.py",
+    "alembic.ini": "alembic.ini",
+    # Docker / Make
+    "Dockerfile": "Dockerfile",
+    "docker-compose.yml": "docker-compose.yml",
+    "Makefile": "Makefile",
+    # Processes
+    "clientscrapper/worker/main.py": "miya/worker/main.py",
+    "clientscrapper/bot/main.py": "miya/bot/main.py",
+    "clientscrapper/userbot/main.py": "miya/userbot/main.py",
+    "clientscrapper/services/lifecycle.py": "miya/userbot/main.py",
+    # Services (later tasks)
+    "clientscrapper/services/retry.py": "miya/services/retry.py",
+    "clientscrapper/services/extraction.py": "miya/services/extraction.py",
+    "clientscrapper/services/model_jobs.py": "miya/services/batch.py",
+    "clientscrapper/services/usage.py": "miya/services/usage.py",
+    "clientscrapper/services/costs.py": "miya/jarvis/costs.py",
+    "clientscrapper/services/companies.py": "miya/services/people.py",
+    "clientscrapper/services/text.py": "miya/services/text.py",
+    "clientscrapper/services/client_import.py": "miya/services/client_import.py",
+    "clientscrapper/services/documents.py": "miya/services/documents.py",
+    "clientscrapper/services/chats.py": "miya/services/chats.py",
+    "clientscrapper/services/reviews.py": "miya/services/approvals.py",
+    "clientscrapper/services/health.py": "miya/services/health.py",
+    "clientscrapper/services/backup.py": "miya/services/backup.py",
+    "clientscrapper/services/restore_drill.py": "miya/services/restore_drill.py",
+    "clientscrapper/services/sheets.py": "miya/services/sheets.py",
+    "clientscrapper/services/sheets_sync.py": "miya/services/sheets_sync.py",
+    "clientscrapper/services/safety.py": "miya/services/safety.py",
+    "clientscrapper/services/purge.py": "miya/services/purge.py",
+    # Owner bot (handlers.py is split per 06 §1.1, replies.py becomes texts.py)
+    "clientscrapper/bot/formatting.py": "miya/bot/formatting.py",
+    "clientscrapper/bot/keyboards.py": "miya/bot/keyboards.py",
+    "clientscrapper/bot/notices.py": "miya/bot/notices.py",
+    "clientscrapper/bot/texts.py": "miya/bot/replies.py",
+    "clientscrapper/bot/handlers/review.py": "miya/bot/handlers.py",
+    "clientscrapper/bot/handlers/sources.py": "miya/bot/handlers.py",
+    "clientscrapper/bot/handlers/chats.py": "miya/bot/handlers.py",
+    "clientscrapper/bot/handlers/status.py": "miya/bot/handlers.py",
+    "clientscrapper/bot/handlers/admin.py": "miya/bot/handlers.py",
+    "clientscrapper/bot/handlers/manager.py": "miya/bot/handlers.py",
+    # Tools
+    "clientscrapper/tools/doctor.py": "miya/tools/doctor.py",
+    "clientscrapper/tools/userbot_login.py": "miya/tools/userbot_login.py",
+    "clientscrapper/tools/import_clients.py": "miya/tools/import_clients.py",
+    "clientscrapper/tools/restore.py": "miya/tools/restore.py",
+    # Tests copied with the code so behaviour stays pinned
+    "tests/conftest.py": "tests/conftest.py",
+    "tests/test_env_example.py": "tests/test_env_example.py",
+    "tests/test_logs.py": "tests/test_logs.py",
+    "tests/test_no_telegram_writes.py": "tests/test_userbot.py",
+}
+# Not listed although the memo says AS-IS: services/codes.py (02 §7 — suppression
+# by GS code is not in the v1 key set, so it is not ported).
+
+# Built by T-01 and T-02: these must exist now.
+REQUIRED_NOW = (
+    "clientscrapper/config.py",
+    "clientscrapper/logs.py",
+    "clientscrapper/db/__init__.py",
+    "clientscrapper/db/base.py",
+    "clientscrapper/db/session.py",
+    "alembic/env.py",
+    "alembic.ini",
+    "Dockerfile",
+    "docker-compose.yml",
+    "Makefile",
+    "clientscrapper/worker/main.py",
+    "clientscrapper/bot/main.py",
+    "clientscrapper/userbot/main.py",
+    "clientscrapper/services/lifecycle.py",
+    "clientscrapper/tools/doctor.py",
+    "tests/conftest.py",
+    "tests/test_env_example.py",
+    "tests/test_logs.py",
+)
+
+SCANNED_SUFFIXES = {".py", ".yml", ".yaml", ".ini", ".toml", ".cfg", ".sh", ".mako"}
+SCANNED_NAMES = {"Dockerfile", "Makefile"}
+SKIPPED_DIRS = {".git", ".venv", "venv", "__pycache__", ".mypy_cache", ".ruff_cache"}
+
+
+def _header(path: Path) -> re.Match[str] | None:
+    head = path.read_text(encoding="utf-8").splitlines()[:3]
+    for line in head:
+        if match := HEADER.match(line):
+            return match
+    return None
+
+
+def _scanned_files() -> list[Path]:
+    files = []
+    for path in ROOT.rglob("*"):
+        if any(part in SKIPPED_DIRS for part in path.relative_to(ROOT).parts):
+            continue
+        scanned = path.suffix in SCANNED_SUFFIXES or path.name in SCANNED_NAMES
+        if scanned and path.is_file():
+            files.append(path)
+    return files
+
+
+def test_the_built_tasks_files_exist():
+    assert [rel for rel in REQUIRED_NOW if not (ROOT / rel).is_file()] == []
+    assert set(REQUIRED_NOW) <= set(VENDORED)
+
+
+def test_every_vendored_file_names_its_miya_source_on_line_1_to_3():
+    wrong = {}
+    for rel, source in VENDORED.items():
+        path = ROOT / rel
+        if not path.is_file():
+            continue
+        match = _header(path)
+        if match is None or match["sha"] != MIYA_SHA or match["path"] != source:
+            wrong[rel] = match.group(0) if match else "no header"
+    assert wrong == {}
+
+
+def test_every_header_in_the_tree_is_a_listed_file():
+    # The reverse direction: a header nobody listed is vendoring nobody tracks.
+    unlisted = [
+        str(path.relative_to(ROOT))
+        for path in _scanned_files()
+        if _header(path) is not None and str(path.relative_to(ROOT)) not in VENDORED
+    ]
+    assert unlisted == []
