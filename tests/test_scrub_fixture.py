@@ -118,12 +118,14 @@ def test_escaped_state_json_inside_a_page_is_scrubbed():
     page = (
         '<script>window.__PRERENDERED_STATE__= "{\\"ad\\":{\\"id\\":5,'
         '\\"user\\":{\\"id\\":9,\\"name\\":\\"Rustam Karimov\\",'
-        '\\"seller_type\\":null}}}";'
+        '\\"seller_type\\":null}},\\"shop\\":{\\"seller\\":{\\"name\\":'
+        '\\"Namuna Mebel MChJ\\"}}}";'
         "</script>"
     )
     out = sf.scrub_bytes(html(page), kind="html").body.decode()
     assert '\\"name\\":\\"Seller 01\\"' in out
     assert "Rustam" not in out and "Karimov" not in out
+    assert '\\"name\\":\\"Namuna Mebel MChJ\\"' in out  # a firm stays
     assert out.count("<script>") == 1 and out.endswith("</script>")
 
 
