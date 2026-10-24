@@ -3,9 +3,12 @@
 
 07 §1.2 and 06 §5.3. MIYA's userbot guard with its sender deleted: there is no
 sender in v1, so ``SENDER_WRITE_FUNCTIONS`` is empty and the exemption branch
-is gone — a write call may appear nowhere in the reader. Two raw requests are
-allowed, each in one named function (the joiner and the ``about`` reader), and
-history is read only where the owner asked for it.
+is gone — a write call may appear nowhere in the reader, called or kept as a
+bound method. Two raw requests are allowed, each in one named function (the
+joiner and the ``about`` reader), and history is read only where the owner
+asked for it. The reader is userbot/, every module importing Telethon and
+every module importing the reader; outside it, a module handed the client
+still may not use Telethon's write methods.
 
 The aiogram side and the other channels are fenced here too: the owner bot
 sends through one wrapper, ``bot/deliver.py::to_person``, which checks the
