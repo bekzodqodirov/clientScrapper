@@ -19,6 +19,7 @@ from pathlib import Path
 import pytest
 
 from tests.ast_tools import ROOT
+from tests.git_env import isolated_env
 
 SCRIPT = ROOT / "scripts" / "pre-push.sh"
 TEXT = SCRIPT.read_text(encoding="utf-8")
@@ -45,7 +46,7 @@ def _bash(command: str, cwd: Path, env: dict[str, str] | None = None):
     return subprocess.run(
         ["bash", "-c", f"set -euo pipefail\n{command}"],
         cwd=cwd,
-        env={**os.environ, **(env or {})},
+        env=isolated_env(env),
         capture_output=True,
         text=True,
         check=False,
@@ -54,7 +55,9 @@ def _bash(command: str, cwd: Path, env: dict[str, str] | None = None):
 
 def _repo(path: Path, message: str) -> Path:
     def git(*args: str) -> None:
-        subprocess.run(["git", *args], cwd=path, check=True, capture_output=True)
+        subprocess.run(
+            ["git", *args], cwd=path, env=isolated_env(), check=True, capture_output=True
+        )
 
     path.mkdir(parents=True, exist_ok=True)
     git("init", "-q")
@@ -132,7 +135,7 @@ def _fake_tools(bin_dir: Path) -> dict[str, str]:
     for tool in ("python", "ruff", "mypy", "pytest", "alembic"):
         (bin_dir / tool).write_text(FAKE)
         (bin_dir / tool).chmod(0o755)
-    return {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"}
+    return isolated_env({"PATH": f"{bin_dir}:{os.environ['PATH']}"})
 
 
 @pytest.mark.parametrize(
@@ -180,3 +183,60 @@ def test_all_green_with_fake_tools(tmp_path):
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert result.stdout.rstrip().endswith("pre-push: green")
+
+
+def _git(repo: Path, *args: str) -> str:
+    return subprocess.run(
+        ["git", *args],
+        cwd=repo,
+        env=isolated_env(),
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
+def _victim(path: Path) -> Path:
+    """A repository standing in for the checkout whose hook runs the suite."""
+    repo = _repo(path, "victim: base")
+    _git(repo, "config", "user.email", "victim@example.uz")
+    return repo
+
+
+def test_scratch_repositories_ignore_an_inherited_git_dir(tmp_path, monkeypatch):
+    """A hook in a linked worktree exports GIT_DIR; the suite's scratch git
+    must still act on its own directory, not on the repository being pushed."""
+    victim = _victim(tmp_path / "victim")
+    monkeypatch.setenv("GIT_DIR", str(victim / ".git"))
+    monkeypatch.setenv("GIT_PREFIX", "")
+    scratch = _repo(tmp_path / "scratch", "x" + TRAILERS)
+    assert _git(victim, "config", "user.email") == "victim@example.uz"
+    assert _git(victim, "log", "--format=%s") == "victim: base"
+    assert (scratch / ".git").is_dir()
+    assert _bash(_gate(7), scratch).returncode == 0  # it read scratch's commit
+
+
+def test_the_hook_does_not_lend_its_git_dir_to_the_gates(tmp_path):
+    """The whole script, run as git runs a linked worktree's hook: GIT_DIR
+    names another repository, and a gate that runs git in its own directory
+    (the suite's scratch repositories do) must not reach it."""
+    victim = _victim(tmp_path / "victim")
+    repo = _repo(tmp_path / "repo", "x" + TRAILERS)
+    shutil.copy(SCRIPT, repo / "pre-push.sh")
+    env = _fake_tools(tmp_path / "bin")
+    # The suite's gate stands in for tests/test_pre_push.py's own _repo().
+    (tmp_path / "bin" / "pytest").write_text(
+        "#!/usr/bin/env bash\ngit config user.email ci@example.uz\n"
+    )
+    env = {**env, "GIT_DIR": str(victim / ".git"), "GIT_PREFIX": ""}
+    result = subprocess.run(
+        ["bash", "pre-push.sh"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert _git(victim, "config", "user.email") == "victim@example.uz"
+    assert _git(repo, "config", "user.email") == "ci@example.uz"

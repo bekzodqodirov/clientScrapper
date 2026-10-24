@@ -2,7 +2,13 @@
 # Each gate prints its own marker and the chain stops at the first red one (fullprompt #738/#803:
 # `cmd | tail` reports tail's exit code, so nothing here is piped).
 set -euo pipefail
-# Three lines differ from 07 §2.2. Two passed a red gate: set -e ignores a
+# A hook in a linked worktree (.wt/*) is handed GIT_DIR, and every gate would
+# inherit it: the suite's scratch-repo git would then commit into the
+# repository being pushed. Clear what git itself clears before entering
+# another repository; the hook runs at the worktree's root, so git still
+# finds this one from the directory.
+unset $(git rev-parse --local-env-vars)
+# Besides that line, three differ from 07 §2.2. Two passed a red gate: set -e ignores a
 # failure anywhere in an && / || list but its last command, so [2/7]'s
 # `ruff check . && ruff format --check .` went on after a failing ruff check
 # (two commands now) and [6/7]'s `{ … && alembic check; } || echo` ran the echo

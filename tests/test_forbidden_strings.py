@@ -27,6 +27,7 @@ import pytest
 
 from clientscrapper.services.text import fold_apostrophes
 from tests.ast_tools import ROOT
+from tests.git_env import isolated_env
 
 ENV = "CS_FORBIDDEN_STRINGS"
 MIN_LENGTH = 4  # shorter entries would match half the tree
@@ -67,6 +68,7 @@ def _tree_files(root: Path) -> list[Path]:
         listed = subprocess.run(
             ["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
             cwd=root,
+            env=isolated_env(),
             capture_output=True,
             check=False,
         )
@@ -124,3 +126,26 @@ def test_the_guard_finds_each_shape(tmp_path):
     ]
     # The report never carries the value itself.
     assert all("namuna" not in line.lower() for line in offenders(tmp_path, entries))
+
+
+def test_an_inherited_git_dir_does_not_change_the_files_read(tmp_path, monkeypatch):
+    """A pre-push hook in a linked worktree exports GIT_DIR: the walk still
+    reads the root's own index (a file tracked there despite .gitignore is
+    only in that index)."""
+
+    def git(repo: Path, *args: str) -> None:
+        subprocess.run(
+            ["git", *args], cwd=repo, env=isolated_env(), check=True, capture_output=True
+        )
+
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    git(victim, "init", "-q")
+    root = tmp_path / "root"
+    root.mkdir()
+    git(root, "init", "-q")
+    (root / ".gitignore").write_text("*.log\n")
+    (root / "kept.log").write_text("Namuna Realname\n", encoding="utf-8")
+    git(root, "add", "-f", "kept.log")
+    monkeypatch.setenv("GIT_DIR", str(victim / ".git"))
+    assert offenders(root, forbidden("Namuna Realname")) == ["kept.log: entry #1"]

@@ -19,6 +19,7 @@ is allowed only on a comment line of ``.env.example``.
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 import sys
@@ -31,6 +32,30 @@ MAX_BYTES = 20 * 1024 * 1024
 SKIPPED_PARTS = {".git", ".venv", "venv", "__pycache__", ".mypy_cache", ".ruff_cache"}
 FIXTURES = "tests/fixtures/"
 ENV_EXAMPLE = ".env.example"
+# What git itself clears before it works in another repository
+# (`git rev-parse --local-env-vars`). A pre-push hook in a linked worktree is
+# handed GIT_DIR; inherited, it would make `--root DIR` list some other
+# repository's index instead of DIR's.
+REPO_LOCAL_ENV = frozenset(
+    {
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_CONFIG",
+        "GIT_CONFIG_PARAMETERS",
+        "GIT_CONFIG_COUNT",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_IMPLICIT_WORK_TREE",
+        "GIT_GRAFT_FILE",
+        "GIT_INDEX_FILE",
+        "GIT_NO_REPLACE_OBJECTS",
+        "GIT_REPLACE_REF_BASE",
+        "GIT_PREFIX",
+        "GIT_INTERNAL_SUPER_PREFIX",
+        "GIT_SHALLOW_FILE",
+        "GIT_COMMON_DIR",
+    }
+)
 
 SECRETS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("anthropic key", re.compile(r"sk-ant-[A-Za-z0-9_-]{20,}")),
@@ -95,11 +120,17 @@ def scan_text(path: str, text: str) -> list[Finding]:
     return found
 
 
+def git_env() -> dict[str, str]:
+    """The environment without the variables that point git at a repository."""
+    return {k: v for k, v in os.environ.items() if k not in REPO_LOCAL_ENV}
+
+
 def _listed(root: Path) -> list[str] | None:
     try:
         result = subprocess.run(
             ["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
             cwd=root,
+            env=git_env(),
             capture_output=True,
             check=False,
         )

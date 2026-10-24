@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from tests.ast_tools import ROOT
+from tests.git_env import isolated_env
 
 SCRIPT = ROOT / "scripts" / "secret_scan.py"
 
@@ -104,9 +105,15 @@ def test_the_cli_names_file_and_line_and_exits_1(tmp_path, capsys):
     assert "blob.bin" not in out  # binary files are skipped
 
 
+def _git(repo: Path, *args: str) -> None:
+    subprocess.run(
+        ["git", *args], cwd=repo, env=isolated_env(), check=True, capture_output=True
+    )
+
+
 def test_the_cli_reads_git_tracked_and_new_files_not_ignored(tmp_path):
     def git(*args: str) -> None:
-        subprocess.run(["git", *args], cwd=tmp_path, check=True, capture_output=True)
+        _git(tmp_path, *args)
 
     git("init", "-q")
     (tmp_path / ".gitignore").write_text(".env\n")
@@ -114,6 +121,7 @@ def test_the_cli_reads_git_tracked_and_new_files_not_ignored(tmp_path):
     (tmp_path / "new.md").write_text(f"{PLANTED['google api key']}\n")
     result = subprocess.run(
         [sys.executable, str(SCRIPT), "--root", str(tmp_path)],
+        env=isolated_env(),
         capture_output=True,
         text=True,
         check=False,
@@ -133,3 +141,32 @@ def test_paths_are_relative_to_the_root(tmp_path):
     [finding] = scanner.scan(tmp_path, [str(target)])
     assert finding.path == "a/b.txt"
     assert isinstance(finding.line, int) and Path(finding.path).name == "b.txt"
+
+
+def test_git_env_drops_every_variable_git_calls_repository_local():
+    listed = subprocess.run(
+        ["git", "rev-parse", "--local-env-vars"],
+        env=isolated_env(),
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.split()
+    assert "GIT_DIR" in listed
+    assert set(listed) <= scanner.REPO_LOCAL_ENV
+
+
+def test_an_inherited_git_dir_does_not_change_what_is_scanned(tmp_path, monkeypatch):
+    """The hook of a linked worktree exports GIT_DIR; --root DIR still lists
+    DIR's own index. A file git tracks there despite .gitignore (added with
+    -f) is listed only by DIR's index, so reading another one misses it."""
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    _git(victim, "init", "-q")
+    root = tmp_path / "root"
+    root.mkdir()
+    _git(root, "init", "-q")
+    (root / ".gitignore").write_text("*.log\n")
+    (root / "kept.log").write_text(f"{PLANTED['apify token']}\n")
+    _git(root, "add", "-f", "kept.log")
+    monkeypatch.setenv("GIT_DIR", str(victim / ".git"))
+    assert [str(f) for f in scanner.scan(root)] == ["kept.log:1: apify token"]
