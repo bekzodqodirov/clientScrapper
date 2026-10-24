@@ -88,7 +88,9 @@ def test_the_guard_finds_each_shape(tmp_path):
     assert [e.index for e in entries] == [0, 1, 2]
     (tmp_path / "handle.md").write_text("yozdi @NAMUNA_REAL kecha", encoding="utf-8")
     (tmp_path / "name.py").write_text('OWNER = "Go\'zal namunova"\n', encoding="utf-8")
-    (tmp_path / "phone.json").write_text('{"p": "+998 (90) 111-22-33"}', encoding="utf-8")
+    # Split: secret_scan reads the bracketed shape too.
+    phone = '{"p": "+998 (90) ' + '111-22-33"}'
+    (tmp_path / "phone.json").write_text(phone, encoding="utf-8")
     (tmp_path / "longer.txt").write_text(
         "id 9011122334 is another number", encoding="utf-8"
     )

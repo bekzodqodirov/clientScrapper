@@ -14,11 +14,16 @@ to the same synthetic one, numbered in order of first appearance:
   attribute or STIR-labelled cell. So a STIR (``"inn": "301234567"``,
   ``<td>STIR</td><td>301234567</td>``) and a platform id (``"ad_id":
   901234567``) stay as the parser tests need them;
+  hh's split phone (``country``/``city``/``number`` in one object) is one
+  number, its parts rewritten in place;
 * a Telegram ``@handle`` / ``t.me/<name>``, an Instagram handle and the value
   of a ``username``-shaped key → ``namuna_NN`` (reserved paths, bots, CSS
   ``@media`` and JSON-LD ``@context`` are left alone);
+* an e-mail address → ``namuna_NN@example.uz`` (one already at an
+  ``example.*`` domain stays, unless its local part is a person's name);
 * a person-shaped name in a ``user.name``-shaped field (``user``/``seller``/
-  ``owner``/``author``/``contact`` → ``name`` at any depth inside them, or
+  ``owner``/``author``/``contact``/``contacts`` → ``name`` at any depth inside
+  them, or
   ``user_name``, ``sellerName``, ``first_name`` …), beside ``IP``/``ИП``/
   ``YaTT``/``ЯТТ``, and — in HTML — a whole text node or a ``title``/``alt``/
   ``content`` attribute that is person-shaped → ``Seller NN``; a firm's name
@@ -34,7 +39,8 @@ JSON is parsed and written back in its own layout (indent, separators,
 are rewritten in place, so every tag and attribute stays and selectors still
 match. JSON embedded in a page (OLX ``__PRERENDERED_STATE__``, escaped or
 not) is walked with balanced braces. ``needs_scrub`` is the recorder's
-``--scrub auto`` rule.
+``--scrub auto`` rule: a person-tier source, a page naming an individual
+entrepreneur, or one carrying a person-shaped name in a person field.
 """
 
 from __future__ import annotations
@@ -50,6 +56,7 @@ from pathlib import Path
 from typing import Any, Final, Literal
 
 from clientscrapper.collectors.keywords import (
+    EMAIL_RE,
     IG_RE,
     LEGAL_FORM_RE,
     PHONE_RE,
@@ -68,14 +75,34 @@ from clientscrapper.services.normalise import is_person_shaped, telegram_key
 
 FixtureKind = Literal["json", "html", "xml", "text"]
 
-# Person-tier sources (07 §1.1): always scrubbed under --scrub auto.
+# Person-tier sources (07 §1.1): always scrubbed under --scrub auto. 07 §1.1
+# names the first three; hh_vacancies (a vacancy's «contacts» block is the HR
+# person: name, e-mail, phones) and uzum_sellers (a seller is often a YaTT,
+# a person) carry people too, and 07 §1.0 lets no real person into tests/.
 PERSON_TIER_SOURCES: Final = frozenset(
-    {"olx_business", "instagram_discovery", "telegram_monitor"}
+    {
+        "olx_business",
+        "instagram_discovery",
+        "telegram_monitor",
+        "hh_vacancies",
+        "uzum_sellers",
+    }
 )
 SYNTHETIC_PREFIX: Final = "998"
 PERSON_PARENTS: Final = frozenset(
-    {"user", "seller", "owner", "author", "contact", "person", "profile"}
+    {"user", "seller", "owner", "author", "contact", "contacts", "contact_person",
+     "contactPerson", "person", "profile"}
+)  # fmt: skip
+# An e-mail at one of these (or a subdomain) is already synthetic (07 §1.0).
+SYNTHETIC_MAIL_DOMAINS: Final = (
+    "example.uz",
+    "example.com",
+    "example.org",
+    "example.net",
 )
+# hh.ru's split phone ({"country": "998", "city": "90", "number": "000-00-01",
+# "formatted": "+998 (90) 000-00-01"}): the three parts are one number.
+PHONE_PARTS: Final = ("country", "city", "number")
 NESTED_NAME_KEYS: Final = frozenset(
     {"name", "first_name", "last_name", "full_name", "display_name", "fullName",
      "displayName", "firstName", "lastName"}
@@ -245,6 +272,7 @@ class Scrubber:
         self._phones: dict[str, int] = {}
         self._handles: dict[str, int] = {}
         self._names: dict[str, int] = {}
+        self._emails: dict[str, int] = {}
         self._handle_raw: dict[str, str] = {}
         self._name_raw: dict[str, str] = {}
         self.replaced: Counter[str] = Counter()
@@ -270,6 +298,44 @@ class Scrubber:
         self.replaced["phones"] += 1
         code = _country_code(digits, raw)
         return _swap_digits(raw, code + str(n).zfill(len(digits) - len(code)))
+
+    def email(self, raw: str) -> str:
+        local, domain = raw.rsplit("@", 1)
+        synthetic_domain = any(
+            domain.lower() == d or domain.lower().endswith("." + d)
+            for d in SYNTHETIC_MAIL_DOMAINS
+        )
+        # «info@namuna.example.uz» is made up; «malika.karimova@example.uz»
+        # still names somebody.
+        if synthetic_domain and not _person_shaped(re.sub(r"[._\-]+", " ", local)):
+            return raw
+        n = self._emails.setdefault(raw.lower(), len(self._emails) + 1)
+        self.replaced["emails"] += 1
+        return f"namuna_{n:02d}@example.uz"
+
+    def phone_parts(self, parts: dict[str, Any]) -> dict[str, Any] | None:
+        """hh's split phone as one number, each part rewritten with the digits
+        the whole number gets; None when the parts are not a phone."""
+        values = [parts.get(k) for k in PHONE_PARTS]
+        if not all(isinstance(v, str | int) and not isinstance(v, bool) for v in values):
+            return None
+        country, city, number = (str(v) for v in values)
+        raw = f"+{country} {city} {number}"
+        if phone_e164(raw) is None:
+            return None
+        digits = re.sub(r"\D", "", self.phone(raw))
+        sizes = [sum(ch.isdigit() for ch in part) for part in (country, city, number)]
+        if sum(sizes) != len(digits):
+            return None
+        out: list[str] = []
+        at = 0
+        for part, size in zip((country, city, number), sizes, strict=True):
+            out.append(_swap_digits(part, digits[at : at + size]))
+            at += size
+        fresh = dict(parts)
+        for key, value, new in zip(PHONE_PARTS, values, out, strict=True):
+            fresh[key] = int(new) if isinstance(value, int) else new
+        return fresh
 
     def handle(self, key: str, raw: str | None = None) -> str:
         n = self._handles.setdefault(key, len(self._handles) + 1)
@@ -307,6 +373,7 @@ class Scrubber:
         """``phone_field``: the value of a phone-labelled key, where every
         valid number is a phone however it is written. ``markup``: HTML/XML,
         where a whole text node or a name attribute can be a person's name."""
+        text = EMAIL_RE.sub(lambda m: self.email(m.group(0)), text)
         text = _FLAT_FIELD.sub(self._field, text)
         text = self._parents_in(text)
         text = _HANDLE_FIELD.sub(self._handle_field, text)
@@ -481,7 +548,15 @@ class Scrubber:
         self, value: Any, *, key: str | None = None, parent: str | None = None
     ) -> Any:
         if isinstance(value, dict):
-            return {k: self.tree(v, key=k, parent=key) for k, v in value.items()}
+            whole = self.phone_parts(value) if set(PHONE_PARTS) <= set(value) else None
+            return {
+                k: (
+                    whole[k]
+                    if whole is not None and k in PHONE_PARTS
+                    else self.tree(v, key=k, parent=key)
+                )
+                for k, v in value.items()
+            }
         if isinstance(value, list):
             return [self.tree(v, key=key, parent=parent) for v in value]
         if isinstance(value, str):
@@ -568,12 +643,23 @@ def has_entrepreneur_name(text: str) -> bool:
     )
 
 
+def has_person_field(text: str) -> bool:
+    """A person-shaped name in a person field (``user.name``, ``contacts.name``,
+    ``seller_name`` …), as the scrubber itself reads one."""
+    probe = Scrubber()
+    probe.text(text)
+    return probe.replaced["names"] > 0
+
+
 def needs_scrub(source_key: str, body: bytes) -> bool:
-    """``--scrub auto``: person-tier sources, and any page naming an
-    individual entrepreneur. Company-tier public pages stay verbatim."""
+    """``--scrub auto``: person-tier sources, any page naming an individual
+    entrepreneur, and any page carrying a person-shaped name in a person
+    field (whatever its source: a directory's API answer with a «contacts»
+    block is a person's). Company-tier public pages stay verbatim."""
     if source_key in PERSON_TIER_SOURCES:
         return True
-    return has_entrepreneur_name(body.decode("utf-8", errors="ignore"))
+    text = body.decode("utf-8", errors="ignore")
+    return has_entrepreneur_name(text) or has_person_field(text)
 
 
 _KINDS: Final[dict[str, FixtureKind]] = {

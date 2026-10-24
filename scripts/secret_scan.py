@@ -9,12 +9,18 @@ matched value itself is never printed — the CI log is not a place for it
 either. No third-party dependency: CI's lint job and the pre-push hook run it
 before anything is installed.
 
-Phones: a ``+998`` number fails outside ``tests/fixtures/`` (recorded public
-pages, already scrubbed for person-tier sources) unless it is visibly
-synthetic (``synthetic()``: ``+998 90 000 00 NN`` and the same shape under
-other codes) or one of the two example numbers the specification itself
-prints (``SPEC_EXAMPLE_TAILS``). An ``age1…`` recipient
-is allowed only on a comment line of ``.env.example``.
+Phones: a number written with a trunk — ``+998``, ``998`` or ``8`` before
+the operator code, the code bare or in brackets (``+998 (93) …``, ``8 (93)
+…``: PHONE_RE's shape in collectors/keywords.py, which this script cannot
+import before anything is installed) — fails unless it is visibly synthetic
+(``synthetic()``: ``+998 90 000 00 NN`` and the same shape under other codes)
+or one of the two example numbers the specification itself prints
+(``SPEC_EXAMPLE_TAILS``). Under ``tests/fixtures/`` a company-tier page is
+stored verbatim (07 §1.1), so its switchboard numbers pass; a person-tier
+source's directory (``PERSON_TIER_FIXTURES``, the scrubber's
+``PERSON_TIER_SOURCES``) is always scrubbed, so a real phone or e-mail there
+fails. An ``age1…`` recipient is allowed only on a comment line of
+``.env.example``.
 """
 
 from __future__ import annotations
@@ -77,18 +83,36 @@ SECRETS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("age secret key", re.compile(r"AGE-SECRET-KEY-1[0-9A-Z]{58}")),
 )
 AGE_RECIPIENT = re.compile(r"age1[a-z0-9]{58}")
-# 07's pattern, with a dash allowed beside the spaces ("+998 90 123-45-67").
-PHONE = re.compile(r"\+998[\s-]?(\d{2})[\s-]?(\d{3})[\s-]?(\d{2})[\s-]?(\d{2})")
+# 07's pattern, widened to PHONE_RE's shapes: a dash beside the spaces
+# ("+998 90 123-45-67"), the code in brackets ("+998 (90) 123-45-67", hh's
+# «formatted»), and a bare 998 or 8 trunk ("998 90 …", "8 (90) …"; an 8 needs
+# a separator or a bracket after it, or every ten-digit id would be a phone).
+PHONE = re.compile(
+    r"(?:\+998|(?<![\w+])998|(?<![\w+])8(?=[\s(-]))"
+    r"[\s-]*\(?(\d{2})\)?[\s-]?(\d{3})[\s-]?(\d{2})[\s-]?(\d{2})(?!\d)"
+)
+EMAIL = re.compile(
+    r"(?<![\w.%+-])[A-Za-z0-9._%+-]+@([A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,})(?![\w-])"
+)
+# tools/scrub_fixture.PERSON_TIER_SOURCES (tests/test_secret_scan.py holds the
+# two equal): their fixtures are scrubbed, so no real number or mailbox stays.
+PERSON_TIER_FIXTURES = frozenset(
+    {"olx_business", "instagram_discovery", "telegram_monitor", "hh_vacancies",
+     "uzum_sellers"}
+)  # fmt: skip
+SYNTHETIC_MAIL_DOMAINS = ("example.uz", "example.com", "example.org", "example.net")
 # Visibly synthetic numbers (07 §1.0): +998 90 000 00 NN, and the same shape
 # under the other operator and area codes the normaliser must be tested on
 # (XX 000 00 NN, and 04 §1.1's landline shape XX 200 00 NN), and placeholders
 # whose seven digits are one digit repeated (90 111 11 11).
 SYNTHETIC_MIDDLES = frozenset({"00000", "20000"})
 # Example numbers the specification itself prints: 04 §1.1's normaliser table
-# (+998 90 123 45 67, mirrored by tests/test_normalise.py and test_keys.py)
-# and the State Statistics Committee register office's public line, quoted as
-# evidence in docs/manbalar.json. Nothing else is exempt.
-SPEC_EXAMPLE_TAILS = frozenset({"901234567", "712028093"})
+# (+998 90 123 45 67, mirrored by tests/test_normalise.py and test_keys.py),
+# the State Statistics Committee register office's public line, quoted as
+# evidence in docs/manbalar.json, and the PD-register hotline the legal memo
+# quotes («(+99871) 207 70 64», docs/huquqiy-memo.md — written with brackets,
+# so the scanner saw it only once it read that shape). Nothing else is exempt.
+SPEC_EXAMPLE_TAILS = frozenset({"901234567", "712028093", "712077064"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,8 +130,22 @@ def synthetic(tail: str) -> bool:
     return tail[2:7] in SYNTHETIC_MIDDLES or len(set(tail[2:])) == 1
 
 
+def person_tier_fixture(path: str) -> bool:
+    """``tests/fixtures/<key>/…`` of a person-tier source."""
+    if not path.startswith(FIXTURES):
+        return False
+    return path[len(FIXTURES) :].split("/", 1)[0] in PERSON_TIER_FIXTURES
+
+
 def _phone_allowed(path: str, tail: str) -> bool:
-    return path.startswith(FIXTURES) or synthetic(tail) or tail in SPEC_EXAMPLE_TAILS
+    if synthetic(tail) or tail in SPEC_EXAMPLE_TAILS:
+        return True
+    return path.startswith(FIXTURES) and not person_tier_fixture(path)
+
+
+def _synthetic_mail(domain: str) -> bool:
+    domain = domain.lower()
+    return any(domain == d or domain.endswith("." + d) for d in SYNTHETIC_MAIL_DOMAINS)
 
 
 def scan_text(path: str, text: str) -> list[Finding]:
@@ -123,6 +161,10 @@ def scan_text(path: str, text: str) -> list[Finding]:
                 found.append(
                     Finding(path, number, "+998 phone outside the synthetic range")
                 )
+        if person_tier_fixture(path):
+            for m in EMAIL.finditer(line):
+                if not _synthetic_mail(m.group(1)):
+                    found.append(Finding(path, number, "e-mail in a person-tier fixture"))
     return found
 
 

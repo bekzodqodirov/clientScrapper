@@ -11,8 +11,12 @@ Logs carry ids and counts, never bodies, names, phones, handles, quotes,
 payloads, headers or any `.env` value. Two filters are the backstop for a
 careless call: ``RedactBodies`` drops an extra named like a body before any
 formatter sees it, and ``RedactPatterns`` rewrites what still slipped into the
-message, the traceback or the value of any other extra (a phone, a key header,
-a token, a DSN password, a handle). Both run in either format.
+message, the traceback or the value of any other extra (a phone, an e-mail, a
+key header, a token, a DSN password, a Telegram or Instagram handle). Both run
+in either format. The phone, e-mail and Instagram patterns are imported from
+``collectors/keywords.py`` (06 §5.2), never restated: they over-match (any nine
+digits standing alone become ``<phone>``), which is the safe direction for a
+log; an integer extra is an id and is left as it is.
 """
 
 from __future__ import annotations
@@ -21,9 +25,11 @@ import json
 import logging
 import re
 import sys
+from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any, Literal, TextIO
 
+from clientscrapper.collectors.keywords import EMAIL_RE, IG_RE, PHONE_RE
 from clientscrapper.config import settings
 
 LogFormat = Literal["json", "text"]
@@ -60,10 +66,23 @@ _KEY_HEADER = re.compile(
     rf"(?:([\"'])(?:{_AUTH_SCHEME})?[^\"']*\2|(?:{_AUTH_SCHEME})?\S+)"
 )
 
+
+def _ig_handle(match: re.Match[str]) -> str:
+    """«insta: malika.karimova» → «insta: …»: the label stays, the handle goes."""
+    return match.group(0)[: match.start(1) - match.start(0)] + "…"
+
+
 # Applied in this order: credentials first, so a token is never half-eaten by
-# the phone rule; handles last, and only outside URLs (a DSN's «@host» or a
-# link's «user@» is not a Telegram handle).
-_SECRET_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
+# the phone rule; then e-mails (whole, before the handle rule can eat their
+# «@domain»), phones and Instagram handles — PHONE_RE, EMAIL_RE and IG_RE are
+# collectors/keywords.py's, the patterns the normaliser and the pseudonymiser
+# use (06 §5.2: one home, so all three agree on what a phone is: «93 517 22
+# 84», «(93) 517-22-84» and nine bare digits are phones without a +998);
+# Telegram handles last, and only outside URLs (a DSN's «@host» or a link's
+# «user@» is not a Telegram handle).
+_SECRET_RULES: tuple[
+    tuple[re.Pattern[str], str | Callable[[re.Match[str]], str]], ...
+] = (
     (re.compile(r"sk-ant-[A-Za-z0-9_-]{20,}"), "<secret>"),
     (re.compile(r"\d{8,10}:[A-Za-z0-9_-]{35}"), "<secret>"),
     (re.compile(r"(?i)telethon_session=\S+"), "<secret>"),
@@ -73,7 +92,9 @@ _SECRET_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
     # logged the credential after it.
     (_KEY_HEADER, r"\1=<key>"),
     (re.compile(r"postgresql(\+\w+)?://([^:/]+):([^@]+)@"), r"postgresql\1://\2:***@"),
-    (re.compile(r"\+?998[\s-]?\d{2}[\s-]?\d{3}[\s-]?\d{2}[\s-]?\d{2}"), "<phone>"),
+    (EMAIL_RE, "<email>"),
+    (PHONE_RE, "<phone>"),
+    (IG_RE, _ig_handle),
 )
 _URL_RE = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://\S+")
 _HANDLE_RE = re.compile(r"@[A-Za-z][A-Za-z0-9_]{4,}")
@@ -89,7 +110,8 @@ _RECORD_ATTRS = frozenset(
 
 
 def redact(text: str) -> str:
-    """The 06 §4.5 pattern table applied to one string."""
+    """The 06 §4.5 pattern table, with keywords.py's phone, e-mail and
+    Instagram patterns, applied to one string."""
     for pattern, replacement in _SECRET_RULES:
         text = pattern.sub(replacement, text)
     out: list[str] = []

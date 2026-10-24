@@ -105,6 +105,69 @@ def test_phone_numbers_outside_the_synthetic_range(text, path, flagged):
     assert bool(rules(path, f"tel: {text}")) is flagged
 
 
+# The national number «91 234 56 78», split: this file holds no phone the
+# scanner would refuse.
+LOCAL = "91) 234-56-78"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "+998 (" + LOCAL,  # hh's «formatted», the commonest way it is written
+        "+998(" + LOCAL,
+        "998 (" + LOCAL,
+        "998 " + LOCAL.replace(")", ""),
+        "998" + LOCAL.replace(")", "").replace(" ", "").replace("-", ""),
+        "8 (" + LOCAL,
+        "8 " + LOCAL.replace(")", ""),
+        "8-" + LOCAL.replace(")", ""),
+    ],
+)
+def test_every_trunk_and_bracket_shape_of_a_real_number_is_refused(text):
+    assert rules("docs/x.md", f"Murojaat: {text}") == [
+        "+998 phone outside the synthetic range"
+    ]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "8" + LOCAL.replace(")", "").replace(" ", "").replace("-", ""),  # an id
+        "ID 1998" + LOCAL.replace(")", "").replace(" ", "").replace("-", ""),
+        "+998 (90) 000-00-42",
+        "8 (71) 200-00-17",
+    ],
+    ids=["ten-digits-from-8", "inside-a-longer-number", "synthetic", "synthetic-trunk"],
+)
+def test_ids_and_synthetic_numbers_in_those_shapes_pass(text):
+    assert rules("docs/x.md", text) == []
+
+
+def test_a_person_tier_fixture_holds_no_real_phone_or_mailbox():
+    real_phone = "+998 (" + LOCAL
+    real_mail = "malika.karimova" + "@" + "namuna-mail.uz"
+    for key in ("hh_vacancies", "olx_business"):
+        path = f"tests/fixtures/{key}/vacancy.json"
+        assert rules(path, f'"formatted": "{real_phone}"') == [
+            "+998 phone outside the synthetic range"
+        ]
+        assert rules(path, f'"email": "{real_mail}"') == [
+            "e-mail in a person-tier fixture"
+        ]
+        assert rules(path, '"email": "namuna_01@example.uz"') == []
+        assert rules(path, '"formatted": "+998 (90) 000-00-01"') == []
+    # A company-tier page is stored verbatim (07 §1.1).
+    company = "tests/fixtures/directories/goldenpages.html"
+    assert rules(company, f"{real_phone} {real_mail}") == []
+
+
+def test_the_person_tier_fixtures_are_the_scrubbers_person_tier_sources():
+    from clientscrapper.tools import scrub_fixture
+
+    assert scanner.PERSON_TIER_FIXTURES == scrub_fixture.PERSON_TIER_SOURCES
+    assert scanner.SYNTHETIC_MAIL_DOMAINS == scrub_fixture.SYNTHETIC_MAIL_DOMAINS
+
+
 def test_an_age_recipient_only_on_a_comment_of_env_example():
     recipient = "age" + "1" + "q" * 58
     assert rules(".env.example", f"# e.g. BACKUP_AGE_RECIPIENT={recipient}") == []

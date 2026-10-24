@@ -162,11 +162,91 @@ def test_scrubbing_is_deterministic():
         ("directories", "<p>ИП Каримов Р.Р.</p>".encode(), True),
         ("directories", b"<p>YaTT Aliyev Sardor</p>", True),
         ("directories", b"<p>Namuna Mebel MChJ, optom</p>", False),
-        ("hh_vacancies", b'{"employer": {"name": "Namuna Import"}}', False),
+        # A vacancy's «contacts» is the HR person (03 §2.7): hh is person-tier,
+        # employer pages included (the scrub keeps a firm's name).
+        ("hh_vacancies", b'{"employer": {"name": "Namuna Import"}}', True),
+        ("uzum_sellers", b"{}", True),
+        # Whatever the source, a person-shaped name in a person field.
+        (
+            "directories",
+            '{"firm": "Namuna Import", "contacts": {"name": "Малика Каримова"}}'.encode(),
+            True,
+        ),
+        ("directories", b'{"contacts": {"name": "Namuna Import MChJ"}}', False),
     ],
 )
 def test_needs_scrub(key, body, expected):
     assert sf.needs_scrub(key, body) is expected
+
+
+# hh.ru's vacancy (api.hh.ru/vacancies/{id}): the «contacts» block is a person.
+HH_VACANCY = {
+    "id": "100000001",
+    "name": "Менеджер ВЭД",
+    "employer": {"id": "9000001", "name": "Namuna Import MChJ"},
+    "contacts": {
+        "name": "Малика Каримова",
+        "email": "malika.karimova@namuna-import.uz",
+        "phones": [
+            {
+                "country": "998",
+                "city": "93",
+                "number": "000-00-84",
+                "comment": None,
+                "formatted": "+998 (93) 000-00-84",
+            }
+        ],
+    },
+    "description": "<p>Murojaat: malika.karimova@namuna-import.uz</p>",
+}
+
+
+def test_an_hh_vacancys_contacts_are_scrubbed_whole():
+    raw = json.dumps(HH_VACANCY, ensure_ascii=False, indent=2).encode()
+    out = json.loads(sf.scrub_bytes(raw, kind="json").body)
+    contacts = out["contacts"]
+    assert contacts["name"] == "Seller 01"
+    assert contacts["email"] == "namuna_01@example.uz"
+    assert contacts["phones"] == [
+        {
+            "country": "998",
+            "city": "90",
+            "number": "000-00-01",
+            "comment": None,
+            "formatted": "+998 (90) 000-00-01",  # the same number, the same NN
+        }
+    ]
+    assert out["description"] == "<p>Murojaat: namuna_01@example.uz</p>"
+    assert out["employer"] == HH_VACANCY["employer"]  # a firm stays
+    assert sf.needs_scrub("hh_vacancies", raw)
+
+
+def test_a_split_phone_with_integer_parts_keeps_its_types():
+    phone = {"country": 998, "city": 93, "number": 5000084, "formatted": None}
+    [scrubbed] = sf.Scrubber().tree({"phones": [phone]})["phones"]
+    assert scrubbed == {"country": 998, "city": 90, "number": 1, "formatted": None}
+    # Parts that are no phone together are left as they are.
+    odd = {"country": 998, "city": 93, "number": 84}
+    assert sf.Scrubber().tree(odd) == odd
+
+
+@pytest.mark.parametrize(
+    ("page", "expected"),
+    [
+        (
+            "<p>Murojaat: malika.karimova@namuna-mail.uz yoki "
+            "malika.karimova@namuna-mail.uz</p>",
+            "<p>Murojaat: namuna_01@example.uz yoki namuna_01@example.uz</p>",
+        ),
+        ("<p>info@namuna.example.uz</p>", "<p>info@namuna.example.uz</p>"),
+        (
+            "<p>Rustam.Karimov@example.uz, savdo@namuna.uz</p>",
+            "<p>namuna_01@example.uz, namuna_02@example.uz</p>",
+        ),
+    ],
+)
+def test_an_email_becomes_namuna_nn_unless_it_is_already_made_up(page, expected):
+    assert sf.scrub_bytes(html(page), kind="html").body.decode() == expected
 
 
 def test_the_cli_rewrites_in_place(tmp_path, capsys):
