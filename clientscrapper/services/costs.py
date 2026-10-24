@@ -93,6 +93,12 @@ CAP_MONTH_OP: Final = "cost_cap_month_op:"
 OP_WINDOW: Final = "op_window:"
 ANTHROPIC_SILENCE: Final = "anthropic_silence"
 REFUSED_PREFIX: Final = "refused:"
+# A claim whose call raised after dispatch (timeout, connection reset): the
+# estimate stays counted, and ``usage_log.model`` says ``failed:<error class>``
+# so a failed attempt is told apart from a call still in flight (whose claim
+# row carries no model and no tokens yet) — 06 §4.2 anthropic_silence counts
+# only the former.
+FAILED_PREFIX: Final = "failed:"
 # The refusals that are the 06 §4.2 problem ``cost_cap``, told first by ``ask``.
 CAP_ALERT_CODES: Final = frozenset({CAP_DAILY, CAP_MONTHLY})
 # Every rung that is a cap (money or count) starts so; the others —
@@ -469,16 +475,23 @@ async def serp_overflow(session: AsyncSession) -> bool:
 # counts refusals from the rows, never from here.
 _refused: dict[str, tuple[datetime, str]] = {}
 
-AnthropicHealth = Callable[[AsyncSession, datetime], Awaitable[bool]]
+# «Is the Anthropic API down»: None when it is up, else until when an
+# Anthropic call is refused (the next moment worth asking again — health's
+# next probe slot, 06 §4.2 anthropic_silence).
+AnthropicHealth = Callable[[AsyncSession, datetime], Awaitable[datetime | None]]
 CapNotifier = Callable[[str], Awaitable[bool]]
+# «Hold a warning now»: health.in_quiet_hours (06 §4.2 — only critical
+# problems ignore QUIET_HOURS, and cost_cap is a warning).
+HoldWarnings = Callable[[datetime], bool]
 
 
 @dataclass(slots=True)
 class _Hooks:
-    # health.py (T-08) registers both: «is the Anthropic API down» (06 §4.2
-    # anthropic_silence) and the owner notifier that tells cost_cap first.
+    # health.py (T-08) registers the switch and the worker the owner
+    # notifier that tells cost_cap first, with health's quiet-hours rule.
     anthropic_down: AnthropicHealth | None = None
     notify_cap: CapNotifier | None = None
+    hold_cap: HoldWarnings | None = None
 
 
 _hooks = _Hooks()
@@ -488,9 +501,15 @@ def set_anthropic_health(check: AnthropicHealth | None) -> None:
     _hooks.anthropic_down = check
 
 
-def set_cap_notifier(notify: CapNotifier | None) -> None:
-    """``notify(text) -> delivered``; a cost_cap is marked only once delivered."""
+def set_cap_notifier(
+    notify: CapNotifier | None, *, hold: HoldWarnings | None = None
+) -> None:
+    """``notify(text) -> delivered``; a cost_cap is marked only once delivered.
+    ``hold(now)`` true: the cap is not told at that minute (quiet hours) —
+    nothing is claimed, so the next refusal outside them, or the sweep's
+    repeat, says it."""
     _hooks.notify_cap = notify
+    _hooks.hold_cap = hold if notify is not None else None
 
 
 def refused_until(operation: str, now: datetime) -> datetime | None:
@@ -505,17 +524,17 @@ def clear_refusals() -> None:
     _refused.clear()
 
 
-async def _anthropic_is_down(session: AsyncSession, now: datetime) -> bool:
+async def _anthropic_down_until(session: AsyncSession, now: datetime) -> datetime | None:
     check = _hooks.anthropic_down
     if check is None:
-        return False
+        return None
     try:
         return await check(session, now)
     except Exception as exc:
         # The money rungs are the hard limit; a broken health probe must not
         # stop the classifier.
         log.warning("anthropic health check failed", extra={"error": type(exc).__name__})
-        return False
+        return None
 
 
 # --- writing the ledger --------------------------------------------------------
@@ -753,7 +772,12 @@ async def ask[T](
     if held is not None and _local(now, None) < held[0]:
         raise CostCapReached(held[1], operation)
 
-    down = FAMILY[operation] == "anthropic" and await _anthropic_is_down(session, now)
+    down_until = (
+        await _anthropic_down_until(session, now)
+        if FAMILY[operation] == "anthropic"
+        else None
+    )
+    down = down_until is not None
     wanted = _attribution(
         source_key=source_key,
         company_id=company_id,
@@ -796,7 +820,13 @@ async def ask[T](
     rows = _Attributions()
     rows.note(claim_id, wanted, attached)
     if code is not None:
-        _refused[operation] = (next_hour(now), code)
+        until = next_hour(now)
+        if code == ANTHROPIC_SILENCE and down_until is not None:
+            # Remembered only until health's next probe slot: kept to the
+            # hour, an op refused at 10:02 would miss the slot that frees at
+            # 10:31 and stay refused after the API came back.
+            until = min(until, max(down_until, now))
+        _refused[operation] = (until, code)
         log.info("paid call refused", extra={"op": operation, "code": code})
         await _attribute_in_caller(session, rows)
         if code in CAP_ALERT_CODES:
@@ -810,9 +840,10 @@ async def ask[T](
         if counted:
             await _release_units(session, claim_id, own=claim_own)
         raise
-    except Exception:
-        if counted:
-            await _release_units(session, claim_id, own=claim_own)
+    except Exception as exc:
+        await _mark_failed(
+            session, claim_id, type(exc).__name__, counted=counted, own=claim_own
+        )
         await _attribute_in_caller(session, rows)
         raise
 
@@ -888,6 +919,29 @@ async def _release_units(session: AsyncSession, claim_id: int, *, own: bool) -> 
     except Exception as exc:
         # The unit stays reserved: an overcount, the safe direction.
         log.warning("claimed unit not released", extra={"error": type(exc).__name__})
+
+
+async def _mark_failed(
+    session: AsyncSession, claim_id: int, error: str, *, counted: bool, own: bool
+) -> None:
+    """The call raised after dispatch: the claim keeps its estimate, gives its
+    unit back (a counted op) and says ``failed:<error class>`` — a failed
+    attempt, not a call in flight (``FAILED_PREFIX``)."""
+    values: dict[str, Any] = {"model": FAILED_PREFIX + error[:60]}
+    if counted:
+        values["units"] = D0
+
+    async def body(s: AsyncSession) -> None:
+        await s.execute(
+            sa.update(UsageLog).where(UsageLog.id == claim_id).values(**values)
+        )
+
+    try:
+        await _write(session, body, what="failed", lock=False, own=own)
+    except Exception as exc:
+        # The row stays a claim: the unit an overcount (the safe direction),
+        # the attempt unseen by anthropic_silence until the next one.
+        log.warning("failed call not marked", extra={"error": type(exc).__name__})
 
 
 async def settle_provisional(
@@ -967,6 +1021,25 @@ class SpendSnapshot:
     day_usd: Decimal
     month_usd: Decimal
     family_day_usd: Mapping[Family, Decimal]
+    # The cap refusals ``ask`` recorded in force: ``cost_cap_daily`` today,
+    # ``cost_cap_monthly`` this month. ``ask`` refuses at spend + est ≥ cap,
+    # and the allocations sum to the daily cap, so the spend itself need never
+    # reach a cap that refuses every call: the refusal rows are what says it
+    # holds — until the day (the month) is over, as the alert text promises.
+    capped: frozenset[str] = frozenset()
+
+
+def cap_in_force(
+    snap: SpendSnapshot, *, daily_cap: Decimal, monthly_cap: Decimal
+) -> str | None:
+    """The cap ``cost_cap`` is about (``CAP_MONTHLY`` before ``CAP_DAILY``, as
+    ``decide`` orders them), or None: reached by the spend, or refused at by
+    ``ask`` in this business day (month)."""
+    if snap.month_usd >= monthly_cap or CAP_MONTHLY in snap.capped:
+        return CAP_MONTHLY
+    if snap.day_usd >= daily_cap or CAP_DAILY in snap.capped:
+        return CAP_DAILY
+    return None
 
 
 @dataclass(frozen=True, slots=True)
@@ -982,11 +1055,12 @@ def spend_alerts(
     monthly_cap: Decimal,
     alert_pct: int,
 ) -> list[SpendAlert]:
-    """``cost_cap`` at a cap; ``spend_high`` — one key whose text names each
-    scope (day, month, a family) at or above ``alert_pct`` of its cap."""
+    """``cost_cap`` while a cap is in force (``cap_in_force``); ``spend_high``
+    — one key whose text names each scope (day, month, a family) at or above
+    ``alert_pct`` of its cap."""
     alerts: list[SpendAlert] = []
-    if snap.month_usd >= monthly_cap or snap.day_usd >= daily_cap:
-        code = CAP_MONTHLY if snap.month_usd >= monthly_cap else CAP_DAILY
+    code = cap_in_force(snap, daily_cap=daily_cap, monthly_cap=monthly_cap)
+    if code is not None:
         text = cost_cap_text(code, daily_cap=daily_cap, monthly_cap=monthly_cap)
         alerts.append(SpendAlert(COST_CAP_KEY, text))
 
@@ -1016,12 +1090,37 @@ def spend_alerts(
     return alerts
 
 
+async def capped(session: AsyncSession, now: datetime) -> frozenset[str]:
+    """The cap codes ``ask`` refused at in force at ``now``: ``cost_cap_daily``
+    rows of this business day, ``cost_cap_monthly`` rows of this month."""
+
+    def refused_at(code: str, since: datetime, until: datetime) -> sa.ColumnElement[bool]:
+        return sa.and_(
+            UsageLog.model == REFUSED_PREFIX + code,
+            UsageLog.created_at >= since,
+            UsageLog.created_at < until,
+        )
+
+    rows = await session.scalars(
+        sa.select(UsageLog.model)
+        .where(
+            sa.or_(
+                refused_at(CAP_DAILY, day_start(now), day_end(now)),
+                refused_at(CAP_MONTHLY, month_start(now), month_end(now)),
+            )
+        )
+        .distinct()
+    )
+    return frozenset(str(model)[len(REFUSED_PREFIX) :] for model in rows)
+
+
 async def snapshot(session: AsyncSession, now: datetime) -> SpendSnapshot:
     totals = await read_ledger(session, now)
     return SpendSnapshot(
         day_usd=totals.day_usd,
         month_usd=totals.month_usd,
         family_day_usd={f: totals.family_day_usd(f) for f in FAMILIES},
+        capped=await capped(session, now),
     )
 
 
@@ -1115,6 +1214,13 @@ async def _tell_cost_cap(code: str, now: datetime) -> None:
     (``claim_alert``), kept only if delivered."""
     notify = _hooks.notify_cap
     if notify is None:
+        return
+    hold = _hooks.hold_cap
+    if hold is not None and hold(now):
+        # A warning inside QUIET_HOURS (06 §4.2): not claimed, so it is not
+        # lost — the refusal rows keep cost_cap in force for health, and the
+        # next refusal at the cap outside the quiet hours tells it.
+        log.info("cost_cap held for the end of the quiet hours")
         return
     text = cost_cap_text(
         code,
@@ -1297,6 +1403,7 @@ __all__ = [
     "CAP_PREFIX",
     "COST_CAP_KEY",
     "DAILY_UNIT_CAPS",
+    "FAILED_PREFIX",
     "FAMILY",
     "FAMILY_CAPS",
     "LEDGER_LOCK",
@@ -1331,6 +1438,8 @@ __all__ = [
     "UsageLines",
     "alert_due",
     "ask",
+    "cap_in_force",
+    "capped",
     "claim_alert",
     "clear_refusals",
     "cost_cap_text",

@@ -5,8 +5,11 @@ No database: the probe's answer and the server facts are handed in.
 
 from __future__ import annotations
 
+import asyncio
+import json
 from pathlib import Path
 
+import httpx
 from dotenv import dotenv_values
 
 from clientscrapper.config import Settings
@@ -239,3 +242,498 @@ def test_a_stray_space_in_a_model_id_reads_alike_in_the_doctor_and_at_runtime(
     monkeypatch.setenv("EXTRACT_MODEL", env["EXTRACT_MODEL"])
     runtime = Settings(_env_file=None)  # type: ignore[call-arg]
     assert usage.resolve_price(runtime.extract_model) is not None
+
+
+# --- T-08: Telegram, ERP and salt_id (06 §3.3, 04 AC 13) --------------------------
+#
+# check() takes each probe's answer; the probes themselves run against fakes —
+# a recording Bot stand-in and httpx.MockTransport. No test reaches a network.
+
+KEY = "test-secret"  # 07 §1.0's agent-side vector: salt_id("test-secret") == "9caf06bb"
+KEY_SALT = "9caf06bb"
+OWNER = "111111111"
+MANAGERS = ("222222222", "333333333")
+
+
+def _telegram_env() -> dict[str, str]:
+    env = _filled()
+    env.update(MANAGER_TELEGRAM_IDS=",".join(MANAGERS))
+    return env
+
+
+def _crm_env(**change: str) -> dict[str, str]:
+    env = _filled()
+    env.update(
+        CRM_AGENT_KEY=KEY,
+        CRM_PUSH_SOURCE="agent",
+        CRM_BASE_URL="https://gsr-namuna.example.uz",
+    )
+    env.update(change)
+    return env
+
+
+def _levels(findings: list[doctor.Finding], needle: str) -> list[tuple[str, str]]:
+    return [(f.level, f.text) for f in findings if needle in f.text]
+
+
+def test_nothing_is_reported_as_not_checked_yet_any_more():
+    findings = _check(_filled())
+    assert [f.text for f in findings if "hali tekshirilmaydi" in f.text] == []
+
+
+def test_the_ids_the_bot_must_reach_are_the_owner_then_each_manager():
+    env = _telegram_env()
+    env["MANAGER_TELEGRAM_IDS"] = f"{MANAGERS[0]}, namuna_01 ,{OWNER},{MANAGERS[1]}"
+    assert doctor.telegram_ids(env) == (OWNER, MANAGERS[0], MANAGERS[1])
+    env["OWNER_TELEGRAM_ID"] = ""
+    assert doctor.telegram_ids(env) == (MANAGERS[0], OWNER, MANAGERS[1])
+
+
+def test_a_bot_that_reaches_everybody_is_green():
+    state = doctor.TelegramState(
+        "ok",
+        username="namuna_bot",
+        chats={OWNER: "ok", MANAGERS[0]: "ok", MANAGERS[1]: "ok"},
+    )
+    findings = _check(_telegram_env(), telegram=state)
+    assert _errors(findings) == []
+    infos = _infos(findings)
+    assert "✅ Bot: @namuna_bot (get_me javob berdi)." in infos
+    assert f"✅ Egasi {OWNER}: bot unga yoza oladi (get_chat)." in infos
+    assert f"✅ Menejer {MANAGERS[1]}: bot unga yoza oladi (get_chat)." in infos
+
+
+def test_a_refused_token_is_an_error_and_an_unreachable_telegram_a_warning():
+    refused = doctor.TelegramState("refused", error="TelegramUnauthorizedError")
+    findings = _check(_telegram_env(), telegram=refused)
+    assert _errors(findings) == [
+        "❌ ASSISTANT_BOT_TOKEN ni Telegram rad etdi (TelegramUnauthorizedError) — "
+        "@BotFather → /mybots → API Token; .env ga qaytadan koʻchir."
+    ]
+    assert doctor.exit_code(findings) == 1
+    away = doctor.TelegramState("unreachable", error="TelegramNetworkError")
+    findings = _check(_telegram_env(), telegram=away)
+    assert _errors(findings) == []
+    assert _levels(findings, "TelegramNetworkError")[0][0] == "warn"
+
+
+def test_an_owner_the_bot_cannot_see_is_an_error_a_manager_a_warning():
+    state = doctor.TelegramState(
+        "ok",
+        username="namuna_bot",
+        chats={OWNER: "not_found", MANAGERS[0]: "not_found", MANAGERS[1]: "unreachable"},
+        chat_errors={
+            OWNER: "TelegramBadRequest",
+            MANAGERS[0]: "TelegramForbiddenError",
+            MANAGERS[1]: "TimeoutError",
+        },
+    )
+    findings = _check(_telegram_env(), telegram=state)
+    [error] = _errors(findings)
+    assert error.startswith(
+        f"❌ OWNER_TELEGRAM_ID={OWNER}: bot bu chatni topmadi (TelegramBadRequest) — "
+        "botga /start yoz"
+    )
+    assert _levels(findings, MANAGERS[0]) == [
+        (
+            "warn",
+            f"⚠️ Menejer {MANAGERS[0]}: bot bu chatni topmadi (TelegramForbiddenError) — "
+            "menejer botga /start yozsin, aks holda unga karta yetib bormaydi.",
+        )
+    ]
+    assert _levels(findings, MANAGERS[1]) == [
+        ("warn", f"⚠️ Menejer {MANAGERS[1]}: tekshirib boʻlmadi (TimeoutError).")
+    ]
+
+
+# The probe against a stand-in Bot: aiogram's exception classes by name.
+
+
+class TelegramUnauthorizedError(Exception):
+    pass
+
+
+class TelegramBadRequest(Exception):
+    pass
+
+
+class TelegramNetworkError(Exception):
+    pass
+
+
+class TokenValidationError(Exception):
+    pass
+
+
+class _Me:
+    username = "namuna_bot"
+
+
+class FakeBot:
+    """Records every call; get_chat answers per id (an exception class or ok)."""
+
+    def __init__(self, token: str, *, me: object = None, chats: dict | None = None):
+        self.token = token
+        self.calls: list[tuple[str, object]] = []
+        self.me = me if me is not None else _Me()
+        self.chats = chats or {}
+        self.closed = False
+
+    async def get_me(self):
+        self.calls.append(("get_me", None))
+        if isinstance(self.me, BaseException):
+            raise self.me
+        if self.me == "hang":
+            await asyncio.sleep(10)
+        return self.me
+
+    async def get_chat(self, chat_id):
+        self.calls.append(("get_chat", chat_id))
+        answer = self.chats.get(chat_id)
+        if isinstance(answer, BaseException):
+            raise answer
+        return object()
+
+    async def close(self):
+        self.closed = True
+
+
+def _probe(bot: FakeBot, ids=(OWNER, *MANAGERS), **kw):
+    made: list[str] = []
+
+    def make(token: str) -> FakeBot:
+        made.append(token)
+        return bot
+
+    state = asyncio.run(
+        doctor.probe_telegram("placeholder-not-a-token", ids, make_bot=make, **kw)
+    )
+    return state, made
+
+
+def test_the_probe_asks_get_me_then_get_chat_per_id_and_closes():
+    bot = FakeBot("x", chats={int(MANAGERS[0]): TelegramBadRequest("chat not found")})
+    state, made = _probe(bot)
+    assert made == ["placeholder-not-a-token"]
+    assert bot.calls == [
+        ("get_me", None),
+        ("get_chat", int(OWNER)),
+        ("get_chat", int(MANAGERS[0])),
+        ("get_chat", int(MANAGERS[1])),
+    ]
+    assert state == doctor.TelegramState(
+        "ok",
+        username="namuna_bot",
+        chats={OWNER: "ok", MANAGERS[0]: "not_found", MANAGERS[1]: "ok"},
+        chat_errors={MANAGERS[0]: "TelegramBadRequest"},
+    )
+    assert bot.closed
+
+
+def test_the_probe_tells_a_refused_token_from_an_unreachable_telegram():
+    refused, _ = _probe(FakeBot("x", me=TelegramUnauthorizedError("Unauthorized")))
+    assert (refused.token, refused.error, refused.chats) == (
+        "refused",
+        "TelegramUnauthorizedError",
+        {},
+    )
+    away, _ = _probe(FakeBot("x", me=TelegramNetworkError("no route")))
+    assert (away.token, away.error) == ("unreachable", "TelegramNetworkError")
+    hung = FakeBot("x", me="hang")
+    late, _ = _probe(hung, timeout=0.01)
+    assert (late.token, late.error) == ("unreachable", "TimeoutError")
+    assert hung.closed
+
+    def bad_shape(token: str) -> FakeBot:
+        raise TokenValidationError("Token is invalid!")
+
+    state = asyncio.run(doctor.probe_telegram("x", (OWNER,), make_bot=bad_shape))
+    assert (state.token, state.error) == ("refused", "TokenValidationError")
+
+
+def test_a_malformed_token_is_refused_by_aiogram_itself_without_a_request():
+    # The real Bot construction validates the shape before any session opens.
+    state = asyncio.run(doctor.probe_telegram("not-a-token", (OWNER,)))
+    assert (state.token, state.error) == ("refused", "TokenValidationError")
+
+
+# The ERP probe against httpx.MockTransport.
+
+
+def _erp(handler) -> tuple[list[httpx.Request], httpx.MockTransport]:
+    seen: list[httpx.Request] = []
+
+    def record(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return handler(request)
+
+    return seen, httpx.MockTransport(record)
+
+
+def _page(salt: str = KEY_SALT) -> dict[str, object]:
+    return {
+        "mode": "full",
+        "generated_at": "2026-10-24T08:56:38.538Z",
+        "salt_id": salt,
+        "rule": "hmac-sha256(secret, last9digits) hex[0:20]",
+        "entries": [],
+        "next": None,
+        "resume": None,
+    }
+
+
+def test_the_erp_probe_is_one_keyed_get_of_one_entry():
+    seen, transport = _erp(lambda r: httpx.Response(200, json=_page()))
+    state = asyncio.run(
+        doctor.probe_crm("https://gsr-namuna.example.uz/", KEY, transport=transport)
+    )
+    assert state == doctor.CrmState(200, salt_id=KEY_SALT)
+    [request] = seen
+    assert request.method == "GET"
+    assert (
+        str(request.url) == "https://gsr-namuna.example.uz/api/agent/suppression?limit=1"
+    )
+    assert request.headers["X-GSR-Key"] == KEY
+    assert request.headers["X-ERP-Key"] == KEY
+    assert request.headers["User-Agent"] == doctor.DOCTOR_USER_AGENT
+    assert KEY not in str(request.url)
+
+
+def test_the_erp_probe_never_follows_a_redirect_and_names_each_answer():
+    def redirect(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            308, headers={"Location": "https://gsr-namuna.example.uz/login"}
+        )
+
+    seen, transport = _erp(redirect)
+    state = asyncio.run(
+        doctor.probe_crm("https://gsr-namuna.example.uz", KEY, transport=transport)
+    )
+    assert (state, len(seen)) == (doctor.CrmState(308), 1)
+    for response, expected in (
+        (httpx.Response(404, text="Not found"), doctor.CrmState(404)),
+        (httpx.Response(503, text=""), doctor.CrmState(503)),
+        (
+            httpx.Response(200, text="<html>Kirish</html>"),
+            doctor.CrmState(200, shape="not_json"),
+        ),
+        (httpx.Response(200, json={"rows": []}), doctor.CrmState(200, shape="no_salt")),
+        (httpx.Response(200, json=_page("XYZ")), doctor.CrmState(200, shape="no_salt")),
+    ):
+        _, transport = _erp(lambda r, response=response: response)
+        got = asyncio.run(
+            doctor.probe_crm("https://gsr-namuna.example.uz", KEY, transport=transport)
+        )
+        assert got == expected, response
+
+
+def test_the_erp_probe_survives_a_dead_host_and_refuses_plain_http():
+    def down(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("connection refused", request=request)
+
+    _, transport = _erp(down)
+    state = asyncio.run(
+        doctor.probe_crm("https://gsr-namuna.example.uz", KEY, transport=transport)
+    )
+    assert state == doctor.CrmState(None, error="ConnectError")
+    # The key never travels in clear: no request at all to an http:// base.
+    seen, transport = _erp(lambda r: httpx.Response(200, json=_page()))
+    state = asyncio.run(
+        doctor.probe_crm("http://gsr-namuna.example.uz", KEY, transport=transport)
+    )
+    assert (state, seen) == (doctor.CrmState(None, error="not_https"), [])
+
+
+def test_crm_base_url_must_be_https_whatever_the_feed_says():
+    for env in (
+        _crm_env(CRM_BASE_URL="http://gsr-namuna.example.uz"),
+        _filled() | {"CRM_BASE_URL": "http://gsr-namuna.example.uz"},
+    ):
+        assert _errors(_check(env)) == [
+            "❌ CRM_BASE_URL https:// bilan boshlanishi kerak — http:// soʻroviga "
+            "ERP 308 qaytaradi, agent unga ergashmaydi (erp_redirect)."
+        ]
+
+
+def test_during_the_fallback_no_feed_is_read_and_the_doctor_says_why():
+    env = _crm_env(CRM_PUSH_SOURCE="other")
+    assert not doctor.feeds_configured(env)
+    findings = _check(env)
+    assert _errors(findings) == []
+    assert any("«Boshqa» kaliti" in line and "lid" in line for line in _infos(findings))
+    assert [line for line in _infos(findings) if "salt_id" in line] == []
+    blank = _crm_env(CRM_AGENT_KEY="")
+    assert not doctor.feeds_configured(blank)
+    assert "ℹ️ ERP: CRM_AGENT_KEY boʻsh — ERP bilan bogʻlanish tekshirilmadi." in _infos(
+        _check(blank)
+    )
+
+
+def test_each_erp_answer_has_its_level():
+    def level(state: doctor.CrmState, **change: str) -> list[str]:
+        findings = _check(
+            _crm_env(**change),
+            crm=state,
+            db=DbState(True, "0001_initial", salt_id=KEY_SALT),
+        )
+        return [f.level for f in findings if "ERP" in f.text and "salt_id" not in f.text]
+
+    assert level(doctor.CrmState(200, salt_id=KEY_SALT)) == ["info"]
+    assert level(doctor.CrmState(404)) == ["warn"]
+    assert level(doctor.CrmState(404), CRM_PUSH_ENABLED="true") == ["error"]
+    assert level(doctor.CrmState(308)) == ["error"]
+    assert level(doctor.CrmState(503)) == ["warn"]
+    assert level(doctor.CrmState(None, error="ConnectError")) == ["warn"]
+    assert level(doctor.CrmState(200, shape="not_json")) == ["error"]
+    findings = _check(_crm_env(), crm=doctor.CrmState(404))
+    assert _levels(findings, "404")[0][1] == (
+        "⚠️ ERP 404: kalit yoki manba yoʻq — Kelgan arizalar → Reklama havolalari → "
+        "Agent → kalit; .env CRM_AGENT_KEY; make reload."
+    )
+
+
+def test_the_salt_the_key_hashes_with_is_compared_with_the_feed_and_the_store():
+    assert keys_salt(KEY) == KEY_SALT
+
+    def salt_lines(db: DbState | None, crm: doctor.CrmState | None = None):
+        return [
+            (f.level, f.text)
+            for f in _check(_crm_env(), db=db, crm=crm)
+            if "salt_id" in f.text
+        ]
+
+    migrated = DbState(True, "0001_initial", salt_id=None)
+    assert salt_lines(migrated) == [
+        (
+            "info",
+            f"ℹ️ salt_id: kalitniki {KEY_SALT}; bazada hali yoʻq — birinchi toʻliq "
+            "yuklash (02:30) uni yozadi.",
+        )
+    ]
+    assert salt_lines(DbState(True, "0001_initial", salt_id=KEY_SALT)) == [
+        ("info", f"✅ salt_id {KEY_SALT}: bazadagi va kalitniki bir xil.")
+    ]
+    assert salt_lines(DbState(True, "0001_initial", salt_id="7a659490")) == [
+        (
+            "warn",
+            f"⚠️ Bazadagi salt_id 7a659490, kalitniki {KEY_SALT} — kalit yangilangan: "
+            "keyingi toʻliq yuklashgacha push toʻxtaydi (suppression_stale).",
+        )
+    ]
+    assert salt_lines(DbState(False, error="OperationalError")) == [
+        ("info", f"ℹ️ salt_id: kalitniki {KEY_SALT} (baza tekshirilmadi).")
+    ]
+    # The feed answering another salt for this very key is a contract break.
+    lines = salt_lines(
+        DbState(True, "0001_initial", salt_id=KEY_SALT),
+        doctor.CrmState(200, salt_id="8254c329"),
+    )
+    assert lines[0] == (
+        "error",
+        f"❌ ERP feed salt_id 8254c329, kalitniki {KEY_SALT} — ERP xesh qoidasi "
+        "oʻzgargan; bostirish roʻyxatini oʻqib boʻlmaydi, ERP ni tekshir.",
+    )
+
+
+def keys_salt(secret: str) -> str:
+    from clientscrapper.services import keys
+
+    return keys.erp_salt_id(secret)
+
+
+def test_probe_network_asks_only_what_it_has_something_to_ask():
+    made: list[str] = []
+
+    def make(token: str) -> FakeBot:
+        made.append(token)
+        return FakeBot(token)
+
+    seen, transport = _erp(lambda r: httpx.Response(200, json=_page()))
+    env = _crm_env(MANAGER_TELEGRAM_IDS=MANAGERS[0])
+    telegram, crm = asyncio.run(
+        doctor.probe_network(env, make_bot=make, transport=transport)
+    )
+    assert telegram is not None and telegram.chats == {OWNER: "ok", MANAGERS[0]: "ok"}
+    assert crm == doctor.CrmState(200, salt_id=KEY_SALT) and len(seen) == 1
+    # No token, the fallback key, an http:// base: nothing is asked.
+    made.clear()
+    seen.clear()
+    for change in (
+        {"ASSISTANT_BOT_TOKEN": "", "CRM_PUSH_SOURCE": "other"},
+        {
+            "ASSISTANT_BOT_TOKEN": "# @BotFather",
+            "CRM_BASE_URL": "http://gsr-namuna.example.uz",
+        },
+        {"ASSISTANT_BOT_TOKEN": "", "CRM_AGENT_KEY": ""},
+    ):
+        got = asyncio.run(
+            doctor.probe_network(_crm_env(**change), make_bot=make, transport=transport)
+        )
+        assert got == (None, None), change
+    assert (made, seen) == ([], [])
+
+
+def test_the_doctor_never_sends_anything_to_telegram():
+    # Read-only by construction: the stand-in has no send method, and the
+    # wrapper around aiogram's Bot exposes only the three calls.
+    assert {name for name in vars(doctor._AiogramBot) if not name.startswith("__")} == {
+        "get_me",
+        "get_chat",
+        "close",
+    }
+
+
+async def test_the_database_probe_reads_the_stored_salt(session):
+    import os
+
+    import sqlalchemy as sa
+
+    url = os.environ.get("DATABASE_URL", "")
+    before = (
+        await session.execute(
+            sa.text("SELECT config FROM sources WHERE key = 'erp_sync'")
+        )
+    ).scalar_one()
+    try:
+        assert doctor.probe_database(url).salt_id is None
+        await session.execute(
+            sa.text(
+                "UPDATE sources SET config = jsonb_set(config, '{suppression,salt_id}', "
+                "'\"9caf06bb\"') WHERE key = 'erp_sync'"
+            )
+        )
+        await session.commit()
+        state = doctor.probe_database(url)
+        assert (state.reachable, state.salt_id) == (True, KEY_SALT)
+        assert state.version is not None
+    finally:
+        await session.execute(
+            sa.text(
+                "UPDATE sources SET config = CAST(:c AS jsonb) WHERE key = 'erp_sync'"
+            ),
+            {"c": json.dumps(before)},
+        )
+        await session.commit()
+
+
+def test_the_example_host_never_receives_the_key():
+    """A real CRM_AGENT_KEY with CRM_BASE_URL still the .env.example host (or
+    blank, which falls back to it): example.uz is not reserved, so the probe
+    must not send the key there, and the doctor names the cause."""
+    seen, transport = _erp(lambda r: httpx.Response(404))
+    for base in ("https://erp.example.uz", "https://ERP.example.uz/", ""):
+        env = _crm_env(CRM_BASE_URL=base)
+        telegram, crm = asyncio.run(
+            doctor.probe_network(env | {"ASSISTANT_BOT_TOKEN": ""}, transport=transport)
+        )
+        assert (telegram, crm) == (None, None), base
+        assert _errors(_check(env)) == [
+            "❌ CRM_BASE_URL hali namuna manzili (erp.example.uz) — .env ga ERP ning "
+            "haqiqiy https:// manzilini yoz; kalit u yerga yuborilmadi."
+        ], base
+    direct = asyncio.run(
+        doctor.probe_crm("https://erp.example.uz", KEY, transport=transport)
+    )
+    assert (direct, seen) == (doctor.CrmState(None, error="placeholder"), [])
+    # No key: nothing would be sent, so the example host is not an error.
+    assert _errors(_check(_crm_env(CRM_BASE_URL="", CRM_AGENT_KEY=""))) == []

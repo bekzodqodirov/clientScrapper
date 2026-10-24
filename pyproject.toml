@@ -58,7 +58,18 @@ files = [
     "scripts/check_compose_env.py",
     # T-01/T-02 review
     "scripts/revision_id.py",
+    # T-08
+    "clientscrapper/services/crontab.py",
+    "clientscrapper/services/backup.py",
+    "clientscrapper/services/restore_drill.py",
+    "clientscrapper/tools/restore.py",
+    "clientscrapper/tools/healthcheck.py",
 ]
+
+# APScheduler 3 ships no type information.
+[[tool.mypy.overrides]]
+module = ["apscheduler", "apscheduler.*"]
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
