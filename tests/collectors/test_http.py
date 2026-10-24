@@ -18,7 +18,8 @@ from pathlib import Path
 import httpx
 import pytest
 
-from clientscrapper.services import http, retry
+from clientscrapper.services import http, retry, usage
+from clientscrapper.services.costs import CostCapReached
 from clientscrapper.services.http import (
     BREAKER_PAUSE,
     USER_AGENT,
@@ -646,16 +647,19 @@ async def test_the_run_deadline_stops_requests(clock):
 # --- paid hosts ---------------------------------------------------------------------
 
 
-class Priced:
-    def __init__(self, cost: str | None) -> None:
-        self.cost_usd = Decimal(cost) if cost is not None else None
+def Priced(cost: str | None) -> usage.Priced:
+    return usage.Priced(cost_usd=Decimal(cost) if cost is not None else None)
 
 
 class Gate:
-    """Stands in for functools.partial(costs.ask, session, now=…)."""
+    """Stands in for functools.partial(costs.ask, session, now=…); the real
+    one runs in tests/collectors/test_cost_gate.py. It refuses the way ask
+    does, with ``CostCapReached``; ``bug`` raises what ask raises for a
+    request it cannot take (an operation that is not callable)."""
 
-    def __init__(self, refuse: bool = False) -> None:
+    def __init__(self, refuse: bool = False, bug: bool = False) -> None:
         self.refuse = refuse
+        self.bug = bug
         self.calls: list[dict] = []
 
     async def __call__(self, *, operation, est_usd, call, price, source_key):
@@ -663,7 +667,9 @@ class Gate:
             {"operation": operation, "est_usd": est_usd, "source_key": source_key}
         )
         if self.refuse:
-            raise RuntimeError("cost_cap_op:serp_brave")
+            raise CostCapReached("cost_cap_op:serp_brave", operation)
+        if self.bug:
+            raise ValueError(f"{operation} is not a callable operation")
         result = await call()
         price(result)
         return result
@@ -755,8 +761,59 @@ async def test_a_gate_refusal_is_a_budget_stop_and_nothing_is_sent(clock):
             paid=paid,
         )
     assert caught.value.reason == "cost_cap"
+    assert caught.value.detail == "cost_cap_op:serp_brave"
     assert fetcher.stats.exhausted == "cost_cap"
     assert site.seen == []
+
+
+async def test_a_gate_that_cannot_take_the_request_is_a_bug_not_a_budget_stop(clock):
+    # costs.ask raises ValueError/TypeError for a request it cannot take
+    # (test_costs::test_programming_errors_are_not_budget_refusals); the run
+    # must fail on it, not end «partial» as if a cap had been reached.
+    site = brave_site(clock)
+    fetcher = fetcher_for(site, cost_gate=Gate(bug=True))
+    paid = PaidCall("serp_brave", Decimal("0.005"), lambda r: Priced("0.005"))
+    b = budget(usd="1")
+    with pytest.raises(ValueError):
+        await fetcher.get(
+            BRAVE, source="search_brave", budget=b, obey_robots=False, paid=paid
+        )
+    assert fetcher.stats.exhausted is None
+    assert (b.spent_usd, fetcher.stats.cost_usd) == (Decimal("0"), Decimal("0"))
+    assert site.seen == []
+
+
+async def test_a_price_that_is_not_usage_priced_is_refused_and_the_estimate_stays(
+    clock,
+):
+    # costs.ask tells one answer from a batch's list by isinstance; a
+    # look-alike would break it after the request went out.
+    class LookAlike:
+        cost_usd = Decimal("0.004")
+
+    site = brave_site(clock)
+    fetcher = fetcher_for(site, cost_gate=Gate())
+    paid = PaidCall("serp_brave", Decimal("0.005"), lambda r: LookAlike())
+    b = budget(usd="1")
+    with pytest.raises(TypeError, match="usage.Priced"):
+        await fetcher.get(
+            BRAVE, source="search_brave", budget=b, obey_robots=False, paid=paid
+        )
+    assert len(site.seen) == 1
+    assert (b.spent_usd, fetcher.stats.cost_usd) == (Decimal("0.005"), Decimal("0.005"))
+
+
+@pytest.mark.parametrize("cost", [None, "NaN", "-0.001"])
+async def test_an_answer_that_cannot_be_priced_charges_the_estimate(clock, cost):
+    # The same rule as costs.ask's: the per-source budget never undercounts.
+    site = brave_site(clock)
+    fetcher = fetcher_for(site, cost_gate=Gate())
+    paid = PaidCall("serp_brave", Decimal("0.005"), lambda r: Priced(cost))
+    b = budget(usd="1")
+    await fetcher.get(
+        BRAVE, source="search_brave", budget=b, obey_robots=False, paid=paid
+    )
+    assert (b.spent_usd, fetcher.stats.cost_usd) == (Decimal("0.005"), Decimal("0.005"))
 
 
 async def test_proxy_needs_proxy_url(clock, monkeypatch):

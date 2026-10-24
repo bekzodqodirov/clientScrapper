@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import os
 import re
-import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -27,11 +26,10 @@ import pytest
 
 from clientscrapper.services.text import fold_apostrophes
 from tests.ast_tools import ROOT
-from tests.git_env import isolated_env
+from tests.git_env import isolated_env, tree_files
 
 ENV = "CS_FORBIDDEN_STRINGS"
 MIN_LENGTH = 4  # shorter entries would match half the tree
-SKIPPED_DIRS = {".git", ".venv", "venv", "__pycache__", ".mypy_cache", ".ruff_cache"}
 PHONE_TAIL = re.compile(r"\+?[\d\s()-]{7,}")
 
 
@@ -61,30 +59,9 @@ def forbidden(raw: str) -> list[Forbidden]:
     return found
 
 
-def _tree_files(root: Path) -> list[Path]:
-    """Tracked files (plus untracked, not ignored) of a git checkout, or every
-    file under ``root`` outside the tool directories."""
-    if shutil.which("git"):
-        listed = subprocess.run(
-            ["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
-            cwd=root,
-            env=isolated_env(),
-            capture_output=True,
-            check=False,
-        )
-        if listed.returncode == 0:
-            names = [n for n in listed.stdout.decode().split("\0") if n]
-            return sorted({root / n for n in names if (root / n).is_file()})
-    return sorted(
-        p
-        for p in root.rglob("*")
-        if p.is_file() and not SKIPPED_DIRS & set(p.relative_to(root).parts)
-    )
-
-
 def offenders(root: Path, entries: list[Forbidden]) -> list[str]:
     found = []
-    for path in _tree_files(root):
+    for path in tree_files(root):
         content = path.read_bytes()
         if b"\0" in content[:8192]:
             continue  # binary

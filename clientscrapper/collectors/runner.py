@@ -44,7 +44,7 @@ import hashlib
 import json
 import logging
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -60,8 +60,8 @@ from clientscrapper.config import settings
 from clientscrapper.db.models import CollectorRun, Evidence, RuntimeFlag, Source, UsageLog
 from clientscrapper.db.models import Observation as ObservationRow
 from clientscrapper.db.session import SessionLocal
+from clientscrapper.services import costs, health
 from clientscrapper.services import evidence as evidence_store
-from clientscrapper.services import health
 from clientscrapper.services.http import (
     BLOCKED_ERROR,
     BLOCKED_PROBLEM,
@@ -75,6 +75,7 @@ from clientscrapper.services.http import (
 )
 from clientscrapper.services.normalise import NOT_OBSERVATIONS, to_observation_json
 from clientscrapper.services.urlsafe import strip_secrets
+from clientscrapper.services.usage import Operation, Priced
 
 log = logging.getLogger(__name__)
 
@@ -98,6 +99,39 @@ _REFUSED: Final = (IntegrityError, DataError, ValueError)
 
 SessionFactory = Callable[[], AsyncSession]
 GateFactory = Callable[[AsyncSession, int, datetime], CostGate]
+
+
+def ask_gate(session: AsyncSession, run_id: int, now: datetime) -> CostGate:
+    """The run's cost gate: ``costs.ask`` with the run's session, clock and
+    ``collector_run_id`` bound (04 §8); the Fetcher supplies the rest per call
+    (operation, estimate, call, price, the sub-source it was made for).
+
+    ``functools.partial(costs.ask, session, now=…, collector_run_id=…)`` in
+    effect, spelled out because mypy does not hold a partial to a Protocol:
+    written as a call, both signatures are checked, so a change to either
+    side of the seam is a type error (tests/collectors/test_cost_gate.py
+    runs it against the database)."""
+
+    async def gate(
+        *,
+        operation: Operation,
+        est_usd: Decimal,
+        call: Callable[[], Awaitable[FetchResult]],
+        price: Callable[[FetchResult], Priced],
+        source_key: str,
+    ) -> FetchResult:
+        return await costs.ask(
+            session,
+            operation=operation,
+            est_usd=est_usd,
+            call=call,
+            price=price,
+            now=now,
+            source_key=source_key,
+            collector_run_id=run_id,
+        )
+
+    return gate
 
 
 @dataclass(slots=True)
@@ -526,7 +560,7 @@ async def run_collector(
     now: datetime,
     variant: str | None = None,
     session_factory: SessionFactory = SessionLocal,
-    cost_gate_for: GateFactory | None = None,
+    cost_gate_for: GateFactory | None = ask_gate,
     serp: object | None = None,
     evidence_root: Path | None = None,
     deadline: timedelta = DEFAULT_DEADLINE,
@@ -534,7 +568,9 @@ async def run_collector(
 ) -> RunReport:
     """One run of ``collector_cls`` at ``now``; see the module docstring.
     ``clock`` gives the finish time (default: the real clock, never before
-    ``now``). ``cost_gate_for(session, run_id, now)`` binds ``costs.ask``."""
+    ``now``). ``cost_gate_for(session, run_id, now)`` binds ``costs.ask``
+    (``ask_gate``); ``None`` leaves the run without a gate, so a paid call
+    is refused (``UnmeteredCall``) before anything is sent."""
     key = collector_cls.key
     component = health.collector_component(key, variant)
     version = f"{key}@{collector_cls.version}"

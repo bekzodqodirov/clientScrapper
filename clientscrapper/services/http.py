@@ -51,10 +51,12 @@ import httpx
 
 from clientscrapper.collectors.keywords import CAPTCHA_MARKERS, EMAIL_RE
 from clientscrapper.config import settings
+from clientscrapper.services.costs import CostCapReached
 from clientscrapper.services.retry import is_transient_http, with_backoff
 from clientscrapper.services.robots import RobotsRules, parse_robots
 from clientscrapper.services.urlsafe import scrub_url as scrub_url  # re-exported
 from clientscrapper.services.urlsafe import strip_secrets
+from clientscrapper.services.usage import Operation, Priced
 
 log = logging.getLogger(__name__)
 
@@ -247,32 +249,31 @@ class PageBudget(Protocol):
     def charge(self, usd: Decimal) -> None: ...
 
 
-class Priced(Protocol):
-    """``usage.Priced`` (T-06) as this layer sees it."""
-
-    @property
-    def cost_usd(self) -> Decimal | None: ...
-
-
 @dataclass(frozen=True, slots=True)
 class PaidCall:
-    """A request costs.ask must clear first (operation as 04 §8 names it)."""
+    """A request costs.ask must clear first (operation as 04 §8 names it).
 
-    operation: str
+    ``price`` returns ``usage.Priced`` itself, not a look-alike: costs.ask
+    tells one answer from a batch's list by ``isinstance``."""
+
+    operation: Operation
     est_usd: Decimal
     price: Callable[[FetchResult], Priced]
 
 
 class CostGate(Protocol):
-    """``functools.partial(costs.ask, session, now=…, collector_run_id=…)``."""
+    """``functools.partial(costs.ask, session, now=…, collector_run_id=…)``
+    (``collectors/runner.ask_gate``). It refuses by raising
+    ``costs.CostCapReached`` before anything is sent; any other exception it
+    raises before the call is a programming error and propagates as such."""
 
     def __call__(
         self,
         *,
-        operation: Any,
+        operation: Operation,
         est_usd: Decimal,
         call: Callable[[], Awaitable[FetchResult]],
-        price: Callable[[FetchResult], Any],
+        price: Callable[[FetchResult], Priced],
         source_key: str,
     ) -> Awaitable[FetchResult]: ...
 
@@ -683,8 +684,14 @@ class Fetcher:
 
         def price(result: FetchResult) -> Priced:
             priced = paid.price(result)
+            if not isinstance(priced, Priced):
+                # A look-alike would pass here and break ask after the call.
+                raise TypeError("PaidCall.price must return usage.Priced")
             cost = priced.cost_usd
-            charged.append(cost if cost is not None else paid.est_usd)
+            if cost is None or not cost.is_finite() or cost < 0:
+                # costs.ask's rule: an answer it cannot price keeps the estimate.
+                cost = paid.est_usd
+            charged.append(cost)
             return priced
 
         try:
@@ -697,10 +704,15 @@ class Fetcher:
             )
         except Exception as exc:
             if not dispatched:
-                # The gate refused before anything was sent (a cap): a budget
-                # stop, not a failure — the run ends partial (04 §8).
-                self.stats.exhausted = "cost_cap"
-                raise BudgetExhausted("cost_cap", str(exc)) from exc
+                if isinstance(exc, CostCapReached):
+                    # The gate refused before anything was sent (a cap): a
+                    # budget stop, not a failure — the run ends partial (04 §8).
+                    self.stats.exhausted = "cost_cap"
+                    raise BudgetExhausted("cost_cap", exc.code) from exc
+                # ask refusing a bad request (an operation that is not
+                # callable, a float estimate, a naive now) is a bug: nothing
+                # was sent or claimed, so it is neither a budget stop nor spend.
+                raise
             # Sent and failed: the cap layer keeps the estimate, so do we.
             self._charge(budget, paid.est_usd)
             raise

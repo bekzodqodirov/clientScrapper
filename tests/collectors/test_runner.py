@@ -34,7 +34,7 @@ from clientscrapper.db.models import (
 )
 from clientscrapper.db.models import Observation as ObservationRow
 from clientscrapper.db.session import SessionLocal
-from clientscrapper.services import http
+from clientscrapper.services import costs, http, usage
 from clientscrapper.services.http import BREAKER_PAUSE, PaidCall, RobotsDisallowed
 from tests.fakes import ALLOW_ALL, FakeClock, Site, fetcher_for
 
@@ -610,9 +610,9 @@ class Paying(Directory):
         return []
 
 
-class _Priced:
-    def __init__(self, cost: str) -> None:
-        self.cost_usd = Decimal(cost)
+def _Priced(cost: str) -> usage.Priced:
+    # The real type: costs.ask (the default gate) refuses a look-alike.
+    return usage.Priced(cost_usd=Decimal(cost))
 
 
 async def test_the_cost_gate_is_bound_to_the_run_and_its_cost_recorded(
@@ -644,6 +644,75 @@ async def test_the_cost_gate_is_bound_to_the_run_and_its_cost_recorded(
     [row] = await runs(session)
     assert bound == [(row.id, clock.now())]
     assert (report.status, row.cost_usd) == ("ok", Decimal("0.004000"))
+
+
+async def test_by_default_a_run_pays_through_the_real_costs_ask(
+    session, directories, clock, tmp_path
+):
+    # No cost_gate_for: the runner binds costs.ask itself (runner.ask_gate),
+    # so the usage row names this run and its sub-source.
+    await session.execute(
+        sa.update(Source)
+        .where(Source.key == "directories")
+        .values(daily_cost_cap_usd=Decimal("0.1"))
+    )
+    await session.commit()
+    site = Site(
+        clock,
+        {"https://api.search.brave.com/res/v1/web/search": httpx.Response(200, json={})},
+    )
+    report = await run(Paying, fetcher_for(site), clock, tmp_path)
+    [row] = await runs(session)
+    assert (report.status, row.cost_usd) == ("ok", Decimal("0.004000"))
+    [usage] = await session.scalars(
+        sa.select(UsageLog).where(UsageLog.operation != "other")
+    )
+    assert (
+        usage.operation,
+        usage.source_key,
+        usage.collector_run_id,
+        usage.cost_usd,
+    ) == (
+        "serp_brave",
+        "search_brave",
+        row.id,
+        Decimal("0.004000"),
+    )
+
+
+async def test_by_default_a_run_at_the_daily_cap_ends_partial_and_sends_nothing(
+    session, directories, clock, tmp_path
+):
+    await session.execute(
+        sa.update(Source)
+        .where(Source.key == "directories")
+        .values(daily_cost_cap_usd=Decimal("0.1"))
+    )
+    session.add(
+        UsageLog(
+            provider="other",
+            operation="other",
+            cost_usd=Decimal("10"),
+            created_at=clock.now(),
+        )
+    )
+    await session.commit()
+    costs.clear_refusals()
+    site = Site(
+        clock,
+        {"https://api.search.brave.com/res/v1/web/search": httpx.Response(200, json={})},
+    )
+    try:
+        report = await run(Paying, fetcher_for(site), clock, tmp_path)
+    finally:
+        costs.clear_refusals()
+    [row] = await runs(session)
+    assert (report.status, row.status, row.meta["exhausted"]) == (
+        "partial",
+        "partial",
+        "cost_cap",
+    )
+    assert site.seen == []
 
 
 # --- skips and failures ----------------------------------------------------------------

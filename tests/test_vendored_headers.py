@@ -11,7 +11,10 @@ must already have, so the guard can never pass by finding nothing.
 from __future__ import annotations
 
 import re
+import subprocess
 from pathlib import Path
+
+from tests.git_env import isolated_env, tree_files
 
 ROOT = Path(__file__).resolve().parents[1]
 MIYA_SHA = "6b1f67f"
@@ -128,7 +131,6 @@ REQUIRED_NOW = (
 
 SCANNED_SUFFIXES = {".py", ".yml", ".yaml", ".ini", ".toml", ".cfg", ".sh", ".mako"}
 SCANNED_NAMES = {"Dockerfile", "Makefile"}
-SKIPPED_DIRS = {".git", ".venv", "venv", "__pycache__", ".mypy_cache", ".ruff_cache"}
 
 
 def _header(path: Path) -> re.Match[str] | None:
@@ -139,15 +141,14 @@ def _header(path: Path) -> re.Match[str] | None:
     return None
 
 
-def _scanned_files() -> list[Path]:
-    files = []
-    for path in ROOT.rglob("*"):
-        if any(part in SKIPPED_DIRS for part in path.relative_to(ROOT).parts):
-            continue
-        scanned = path.suffix in SCANNED_SUFFIXES or path.name in SCANNED_NAMES
-        if scanned and path.is_file():
-            files.append(path)
-    return files
+def _scanned_files(root: Path = ROOT) -> list[Path]:
+    # git's own list (tracked + untracked not ignored), never a bare rglob: run
+    # from the main checkout, that would read every task worktree under .wt/.
+    return [
+        path
+        for path in tree_files(root)
+        if path.suffix in SCANNED_SUFFIXES or path.name in SCANNED_NAMES
+    ]
 
 
 def test_the_built_tasks_files_exist():
@@ -175,3 +176,33 @@ def test_every_header_in_the_tree_is_a_listed_file():
         if _header(path) is not None and str(path.relative_to(ROOT)) not in VENDORED
     ]
     assert unlisted == []
+
+
+def test_the_scan_stays_inside_its_own_checkout(tmp_path):
+    """A worktree under .wt/ (excluded in .git/info/exclude) or any ignored
+    directory is another checkout's business: its headers are not ours."""
+
+    def git(*args: str) -> None:
+        subprocess.run(
+            ["git", *args],
+            cwd=tmp_path,
+            env=isolated_env(),
+            check=True,
+            capture_output=True,
+        )
+
+    git("init", "-q")
+    header = "# VENDORED_FROM dailyJournal@6b1f67f miya/config.py\n"
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "tracked.py").write_text(header, encoding="utf-8")
+    (tmp_path / "pkg" / "new.py").write_text(header, encoding="utf-8")
+    git("add", "pkg/tracked.py")
+    for ignored in (".wt/t09/pkg/other.py", "data/stray.py"):
+        (tmp_path / ignored).parent.mkdir(parents=True)
+        (tmp_path / ignored).write_text(header, encoding="utf-8")
+    (tmp_path / ".gitignore").write_text("data/\n", encoding="utf-8")
+    (tmp_path / ".git" / "info").mkdir(exist_ok=True)
+    (tmp_path / ".git" / "info" / "exclude").write_text(".wt/\n", encoding="utf-8")
+
+    scanned = sorted(p.relative_to(tmp_path).as_posix() for p in _scanned_files(tmp_path))
+    assert scanned == ["pkg/new.py", "pkg/tracked.py"]
