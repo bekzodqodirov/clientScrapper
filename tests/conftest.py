@@ -14,6 +14,10 @@ never counted green.
 Dates in tests: hard-code a calendar date only when the test passes it to the
 code under test (``now=``). Anything compared against code that reads the real
 clock must be derived from the real clock.
+
+``CS_TIME_TRAVEL=newyear`` or ``=+Nd`` runs the suite at another moment
+(tests/timetravel.py, CI's ``time-travel`` job); it is for runs without a
+database.
 """
 
 from __future__ import annotations
@@ -51,6 +55,22 @@ def truncate_statement() -> str:
     tables = Base.metadata.sorted_tables
     names = sorted(t.name for t in tables if t.name not in KEPT_TABLES)
     return f"TRUNCATE {', '.join(names)} RESTART IDENTITY CASCADE"
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    # Before any test module is imported, so module-level stamps are taken in
+    # the travelled time.
+    if os.environ.get("CS_TIME_TRAVEL"):
+        from tests import timetravel
+
+        timetravel.start()
+
+
+def pytest_unconfigure(config: pytest.Config) -> None:
+    if os.environ.get("CS_TIME_TRAVEL"):
+        from tests import timetravel
+
+        timetravel.stop()
 
 
 def pytest_collection_modifyitems(
