@@ -89,12 +89,28 @@ def test_the_cursor_vector_round_trips():
         "2026-10-23T09:00:00Z|not-a-uuid|0",
         "2026-10-23T09:00:00Z|00000000-0000-4000-8000-000000000000|1234567",
         "2026-10-23T09:00:00Z|00000000-0000-4000-8000-000000000000|1|2",
+        # JavaScript's \d is ASCII; Python's matches every Unicode digit.
+        "\u0662\u0660\u0662\u0666-10-23T09:00:00Z|00000000-0000-4000-8000-000000000000|2",
+        "2026-10-23T09:00:00Z|00000000-0000-4000-8000-000000000000|\u0662",
+        "2026-10-23T09:00:00.\uff11Z|00000000-0000-4000-8000-000000000000|2",
+        # A JavaScript $ is the end; a Python $ also matches before a last \n.
+        "2026-10-23T09:00:00Z\n|00000000-0000-4000-8000-000000000000|2",
+        "2026-10-23T09:00:00Z|00000000-0000-4000-8000-000000000000\n",
+        "2026-10-23T09:00:00Z|00000000-0000-4000-8000-000000000000|2\n",
     ],
 )
 def test_a_cursor_the_erp_refuses(text):
     raw = base64.urlsafe_b64encode(text.encode()).decode().rstrip("=")
     assert decode_cursor(raw) == "invalid"
     assert decode_cursor("bm9wZQ") == "invalid"
+
+
+def test_a_cursor_at_the_year_s_edges_is_valid():
+    # Date.parse reads «0000» as 1 BC and prints it back the same: valid —
+    # the page then fails in postgres (no year 0) and the door answers 503.
+    for at in ("0000-02-29T00:00:00Z", "0050-01-01T00:00:00Z", "9999-12-31T23:59:59Z"):
+        assert decode_cursor(encode_cursor(at, UUID, 1)) == (at, UUID, 1)
+    assert decode_cursor(encode_cursor("0100-02-29T00:00:00Z", UUID, 1)) == "invalid"
 
 
 def test_an_empty_cursor_or_since_is_absent():
@@ -113,6 +129,11 @@ def test_an_empty_cursor_or_since_is_absent():
         ("2026-10-24T05:00:00-0130", "2026-10-24T06:30:00.000000Z"),
         ("2026-10-24T05:00:00+23:59", "2026-10-23T05:01:00.000000Z"),
         ("2026-10-24T00:30:00.250+05:00", "2026-10-23T19:30:00.250000Z"),
+        # toISOString pads a year under 1000 to four digits…
+        ("0100-01-01T00:00Z", "0100-01-01T00:00:00.000000Z"),
+        ("0100-01-01T00:30+01:00", "0099-12-31T23:30:00.000000Z"),
+        # …and spells one past 9999 with a sign and six (postgres then refuses it).
+        ("9999-12-31T23:59:59.999999-12:00", "+010000-01-01T11:59.999999Z"),
     ],
 )
 def test_since_is_read_as_the_erp_reads_it(raw, utc):
@@ -135,6 +156,14 @@ def test_since_is_read_as_the_erp_reads_it(raw, utc):
         "2026-10-24T05:00:00+12:60",
         "2026-10-24T05:00:00+1260",
         "2026-10-24T05:00:00.1234567Z",
+        # Date.UTC maps the years 0–99 to 1900–1999: refused.
+        "0000-01-01T00:00Z",
+        "0050-01-01T00:00Z",
+        "0099-12-31T23:59Z",
+        "\u0662\u0660\u0662\u0666-10-23T09:00Z",
+        "2026-10-23T09:00:\u0660\u0660Z",
+        "2026-10-23T09:00+\u0660\u0665:00",
+        "2026-10-23T09:00Z\n",
     ],
 )
 def test_since_the_erp_refuses(raw):
@@ -172,6 +201,10 @@ def test_since_the_erp_refuses(raw):
         ("infinity", 1000),
         ("inf", 1000),
         ("nan", 1000),
+        # Number() reads ASCII digits only.
+        ("\u0663", 1000),
+        ("\uff15", 1000),
+        ("1\u0663", 1000),
     ],
 )
 def test_fake_clamp_limit_vectors(raw, limit):
@@ -490,6 +523,19 @@ async def test_the_cursor_is_checked_before_since():
         "error": "bad_since"
     }
     assert both.headers["cache-control"] == "private, no-store"
+
+
+async def test_an_instant_postgres_refuses_is_the_door_s_503():
+    # Valid to the codec, refused by the query: agentFeedResponse's catch.
+    fake = FakeErp(SECRET)
+    year0 = encode_cursor("0000-01-01T00:00:00.000000Z", UUID, 1)
+    for path, params in (
+        ("/api/agent/suppression", {"cursor": year0}),
+        ("/api/agent/outcomes", {"cursor": year0}),
+        ("/api/agent/suppression", {"since": "9999-12-31T23:59:59-12:00"}),
+    ):
+        answer = await get(fake, path, **params)
+        assert (answer.status_code, answer.json()) == (503, {"error": "unavailable"})
 
 
 async def test_since_is_strictly_after_and_resume_keeps_the_sent_cursor():

@@ -169,10 +169,15 @@ def trim_field(value: str | None, max_units: int) -> str | None:
     return clip_units(collapsed, max_units) or None
 
 
-_HEX = re.compile(r"^0[xX][0-9a-fA-F]+$")
-_OCT = re.compile(r"^0[oO][0-7]+$")
-_BIN = re.compile(r"^0[bB][01]+$")
-_DECIMAL = re.compile(r"^[+-]?(?:\d+\.?\d*(?:[eE][+-]?\d+)?|\.\d+(?:[eE][+-]?\d+)?)$")
+# JavaScript's \d is [0-9] and its $ the end of the text: never Python's \d
+# (every Unicode digit, which int() and float() then read) nor its $ (which
+# also matches before a final newline).
+_HEX = re.compile(r"0[xX][0-9a-fA-F]+\Z")
+_OCT = re.compile(r"0[oO][0-7]+\Z")
+_BIN = re.compile(r"0[bB][01]+\Z")
+_DECIMAL = re.compile(
+    r"[+-]?(?:[0-9]+\.?[0-9]*(?:[eE][+-]?[0-9]+)?|\.[0-9]+(?:[eE][+-]?[0-9]+)?)\Z"
+)
 
 
 def js_number(raw: str | None) -> float:
@@ -212,13 +217,16 @@ def clamp_limit(raw: str | None) -> int:
 
 # --- the codec (a copy of agent-feed.ts) ----------------------------------------------
 
-CURSOR_AT = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?Z$")
-_UUID = re.compile(
-    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I
+CURSOR_AT = re.compile(
+    r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,6})?Z\Z"
 )
-_N = re.compile(r"^\d{1,6}$")
+_UUID = re.compile(
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\Z", re.I | re.ASCII
+)
+_N = re.compile(r"[0-9]{1,6}\Z")
 _ISO_INSTANT = re.compile(
-    r"^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,6}))?)?(Z|[+-]\d{2}:?\d{2})$"
+    r"([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2})"
+    r"(?::([0-9]{2})(?:\.([0-9]{1,6}))?)?(Z|[+-][0-9]{2}:?[0-9]{2})\Z"
 )
 _B64_NOISE = re.compile(r"[^A-Za-z0-9_-]")
 
@@ -237,14 +245,57 @@ def _b64url_decode(raw: str) -> str:
     return base64.urlsafe_b64decode(padded).decode("utf-8", errors="replace")
 
 
+def _days_in_month(y: int, mo: int) -> int:
+    """The proleptic Gregorian calendar of ECMAScript dates, year 0 (1 BC)
+    included — a leap year."""
+    if mo == 2:
+        return 29 if y % 4 == 0 and (y % 100 != 0 or y % 400 == 0) else 28
+    return 30 if mo in (4, 6, 9, 11) else 31
+
+
+def _real_date(y: int, mo: int, d: int) -> bool:
+    return 1 <= mo <= 12 and 1 <= d <= _days_in_month(y, mo)
+
+
+def _days_from_civil(y: int, mo: int, d: int) -> int:
+    """Days since 1970-01-01 of a proleptic Gregorian date (any year)."""
+    y -= mo <= 2
+    era = y // 400
+    yoe = y - era * 400
+    doy = (153 * (mo + (-3 if mo > 2 else 9)) + 2) // 5 + d - 1
+    doe = yoe * 365 + yoe // 4 - yoe // 100 + doy
+    return era * 146097 + doe - 719468
+
+
+def _civil_from_days(z: int) -> tuple[int, int, int]:
+    z += 719468
+    era = z // 146097
+    doe = z - era * 146097
+    yoe = (doe - doe // 1460 + doe // 36524 - doe // 146096) // 365
+    doy = doe - (365 * yoe + yoe // 4 - yoe // 100)
+    mp = (5 * doy + 2) // 153
+    d = doy - (153 * mp + 2) // 5 + 1
+    mo = mp + (3 if mp < 10 else -9)
+    return yoe + era * 400 + (mo <= 2), mo, d
+
+
+def js_iso_seconds(seconds: int) -> str:
+    """``new Date(seconds * 1000).toISOString().slice(0, 19)``: a year of
+    0–9999 in four digits, any other with its sign and six."""
+    days, rest = divmod(seconds, 86400)
+    y, mo, d = _civil_from_days(days)
+    year = f"{y:04d}" if 0 <= y <= 9999 else f"{'+' if y > 0 else '-'}{abs(y):06d}"
+    h, rest = divmod(rest, 3600)
+    return f"{year}-{mo:02d}-{d:02d}T{h:02d}:{rest // 60:02d}:{rest % 60:02d}"[:19]
+
+
 def _real_instant(at: str) -> bool:
     """``new Date(ms).toISOString().slice(0, 19) === at.slice(0, 19)``: a date
-    and a time that survive a calendar round trip (02-30, T24:00, :60 do not)."""
-    try:
-        datetime.strptime(at[:19], "%Y-%m-%dT%H:%M:%S")
-    except ValueError:
-        return False
-    return True
+    and a time that survive a calendar round trip (02-30, T24:00, :60 do not;
+    the year 0000 does — ECMAScript's 1 BC)."""
+    y, mo, d = int(at[0:4]), int(at[5:7]), int(at[8:10])
+    h, mi, sec = int(at[11:13]), int(at[14:16]), int(at[17:19])
+    return _real_date(y, mo, d) and h <= 23 and mi <= 59 and sec <= 59
 
 
 def decode_cursor(raw: str | None) -> tuple[str, str, int] | None | Literal["invalid"]:
@@ -278,26 +329,34 @@ def parse_since(raw: str | None) -> str | None | Literal["invalid"]:
     sec = int(m.group(6) or 0)
     frac = m.group(7) or ""
     zone = m.group(8)
-    if h > 23 or mi > 59 or sec > 59:
+    # Date.UTC maps the years 0–99 to 1900–1999, so getUTCFullYear() differs.
+    if y < 100 or not _real_date(y, mo, d) or h > 23 or mi > 59 or sec > 59:
         return "invalid"
-    try:
-        local = datetime(y, mo, d, h, mi, sec)
-    except ValueError:
-        return "invalid"
-    offset = timedelta(0)
+    offset = 0
     if zone != "Z":
         digits = zone[1:].replace(":", "")
         oh, om = int(digits[:2]), int(digits[2:])
         # Date.parse is NaN for an offset hour of 24+ or a minute of 60+.
         if oh > 23 or om > 59:
             return "invalid"
-        offset = timedelta(hours=oh, minutes=om) * (1 if zone[0] == "+" else -1)
-    utc = local - offset
-    return f"{utc:%Y-%m-%dT%H:%M:%S}.{frac.ljust(6, '0')[:6]}Z"
+        offset = (oh * 3600 + om * 60) * (1 if zone[0] == "+" else -1)
+    utc = _days_from_civil(y, mo, d) * 86400 + h * 3600 + mi * 60 + sec - offset
+    # toISOString's own spelling, so a year past 9999 comes back as the ERP
+    # sends it to postgres («+010000-…», which postgres refuses: a 503).
+    return f"{js_iso_seconds(utc)}.{frac.ljust(6, '0')[:6]}Z"
+
+
+class PostgresRefused(ValueError):
+    """An instant the ERP's query hands postgres and postgres refuses — the
+    year 0000 a valid cursor may carry, a since past 9999 as toISOString
+    spells it: the page fails and ``agentFeedResponse`` answers 503."""
 
 
 def instant(at_us: str) -> datetime:
-    return datetime.strptime(at_us, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=UTC)
+    try:
+        return datetime.strptime(at_us, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=UTC)
+    except ValueError:
+        raise PostgresRefused(at_us) from None
 
 
 def us_text(at: datetime) -> str:
@@ -989,10 +1048,13 @@ class FakeErp:
             code = "bad_cursor" if cursor == "invalid" else "bad_since"
             return self._feed_json(request, 400, {"error": code})
         limit = clamp_limit(q.get("limit"))
-        if path == SUPPRESSION_PATH:
-            body = self._suppression_body(since, cursor, limit)
-        else:
-            body = self._outcomes_body(since, cursor, limit)
+        try:
+            if path == SUPPRESSION_PATH:
+                body = self._suppression_body(since, cursor, limit)
+            else:
+                body = self._outcomes_body(since, cursor, limit)
+        except PostgresRefused:
+            return self._feed_json(request, 503, {"error": "unavailable"})
         items = "entries" if path == SUPPRESSION_PATH else "rows"
         if mode == "feed_rule_changed" and path == SUPPRESSION_PATH:
             body["rule"] = "hmac-sha512(secret, last9digits) hex[0:20]"
@@ -1031,7 +1093,9 @@ class FakeErp:
         assert self.secret is not None
         rows = [r for r in self.table() if len(r.tail) == 9]
         if since is not None:
-            rows = [r for r in rows if r.at > instant(since)]
+            # Cast once, as postgres casts the bound parameter: even over no rows.
+            after = instant(since)
+            rows = [r for r in rows if r.at > after]
         if cursor is not None:
             c_at = instant(_pad_us(cursor[0]))
             rows = [r for r in rows if (r.at, r.id, r.n) > (c_at, cursor[1], cursor[2])]
@@ -1121,7 +1185,8 @@ class FakeErp:
     ) -> dict[str, Any]:
         rows = self.outcome_rows()
         if since is not None:
-            rows = [r for r in rows if r[0] > instant(since)]
+            after = instant(since)
+            rows = [r for r in rows if r[0] > after]
         if cursor is not None:
             c_at = instant(_pad_us(cursor[0]))
             rows = [r for r in rows if (r[0], r[1]) > (c_at, cursor[1])]
