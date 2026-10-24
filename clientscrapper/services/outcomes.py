@@ -20,8 +20,9 @@ setting label, a seller's free text never leaves it (``LOST_REASON_PATTERNS``).
 company flags its CURRENT labels justify — so a label that changes takes back
 what the old one wrote (the retractions): a lead revived out of lost, moved
 from won back to open, or given another reason. A company's keys are read
-over its lineage (04 §2.5: ``push_log`` and ``outcomes`` are never re-pointed
-by a merge, so a merged source's contacts are found on its target). Kept
+over its lineage (``companies.lineages``, T-17's root rule and merge_log in one
+home; 04 §2.5: ``push_log`` and ``outcomes`` are never re-pointed by a merge,
+so a merged source's contacts are found on its target). Kept
 stricter on purpose and never taken back here: ``bounced`` (a wrong number is
 a fact about the number), ``companies.is_competitor`` (the owner clears it by
 hand), every row a person wrote and every ``erp_feed`` / ``manual_import`` row
@@ -61,13 +62,12 @@ from clientscrapper.db.models import (
     Company,
     Contact,
     LeadCandidate,
-    MergeLog,
     Outcome,
     PushLog,
     Suppression,
 )
 from clientscrapper.db.models.leads import EXTERNAL_ID_RE
-from clientscrapper.services import keys
+from clientscrapper.services import companies, keys
 
 # --- the feed row (05 §A.9) ------------------------------------------------------------
 
@@ -519,8 +519,6 @@ NEVER_RETRACTED: Final[frozenset[str]] = frozenset({"bounced"})
 KEPT_WHILE_STANDING: Final[Mapping[str, frozenset[str]]] = {
     "lost_no_contact": frozenset({"lost"}),
 }
-# merged_into hops followed to a company's root (a chain is one or two long).
-ROOT_HOPS: Final = 16
 # Serialises the recompute across processes (the nightly walk, reconcile's
 # 10-minute walk): two of them over one company would each delete what the
 # other is inserting.
@@ -750,50 +748,6 @@ def _first_tail(where: sa.ColumnElement[bool]) -> sa.Subquery:
     )
 
 
-async def _lineage(
-    session: AsyncSession, ids: Sequence[uuid.UUID]
-) -> dict[uuid.UUID, frozenset[uuid.UUID]]:
-    """Each company's lineage, read whole: ``merged_into`` followed to the
-    company that holds its rows now (a merged source's contacts sit on its
-    target, 04 §2.5), then that root plus every company merged into it, as
-    ``merge_log`` records it (undone merges excluded) — one statement for
-    any number of companies. A company with no merge is its own lineage."""
-    up = (
-        sa.select(
-            Company.id.label("start"),
-            Company.id.label("id"),
-            sa.literal(0).label("hops"),
-        )
-        .where(Company.id.in_(ids))
-        .cte("up", recursive=True)
-    )
-    up = up.union_all(
-        sa.select(up.c.start, Company.merged_into, up.c.hops + 1)
-        .join(Company, Company.id == up.c.id)
-        .where(
-            Company.state == "merged",
-            Company.merged_into.is_not(None),
-            up.c.hops < ROOT_HOPS,
-        )
-    )
-    root = (
-        sa.select(up.c.start, up.c.id)
-        .distinct(up.c.start)
-        .order_by(up.c.start, up.c.hops.desc())
-        .cte("root")
-    )
-    down = sa.select(root.c.start, root.c.id).cte("down", recursive=True)
-    down = down.union(
-        sa.select(down.c.start, MergeLog.source_company_id)
-        .join(MergeLog, MergeLog.target_company_id == down.c.id)
-        .where(MergeLog.undone_at.is_(None))
-    )
-    groups: dict[uuid.UUID, set[uuid.UUID]] = {c: {c} for c in ids}
-    for start, member in await session.execute(sa.select(down.c.start, down.c.id)):
-        groups.setdefault(start, {start}).add(member)
-    return {c: frozenset(g) for c, g in groups.items()}
-
-
 @dataclass(slots=True)
 class _Keys:
     tg: set[str] = field(default_factory=set)
@@ -823,7 +777,7 @@ async def _load(session: AsyncSession, ids: Sequence[uuid.UUID]) -> _Loaded:
         loaded.labelled.setdefault(r.company_id, []).append(
             Labelled(r.external_id, r.label, r.label_changed_at, r.phone_tail.strip())
         )
-    groups = await _lineage(session, ids)
+    groups = await companies.lineages(session, ids)
     members = sorted({m for g in groups.values() for m in g})
     held: dict[uuid.UUID, _Keys] = {m: _Keys() for m in members}
     live = sa.and_(Contact.company_id.in_(members), Contact.anonymised_at.is_(None))
@@ -1053,7 +1007,7 @@ async def _companies_wanting(
                 )
             )
     if holders:
-        for lineage in (await _lineage(session, sorted(holders))).values():
+        for lineage in (await companies.lineages(session, sorted(holders))).values():
             found.update(lineage)
     return {c for c in found if c is not None and c not in exclude}
 

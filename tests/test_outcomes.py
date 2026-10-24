@@ -42,7 +42,7 @@ from clientscrapper.db.models import (
     Suppression,
 )
 from clientscrapper.db.session import SessionLocal
-from clientscrapper.services import erp_feeds, health, outcomes
+from clientscrapper.services import companies, erp_feeds, health, outcomes
 from clientscrapper.services.erp_feeds import ErpClient
 from tests import fake_erp
 from tests.fake_erp import FakeErp
@@ -1315,6 +1315,36 @@ async def test_a_loss_read_after_the_merge_finds_the_moved_contacts(world, sessi
     world.fake.move(world.lead(p).id, "lost", reason="Qayta qilinmasin")
     await world.walk()
     assert await local(session) == _lost_rows(p)
+
+
+async def test_a_real_merge_chain_reaches_the_root_s_keys(world, session):
+    """T-17's own ``merge_into``, not this file's stand-in, and a chain: A into
+    B, then B into C. A's outcome is keyed by A, and A's never-again reads the
+    keys of its root C and of every company merged into C — B's channel
+    (carried onto C) and C's own Instagram — not A's alone."""
+    a = await world.company(77)
+    p = await world.push(77, company_id=a)
+    b = await world.company(78, telegram_channel="namuna_bosh")
+    c = await world.company(79, instagram="namuna_ildiz")
+    for source, target in ((a, b), (b, c)):
+        await companies.merge_into(
+            session,
+            await company(session, source),
+            await company(session, target),
+            by="owner:1",
+            now=NOW - DAY,
+        )
+    await session.commit()
+    assert (await company(session, a)).merged_into == b  # A's row points one hop
+    assert await companies.company_lineage(session, c) == {a, b, c}
+    world.fake.move(world.lead(p).id, "lost", reason="Qayta qilinmasin")
+    await world.walk()
+    assert (await outcome(session, p.external_id)).company_id == a
+    assert await local(session) == {
+        ("lost", "phone_tail", p.tail, because(p)),
+        ("lost", "tg_username", "namuna_bosh", because(p)),
+        ("lost", "instagram", "namuna_ildiz", because(p)),
+    }
 
 
 async def test_an_undone_merge_is_no_lineage(world, session):

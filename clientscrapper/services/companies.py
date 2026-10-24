@@ -1444,19 +1444,71 @@ async def company_lineage(session: AsyncSession, company_id: uuid.UUID) -> set[u
     """The id plus every company merged into it, directly or through a chain
     (undone merges excluded). ``push_log`` and ``outcomes`` are never
     re-pointed, so their readers ask for the lineage (04 §2.5)."""
-    rows = await session.execute(
-        sa.text(
-            "WITH RECURSIVE lineage(id) AS ("
-            " SELECT CAST(:id AS uuid)"
-            " UNION"
-            " SELECT m.source_company_id FROM merge_log m"
-            " JOIN lineage l ON m.target_company_id = l.id"
-            " WHERE m.undone_at IS NULL"
-            ") SELECT id FROM lineage"
-        ),
-        {"id": str(company_id)},
+    groups = await _lineages(session, [company_id], from_root=False)
+    return set(groups[company_id])
+
+
+async def lineages(
+    session: AsyncSession, ids: Sequence[uuid.UUID]
+) -> dict[uuid.UUID, frozenset[uuid.UUID]]:
+    """Each company's whole lineage, in one statement for any number of
+    companies: ``merged_into`` followed to the company that holds its rows now
+    (:func:`_root`'s rule, at most ``_ROOT_HOPS`` hops), then that root's
+    :func:`company_lineage`. A merged source's contacts and carried keys sit
+    on its root (04 §2.5), so a reader of what a company is known by — the
+    outcomes recompute (02 §2.11, T-10) — asks for this. A company with no
+    merge, and an id that names no company, is its own lineage."""
+    return await _lineages(session, ids, from_root=True)
+
+
+async def _lineages(
+    session: AsyncSession, ids: Sequence[uuid.UUID], *, from_root: bool
+) -> dict[uuid.UUID, frozenset[uuid.UUID]]:
+    """The one statement behind :func:`company_lineage` and :func:`lineages`:
+    (start, top) where top is the start itself or, ``from_root``, its root;
+    then down ``merge_log`` from the top (undone merges excluded)."""
+    groups: dict[uuid.UUID, set[uuid.UUID]] = {c: {c} for c in ids}
+    if not ids:
+        return {}
+    named = Company.id.in_(list(ids))
+    top: sa.Select[tuple[uuid.UUID, uuid.UUID]]
+    if from_root:
+        up = (
+            sa.select(
+                Company.id.label("start"),
+                Company.id.label("id"),
+                sa.literal(0).label("hops"),
+            )
+            .where(named)
+            .cte("up", recursive=True)
+        )
+        up = up.union_all(
+            sa.select(up.c.start, Company.merged_into, up.c.hops + 1)
+            .join(Company, Company.id == up.c.id)
+            .where(
+                Company.state == "merged",
+                Company.merged_into.is_not(None),
+                up.c.hops < _ROOT_HOPS,
+            )
+        )
+        root = (
+            sa.select(up.c.start, up.c.id)
+            .distinct(up.c.start)
+            .order_by(up.c.start, up.c.hops.desc())
+            .cte("root")
+        )
+        top = sa.select(root.c.start, root.c.id)
+    else:
+        top = sa.select(Company.id.label("start"), Company.id.label("id")).where(named)
+    down = top.cte("down", recursive=True)
+    down = down.union(
+        sa.select(down.c.start, MergeLog.source_company_id)
+        .join(MergeLog, MergeLog.target_company_id == down.c.id)
+        .where(MergeLog.undone_at.is_(None))
     )
-    return {row[0] for row in rows}
+    for start, member in await session.execute(sa.select(down.c.start, down.c.id)):
+        groups.setdefault(start, {start}).add(member)
+    return {c: frozenset(g) for c, g in groups.items()}
 
 
 # --- Merge and unmerge (04 §2.5, 02 §2.14) --------------------------------------
