@@ -464,15 +464,23 @@ def _volume(value: Any) -> Decimal | None:
     return kub.quantize(VOLUME_STEP, rounding=ROUND_HALF_EVEN)
 
 
+def refuse_pii(rows: Sequence[Mapping[str, Any]]) -> None:
+    """``FeedShapeError`` when any row of a page carries a PII key — a foreign
+    row too: the keys are the ERP's own projection (05 §A.9), which no
+    sender chooses, so a PII key anywhere is the feed changing shape."""
+    leaked = sorted({k for row in rows for k in _pii_keys(row)})
+    if leaked:
+        raise FeedShapeError(f"an outcomes row carries {leaked}")
+
+
 def parse_outcome(d: Any) -> outcomes.FeedRow:
     """One outcomes row (05 §A.9): the 15 fields all present (an absent one
     → ``FeedShapeError``), unknown keys ignored, a PII key or a field of the
-    wrong form → ``FeedShapeError``."""
+    wrong form → ``FeedShapeError``. Only a row of ours comes here
+    (``outcomes.record_page`` decides that from the id first)."""
     if not isinstance(d, dict):
         raise FeedShapeError("an outcomes row is not an object")
-    leaked = _pii_keys(d)
-    if leaked:
-        raise FeedShapeError(f"an outcomes row carries {leaked}")
+    refuse_pii([d])
     missing = [name for name in outcomes.FIELDS if name not in d]
     if missing:
         raise FeedShapeError(f"an outcomes row misses {missing}")
@@ -1184,6 +1192,17 @@ NIGHTLY_MAX_AGE: Final = timedelta(hours=25)
 UNCONFIRMED_PROBLEM: Final = "push_unconfirmed"
 # The walk a scheduled run stamps in config.outcomes (the unknown walk none).
 STAMPED_WALKS: Final[tuple[Walk, ...]] = ("cursor", "recent", "quarter", "year")
+# A Sunday or monthly walk that did not complete (the worker down at 03:20 /
+# 03:40, the run skipped already_running behind a long 03:00 one, a failed
+# walk) is made by the next nightly run: the quarter walk once its last
+# completion is older than a week and an hour (a normal Sunday 03:00 run
+# sees 6 d 23 h 40 min), the year walk once older than the longest month and
+# an hour. Never completed counts as due — the switch-over day runs the year
+# walk (05 §B.3).
+CATCH_UP_AFTER: Final[Mapping[Walk, timedelta]] = {
+    "quarter": timedelta(days=7, hours=1),
+    "year": timedelta(days=31, hours=1),
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -1234,6 +1253,24 @@ class OutcomesConfig:
             return replace(self, last_year_at=now)
         return self
 
+    def last_completed(self, walk: Walk) -> datetime | None:
+        return {
+            "cursor": self.last_cursor_at,
+            "recent": self.last_recent_at,
+            "quarter": self.last_quarter_at,
+            "year": self.last_year_at,
+        }.get(walk)
+
+    def catch_up(self, now: datetime) -> tuple[Walk, ...]:
+        """The Sunday and monthly walks the nightly run makes after its own
+        (``CATCH_UP_AFTER``), in that order."""
+        due: list[Walk] = []
+        for walk, after in CATCH_UP_AFTER.items():
+            last = self.last_completed(walk)
+            if last is None or now - last > after:
+                due.append(walk)
+        return tuple(due)
+
     def nightly_done(self, now: datetime) -> bool:
         """The last cursor walk completed within ``NIGHTLY_MAX_AGE`` and the
         recent walk after it (the nightly run makes them in that order)."""
@@ -1270,10 +1307,11 @@ async def _store_outcomes_config(session: AsyncSession, cfg: OutcomesConfig) -> 
 class OutcomesReport:
     """What one ``sync_outcomes`` did; it lands in ``collector_runs.meta``.
     ``status='nothing'``: the unknown walk had no push to look for and made
-    no call."""
+    no call; ``'not_configured'``: the feeds are not configured (the «Boshqa»
+    fallback) and no call was made."""
 
     walk: Walk
-    status: Literal["ok", "nothing"] = "ok"
+    status: Literal["ok", "nothing", "not_configured"] = "ok"
     pages: int = 0
     rows: int = 0
     # Rows of ids the agent never pushed: counted, never stored (05 §A.13).
@@ -1352,13 +1390,23 @@ async def sync_outcomes(
     *,
     walk: Walk,
     now: datetime,
+    configured: bool | None = None,
 ) -> OutcomesReport:
     """One walk of the outcomes feed applied (05 §B.2). Each page is one
     transaction: its rows recorded (``outcomes.record_page`` — foreign ids
     skipped, labels, effects, ``unknown → sent``) and, on the cursor walk,
     the page's ``resume`` stored as the cursor when it is not null. A walk
     that fails keeps the pages it committed; a failure is recorded (the
-    breaker, ``feed_contract``) and raised."""
+    breaker, ``feed_contract``) and raised.
+
+    No call at all unless ``feeds_configured()`` (``configured`` overrides
+    it, as for ``reconcile_unconfirmed``): during the «Boshqa» fallback every
+    GET would be a 404 and trip the push breaker (05 §B.3) — and the
+    10-minute ``unknown`` walk is called directly, outside the collector
+    that checks it (T-28's ``reconcile_job``)."""
+    on = feeds_configured() if configured is None else configured
+    if not on:
+        return OutcomesReport(walk=walk, status="not_configured")
     cfg = await outcomes_config(session)
     oldest = await oldest_unknown(session, now) if walk == "unknown" else None
     if walk == "unknown" and oldest is None:
@@ -1388,9 +1436,9 @@ async def _walk_outcomes(
             if report.pages == 0:
                 report.generated_at = page.generated_at
                 await clear_breaker(session)
-            rows = [parse_outcome(r) for r in page.rows]
+            refuse_pii(page.rows)
             result = await outcomes.record_page(
-                session, rows, page.rows, now=now, hasher=erp.hash_tail
+                session, page.rows, parse=parse_outcome, now=now, hasher=erp.hash_tail
             )
             report.add(result)
             if result.stale_hits:
@@ -1721,6 +1769,7 @@ async def _clear_feed_contract(session: AsyncSession, feed: FeedName) -> None:
 
 
 __all__ = [
+    "CATCH_UP_AFTER",
     "DELTA_MAX_AGE_H",
     "ERP_KEY_HEADERS",
     "FEED_RULE",
@@ -1759,6 +1808,7 @@ __all__ = [
     "parse_outcome",
     "reconcile_unconfirmed",
     "refresh_precision",
+    "refuse_pii",
     "salt_id",
     "source_precision",
     "suppression_fresh",

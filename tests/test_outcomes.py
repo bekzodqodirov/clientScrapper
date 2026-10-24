@@ -31,8 +31,10 @@ from clientscrapper.config import settings
 from clientscrapper.db.models import (
     CollectorRun,
     Company,
+    Contact,
     Heartbeat,
     LeadCandidate,
+    MergeLog,
     Outcome,
     PushLog,
     RuntimeFlag,
@@ -277,6 +279,37 @@ async def raised(session: AsyncSession) -> dict[str, dict[str, Any]]:
 
 def because(p: Pushed, prefix: str = "outcome:") -> str:
     return prefix + p.external_id
+
+
+async def merge(session: AsyncSession, src: uuid.UUID, tgt: uuid.UUID) -> None:
+    """What T-17's ``merge_into`` leaves behind (04 §2.5, 02 §2.14): the
+    source's contacts on the target, the source merged into it, a merge_log
+    row — ``push_log`` and ``outcomes`` where they were."""
+    moved = (
+        await session.scalars(sa.select(Contact.id).where(Contact.company_id == src))
+    ).all()
+    await session.execute(
+        sa.update(Contact).where(Contact.company_id == src).values(company_id=tgt)
+    )
+    await session.execute(
+        sa.update(Company)
+        .where(Company.id == src)
+        .values(state="merged", merged_into=tgt)
+    )
+    session.add(
+        MergeLog(
+            source_company_id=src,
+            target_company_id=tgt,
+            decided_by="owner:1",
+            moved={"contacts": [str(c) for c in moved]},
+        )
+    )
+    await session.commit()
+
+
+async def add_contact(session: AsyncSession, cid: uuid.UUID, **attrs: Any) -> None:
+    session.add(Contact(company_id=cid, tier="company", **attrs))
+    await session.commit()
 
 
 # --- the labels land, and what each one does (02 §2.11) -------------------------------
@@ -572,14 +605,17 @@ async def test_a_shared_phone_s_row_passes_to_the_other_company(world, session):
     await world.walk()
     assert (await outcome(session, second.external_id)).label == "dropped_suppressed"
     assert await local(session) == {("client", "phone_tail", first.tail, because(first))}
+    row_id = await session.scalar(sa.select(Suppression.id))
     world.clock.set(NOW + timedelta(hours=1))
     world.fake.revive(world.lead(first).id)
     report = await world.walk("recent", now=NOW + timedelta(hours=2))
-    # The first company lets the row go; the second still wants it.
-    assert (report.deleted, report.inserted) == (1, 1)
+    # The first company lets the row go; the second still wants it: handed
+    # over in place, its id kept (a candidate's suppressed_by points at it).
+    assert (report.deleted, report.inserted, report.updated) == (0, 0, 1)
     assert await local(session) == {
         ("client", "phone_tail", first.tail, because(second, "erp_belt:"))
     }
+    assert await session.scalar(sa.select(Suppression.id)) == row_id
 
 
 # --- unknown → sent, foreign rows -----------------------------------------------------
@@ -1016,6 +1052,10 @@ def a_fetcher():
 
 async def test_the_nightly_run_walks_both_and_then_checks_the_rule(world, session):
     await world.push(81)
+    # Last Sunday's and the 1st's walks completed: nothing to catch up.
+    await world.walk("quarter", NOW - DAY)
+    await world.walk("year", NOW - DAY)
+    world.fake.gets.clear()
     report = await erp_sync.run("outcomes", fetcher=a_fetcher(), now=NOW, erp=world.erp)
     assert (report.status, report.component) == ("ok", "collector:erp_sync.outcomes")
     assert [set(q) for q in world.gets()] == [{"limit"}, {"limit", "since"}]
@@ -1028,6 +1068,7 @@ async def test_the_nightly_run_walks_both_and_then_checks_the_rule(world, sessio
     assert run.meta["outcomes"]["cursor"]["rows"] == 1
     assert run.meta["outcomes"]["recent"]["foreign"] == 0
     assert run.meta["reconcile"] == {"checked": True, "unconfirmed": 0, "repushable": []}
+    assert "catch_up" not in run.meta
     beat = await session.get(Heartbeat, "collector:erp_sync.outcomes",
                              populate_existing=True)  # fmt: skip
     assert beat is not None and beat.detail["status"] == "ok"
@@ -1099,8 +1140,505 @@ def test_desired_prefers_the_longer_cooldown_and_the_landing_over_the_belt():
     gone = outcomes.desired(keys, [item("202610", "lost_price")], wrong_numbers={},
                             now=at + timedelta(days=180))  # fmt: skip
     assert gone == {}
+    # The first wrong number's 30 days, to the microsecond.
+    wrong = [item("202610", "lost_wrong_number")]
+    before = at + timedelta(days=30) - timedelta(microseconds=1)
+    assert outcomes.desired(keys, wrong, wrong_numbers={"900000091": 1}, now=before) == {
+        ("cooldown", "phone_tail", "900000091"): outcomes.Want(
+            f"outcome:cs:{cid}:202610", at + timedelta(days=30)
+        )
+    }
+    past = at + timedelta(days=30)
+    assert outcomes.desired(keys, wrong, wrong_numbers={"900000091": 1}, now=past) == {}
 
 
 async def test_apply_effects_on_nothing_does_nothing(session):
     effects = await outcomes.apply_effects(session, [], now=NOW)
     assert effects == outcomes.Effects()
+
+
+# --- foreignness is decided first (05 §A.13) ------------------------------------------
+
+
+async def test_a_foreign_row_is_never_validated(world, session):
+    """The «Boshqa» key holder chooses the id, and the ERP keeps an id of
+    2,048 bytes and more as sent: a row we never pushed is skipped before a
+    field of it is read, so it cannot refuse the page our own row is on."""
+    ours = await world.push(24)
+    long_id = ("cs:" + uuid.uuid4().hex * 100)[:2600]
+    shaped = f"cs:{uuid.uuid4()}:202610"
+    nameless = f"cs:{uuid.uuid4()}:202610"
+    for n, eid in ((25, long_id), (26, shaped), (27, nameless)):
+        await world.post(
+            {"external_id": eid, "name": "Begona", "phone": phone(n),
+             "utm_source": "clientscrapper"},
+            door="other",
+        )  # fmt: skip
+    # A stranger's card can carry any kub; a field of the wrong form; an id
+    # that is no string at all.
+    world.fake.outcome_overrides[shaped] = {"quoted_volume_m3": 1e12, "intake_id": "17"}
+    world.fake.outcome_overrides[nameless] = {"external_id": None}
+    sent = [r["external_id"] for _, _, r in world.fake.outcome_rows()]
+    assert long_id in sent and len(long_id) == 2600
+    report = await world.walk()
+    assert (report.rows, report.foreign, report.stored) == (4, 3, 1)
+    stored = await session.scalars(sa.select(Outcome.external_id))
+    assert stored.all() == [ours.external_id]
+    assert (await erp_feeds.outcomes_config(session)).last_cursor_at == NOW
+
+
+def test_an_id_is_ours_only_in_push_log_s_shape():
+    eid = "cs:00000000-0000-4000-8000-000000000101:202610"
+    assert outcomes.pushed_id({"external_id": eid}) == eid
+    for other in (eid + "\n", eid.upper(), eid + "0", ("cs:" + "0" * 36) * 70, None, 17):
+        assert outcomes.pushed_id({"external_id": other}) is None
+    assert outcomes.pushed_id({}) is None
+
+
+async def test_a_pii_key_on_any_row_is_the_feed_changing_shape(world, session):
+    # The keys are the ERP's own projection — no sender chooses them.
+    await world.push(28)
+    foreign = f"cs:{uuid.uuid4()}:202610"
+    await world.post(
+        {"external_id": foreign, "name": "Begona", "phone": phone(29),
+         "utm_source": "clientscrapper"},
+        door="other",
+    )  # fmt: skip
+    world.fake.outcome_overrides[foreign] = {"phone": "x"}
+    with pytest.raises(erp_feeds.FeedShapeError, match="carries"):
+        await world.walk()
+    assert await session.scalar(sa.select(sa.func.count(Outcome.external_id))) == 0
+
+
+# --- no outcomes call while the feeds are not configured (05 §B.3) --------------------
+
+
+async def test_no_outcomes_call_during_the_fallback_whoever_calls(
+    world, session, monkeypatch
+):
+    """T-28's reconcile_job calls the unknown walk directly, every 10 minutes:
+    during the «Boshqa» fallback each GET would be a 404 and block every
+    push for 6 hours."""
+    monkeypatch.setattr(settings, "crm_push_source", "other")
+    monkeypatch.setattr(settings, "crm_agent_key", OTHER_KEY)
+    erp = ErpClient(BASE, OTHER_KEY, transport=world.fake.transport(), sleep=no_sleep)
+    await world.push(90, status="unknown", http=None, door="other",
+                     sent_at=NOW - timedelta(hours=1))  # fmt: skip
+    for walk in ("unknown", "cursor", "recent", "quarter", "year"):
+        report = await erp_feeds.sync_outcomes(session, erp, walk=walk, now=NOW)
+        assert (report.walk, report.status, report.pages) == (walk, "not_configured", 0)
+    assert world.fake.gets == []
+    row = await session.get(Source, "erp_sync", populate_existing=True)
+    assert row is not None and (row.breaker_until, row.breaker_reason) == (None, None)
+    assert await erp_feeds.outcomes_config(session) == erp_feeds.OutcomesConfig()
+
+
+# --- a lost row stands while its label stands; keys over the lineage (04 §2.5) --------
+
+
+async def _lost_with_a_contact(world: World, session, n: int) -> Pushed:
+    cid = await world.company(n, telegram_channel="namuna_kanal")
+    await add_contact(session, cid, telegram_username="namuna_ofis",
+                      instagram="namuna_ofis")  # fmt: skip
+    p = await world.push(n, company_id=cid)
+    world.fake.move(world.lead(p).id, "lost", reason="Qayta qilinmasin")
+    await world.walk()
+    return p
+
+
+def _lost_rows(p: Pushed, *extra: tuple[str, str]) -> set[tuple[str, str, str, str]]:
+    r = because(p)
+    return {
+        ("lost", "phone_tail", p.tail, r),
+        ("lost", "tg_username", "namuna_kanal", r),
+        ("lost", "tg_username", "namuna_ofis", r),
+        ("lost", "instagram", "namuna_ofis", r),
+        *(("lost", t, k, r) for t, k in extra),
+    }
+
+
+async def test_a_merge_keeps_the_never_again_and_reads_the_target(world, session):
+    p = await _lost_with_a_contact(world, session, 4)
+    assert await local(session) == _lost_rows(p)
+    tgt = await world.company(5, telegram_channel="namuna_bosh")
+    await merge(session, p.company_id, tgt)
+    # The 1st of the month: every row of the year re-read, the lead still lost.
+    report = await world.walk("year", now=NOW + DAY)
+    assert (await outcome(session, p.external_id)).label == "lost_no_contact"
+    # Nothing taken back; the target's own handle is the lineage's too.
+    assert report.deleted == 0
+    assert await local(session) == _lost_rows(p, ("tg_username", "namuna_bosh"))
+    # Revived: the label changed, so every row it wrote goes — on the moved
+    # contact's handles too.
+    world.clock.set(NOW + DAY)
+    world.fake.revive(world.lead(p).id)
+    await world.walk("recent", now=NOW + 2 * DAY)
+    assert await local(session) == set()
+
+
+async def test_an_anonymised_contact_keeps_its_lost_rows(world, session):
+    p = await _lost_with_a_contact(world, session, 6)
+    # T-17's anonymise: the person's handles nulled, anonymised_at stamped.
+    await session.execute(
+        sa.update(Contact)
+        .where(Contact.company_id == p.company_id)
+        .values(telegram_username=None, instagram=None, anonymised_at=NOW)
+    )
+    await session.commit()
+    report = await world.walk("year", now=NOW + DAY)
+    assert report.deleted == 0
+    assert await local(session) == _lost_rows(p)
+
+
+async def test_a_purge_keeps_the_lost_rows(world, session):
+    # 04 §7: a purge keeps dnc|legal|lost|client rows and removes the company.
+    p = await _lost_with_a_contact(world, session, 7)
+    await session.execute(sa.delete(Contact).where(Contact.company_id == p.company_id))
+    await session.execute(
+        sa.update(Company)
+        .where(Company.id == p.company_id)
+        .values(state="purged", telegram_channel=None)
+    )
+    await session.commit()
+    report = await world.walk("year", now=NOW + DAY)
+    assert report.deleted == 0
+    assert await local(session) == _lost_rows(p)
+
+
+async def test_a_loss_read_after_the_merge_finds_the_moved_contacts(world, session):
+    cid = await world.company(8, telegram_channel="namuna_kanal")
+    await add_contact(session, cid, telegram_username="namuna_ofis",
+                      instagram="namuna_ofis")  # fmt: skip
+    p = await world.push(8, company_id=cid)
+    tgt = await world.company(9)
+    await merge(session, cid, tgt)  # before the seller closed the lead
+    world.fake.move(world.lead(p).id, "lost", reason="Qayta qilinmasin")
+    await world.walk()
+    assert await local(session) == _lost_rows(p)
+
+
+async def test_an_undone_merge_is_no_lineage(world, session):
+    cid = await world.company(10, telegram_channel="namuna_kanal")
+    p = await world.push(10, company_id=cid)
+    tgt = await world.company(11, telegram_channel="namuna_bosh")
+    q = await world.push(11, company_id=tgt)
+    await merge(session, cid, tgt)
+    # T-17's unmerge: the source active again, the merge_log row stamped.
+    await session.execute(
+        sa.update(Company)
+        .where(Company.id == cid)
+        .values(state="active", merged_into=None)
+    )
+    await session.execute(
+        sa.update(MergeLog).values(undone_at=NOW - DAY, undone_by="owner:1")
+    )
+    await session.commit()
+    for pushed in (p, q):
+        world.fake.move(world.lead(pushed).id, "lost", reason="Qayta qilinmasin")
+    await world.walk()
+    # Each company's never-again sits on its own keys only.
+    assert await local(session) == {
+        ("lost", "phone_tail", p.tail, because(p)),
+        ("lost", "tg_username", "namuna_kanal", because(p)),
+        ("lost", "phone_tail", q.tail, because(q)),
+        ("lost", "tg_username", "namuna_bosh", because(q)),
+    }
+
+
+async def test_a_row_let_go_passes_to_a_merged_company_s_lineage(world, session):
+    """A and a merged company S hold one handle (S's contact now sits on its
+    target T): when A's loss is revived, the company that holds the handle is
+    T, and the label that wants it is S's — the lineage finds it."""
+    a = await world.company(13)
+    await add_contact(session, a, telegram_username="namuna_ofis")
+    first = await world.push(13, company_id=a)
+    world.fake.move(world.lead(first).id, "lost", reason="Qayta qilinmasin")
+    await world.walk("cursor")
+    world.clock.set(NOW)
+    src = await world.company(14)
+    await add_contact(session, src, telegram_username="namuna_ofis")
+    second = await world.push(14, company_id=src)
+    await merge(session, src, await world.company(15))
+    world.fake.move(world.lead(second).id, "lost", reason="Qayta qilinmasin")
+    await world.walk("cursor", now=NOW + timedelta(hours=1))
+    held = ("lost", "tg_username", "namuna_ofis")
+    assert (*held, because(first)) in await local(session)
+    world.clock.set(NOW + timedelta(hours=2))
+    world.fake.revive(world.lead(first).id)
+    report = await world.walk("cursor", now=NOW + timedelta(hours=3))
+    assert report.rows == 1
+    assert await local(session) == {
+        ("lost", "phone_tail", second.tail, because(second)),
+        (*held, because(second)),
+    }
+
+
+async def test_a_key_the_suppression_table_cannot_hold_is_left_out(world, session):
+    # ck_suppression_key: 3–200 characters; companies.instagram only has to
+    # be lower case, a domain only to look like one.
+    long_domain = "a" * 70 + "." + "b" * 70 + "." + "c" * 60 + ".uz"
+    assert len(long_domain) == 205
+    cid = await world.company(12, instagram="ab", website_domain=long_domain)
+    await add_contact(session, cid, instagram="x" * 201)
+    p = await world.push(12, company_id=cid)
+    world.fake.move(world.lead(p).id, "lost", reason="Qayta qilinmasin")
+    report = await world.walk()
+    assert report.stored == 1
+    assert await local(session) == {("lost", "phone_tail", p.tail, because(p))}
+
+
+# --- the shared phone, and the client a company stays ---------------------------------
+
+
+async def test_a_shared_phone_s_row_passes_over_on_a_walk_that_reads_one_row(
+    world, session
+):
+    """The cursor walk carries only the revived company's row (the other's
+    did not move): the company holding the same phone is found and takes the
+    row over in place."""
+    first = await world.push(17)
+    world.fake.win(world.lead(first).id)
+    world.clock.set(NOW - timedelta(hours=20))
+    second = await world.push(18, phone_n=17)  # the belt refuses it
+    await world.walk("cursor")
+    row_id = await session.scalar(sa.select(Suppression.id))
+    world.clock.set(NOW + timedelta(hours=1))
+    world.fake.revive(world.lead(first).id)
+    report = await world.walk("cursor", now=NOW + timedelta(hours=2))
+    assert report.rows == 1
+    assert await local(session) == {
+        ("client", "phone_tail", first.tail, because(second, "erp_belt:"))
+    }
+    assert await session.scalar(sa.select(Suppression.id)) == row_id
+
+
+async def test_a_client_row_on_another_of_its_phones_keeps_it_a_client(world, session):
+    p = await world.push(97)
+    await add_contact(session, p.company_id, phone="+998" + tail(98), phone_kind="mobile")
+    session.add(
+        Suppression(kind="client", key_type="phone_tail", key=tail(98),
+                    source="manual_import")
+    )  # fmt: skip
+    await session.commit()
+    world.fake.win(world.lead(p).id)
+    await world.walk()
+    world.clock.set(NOW + timedelta(hours=1))
+    world.fake.revive(world.lead(p).id)
+    await world.walk("recent", now=NOW + timedelta(hours=2))
+    assert await local(session) == set()
+    assert (await company(session, p.company_id)).state == "client"
+
+
+async def test_a_won_outcome_on_a_merged_or_purged_company_moves_no_state(world, session):
+    tgt = await world.company(66)
+    merged = await world.push(67)
+    purged = await world.push(68)
+    for p in (merged, purged):
+        world.fake.win(world.lead(p).id)
+    await merge(session, merged.company_id, tgt)
+    await session.execute(
+        sa.update(Company).where(Company.id == purged.company_id).values(state="purged")
+    )
+    await session.commit()
+    report = await world.walk()
+    assert report.labels == {"won": 2}
+    assert (await company(session, merged.company_id)).state == "merged"
+    assert (await company(session, purged.company_id)).state == "purged"
+    assert await local(session) == {
+        ("client", "phone_tail", merged.tail, because(merged)),
+        ("client", "phone_tail", purged.tail, because(purged)),
+    }
+
+
+# --- the recompute's lock, the stale hit ----------------------------------------------
+
+
+def _try_lock() -> sa.Select[tuple[bool]]:
+    return sa.select(
+        sa.func.pg_try_advisory_xact_lock(sa.func.hashtext(outcomes.EFFECTS_LOCK))
+    )
+
+
+async def test_the_recompute_holds_the_effects_lock(world, session):
+    p = await world.push(94)
+    await outcomes.apply_effects(session, [p.company_id], now=NOW)
+    async with SessionLocal() as other:
+        assert await other.scalar(_try_lock()) is False
+        await other.rollback()
+    await session.commit()
+    async with SessionLocal() as other:
+        assert await other.scalar(_try_lock()) is True
+        await other.rollback()
+
+
+async def test_the_stale_hit_counts_only_since_the_last_full_pull(world, session):
+    world.fake.add_client([phone(95)])
+    await world.push(95)
+    await world.walk()
+    await erp_feeds.sync_suppression(session, world.erp, mode="full", now=NOW)
+    assert "suppression_stale_hit" not in await raised(session)
+    world.fake.add_client([phone(96)])
+    world.clock.set(NOW)
+    await world.push(96)
+    await world.walk(now=NOW + timedelta(hours=1))
+    # Two refusals labelled, one of them after the pull that cleared the first.
+    assert (await raised(session))["suppression_stale_hit"]["detail"] == {"n": 1}
+
+
+async def test_a_capped_push_is_no_stale_hit(world, session):
+    cid = await world.company(93)
+    world.fake.modes[f"cs:{cid}:202610"] = "capped"
+    p = await world.push(93, company_id=cid)
+    report = await world.walk()
+    assert (await outcome(session, p.external_id)).label == "dropped_capped"
+    assert report.stale_hits == 0
+    assert "suppression_stale_hit" not in await raised(session)
+    assert await local(session) == set()
+
+
+async def test_an_outcomes_walk_that_reads_ends_the_feed_s_breaker(world, session):
+    await erp_feeds.trip_breaker(session, "push_404", status=404, now=NOW - DAY)
+    await session.commit()
+    await world.walk()
+    row = await session.get(Source, "erp_sync", populate_existing=True)
+    assert row is not None and (row.breaker_until, row.breaker_reason) == (None, None)
+
+
+# --- unknown → sent: which row, which status, which candidate --------------------------
+
+
+async def test_a_re_push_the_feed_shows_is_the_row_promoted(world, session):
+    """Rule 5's re-push: the first delivery superseded, the second unknown —
+    the feed's row is about the live one, which is promoted, and its sent_at
+    ages the label."""
+    first = await world.push(65, sent_at=NOW - timedelta(days=40), post=False,
+                             superseded_at=NOW - timedelta(days=2))  # fmt: skip
+    again = await world.push(65, company_id=first.company_id, status="unknown",
+                             http=None, sent_at=NOW - timedelta(days=2), attempt=2,
+                             candidate_id=first.candidate_id)  # fmt: skip
+    report = await world.walk()
+    assert report.promoted == 1
+    rows = {
+        r.attempt: (r.status, r.superseded_at)
+        for r in await session.scalars(
+            sa.select(PushLog).execution_options(populate_existing=True)
+        )
+    }
+    assert rows == {1: ("sent", NOW - timedelta(days=2)), 2: ("sent", None)}
+    assert again.push_id != first.push_id
+    assert (await outcome(session, first.external_id)).label == "open_untouched"
+
+
+async def test_an_unknown_push_with_a_5xx_is_promoted_with_no_status(world, session):
+    # A 503, then a try that timed out: the feed shows the id, so it landed —
+    # and the 503 was not its answer.
+    p = await world.push(91, status="unknown", http=503, sent_at=NOW - timedelta(days=3))
+    report = await world.walk()
+    assert report.promoted == 1
+    row = await session.get(PushLog, p.push_id, populate_existing=True)
+    assert row is not None and (row.status, row.http_status) == ("sent", None)
+    cand = await session.get(LeadCandidate, p.candidate_id, populate_existing=True)
+    assert cand is not None and cand.state == "pushed"
+
+
+async def test_a_promotion_moves_only_an_approved_candidate(world, session):
+    p = await world.push(92, status="unknown", http=None)
+    await session.execute(
+        sa.update(LeadCandidate)
+        .where(LeadCandidate.id == p.candidate_id)
+        .values(state="review")
+    )
+    await session.commit()
+    report = await world.walk()
+    assert report.promoted == 1
+    row = await session.get(PushLog, p.push_id, populate_existing=True)
+    assert row is not None and row.status == "sent"
+    cand = await session.get(LeadCandidate, p.candidate_id, populate_existing=True)
+    assert cand is not None
+    assert (cand.state, cand.pushed_at, cand.external_id) == ("review", None, None)
+
+
+# --- the 48-hour rule: what it reads, when it may run -----------------------------------
+
+
+async def test_a_failed_push_is_never_unconfirmed(world, session):
+    await world.push(69, status="failed", http=503, sent_at=NOW - timedelta(days=3),
+                     post=False)  # fmt: skip
+    await _nightly(world)
+    report = await erp_feeds.reconcile_unconfirmed(session, world.erp, now=NOW)
+    assert (report.checked, report.unconfirmed, report.repushable) == (True, 0, [])
+    assert "push_unconfirmed" not in await raised(session)
+
+
+@pytest.mark.parametrize(
+    ("ago", "checked"),
+    [(timedelta(hours=25), True), (timedelta(hours=25, microseconds=1), False)],
+    ids=["25 h", "past 25 h"],
+)
+async def test_the_nightly_walks_count_for_25_hours(world, session, ago, checked):
+    await _nightly(world, NOW - ago)
+    report = await erp_feeds.reconcile_unconfirmed(session, world.erp, now=NOW)
+    assert report.checked is checked
+
+
+def test_the_nightly_pair_is_the_cursor_walk_then_the_recent_one():
+    at = NOW - timedelta(hours=1)
+    pair = erp_feeds.OutcomesConfig(last_cursor_at=at, last_recent_at=at)
+    assert pair.nightly_done(NOW)
+    early = erp_feeds.OutcomesConfig(last_cursor_at=at, last_recent_at=at - DAY)
+    assert not early.nightly_done(NOW)
+    assert not erp_feeds.OutcomesConfig(last_cursor_at=at).nightly_done(NOW)
+
+
+# --- the catch-up of a Sunday or monthly walk that did not complete --------------------
+
+
+def test_the_catch_up_is_due_past_a_week_and_the_longest_month():
+    on_time = erp_feeds.OutcomesConfig(
+        last_quarter_at=NOW - timedelta(days=7, hours=1),
+        last_year_at=NOW - timedelta(days=31, hours=1),
+    )
+    assert on_time.catch_up(NOW) == ()
+    assert on_time.catch_up(NOW + timedelta(microseconds=1)) == ("quarter", "year")
+    # A normal Sunday 03:00: last Sunday's 03:20 walk is 6 d 23 h 40 min old.
+    sunday = erp_feeds.OutcomesConfig(
+        last_quarter_at=NOW - timedelta(days=6, hours=23, minutes=40),
+        last_year_at=NOW - DAY,
+    )
+    assert sunday.catch_up(NOW) == ()
+    # Never completed: the switch-over day (05 §B.3).
+    assert erp_feeds.OutcomesConfig().catch_up(NOW) == ("quarter", "year")
+
+
+async def test_the_nightly_run_catches_up_a_missed_sunday(world, session):
+    await world.push(83)
+    await world.walk("quarter", NOW - timedelta(days=8))
+    await world.walk("year", NOW - timedelta(days=3))
+    world.fake.gets.clear()
+    report = await erp_sync.run("outcomes", fetcher=a_fetcher(), now=NOW, erp=world.erp)
+    assert report.status == "ok"
+    assert world.gets() == [
+        {"limit": "1000"},
+        {"limit": "1000", "since": erp_feeds.fmt_since(NOW - timedelta(days=8))},
+        {"limit": "1000", "since": erp_feeds.fmt_since(NOW - timedelta(days=90))},
+    ]
+    assert report.meta["catch_up"] == ["quarter"]
+    assert set(report.meta["outcomes"]) == {"cursor", "recent", "quarter"}
+    assert report.meta["reconcile"]["checked"] is True
+    cfg = await erp_feeds.outcomes_config(session)
+    assert (cfg.last_quarter_at, cfg.last_year_at) == (NOW, NOW - timedelta(days=3))
+
+
+async def test_a_failing_catch_up_never_holds_the_rule(world, session):
+    lost = await world.push(84, sent_at=NOW - timedelta(days=3), post=False)
+    # Cursor and recent answer; the overdue quarter walk gets four 503s.
+    world.fake.feed_modes[PATH] = ["ok", "ok", *["feed_503"] * 4]
+    report = await erp_sync.run("outcomes", fetcher=a_fetcher(), now=NOW, erp=world.erp)
+    assert report.status == "failed"
+    assert report.meta["catch_up"] == ["quarter", "year"]
+    assert report.meta["reconcile"] == {
+        "checked": True,
+        "unconfirmed": 1,
+        "repushable": [lost.push_id],
+    }
+    assert (await raised(session))["push_unconfirmed"]["detail"]["n"] == 1

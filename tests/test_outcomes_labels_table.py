@@ -270,6 +270,7 @@ def _stored(row: FeedRow) -> dict[str, Any]:
         "stored_stage_kind": row.stage_kind,
         "stored_closed_at": row.closed_at,
         "stored_lost_reason": row.lost_reason,
+        "stored_no_contact": row.no_contact,
     }
 
 
@@ -279,6 +280,28 @@ def test_a_renamed_label_keeps_the_text_chosen_at_the_move():
     carried = carry_lost_reason(after, **_stored(before))
     assert carried.lost_reason == "Narx qimmat"
     assert derive_label(carried, pushed_at=PUSHED, now=NOW) == ("lost_price", "neutral")
+
+
+def test_a_never_again_whose_spelling_left_the_setting_stays_never_again():
+    # «Qayta qilinmasin» was a label of the setting only; the owner replaced
+    # the spelling there: the ERP now sends null and no_contact=false for the
+    # old lead. 02 §2.11 reads the row as unchanged — its label stands.
+    before = erp_feeds.parse_outcome(lost("Qayta qilinmasin", no_contact=True))
+    after = erp_feeds.parse_outcome(lost(None, no_contact=False))
+    carried = carry_lost_reason(after, **_stored(before))
+    assert (carried.lost_reason, carried.no_contact) == ("Qayta qilinmasin", True)
+    assert derive_label(carried, pushed_at=PUSHED, now=NOW) == (
+        "lost_no_contact",
+        "negative",
+    )
+
+
+def test_a_label_the_erp_still_sends_is_never_overridden():
+    # The setting dropped the spelling but the dictionary still has it: the
+    # ERP sends the label with no_contact=false — its answer, not a rename.
+    before = erp_feeds.parse_outcome(lost("Qayta qilinmasin", no_contact=True))
+    after = erp_feeds.parse_outcome(lost("Qayta qilinmasin", no_contact=False))
+    assert carry_lost_reason(after, **_stored(before)) == after
 
 
 @pytest.mark.parametrize(
@@ -297,6 +320,15 @@ def test_nothing_else_is_carried(now_row):
     before = erp_feeds.parse_outcome(lost("Narx qimmat"))
     row = erp_feeds.parse_outcome(now_row)
     assert carry_lost_reason(row, **_stored(before)) == row
+
+
+def test_a_reason_stored_on_a_row_that_was_not_lost_is_never_carried():
+    # Only a lost row was decided with that reason: whatever a stored won (or
+    # open) row carries, the lead's loss is a new decision of its own.
+    row = erp_feeds.parse_outcome(lost(None))
+    stored = _stored(erp_feeds.parse_outcome(lost("Narx qimmat")))
+    assert carry_lost_reason(row, **(stored | {"stored_stage_kind": "won"})) == row
+    assert carry_lost_reason(row, **(stored | {"stored_stage_kind": None})) == row
 
 
 def test_a_free_text_loss_is_never_given_a_label():

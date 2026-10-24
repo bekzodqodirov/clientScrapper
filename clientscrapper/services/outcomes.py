@@ -4,7 +4,10 @@ One feed row of ``GET /api/agent/outcomes`` (``FeedRow``, parsed by
 ``erp_feeds.parse_outcome``) becomes one ``outcomes`` row, keyed by its
 ``external_id``, written only for an id the agent pushed (``push_log``): the
 «Boshqa» clause is permanent and anybody holding that key can post ``cs:`` ids
-(05 §A.13), so every other row is ``foreign`` and dropped.
+(05 §A.13), so every other row is ``foreign`` and dropped. Foreignness is
+decided FIRST, from the id alone (``pushed_id``): a foreign row is never
+validated, so nothing a stranger posts — a 3,000-character id, a kub the
+column cannot hold — can refuse the page our own rows are on.
 
 ``derive_label`` is THE label rule (pure; the table of 05 §B.2 is its
 picture): ``no_contact`` is the ERP's own answer, ``won`` is the stage (never
@@ -16,20 +19,25 @@ setting label, a seller's free text never leaves it (``LOST_REASON_PATTERNS``).
 ``apply_effects`` recomputes, per company, the local suppression rows and the
 company flags its CURRENT labels justify — so a label that changes takes back
 what the old one wrote (the retractions): a lead revived out of lost, moved
-from won back to open, or given another reason. Kept stricter on purpose and
-never taken back here: ``bounced`` (a wrong number is a fact about the
-number), ``companies.is_competitor`` (the owner clears it by hand), every row
-a person wrote and every ``erp_feed`` / ``manual_import`` row (their own syncs
-own them). A row this module writes is ``source='outcomes'`` with
-``reason='outcome:<external_id>'`` or ``'erp_belt:<external_id>'`` — that is
-how it finds its own rows again.
+from won back to open, or given another reason. A company's keys are read
+over its lineage (04 §2.5: ``push_log`` and ``outcomes`` are never re-pointed
+by a merge, so a merged source's contacts are found on its target). Kept
+stricter on purpose and never taken back here: ``bounced`` (a wrong number is
+a fact about the number), ``companies.is_competitor`` (the owner clears it by
+hand), every row a person wrote and every ``erp_feed`` / ``manual_import`` row
+(their own syncs own them) — and a ``lost`` row while the ``lost_no_contact``
+label that wrote it stands (``KEPT_WHILE_STANDING``): its key can leave the
+company (a merge moves the contact, an anonymisation or a purge clears it)
+while the decision «never again» did not move. A row this module writes is
+``source='outcomes'`` with ``reason='outcome:<external_id>'`` or
+``'erp_belt:<external_id>'`` — that is how it finds its own rows again.
 
 ``carry_lost_reason`` is the one place a stored value outranks the feed: a
 renamed dictionary label comes back as ``lost_reason: null`` on every old
 lead (the ERP compares with the CURRENT labels, verify:final), while the
-lead, its stage and its decision moved nowhere; the text chosen at the move
-is kept so the label and its cooldown do not flip (05 §B.6 «old leads keep
-their spelling»).
+lead, its stage and its decision moved nowhere; the row is read as unchanged
+— its stored reason and ``no_contact``, so its label and its cooldown or lost
+rows do not flip (02 §2.11 «a renamed dictionary label», 05 §B.6).
 """
 
 from __future__ import annotations
@@ -53,10 +61,12 @@ from clientscrapper.db.models import (
     Company,
     Contact,
     LeadCandidate,
+    MergeLog,
     Outcome,
     PushLog,
     Suppression,
 )
+from clientscrapper.db.models.leads import EXTERNAL_ID_RE
 from clientscrapper.services import keys
 
 # --- the feed row (05 §A.9) ------------------------------------------------------------
@@ -115,8 +125,9 @@ class FeedRow(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="ignore", strict=True)
 
-    # Any cs: id the ERP holds — a foreign one too, which is skipped, not refused.
-    external_id: Annotated[str, Field(min_length=1, max_length=2048)]
+    # Only an id push_log holds reaches the parser (``pushed_id``, then
+    # ``deliveries``): its own shape, push_log's CHECK.
+    external_id: Annotated[str, Field(pattern=EXTERNAL_ID_RE)]
     intake_id: Uuid
     outcome: Landing
     # suppressed|capped|no_phone|no_contact; a reason added later is dropped_other.
@@ -206,12 +217,17 @@ def carry_lost_reason(
     stored_stage_kind: str | None,
     stored_closed_at: datetime | None,
     stored_lost_reason: str | None,
+    stored_no_contact: bool,
 ) -> FeedRow:
-    """The stored label, when the feed now sends ``null`` for the reason of a
-    lead that is still lost with the same decision — a dictionary label was
-    renamed (or the setting no longer lists it), and the ERP compares with
-    the current labels only. A revival and a new loss re-stamp ``closed_at``,
-    so they are never carried."""
+    """The row read as unchanged when the feed now sends ``null`` for the
+    reason of a lead that is still lost with the same decision — a dictionary
+    label was renamed (or the setting no longer lists a text that was only
+    its label), and the ERP compares with the current labels only (02 §2.11
+    «a renamed dictionary label»). The stored reason AND ``no_contact`` are
+    carried, so the label the row had stands — a «never again» stays
+    lost_no_contact although the setting no longer names its old spelling.
+    A revival and a new loss re-stamp ``closed_at``, so they are never
+    carried."""
     if (
         row.stage_kind == "lost"
         and row.lost_reason is None
@@ -220,11 +236,30 @@ def carry_lost_reason(
         and stored_closed_at is not None
         and row.closed_at == stored_closed_at
     ):
-        return row.model_copy(update={"lost_reason": stored_lost_reason})
+        return row.model_copy(
+            update={"lost_reason": stored_lost_reason, "no_contact": stored_no_contact}
+        )
     return row
 
 
 # --- one page recorded (05 §B.2 per-row steps 1–4) -------------------------------------
+
+_PUSHED_ID: Final = re.compile(EXTERNAL_ID_RE)
+# A raw row → its ``FeedRow`` (``erp_feeds.parse_outcome``, which raises
+# ``FeedShapeError``; erp_feeds imports this module, so it is handed in).
+Parse = Callable[[Mapping[str, Any]], FeedRow]
+
+
+def pushed_id(src: Mapping[str, Any]) -> str | None:
+    """The raw row's ``external_id`` when it has the shape of an id the agent
+    can have pushed (push_log's own CHECK, ``EXTERNAL_ID_RE``), else None.
+    Read before anything else in the row: the id is the one field a stranger
+    with the «Boshqa» key chooses (05 §A.13), and the ERP keeps one of up to
+    2,048 bytes as sent — and longer whenever its index takes it."""
+    eid = src.get("external_id")
+    if isinstance(eid, str) and _PUSHED_ID.fullmatch(eid):
+        return eid
+    return None
 
 
 @dataclass(frozen=True, slots=True)
@@ -305,26 +340,25 @@ async def deliveries(
 
 async def record_page(
     session: AsyncSession,
-    rows: Sequence[FeedRow],
     raw: Sequence[Mapping[str, Any]],
     *,
+    parse: Parse,
     now: datetime,
     hasher: Hasher | None = None,
 ) -> PageResult:
     """Steps 1–4 of 05 §B.2 for one page, in the caller's transaction:
-    foreign rows skipped, every other row upserted with its label, the
+    foreign rows skipped — decided from the id alone, before ``parse`` sees
+    the row — every other row parsed and upserted with its label, the
     touched companies' effects recomputed, an ``unknown`` push promoted to
-    ``sent`` and its candidate to ``pushed``. ``raw[i]`` is ``rows[i]`` as the
-    feed sent it (``outcomes.raw``)."""
-    result = PageResult(rows=len(rows))
+    ``sent`` and its candidate to ``pushed``. ``raw`` is the page's rows as
+    the feed sent them (``outcomes.raw``); a row of ours that ``parse``
+    refuses refuses the page."""
+    result = PageResult(rows=len(raw))
     await _lock(session)
-    found = await deliveries(session, (r.external_id for r in rows))
-    ours = [
-        (row, dict(src))
-        for row, src in zip(rows, raw, strict=True)
-        if row.external_id in found
-    ]
-    result.foreign = len(rows) - len(ours)
+    claimed = [(src, eid) for src in raw if (eid := pushed_id(src)) is not None]
+    found = await deliveries(session, (eid for _, eid in claimed))
+    ours = [(parse(src), dict(src)) for src, eid in claimed if eid in found]
+    result.foreign = len(raw) - len(ours)
     if not ours:
         return result
     stored = {
@@ -345,6 +379,7 @@ async def record_page(
                 stored_stage_kind=old.stage_kind,
                 stored_closed_at=old.closed_at,
                 stored_lost_reason=old.lost_reason,
+                stored_no_contact=old.no_contact,
             )
         label, precision = derive_label(row, pushed_at=push.sent_at, now=now)
         if old is None or old.label != label:
@@ -424,12 +459,17 @@ async def _upsert_outcomes(session: AsyncSession, values: list[dict[str, Any]]) 
 
 async def _promote(session: AsyncSession, pushes: Sequence[Delivery]) -> int:
     """Step 4: the ERP shows the id, so an ``unknown`` push landed — it
-    becomes ``sent`` (``http_status`` stays as it was; ck_push_log_sent lets
-    a NULL through) and its candidate ``approved → pushed``. A superseded
-    row is history and stays as it is."""
+    becomes ``sent`` and its candidate ``approved → pushed`` (a candidate in
+    any other state keeps it). ``http_status`` stays as it was when it is a
+    2xx or NULL; any other status is a try whose answer said nothing landed
+    (a 503, then a try that timed out), not the answer of the delivery the
+    feed now shows, which was never read — it becomes NULL (ck_push_log_sent:
+    sent ⇒ 2xx or no HTTP answer). A superseded row is history and stays as
+    it is."""
     ids = [p.id for p in pushes if p.status == "unknown"]
     if not ids:
         return 0
+    answered = PushLog.http_status.between(200, 299)
     promoted = (
         await session.execute(
             sa.update(PushLog)
@@ -437,12 +477,11 @@ async def _promote(session: AsyncSession, pushes: Sequence[Delivery]) -> int:
                 PushLog.id.in_(ids),
                 PushLog.status == "unknown",
                 PushLog.superseded_at.is_(None),
-                sa.or_(
-                    PushLog.http_status.is_(None),
-                    PushLog.http_status.between(200, 299),
-                ),
             )
-            .values(status="sent")
+            .values(
+                status="sent",
+                http_status=sa.case((answered, PushLog.http_status), else_=sa.null()),
+            )
             .returning(
                 PushLog.id, PushLog.candidate_id, PushLog.external_id, PushLog.sent_at
             )
@@ -470,6 +509,18 @@ WRONG_NUMBER_TIMES: Final = 2
 CLIENT_LABELS: Final[frozenset[str]] = frozenset({"won", "landed_client"})
 # The rows an outcome never takes back (02 §2.11 «kept stricter on purpose»).
 NEVER_RETRACTED: Final[frozenset[str]] = frozenset({"bounced"})
+# label → the kinds of row it wrote that stand while it stands, whatever the
+# company holds now. A lost_no_contact row sits on a handle, a domain or a
+# STIR the company can lose — a merge moves the contact to its target (04
+# §2.5), an anonymisation nulls the handle, a purge deletes the contact and
+# keeps the lost rows (04 §7) — while the decision «never again» did not
+# move; only a changed label takes it back (02 §2.11). Every other row sits
+# on the pushed phone or the company id, which never leave.
+KEPT_WHILE_STANDING: Final[Mapping[str, frozenset[str]]] = {
+    "lost_no_contact": frozenset({"lost"}),
+}
+# merged_into hops followed to a company's root (a chain is one or two long).
+ROOT_HOPS: Final = 16
 # Serialises the recompute across processes (the nightly walk, reconcile's
 # 10-minute walk): two of them over one company would each delete what the
 # other is inserting.
@@ -499,13 +550,14 @@ class Labelled:
 @dataclass(frozen=True, slots=True)
 class CompanyKeys:
     """What a company is known by, beyond the pushed phone (02 §2.11
-    ``lost_no_contact``: the ERP suppresses by phone only)."""
+    ``lost_no_contact``: the ERP suppresses by phone only) — over its
+    lineage, so a merged company's and its target's are one set."""
 
     id: uuid.UUID
     tg_usernames: frozenset[str] = frozenset()
     instagrams: frozenset[str] = frozenset()
-    domain: str | None = None
-    stir: str | None = None
+    domains: frozenset[str] = frozenset()
+    stirs: frozenset[str] = frozenset()
     phone_tails: frozenset[str] = frozenset()
 
 
@@ -568,10 +620,11 @@ def desired(
             for handle in sorted(company.instagrams):
                 if _key_ok(handle):
                     add(("lost", "instagram", handle), because)
-            if company.domain and _key_ok(company.domain):
-                add(("lost", "domain", company.domain), because)
-            if company.stir:
-                add(("lost", "stir", company.stir), because)
+            for domain in sorted(company.domains):
+                if _key_ok(domain):
+                    add(("lost", "domain", domain), because)
+            for stir in sorted(company.stirs):
+                add(("lost", "stir", stir), because)
         elif item.label in ("lost_price", "lost_not_importer"):
             span = PRICE_COOLDOWN if item.label == "lost_price" else NOT_IMPORTER_COOLDOWN
             until = item.label_changed_at + span
@@ -615,11 +668,13 @@ async def apply_effects(
     """Recompute the companies' ``source='outcomes'`` suppression rows,
     ``companies.state`` and ``is_competitor`` from their current labels, in
     the caller's transaction (02 §2.11). A row a company no longer wants is
-    deleted — unless another company's labels want it too, which then names
-    it; a missing one is inserted; a row another source wrote is never
-    touched. ``hasher`` hashes a tail as the feed does
-    (``ErpClient.hash_tail``; default: under ``CRM_AGENT_KEY``) — the client
-    check reads the feed's hashed rows too."""
+    deleted — unless another company's labels want it too, which then takes
+    it over in place (the row keeps its id: a candidate's ``suppressed_by``
+    points at it, 02 §2.9); a missing one is inserted; a lost row stands
+    while the label that wrote it stands (``KEPT_WHILE_STANDING``); a row
+    another source wrote is never touched. ``hasher`` hashes a tail as the
+    feed does (``ErpClient.hash_tail``; default: under ``CRM_AGENT_KEY``) —
+    the client check reads the feed's hashed rows too."""
     ids = sorted(set(company_ids))
     if not ids:
         return Effects()
@@ -636,10 +691,12 @@ async def apply_effects(
     effects = Effects(companies=len(ids))
     wants = {c: desired(k, loaded.labelled[c], wrong_numbers=loaded.wrong, now=now)
              for c, k in loaded.companies.items()}  # fmt: skip
-    gone = await _delete_unwanted(session, loaded, wants)
-    effects.deleted = len(gone)
-    # A row one company let go may still be another's (a shared phone).
-    others = await _companies_wanting(session, gone, exclude=set(ids))
+    unwanted = await _unwanted(session, loaded, wants)
+    # A row one company lets go may still be another's (a shared phone, a
+    # handle two companies hold).
+    others = await _companies_wanting(
+        session, [row.triple for row in unwanted], exclude=set(ids)
+    )
     if others:
         more = await _load(session, sorted(others))
         loaded.merge(more)
@@ -649,7 +706,9 @@ async def apply_effects(
                 for c, k in more.companies.items()
             }  # fmt: skip
         )
+    effects.deleted, handed = await _let_go(session, unwanted, wants)
     effects.inserted, effects.updated = await _write_wanted(session, loaded, wants)
+    effects.updated += handed
     await _flags(session, loaded, ids, hash_tail, effects)
     return effects
 
@@ -691,9 +750,62 @@ def _first_tail(where: sa.ColumnElement[bool]) -> sa.Subquery:
     )
 
 
+async def _lineage(
+    session: AsyncSession, ids: Sequence[uuid.UUID]
+) -> dict[uuid.UUID, frozenset[uuid.UUID]]:
+    """Each company's lineage, read whole: ``merged_into`` followed to the
+    company that holds its rows now (a merged source's contacts sit on its
+    target, 04 §2.5), then that root plus every company merged into it, as
+    ``merge_log`` records it (undone merges excluded) — one statement for
+    any number of companies. A company with no merge is its own lineage."""
+    up = (
+        sa.select(
+            Company.id.label("start"),
+            Company.id.label("id"),
+            sa.literal(0).label("hops"),
+        )
+        .where(Company.id.in_(ids))
+        .cte("up", recursive=True)
+    )
+    up = up.union_all(
+        sa.select(up.c.start, Company.merged_into, up.c.hops + 1)
+        .join(Company, Company.id == up.c.id)
+        .where(
+            Company.state == "merged",
+            Company.merged_into.is_not(None),
+            up.c.hops < ROOT_HOPS,
+        )
+    )
+    root = (
+        sa.select(up.c.start, up.c.id)
+        .distinct(up.c.start)
+        .order_by(up.c.start, up.c.hops.desc())
+        .cte("root")
+    )
+    down = sa.select(root.c.start, root.c.id).cte("down", recursive=True)
+    down = down.union(
+        sa.select(down.c.start, MergeLog.source_company_id)
+        .join(MergeLog, MergeLog.target_company_id == down.c.id)
+        .where(MergeLog.undone_at.is_(None))
+    )
+    groups: dict[uuid.UUID, set[uuid.UUID]] = {c: {c} for c in ids}
+    for start, member in await session.execute(sa.select(down.c.start, down.c.id)):
+        groups.setdefault(start, {start}).add(member)
+    return {c: frozenset(g) for c, g in groups.items()}
+
+
+@dataclass(slots=True)
+class _Keys:
+    tg: set[str] = field(default_factory=set)
+    ig: set[str] = field(default_factory=set)
+    tails: set[str] = field(default_factory=set)
+    domains: set[str] = field(default_factory=set)
+    stirs: set[str] = field(default_factory=set)
+
+
 async def _load(session: AsyncSession, ids: Sequence[uuid.UUID]) -> _Loaded:
-    """Everything the recompute reads, in four statements for any number of
-    companies."""
+    """Everything the recompute reads, in a fixed number of statements for
+    any number of companies; a company's keys over its lineage."""
     loaded = _Loaded()
     first_tail = _first_tail(PushLog.company_id.in_(ids))
     rows = await session.execute(
@@ -711,24 +823,25 @@ async def _load(session: AsyncSession, ids: Sequence[uuid.UUID]) -> _Loaded:
         loaded.labelled.setdefault(r.company_id, []).append(
             Labelled(r.external_id, r.label, r.label_changed_at, r.phone_tail.strip())
         )
-    handles: dict[uuid.UUID, tuple[set[str], set[str], set[str]]] = {
-        c: (set(), set(), set()) for c in ids
-    }
+    groups = await _lineage(session, ids)
+    members = sorted({m for g in groups.values() for m in g})
+    held: dict[uuid.UUID, _Keys] = {m: _Keys() for m in members}
+    live = sa.and_(Contact.company_id.in_(members), Contact.anonymised_at.is_(None))
     for c in await session.execute(
         sa.select(
             Contact.company_id,
             Contact.telegram_username,
             Contact.instagram,
             Contact.phone_tail,
-        ).where(Contact.company_id.in_(ids), Contact.anonymised_at.is_(None))  # fmt: skip
+        ).where(live)
     ):
-        tg, ig, tails = handles[c.company_id]
+        k = held[c.company_id]
         if c.telegram_username:
-            tg.add(c.telegram_username)
+            k.tg.add(c.telegram_username)
         if c.instagram:
-            ig.add(c.instagram)
+            k.ig.add(c.instagram)
         if c.phone_tail:
-            tails.add(c.phone_tail.strip())
+            k.tails.add(c.phone_tail.strip())
     for co in await session.execute(
         sa.select(
             Company.id,
@@ -739,24 +852,34 @@ async def _load(session: AsyncSession, ids: Sequence[uuid.UUID]) -> _Loaded:
             Company.state,
             Company.exclude_reason,
             Company.is_competitor,
-        ).where(Company.id.in_(ids))
+        ).where(Company.id.in_(members))
     ):
-        tg, ig, tails = handles[co.id]
+        k = held[co.id]
         if co.telegram_channel:
-            tg.add(co.telegram_channel)
+            k.tg.add(co.telegram_channel)
         if co.instagram:
-            ig.add(co.instagram)
-        tails.update(x.phone_tail for x in loaded.labelled.get(co.id, ()))
-        loaded.companies[co.id] = CompanyKeys(
-            id=co.id,
-            tg_usernames=frozenset(tg),
-            instagrams=frozenset(ig),
-            domain=co.website_domain,
-            stir=co.stir.strip() if co.stir else None,
+            k.ig.add(co.instagram)
+        if co.website_domain:
+            k.domains.add(co.website_domain)
+        if co.stir:
+            k.stirs.add(co.stir.strip())
+        if co.id in groups:
+            loaded.state[co.id] = (co.state, co.exclude_reason, co.is_competitor)
+    for company_id in ids:
+        if company_id not in loaded.state:
+            continue  # no such company
+        lineage = [held[m] for m in sorted(groups[company_id])]
+        tails = {t for k in lineage for t in k.tails}
+        tails.update(x.phone_tail for x in loaded.labelled.get(company_id, ()))
+        loaded.companies[company_id] = CompanyKeys(
+            id=company_id,
+            tg_usernames=frozenset(t for k in lineage for t in k.tg),
+            instagrams=frozenset(i for k in lineage for i in k.ig),
+            domains=frozenset(d for k in lineage for d in k.domains),
+            stirs=frozenset(s for k in lineage for s in k.stirs),
             phone_tails=frozenset(tails),
         )
-        loaded.state[co.id] = (co.state, co.exclude_reason, co.is_competitor)
-        loaded.labelled.setdefault(co.id, [])
+        loaded.labelled.setdefault(company_id, [])
     wrong_tails = sorted(
         {
             x.phone_tail
@@ -806,19 +929,31 @@ async def _sharing_wrong_numbers(
     return {c for c in found if c is not None and c not in exclude}
 
 
-async def _delete_unwanted(
+@dataclass(frozen=True, slots=True)
+class _Owned:
+    """A row of ours a company's labels no longer justify."""
+
+    id: int
+    triple: Triple
+    owner: uuid.UUID
+
+
+async def _unwanted(
     session: AsyncSession, loaded: _Loaded, wants: Mapping[uuid.UUID, dict[Triple, Want]]
-) -> list[Triple]:
-    """The companies' own rows their labels no longer justify (never a
-    ``bounced`` one)."""
-    owner = {
-        reason: company_id
-        for company_id in loaded.companies
-        for reason in loaded.owned(company_id)
-    }
+) -> list[_Owned]:
+    """The companies' own rows their labels no longer justify — never a
+    ``bounced`` one, never one the label that wrote it keeps while it
+    stands (``KEPT_WHILE_STANDING``)."""
+    owner: dict[str, uuid.UUID] = {}
+    label_of: dict[str, str] = {}
+    for company_id in loaded.companies:
+        for x in loaded.labelled.get(company_id, ()):
+            for reason in owned_reasons([x.external_id]):
+                owner[reason] = company_id
+                label_of[reason] = x.label
     if not owner:
         return []
-    doomed: list[int] = []
+    found: list[_Owned] = []
     for start in range(0, len(owner), 500):
         chunk = sorted(owner)[start : start + 500]
         mine = await session.execute(
@@ -828,30 +963,62 @@ async def _delete_unwanted(
                 Suppression.key_type,
                 Suppression.key,
                 Suppression.reason,
-            ).where(
+            )
+            .where(
                 Suppression.source == "outcomes",
                 Suppression.reason.in_(chunk),
                 Suppression.kind.not_in(sorted(NEVER_RETRACTED)),
             )
+            .order_by(Suppression.id)
         )
         for r in mine:
-            if (r.kind, r.key_type, r.key) not in wants.get(owner[r.reason], {}):
-                doomed.append(r.id)
-    if not doomed:
-        return []
-    gone = await session.execute(
-        sa.delete(Suppression)
-        .where(Suppression.id.in_(doomed))
-        .returning(Suppression.kind, Suppression.key_type, Suppression.key)
-    )
-    return [(k, t, v) for k, t, v in gone]
+            triple: Triple = (r.kind, r.key_type, r.key)
+            if triple in wants.get(owner[r.reason], {}):
+                continue
+            if r.kind in KEPT_WHILE_STANDING.get(label_of[r.reason], frozenset()):
+                continue
+            found.append(_Owned(r.id, triple, owner[r.reason]))
+    return found
+
+
+async def _let_go(
+    session: AsyncSession,
+    rows: Sequence[_Owned],
+    wants: Mapping[uuid.UUID, dict[Triple, Want]],
+) -> tuple[int, int]:
+    """Delete the rows nobody wants. A row another company's labels want is
+    handed over in place — its reason (and expiry) renamed to that
+    company's, its id kept. Returns (deleted, handed over)."""
+    doomed: list[int] = []
+    handed = 0
+    for row in rows:
+        best: Want | None = None
+        for company_id in sorted(wants):
+            w = wants[company_id].get(row.triple)
+            if company_id == row.owner or w is None:
+                continue
+            if best is None or _better(w, best):
+                best = w
+        if best is None:
+            doomed.append(row.id)
+            continue
+        await session.execute(
+            sa.update(Suppression)
+            .where(Suppression.id == row.id)
+            .values(reason=best.reason, expires_at=best.expires_at)
+        )
+        handed += 1
+    if doomed:
+        await session.execute(sa.delete(Suppression).where(Suppression.id.in_(doomed)))
+    return len(doomed), handed
 
 
 async def _companies_wanting(
     session: AsyncSession, triples: Sequence[Triple], *, exclude: set[uuid.UUID]
 ) -> set[uuid.UUID]:
     """Companies outside ``exclude`` whose labels may want one of these rows:
-    a push on the same phone, or the same handle, domain or STIR."""
+    a push on the same phone, or a lineage holding the same handle, domain
+    or STIR (a merged source's keys sit on its target)."""
     found: set[uuid.UUID | None] = set()
     tails = sorted({k for _, t, k in triples if t == "phone_tail"})
     if tails:
@@ -869,21 +1036,25 @@ async def _companies_wanting(
         "domain": (Company.website_domain, None),
         "stir": (Company.stir, None),
     }
+    holders: set[uuid.UUID] = set()
     for _, key_type, key in triples:
         if key_type not in named:
             continue  # a phone (above) or a company_id (its own company only)
         on_company, on_contact = named[key_type]
-        found.update(
+        holders.update(
             await session.scalars(sa.select(Company.id).where(on_company == key))
         )
         if on_contact is not None:
-            found.update(
+            holders.update(
                 await session.scalars(
                     sa.select(Contact.company_id).where(
                         on_contact == key, Contact.anonymised_at.is_(None)
                     )
                 )
             )
+    if holders:
+        for lineage in (await _lineage(session, sorted(holders))).values():
+            found.update(lineage)
     return {c for c in found if c is not None and c not in exclude}
 
 
