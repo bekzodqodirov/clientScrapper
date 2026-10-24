@@ -131,6 +131,8 @@ REQUIRED_NOW = (
     "clientscrapper/services/backup.py",
     "clientscrapper/services/restore_drill.py",
     "clientscrapper/tools/restore.py",
+    # T-17
+    "clientscrapper/services/companies.py",
 )
 
 SCANNED_SUFFIXES = {".py", ".yml", ".yaml", ".ini", ".toml", ".cfg", ".sh", ".mako"}

@@ -64,6 +64,9 @@ files = [
     "clientscrapper/services/restore_drill.py",
     "clientscrapper/tools/restore.py",
     "clientscrapper/tools/healthcheck.py",
+    # T-17
+    "clientscrapper/services/companies.py",
+    "clientscrapper/services/contacts.py",
 ]
 
 # APScheduler 3 ships no type information.
