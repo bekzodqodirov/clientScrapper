@@ -323,3 +323,100 @@ def test_the_backup_file_is_named_in_tashkent_time():
     assert backup.backup_stamp(Path(backup.backup_name(utc))) == utc
     assert backup.backup_stamp(Path("other.dump.age")) is None
     assert utc + timedelta(0) == NOW
+
+
+# --- review fixes ----------------------------------------------------------------------
+
+
+async def test_the_counts_are_the_dumps_own_snapshot(
+    session, keys, tmp_path, scratch, monkeypatch
+):
+    """Rows that land after the snapshot was exported — a resolve run, a feed
+    delta during the dump — are in neither the counts nor the file, so the
+    drill compares like with like."""
+    await _seed(session)
+    recipient, identity = keys
+
+    async def a_delta_lands() -> None:
+        import psycopg
+
+        dsn = _url(_db_name()).replace("postgresql+psycopg://", "postgresql://")
+        async with await psycopg.AsyncConnection.connect(dsn, autocommit=True) as other:
+            for i in range(7):
+                await other.execute(
+                    "INSERT INTO suppression (kind, key_type, key, source, reason) "
+                    "VALUES ('dnc', 'phone_tail', %s, 'owner_bot', 'owner_command')",
+                    (f"90000010{i}",),
+                )
+
+    monkeypatch.setattr(backup, "_after_snapshot", a_delta_lands)
+    result = await backup.create_backup(
+        recipient=recipient,
+        directory=tmp_path,
+        now=NOW,
+        count_tables=restore_drill.COUNTED_TABLES,
+    )
+    assert result.ok, result.error
+    assert result.counts == {
+        "companies": 1,
+        "contacts": 0,
+        "lead_candidates": 1,
+        "push_log": 0,
+        "suppression": 3,
+        "outcomes": 0,
+    }
+    assert restore_drill.count_rows(settings.database_url)["suppression"] == 10
+    assert restore.restore(result.path, identity, to=scratch) == restore.EXIT_OK
+    assert restore_drill.count_rows(scratch) == result.counts
+
+
+async def test_the_ciphertext_is_owner_only_while_it_is_written(
+    keys, tmp_path, monkeypatch
+):
+    """age gets a .partial this process created 0600: `age -o` would create
+    it with the umask's mode and the bytes would sit readable until the
+    rename."""
+    recipient, _ = keys
+    mode_file = tmp_path / "mode"
+    folder = tmp_path / "bin"
+    folder.mkdir()
+    fake_age = folder / "age"
+    fake_age.write_text(
+        "#!/bin/sh\n"
+        "umask 022\n"
+        # Where the ciphertext goes: -o's file, else the file on stdout.
+        'out="$(readlink /proc/$$/fd/1)"\n'
+        'while [ $# -gt 0 ]; do [ "$1" = "-o" ] && out="$2"; shift; done\n'
+        'cat > "$out"\n'
+        f'stat -c %a "$out" > "{mode_file}"\n',
+        encoding="utf-8",
+    )
+    fake_age.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{folder}{os.pathsep}{os.environ['PATH']}")
+    result = await backup.create_backup(
+        recipient=recipient, directory=tmp_path / "backups", now=NOW
+    )
+    assert result.ok, result.error
+    assert mode_file.read_text().strip() == "600"
+    assert stat.S_IMODE(result.path.stat().st_mode) == 0o600
+
+
+async def test_the_drill_writes_nothing_past_the_log_redactors(
+    session, keys, tmp_path, capfd
+):
+    """pg_restore's raw lines (a DETAIL with a row's values) must not reach
+    the worker's stderr, which is the container log."""
+    recipient, identity = keys
+    folder = tmp_path / "backups"
+    result = await backup.create_backup(recipient=recipient, directory=folder, now=NOW)
+    assert result.path is not None
+    result.path.write_bytes(b"age-encryption.org/v1\nnot really\n")  # corrupted
+    capfd.readouterr()
+    drill = await restore_drill.run(
+        identity=identity, database=f"{_db_name()}_drill", directory=folder
+    )
+    assert not drill.ok
+    out, err = capfd.readouterr()
+    # Only the JSON log lines (redacted) may appear, if a handler is installed.
+    assert out == ""
+    assert [line for line in err.splitlines() if not line.startswith("{")] == []

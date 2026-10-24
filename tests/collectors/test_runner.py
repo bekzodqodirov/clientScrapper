@@ -1212,3 +1212,110 @@ async def test_a_running_row_is_stale_by_its_own_deadline(
     assert report.status == "ok"
     first = (await runs(session))[0]
     assert (first.status, first.error) == ("failed", "abandoned")
+
+
+# --- a run killed mid-crawl keeps its pages (07 §4.1 T-08, carried from T-05) -----
+
+
+class Hanging(Directory):
+    """Fetches both pages, then never returns: a process about to be killed."""
+
+    api_row = False
+    fetched: asyncio.Event | None = None
+
+    async def collect(self, session, budget):
+        for path in self.paths:
+            await self.fetcher.get(
+                EX + path, source="directories_goldenpages", budget=budget
+            )
+        assert self.fetched is not None
+        self.fetched.set()
+        await asyncio.sleep(3600)
+        return []
+
+
+async def test_a_running_row_carries_its_pages_before_the_run_ends(
+    session, directories, clock, tmp_path, monkeypatch
+):
+    """Nothing closes a run whose process was killed: the pages it fetched
+    must already be on its row, or build_budget gives the next run today's
+    whole page budget again."""
+    monkeypatch.setattr(runner_module, "RUN_WATCH", timedelta(milliseconds=10))
+    Hanging.fetched = asyncio.Event()
+    task = asyncio.ensure_future(
+        run(Hanging, fetcher_for(directory_site(clock)), clock, tmp_path)
+    )
+    try:
+        await asyncio.wait_for(Hanging.fetched.wait(), timeout=10)
+        pages = 0
+        for _ in range(200):  # the checkpoint runs every 10 ms
+            async with SessionLocal() as other:
+                pages = await other.scalar(
+                    sa.select(CollectorRun.pages).where(CollectorRun.status == "running")
+                )
+            if pages:
+                break
+            await asyncio.sleep(0.01)
+        assert pages == 2
+        row = await source_row(session)
+        async with SessionLocal() as other:
+            budget = await build_budget(
+                other, row, now=clock.now(), deadline=timedelta(hours=1)
+            )
+        assert budget.pages == row.daily_page_budget - 2
+    finally:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+
+class PausedMidway(Directory):
+    """Fetches page 1, waits until the run's watch has seen /toxtat, then
+    asks for page 2."""
+
+    api_row = False
+    fetched: asyncio.Event | None = None
+
+    async def collect(self, session, budget):
+        first = await self.fetcher.get(
+            EX + self.paths[0], source="directories_goldenpages", budget=budget
+        )
+        self.found += self.parse_listing(
+            first.body, url=first.url, fetched_at=first.fetched_at
+        )
+        assert self.fetched is not None
+        before = budget.deadline
+        self.fetched.set()
+        for _ in range(500):
+            if budget.deadline != before:
+                break
+            await asyncio.sleep(0.01)
+        await self.fetcher.get(
+            EX + self.paths[1], source="directories_goldenpages", budget=budget
+        )
+        raise AssertionError("the second page must be refused")
+
+
+async def test_toxtat_stops_a_run_already_going(
+    session, directories, clock, tmp_path, monkeypatch
+):
+    """06 §1.2: «collectors fetch nothing» once /toxtat holds — a run already
+    in progress included. It keeps what it found and ends partial."""
+    monkeypatch.setattr(runner_module, "RUN_WATCH", timedelta(milliseconds=10))
+    PausedMidway.fetched = asyncio.Event()
+    site = directory_site(clock)
+    task = asyncio.ensure_future(run(PausedMidway, fetcher_for(site), clock, tmp_path))
+    await asyncio.wait_for(PausedMidway.fetched.wait(), timeout=10)
+    async with SessionLocal() as other:
+        other.add(
+            RuntimeFlag(key="paused", value={"since": "x"}, updated_by="bot:/toxtat")
+        )
+        await other.commit()
+    report = await asyncio.wait_for(task, timeout=10)
+    assert report.status == "partial"
+    assert report.meta["exhausted"] == "global_pause"
+    assert report.counters["pages"] == 1
+    assert [path for path in site.paths() if path.startswith("/katalog")] == [
+        "/katalog/1"
+    ]
+    assert len(report.meta["sources"]) == 1  # what it found is kept

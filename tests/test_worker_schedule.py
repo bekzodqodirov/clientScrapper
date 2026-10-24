@@ -22,7 +22,7 @@ from apscheduler.events import JobExecutionEvent
 from clientscrapper.collectors.base import Collector, Observation
 from clientscrapper.config import settings
 from clientscrapper.db import models as m
-from clientscrapper.services import crontab, health
+from clientscrapper.services import costs, crontab, health
 from clientscrapper.worker import main as worker
 
 TZ = ZoneInfo("Asia/Tashkent")
@@ -198,6 +198,9 @@ def _isolated(monkeypatch, tmp_path):
     yield
     worker.set_owner_notifier(None)
     worker.set_backup_sender(None)
+    # worker.wire() (backup_now) registers process-wide hooks.
+    costs.set_anthropic_health(None)
+    costs.set_cap_notifier(None)
 
 
 class Notify:
@@ -440,3 +443,115 @@ def test_the_owner_seam_has_no_recipient_argument():
     params = list(inspect.signature(worker.notify).parameters)
     assert params == ["text"]
     assert list(inspect.signature(worker._not_wired).parameters) == ["text"]
+
+
+# --- review fixes -------------------------------------------------------------------
+
+
+async def test_the_dead_man_is_pinged_only_after_the_beat_is_durable(monkeypatch):
+    """A dead database must stop the ping too, or the outside watcher never
+    notices that the worker cannot write."""
+    from contextlib import asynccontextmanager
+
+    seen: list[str] = []
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        seen.append(str(request.url))
+        return httpx.Response(200)
+
+    @asynccontextmanager
+    async def unreachable():
+        raise OSError("the database is gone")
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(settings, "deadman_ping_url", "https://hc.example.uz/ping/namuna")
+    monkeypatch.setattr(worker, "session_scope", unreachable)
+    with pytest.raises(OSError):
+        await worker.heartbeat_job(None, transport=httpx.MockTransport(answer))
+    assert seen == []
+
+
+def _primary(source_key: str, cron: str) -> worker.JobSlot:
+    async def job() -> None:
+        return None
+
+    return worker.JobSlot(
+        source_key, (cron,), "T-22", job, source_key=source_key, primary=True
+    )
+
+
+@pytest.mark.parametrize("bad", ["0 23 1-7 * 4", "0 23 * * 4 *", "0 25 * * *"])
+def test_a_sources_cron_the_translator_refuses_falls_back_to_the_seeded_one(bad):
+    """An owner edit through /manbalar must not crash-loop the worker."""
+    slots = (_primary("directories", "0 23 * * 4"),)
+    scheduler = worker.build_scheduler(slots, source_crons={"directories": bad})
+    [job] = scheduler.get_jobs()
+    seeded = crontab.trigger("0 23 * * 4", TZ)
+    assert str(job.trigger) == str(seeded)
+
+
+def test_a_null_sources_cron_is_not_scheduled_and_an_unread_table_keeps_the_seed():
+    slots = (_primary("directories", "0 23 * * 4"), _primary("exhibitors", "0 9 * * 1"))
+    scheduler = worker.build_scheduler(slots, source_crons={"directories": None})
+    assert [job.id for job in scheduler.get_jobs()] == ["exhibitors"]
+    scheduler = worker.build_scheduler(slots, source_crons={})
+    assert sorted(job.id for job in scheduler.get_jobs()) == ["directories", "exhibitors"]
+    scheduler = worker.build_scheduler(slots, source_crons={"directories": "30 22 * * 3"})
+    [job] = [j for j in scheduler.get_jobs() if j.id == "directories"]
+    assert str(job.trigger) == str(crontab.trigger("30 22 * * 3", TZ))
+
+
+def _keys(tmp_path: Path) -> str:
+    import shutil
+    import subprocess
+
+    if shutil.which("age-keygen") is None or shutil.which("pg_dump") is None:
+        from tests.conftest import require_db
+
+        if require_db():
+            pytest.fail("CS_REQUIRE_DB=1 but age/pg_dump are not on PATH")
+        pytest.skip("age/pg_dump not on PATH")
+    key = tmp_path / "key.txt"
+    subprocess.run(["age-keygen", "-o", str(key)], check=True, capture_output=True)
+    return subprocess.run(
+        ["age-keygen", "-y", str(key)], check=True, capture_output=True, text=True
+    ).stdout.strip()
+
+
+async def test_make_backup_clears_a_failed_night(session, monkeypatch, tmp_path):
+    """`make backup` is the runbook's cure for backup_failed (06 §4.6): it runs
+    the nightly job, so its heartbeat clears the critical alarm at once."""
+    monkeypatch.setattr(settings, "backup_age_recipient", _keys(tmp_path))
+    night = datetime(2026, 10, 24, 3, 45, tzinfo=TZ)
+    await health.beat(
+        session, "backup", detail={"ok": False, "error": "empty_dump"}, now=night
+    )
+    await session.commit()
+    status = await health.gather(session, now=night, disk=(10**12, 10**12))
+    assert "backup_failed" in [p.key for p in health.problems(status)]
+    morning = datetime(2026, 10, 24, 9, 0, tzinfo=TZ)
+    assert await worker.backup_now(now=morning) == 0
+    status = await health.gather(
+        session, now=morning + timedelta(minutes=5), disk=(10**12, 10**12)
+    )
+    assert "backup_failed" not in [p.key for p in health.problems(status)]
+    rows = await health.beats(session)
+    assert rows["backup"].detail["ok"] is True
+    assert rows["backup_counts"].detail["path"] == rows["backup"].detail["path"]
+    monkeypatch.setattr(settings, "backup_age_recipient", "")
+    assert await worker.backup_now(now=morning) == 1
+
+
+def test_the_worker_command_line_knows_one_command(monkeypatch):
+    calls: list[str] = []
+
+    async def fake_backup_now(*, now=None) -> int:
+        calls.append("backup")
+        return 1
+
+    monkeypatch.setattr(worker, "backup_now", fake_backup_now)
+    monkeypatch.setattr(worker, "setup_logging", lambda name: None)
+    assert worker.main(["backup"]) == 1
+    assert calls == ["backup"]
+    with pytest.raises(SystemExit):
+        worker.main(["restore"])

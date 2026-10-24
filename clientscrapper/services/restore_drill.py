@@ -106,7 +106,9 @@ def _admin(url: str, template: LiteralString, database: str) -> None:
 def _restore(file: Path, identity: Path, target: str) -> None:
     from clientscrapper.tools import restore
 
-    code = restore.restore_into(target, file, identity)
+    # Quiet: pg_restore's own lines may carry row values and this runs in
+    # the worker, whose stderr is the container log (06 §4.5).
+    code = restore.restore_into(target, file, identity, quiet=True)
     if code != restore.EXIT_OK:
         raise RuntimeError(f"restore exited with {code}")
 

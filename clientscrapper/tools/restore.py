@@ -27,13 +27,14 @@ content nor any password is ever printed.
 from __future__ import annotations
 
 import argparse
+import io
 import os
 import re
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from typing import Final
+from typing import Final, TextIO
 from urllib.parse import urlsplit, urlunsplit
 
 from clientscrapper.services import backup
@@ -194,8 +195,12 @@ def decrypt(parts: list[Path], identity: Path, out_fd: int) -> None:
         raise RestoreError(f"age could not decrypt the backup: {detail or 'no detail'}")
 
 
-def pg_restore(archive: Path, url: str, *, list_only: bool = False) -> str:
-    """Run pg_restore; returns its stdout (the TOC for ``list_only``)."""
+def pg_restore(
+    archive: Path, url: str, *, list_only: bool = False, err: TextIO | None = None
+) -> str:
+    """Run pg_restore; returns its stdout (the TOC for ``list_only``).
+    pg_restore's own messages go to ``err`` (default: the terminal)."""
+    err = err if err is not None else sys.stderr
     dsn, env = backup.libpq_dsn_and_env(url)
     if list_only:
         command = ["pg_restore", "--list", str(archive)]
@@ -216,14 +221,14 @@ def pg_restore(archive: Path, url: str, *, list_only: bool = False) -> str:
         raise RestoreError(f"could not start pg_restore: {exc}") from exc
     stderr = result.stderr.decode(errors="replace")
     if stderr.strip():
-        sys.stderr.write(stderr.rstrip() + "\n")
+        err.write(stderr.rstrip() + "\n")
     if result.returncode == 0:
         return result.stdout.decode(errors="replace")
     if list_only:
         raise RestoreError("pg_restore could not read the archive")
     serious = serious_errors(stderr)
     if result.returncode == 1 and "errors ignored on restore" in stderr and not serious:
-        sys.stderr.write(
+        err.write(
             "pg_restore reported ignored errors, all about extension ownership; "
             "the schema and the rows are restored.\n"
         )
@@ -244,7 +249,13 @@ def restore(
     to: str,
     dry_run: bool = False,
     force: bool = False,
+    out: TextIO | None = None,
+    err: TextIO | None = None,
 ) -> int:
+    """The command's work; its messages go to ``out``/``err`` (default: the
+    terminal of the person who ran it)."""
+    out = out if out is not None else sys.stdout
+    err = err if err is not None else sys.stderr
     if not file.exists():
         raise RestoreError(f"no such file: {file}", EXIT_USAGE)
     if not identity.is_file():
@@ -274,39 +285,49 @@ def restore(
     plaintext = Path(name)
     try:
         try:
-            sys.stderr.write(f"decrypting {len(parts)} file(s) …\n")
+            err.write(f"decrypting {len(parts)} file(s) …\n")
             decrypt(parts, identity, fd)
         finally:
             os.close(fd)
         if dry_run:
-            sys.stdout.write(pg_restore(plaintext, to, list_only=True))
-            sys.stderr.write("dry run: nothing was written\n")
+            out.write(pg_restore(plaintext, to, list_only=True, err=err))
+            err.write("dry run: nothing was written\n")
             return EXIT_OK
-        sys.stderr.write(f"restoring into {masked(to)} …\n")
-        pg_restore(plaintext, to)
+        err.write(f"restoring into {masked(to)} …\n")
+        pg_restore(plaintext, to, err=err)
     finally:
         plaintext.unlink(missing_ok=True)
 
     try:
         revision = schema_revision(to)
     except Exception as exc:  # the restore ran; only the check failed
-        sys.stderr.write(f"restored, but the schema could not be read: {exc}\n")
+        err.write(f"restored, but the schema could not be read: {exc}\n")
         return EXIT_FAILED
     if revision is None:
-        sys.stderr.write("restored, but the database has no alembic_version table\n")
+        err.write("restored, but the database has no alembic_version table\n")
         return EXIT_FAILED
-    sys.stdout.write(f"restored {file.name} into {masked(to)} (schema {revision})\n")
-    sys.stdout.write("run `make migrate` next if the code is newer than this backup\n")
+    out.write(f"restored {file.name} into {masked(to)} (schema {revision})\n")
+    out.write("run `make migrate` next if the code is newer than this backup\n")
     return EXIT_OK
 
 
-def restore_into(database_url: str, file: Path, identity: Path) -> int:
+def restore_into(
+    database_url: str, file: Path, identity: Path, *, quiet: bool = False
+) -> int:
     """Load ``file`` into ``database_url`` with no questions asked — for a
-    scratch database such as the weekly drill's. Returns an exit code."""
+    scratch database such as the weekly drill's. Returns an exit code.
+
+    ``quiet``: nothing is written anywhere. The drill runs inside the worker,
+    whose stderr is the container log: pg_restore's raw lines (a DETAIL or a
+    CONTEXT with a row's values) would reach it around the log redactors
+    (06 §4.5). The drill's verdict is its heartbeat; the detail is for a
+    person running ``make restore`` by hand."""
+    sink: TextIO | None = io.StringIO() if quiet else None
     try:
-        return restore(file, identity, to=database_url, force=True)
+        return restore(file, identity, to=database_url, force=True, out=sink, err=sink)
     except RestoreError as exc:
-        sys.stderr.write(f"{exc}\n")
+        if not quiet:
+            sys.stderr.write(f"{exc}\n")
         return exc.code
 
 

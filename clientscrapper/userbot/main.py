@@ -14,7 +14,11 @@ then released: an idle process holds no database connection.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import logging
+from datetime import timedelta
+from typing import Final
 
 from clientscrapper.config import settings
 from clientscrapper.db.session import engine, session_scope
@@ -24,18 +28,28 @@ from clientscrapper.services.lifecycle import idle_until_stopped, run_main
 
 log = logging.getLogger(__name__)
 
+# A beat that did not land (the database restarting with the stack) is tried
+# again this often: the one beat is what keeps the container healthy and
+# userbot_silent unsaid, so a miss must not stand for good.
+BEAT_RETRY: Final = timedelta(minutes=1)
 
-async def beat_switched_off() -> None:
-    """The one beat of a reader that reads nothing. Never raises."""
-    try:
-        async with session_scope() as session:
-            await health.beat(
-                session, "userbot", detail={"enabled": False, "built": False}
+
+async def beat_switched_off(*, retry: timedelta = BEAT_RETRY) -> None:
+    """The one beat of a reader that reads nothing, tried until it lands.
+    Never raises; the pool is released once it is written."""
+    while True:
+        try:
+            async with session_scope() as session:
+                await health.beat(
+                    session, "userbot", detail={"enabled": False, "built": False}
+                )
+            break
+        except Exception as exc:
+            log.warning(
+                "userbot heartbeat not written", extra={"error": type(exc).__name__}
             )
-    except Exception as exc:
-        log.warning("userbot heartbeat not written", extra={"error": type(exc).__name__})
-    finally:
-        await engine.dispose()
+        await asyncio.sleep(retry.total_seconds())
+    await engine.dispose()
 
 
 async def run() -> None:
@@ -44,8 +58,14 @@ async def run() -> None:
         "userbot started: the reader is not built yet",
         extra={"enabled": settings.userbot_enabled},
     )
-    await beat_switched_off()
-    await idle_until_stopped()
+    beating = asyncio.ensure_future(beat_switched_off())
+    try:
+        await idle_until_stopped()
+    finally:
+        if not beating.done():
+            beating.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await beating
     log.info("userbot stopped")
 
 

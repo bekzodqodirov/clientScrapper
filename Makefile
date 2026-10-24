@@ -82,10 +82,13 @@ userbot-login: ## One-time Telethon login; prints TELETHON_SESSION for .env
 	$(COMPOSE) run --rm -it userbot python -m clientscrapper.tools.userbot_login
 
 # --- Backups ----------------------------------------------------------------
+# The key is written through init's ./secrets mount: the app services mount
+# it read-only (MIYA's worker mounted it writable). As the app's uid, so the
+# worker can read the 0600 file it writes; `up init` handed /secrets over.
 backup-key: ## Create the backup key and print the .env line
 	@test ! -e secrets/backup-key.txt || { echo "secrets/backup-key.txt allaqachon bor — yangisi yaratilmaydi (eski zaxiralar faqat eski kalit bilan ochiladi)."; exit 1; }
 	$(COMPOSE) up init
-	$(COMPOSE) run --rm --no-deps worker age-keygen -o /app/secrets/backup-key.txt
+	$(COMPOSE) run --rm --no-deps --user 10001:10001 init age-keygen -o /secrets/backup-key.txt
 	@echo "Quyidagi qatorni .env faylidagi BACKUP_AGE_RECIPIENT= oʻrniga yoz:"
 	@$(COMPOSE) run --rm --no-deps worker sh -c 'printf "BACKUP_AGE_RECIPIENT=%s\n" "$$(age-keygen -y /app/secrets/backup-key.txt)"'
 	@echo "Maxfiy kalitni server tashqarisida saqla: make backup-key-show — chiqqan qatorlarni parol menejeriga koʻchir."
@@ -93,11 +96,10 @@ backup-key: ## Create the backup key and print the .env line
 backup-key-show: ## Print the secret backup key (store it off the server)
 	$(COMPOSE) run --rm --no-deps worker cat /app/secrets/backup-key.txt
 
+# The nightly job itself, not create_backup alone: the `backup` heartbeat, the
+# drill's counts and the Telegram copy, so a good run clears backup_failed.
 backup: ## Run the encrypted database backup now (fails when the backup does, so make update stops)
-	$(COMPOSE) run --rm --no-deps worker python -c \
-		"import asyncio, sys; from clientscrapper.services.backup import create_backup; \
-		 result = asyncio.run(create_backup()); print(result); \
-		 sys.exit(0 if result.ok else 1)"
+	$(COMPOSE) run --rm --no-deps worker python -m clientscrapper.worker.main backup
 
 restore: ## Restore a backup: make restore FILE=/data/backups/clientscrapper-….dump.age [DRY=1] [FORCE=1]
 	@test -n "$(FILE)" || (echo "usage: make restore FILE=/data/backups/clientscrapper-….dump.age [DRY=1] [FORCE=1]" && exit 1)

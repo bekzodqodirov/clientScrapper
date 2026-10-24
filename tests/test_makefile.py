@@ -124,3 +124,85 @@ def test_alembic_names_the_file_after_the_id_alone(tmp_path):
     assert (scripts / "versions" / "0002_probe_slug.py").is_file()
     script = ScriptDirectory.from_config(cfg).get_revision(rev)
     assert script is not None and script.down_revision == "0001_initial"
+
+
+# --- the backup recipes (06 §3.3, §4.4) ----------------------------------------------
+
+# Options of `docker compose run` that take a value.
+_RUN_VALUE_OPTIONS = {
+    "--user",
+    "-u",
+    "-e",
+    "--env",
+    "-v",
+    "--volume",
+    "-w",
+    "--entrypoint",
+}
+
+
+def _compose_run(line: str) -> tuple[str, dict[str, str], list[str]]:
+    """(service, options with values, command) of a `docker compose run` line."""
+    import shlex
+
+    tokens = shlex.split(line)
+    rest = tokens[tokens.index("run") + 1 :]
+    options: dict[str, str] = {}
+    while rest and rest[0].startswith("-"):
+        option = rest.pop(0)
+        options[option] = rest.pop(0) if option in _RUN_VALUE_OPTIONS else ""
+    return rest[0], options, rest[1:]
+
+
+def _host_path(service: dict, container_path: str) -> tuple[str, bool]:
+    """The host path a container path lands on, and whether it is writable."""
+    best: tuple[str, str, bool] | None = None
+    for volume in service.get("volumes", []):
+        host, target, *mode = str(volume).split(":")
+        inside = container_path == target or container_path.startswith(target + "/")
+        if inside and (best is None or len(target) > len(best[1])):
+            best = (host, target, "ro" not in mode)
+    assert best is not None, f"{container_path} is on no mount"
+    host, target, writable = best
+    return str(Path(host) / Path(container_path).relative_to(target)), writable
+
+
+def test_backup_key_writes_through_a_writable_mount_as_the_app_user():
+    """The app services mount ./secrets read-only; the key must be written
+    where the mount is writable, as uid 10001 (the 0600 file must be
+    readable by the worker that decrypts the drill), and land on the very
+    host file the readers then read."""
+    from tests.test_compose import _services
+
+    services = _services()
+    out = dry_run("backup-key").splitlines()
+    [writer] = [line for line in out if "age-keygen -o" in line]
+    service, options, command = _compose_run(writer)
+    written = command[command.index("-o") + 1]
+    host, writable = _host_path(services[service], written)
+    assert writable, writer
+    user = options.get("--user") or options.get("-u") or services[service].get("user")
+    assert user in (None, "10001:10001", "10001"), writer
+    assert host == "secrets/backup-key.txt"
+    readers = [line for line in out if "age-keygen -y" in line or " cat " in line]
+    readers += [
+        line for line in dry_run("backup-key-show").splitlines() if " cat " in line
+    ]
+    assert len(readers) == 2
+    for line in readers:
+        reader, _, rest = _compose_run(line)
+        path = next(
+            t for t in " ".join(rest).replace('"', " ").split() if "backup-key" in t
+        )
+        path = path.rstrip(")")
+        assert _host_path(services[reader], path)[0] == host, line
+
+
+def test_make_backup_runs_the_nightly_job_itself():
+    """Not create_backup alone: the job beats `backup`, keeps the drill's
+    counts and sends the Telegram copy, so a good manual run clears
+    backup_failed (06 §4.6) and the drill can check a file `make update` wrote."""
+    [line] = [x for x in dry_run("backup").splitlines() if "compose run" in x]
+    service, _, command = _compose_run(line)
+    assert service == "worker"
+    assert command == ["python", "-m", "clientscrapper.worker.main", "backup"]

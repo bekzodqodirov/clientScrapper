@@ -128,6 +128,7 @@ async def test_the_userbot_skeleton_beats_once_as_switched_off(session, monkeypa
     monkeypatch.setattr(settings, "userbot_enabled", True)
     monkeypatch.setattr(userbot, "idle_until_stopped", _idle)
     monkeypatch.setattr(userbot, "setup_logging", lambda *a, **k: None)
+    await userbot.beat_switched_off()  # run() beats beside its idle
     await userbot.run()
     assert idled == [True]
     row = (await health.beats(session))["userbot"]
@@ -156,3 +157,28 @@ async def test_the_bot_skeleton_beats_every_minute_until_stopped(session, monkey
     assert healthcheck.verdict("bot", row.last_seen_at, row.detail, now=row.last_seen_at)[
         0
     ]
+
+
+async def test_a_userbot_beat_that_did_not_land_is_tried_again(session, monkeypatch):
+    """A database still starting when the reader starts must not leave it
+    unhealthy (and userbot_silent said) for good."""
+    from contextlib import asynccontextmanager
+
+    from clientscrapper.db.session import session_scope as real_scope
+
+    failures = [OSError("starting"), OSError("starting")]
+
+    @asynccontextmanager
+    async def flaky():
+        if failures:
+            raise failures.pop(0)
+        async with real_scope() as s:
+            yield s
+
+    monkeypatch.setattr(userbot, "session_scope", flaky)
+    await asyncio.wait_for(
+        userbot.beat_switched_off(retry=timedelta(milliseconds=10)), timeout=10
+    )
+    assert failures == []
+    row = (await health.beats(session))["userbot"]
+    assert row.detail == {"enabled": False, "built": False}

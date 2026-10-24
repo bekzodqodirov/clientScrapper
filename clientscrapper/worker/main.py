@@ -42,6 +42,7 @@ from __future__ import annotations
 import asyncio
 import functools
 import logging
+import sys
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, time, timedelta, tzinfo
@@ -258,6 +259,34 @@ def build_trigger(specs: tuple[str, ...], tz: tzinfo) -> BaseTrigger:
     return parts[0] if len(parts) == 1 else OrTrigger(parts)
 
 
+def slot_trigger(
+    slot: JobSlot, source_crons: Mapping[str, str | None], tz: tzinfo
+) -> BaseTrigger | None:
+    """The trigger a built slot runs on, or None when it is not scheduled.
+
+    A primary collector runs on its ``sources.cron`` (03 §3); a row whose
+    cron is NULL is not scheduled (02 §2.1: NULL = never scheduled — health
+    stops judging it too); a key absent from ``source_crons`` (the table
+    could not be read) keeps the seeded cron. A ``sources.cron`` the
+    translator refuses — an owner edit — falls back to the seeded cron with
+    an error line, and ``health`` names it under collector_silent: one bad
+    row must not keep the whole worker from starting (a crash loop under
+    ``restart: unless-stopped``)."""
+    if slot.primary and slot.source_key and slot.source_key in source_crons:
+        override = source_crons[slot.source_key]
+        if override is None:
+            log.info("sources.cron is NULL: not scheduled", extra={"job": slot.id})
+            return None
+        try:
+            return build_trigger((override,), tz)
+        except crontab.CrontabError:
+            log.error(
+                "sources.cron refused; the seeded cron is used",
+                extra={"job": slot.id, "source": slot.source_key},
+            )
+    return build_trigger(slot.triggers, tz)
+
+
 def build_scheduler(
     slots: tuple[JobSlot, ...] | None = None,
     *,
@@ -266,21 +295,19 @@ def build_scheduler(
     """The scheduler with every built row of ``slots`` (default: the table)
     registered: one instance at a time, a missed run coalesced, a cron run up
     to an hour late still made. ``source_crons`` (``sources.key`` → cron)
-    overrides a primary collector's seeded cron."""
+    overrides a primary collector's seeded cron (``slot_trigger``)."""
     tz = settings.tz
     scheduler = AsyncIOScheduler(timezone=tz)
     for slot in slots if slots is not None else job_table():
         if slot.job is None:
             continue
-        specs = slot.triggers
-        if slot.primary and slot.source_key and source_crons:
-            override = source_crons.get(slot.source_key)
-            if override:
-                specs = (override,)
+        trigger = slot_trigger(slot, source_crons or {}, tz)
+        if trigger is None:
+            continue
         args = [scheduler] if slot.pass_scheduler else []
         scheduler.add_job(
             slot.job,
-            build_trigger(specs, tz),
+            trigger,
             args=args,
             id=slot.id,
             name=slot.id,
@@ -497,7 +524,9 @@ async def backup_job(*, now: datetime | None = None) -> backup.BackupResult:
     tonight went — ``ok=false`` is the critical ``backup_failed`` — and a good
     file's row counts are kept for the weekly drill."""
     now = now or datetime.now(settings.tz)
-    result = await backup.create_backup(now=now)
+    result = await backup.create_backup(
+        now=now, count_tables=restore_drill.COUNTED_TABLES
+    )
     if result.error == "no_recipient":
         log.warning("backup skipped: BACKUP_AGE_RECIPIENT is empty")
         return result
@@ -517,14 +546,13 @@ async def backup_job(*, now: datetime | None = None) -> backup.BackupResult:
     }
     if result.ok and result.path is not None:
         try:
-            counts = await asyncio.to_thread(
-                restore_drill.count_rows, settings.database_url
-            )
+            # Counted in the dump's own snapshot (backup.create_backup), so
+            # the drill compares the file with exactly what it holds.
             async with session_scope() as session:
                 await health.beat(
                     session,
                     health.BACKUP_COUNTS_COMPONENT,
-                    detail={"path": str(result.path), "counts": counts},
+                    detail={"path": str(result.path), "counts": result.counts},
                     now=now,
                 )
         except Exception as exc:
@@ -624,13 +652,41 @@ async def source_crons() -> dict[str, str | None]:
 # --- the process ---------------------------------------------------------------------
 
 
-async def run() -> None:
-    setup_logging("worker")
+def wire() -> None:
+    """The hooks every worker process registers — the scheduler and a one-off
+    run alike (``make backup``): the Anthropic switch costs.ask reads, and
+    the cap notifier with health's quiet hours. The owner bot's seams (the
+    notifier, the backup sender, T-20) are wired through the same setters."""
     costs.set_anthropic_health(health.anthropic_down_until)
     costs.set_cap_notifier(
         _seams.notify if _seams.notify is not _not_wired else None,
         hold=health.in_quiet_hours,
     )
+
+
+async def backup_now(*, now: datetime | None = None) -> int:
+    """``make backup`` (06 §3.3, §4.6): the nightly job run once by hand — the
+    same ``backup`` heartbeat, the drill's counts and the Telegram copy, so a
+    good manual run clears ``backup_failed`` (the runbook's «verify: backup
+    beat ok=true»). 0 when the file was written, else 1 (``make update``
+    stops)."""
+    wire()
+    try:
+        result = await backup_job(now=now)
+    finally:
+        await engine.dispose()
+    # The JSON log line is what the operator reads (create_backup logs the
+    # file and its size, or the failure).
+    log.info(
+        "manual backup finished",
+        extra={"ok": result.ok, "bytes": result.size, "error": result.error},
+    )
+    return 0 if result.ok else 1
+
+
+async def run() -> None:
+    setup_logging("worker")
+    wire()
     try:
         crons = await source_crons()
     except Exception as exc:
@@ -676,7 +732,15 @@ async def run() -> None:
         log.info("worker stopped")
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    """``python -m clientscrapper.worker.main`` runs the scheduler;
+    ``… main backup`` runs one backup (``make backup``)."""
+    args = sys.argv[1:] if argv is None else argv
+    if args == ["backup"]:
+        setup_logging("worker")
+        return asyncio.run(backup_now())
+    if args:
+        raise SystemExit(f"unknown arguments: {args} (only «backup»)")
     return run_main(run)
 
 

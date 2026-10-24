@@ -90,6 +90,16 @@ DEFAULT_DEADLINE: Final = timedelta(hours=2)
 # soon after it). Rows without meta.deadline_at count from started_at + 2 h.
 STALE_MARGIN: Final = timedelta(minutes=30)
 DEDUPE_WINDOW: Final = timedelta(hours=24)
+# How often a run in progress is looked after (``_watch_run``): its
+# ``pages``/``requests`` are written onto its ``running`` row, so a run killed
+# mid-crawl (OOM, kill -9, a VPS reboot — nothing runs its close) still counts
+# what it fetched (build_budget sums ``collector_runs.pages`` and would
+# otherwise hand the next run today's whole page budget again); and
+# ``/toxtat`` (``runtime_flags('paused')``) is re-read, so a run already going
+# fetches nothing more once the owner paused (06 §1.2 «collectors fetch
+# nothing»). 07 §4.1 T-08, both carried from T-05.
+RUN_WATCH: Final = timedelta(seconds=10)
+GLOBAL_PAUSE: Final = "global_pause"
 ABANDONED: Final = "abandoned"
 CANCELLED: Final = "cancelled"
 # The database refused this row: skip it (or its group), keep the run.
@@ -557,6 +567,62 @@ async def _skip(
     return RunReport(key, component, "skipped", run_id=run.id, meta=meta)
 
 
+@dataclass(slots=True)
+class _Watch:
+    paused: bool = False
+
+
+async def _watch_run(
+    session_factory: SessionFactory,
+    run_id: int,
+    fetcher: Fetcher,
+    budget: Budget,
+    *,
+    started: datetime,
+    watch: _Watch,
+) -> None:
+    """Every RUN_WATCH, in a short session of its own: the run's counters
+    onto its ``running`` row, and the global pause re-read — once it holds,
+    the budget's deadline moves to the run's start, so the Fetcher refuses
+    the next request (``BudgetExhausted``) and the run ends ``partial``.
+    Cancelled when the run ends; a failed step is a log line and the next
+    tick tries again."""
+    written = (-1, -1)
+    while True:
+        await asyncio.sleep(RUN_WATCH.total_seconds())
+        stats = fetcher.stats
+        counters = (stats.pages, stats.requests)
+        try:
+            async with session_factory() as session:
+                if counters != written:
+                    await session.execute(
+                        sa.update(CollectorRun)
+                        .where(
+                            CollectorRun.id == run_id, CollectorRun.status == "running"
+                        )
+                        .values(pages=stats.pages, requests=stats.requests)
+                    )
+                    await session.commit()
+                    written = counters
+                if not watch.paused and await global_pause(session):
+                    watch.paused = True
+                    budget.deadline = min(budget.deadline, started)
+                    log.info("collector run stopped by /toxtat", extra={"run_id": run_id})
+        except Exception as exc:
+            log.warning(
+                "run not looked after",
+                extra={"run_id": run_id, "error": type(exc).__name__},
+            )
+
+
+async def _stop(task: asyncio.Future[None]) -> None:
+    """Cancel the checkpoint and wait for it to let go of its session, so the
+    run's own final write is the last one on the row."""
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError, Exception):
+        await task
+
+
 async def _close_interrupted(
     session_factory: SessionFactory,
     run_id: int,
@@ -671,6 +737,12 @@ async def run_collector(
         ledger = RunLedger(session_factory, evidence_root)
         gate = cost_gate_for(session, run_id) if cost_gate_for is not None else None
         run_fetcher = fetcher.bind(hooks=ledger, cost_gate=gate)
+        watch = _Watch()
+        checkpoint = asyncio.ensure_future(
+            _watch_run(
+                session_factory, run_id, run_fetcher, budget, started=now, watch=watch
+            )
+        )
         try:
             collector = collector_cls(run_fetcher, serp)
             collector.variant = variant
@@ -680,7 +752,10 @@ async def run_collector(
             # classify, T-27) rather than through the Fetcher: what stopped it.
             stopped: tuple[str, str] | None = None
             try:
-                observations = await collector.collect(session, budget)
+                try:
+                    observations = await collector.collect(session, budget)
+                finally:
+                    await _stop(checkpoint)
             except HostPaused:
                 observations, status, error = (
                     list(collector.found),
@@ -705,6 +780,10 @@ async def run_collector(
                     extra={"source": key, "run_id": run_id, "error": error},
                 )
             blocked = list(run_fetcher.stats.blocked_hosts)
+            if watch.paused and stopped is None:
+                stopped = (GLOBAL_PAUSE, "")
+                if status == "ok":
+                    status = "partial"
             if blocked:
                 status, error = "failed", BLOCKED_ERROR
             elif status == "ok" and run_fetcher.stats.exhausted is not None:
@@ -794,6 +873,7 @@ async def run_collector(
             # refuses every later run until the stale margin. A fresh session,
             # shielded: this one may be mid-statement, and a second cancel must
             # not interrupt the close.
+            checkpoint.cancel()
             cancelled = isinstance(exc, asyncio.CancelledError)
             error = CANCELLED if cancelled else type(exc).__name__
             with contextlib.suppress(Exception):

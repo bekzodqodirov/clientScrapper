@@ -264,7 +264,9 @@ def _telegram_env() -> dict[str, str]:
 def _crm_env(**change: str) -> dict[str, str]:
     env = _filled()
     env.update(
-        CRM_AGENT_KEY=KEY, CRM_PUSH_SOURCE="agent", CRM_BASE_URL="https://erp.example.uz"
+        CRM_AGENT_KEY=KEY,
+        CRM_PUSH_SOURCE="agent",
+        CRM_BASE_URL="https://gsr-namuna.example.uz",
     )
     env.update(change)
     return env
@@ -483,12 +485,14 @@ def _page(salt: str = KEY_SALT) -> dict[str, object]:
 def test_the_erp_probe_is_one_keyed_get_of_one_entry():
     seen, transport = _erp(lambda r: httpx.Response(200, json=_page()))
     state = asyncio.run(
-        doctor.probe_crm("https://erp.example.uz/", KEY, transport=transport)
+        doctor.probe_crm("https://gsr-namuna.example.uz/", KEY, transport=transport)
     )
     assert state == doctor.CrmState(200, salt_id=KEY_SALT)
     [request] = seen
     assert request.method == "GET"
-    assert str(request.url) == "https://erp.example.uz/api/agent/suppression?limit=1"
+    assert (
+        str(request.url) == "https://gsr-namuna.example.uz/api/agent/suppression?limit=1"
+    )
     assert request.headers["X-GSR-Key"] == KEY
     assert request.headers["X-ERP-Key"] == KEY
     assert request.headers["User-Agent"] == doctor.DOCTOR_USER_AGENT
@@ -497,11 +501,13 @@ def test_the_erp_probe_is_one_keyed_get_of_one_entry():
 
 def test_the_erp_probe_never_follows_a_redirect_and_names_each_answer():
     def redirect(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(308, headers={"Location": "https://erp.example.uz/login"})
+        return httpx.Response(
+            308, headers={"Location": "https://gsr-namuna.example.uz/login"}
+        )
 
     seen, transport = _erp(redirect)
     state = asyncio.run(
-        doctor.probe_crm("https://erp.example.uz", KEY, transport=transport)
+        doctor.probe_crm("https://gsr-namuna.example.uz", KEY, transport=transport)
     )
     assert (state, len(seen)) == (doctor.CrmState(308), 1)
     for response, expected in (
@@ -516,7 +522,7 @@ def test_the_erp_probe_never_follows_a_redirect_and_names_each_answer():
     ):
         _, transport = _erp(lambda r, response=response: response)
         got = asyncio.run(
-            doctor.probe_crm("https://erp.example.uz", KEY, transport=transport)
+            doctor.probe_crm("https://gsr-namuna.example.uz", KEY, transport=transport)
         )
         assert got == expected, response
 
@@ -527,21 +533,21 @@ def test_the_erp_probe_survives_a_dead_host_and_refuses_plain_http():
 
     _, transport = _erp(down)
     state = asyncio.run(
-        doctor.probe_crm("https://erp.example.uz", KEY, transport=transport)
+        doctor.probe_crm("https://gsr-namuna.example.uz", KEY, transport=transport)
     )
     assert state == doctor.CrmState(None, error="ConnectError")
     # The key never travels in clear: no request at all to an http:// base.
     seen, transport = _erp(lambda r: httpx.Response(200, json=_page()))
     state = asyncio.run(
-        doctor.probe_crm("http://erp.example.uz", KEY, transport=transport)
+        doctor.probe_crm("http://gsr-namuna.example.uz", KEY, transport=transport)
     )
     assert (state, seen) == (doctor.CrmState(None, error="not_https"), [])
 
 
 def test_crm_base_url_must_be_https_whatever_the_feed_says():
     for env in (
-        _crm_env(CRM_BASE_URL="http://erp.example.uz"),
-        _filled() | {"CRM_BASE_URL": "http://erp.example.uz"},
+        _crm_env(CRM_BASE_URL="http://gsr-namuna.example.uz"),
+        _filled() | {"CRM_BASE_URL": "http://gsr-namuna.example.uz"},
     ):
         assert _errors(_check(env)) == [
             "❌ CRM_BASE_URL https:// bilan boshlanishi kerak — http:// soʻroviga "
@@ -654,7 +660,10 @@ def test_probe_network_asks_only_what_it_has_something_to_ask():
     seen.clear()
     for change in (
         {"ASSISTANT_BOT_TOKEN": "", "CRM_PUSH_SOURCE": "other"},
-        {"ASSISTANT_BOT_TOKEN": "# @BotFather", "CRM_BASE_URL": "http://erp.example.uz"},
+        {
+            "ASSISTANT_BOT_TOKEN": "# @BotFather",
+            "CRM_BASE_URL": "http://gsr-namuna.example.uz",
+        },
         {"ASSISTANT_BOT_TOKEN": "", "CRM_AGENT_KEY": ""},
     ):
         got = asyncio.run(
@@ -705,3 +714,26 @@ async def test_the_database_probe_reads_the_stored_salt(session):
             {"c": json.dumps(before)},
         )
         await session.commit()
+
+
+def test_the_example_host_never_receives_the_key():
+    """A real CRM_AGENT_KEY with CRM_BASE_URL still the .env.example host (or
+    blank, which falls back to it): example.uz is not reserved, so the probe
+    must not send the key there, and the doctor names the cause."""
+    seen, transport = _erp(lambda r: httpx.Response(404))
+    for base in ("https://erp.example.uz", "https://ERP.example.uz/", ""):
+        env = _crm_env(CRM_BASE_URL=base)
+        telegram, crm = asyncio.run(
+            doctor.probe_network(env | {"ASSISTANT_BOT_TOKEN": ""}, transport=transport)
+        )
+        assert (telegram, crm) == (None, None), base
+        assert _errors(_check(env)) == [
+            "❌ CRM_BASE_URL hali namuna manzili (erp.example.uz) — .env ga ERP ning "
+            "haqiqiy https:// manzilini yoz; kalit u yerga yuborilmadi."
+        ], base
+    direct = asyncio.run(
+        doctor.probe_crm("https://erp.example.uz", KEY, transport=transport)
+    )
+    assert (direct, seen) == (doctor.CrmState(None, error="placeholder"), [])
+    # No key: nothing would be sent, so the example host is not an error.
+    assert _errors(_check(_crm_env(CRM_BASE_URL="", CRM_AGENT_KEY=""))) == []

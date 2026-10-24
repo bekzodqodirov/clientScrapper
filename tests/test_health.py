@@ -509,6 +509,20 @@ def test_no_signals_waits_for_a_whole_day_of_monitoring():
             False,
         ),
         ({"last_run_at": None}, False),  # never ran, never fired: no clock yet
+        # Never ran and never fired since it was enabled (its row's last
+        # write): a built job that fails before it claims a run is silent too.
+        ({"last_run_at": None, "updated_at": NOW - timedelta(hours=3)}, True),
+        ({"last_run_at": None, "updated_at": NOW - timedelta(minutes=50)}, False),
+        # At :45, last run 10:40: 10:45 and 11:45 unrun — but 11:45 is only
+        # 15 minutes old, inside COLLECTOR_GRACE.
+        (
+            {"cron": "45 * * * *", "last_run_at": NOW - timedelta(hours=1, minutes=20)},
+            False,
+        ),
+        (
+            {"cron": "45 * * * *", "last_run_at": NOW - timedelta(hours=2, minutes=20)},
+            True,
+        ),
         ({"last_run_at": NOW - timedelta(hours=1, minutes=40)}, False),
         ({"last_run_at": NOW - timedelta(hours=2, minutes=50)}, True),
         # The scheduler fired it 40 minutes ago while it could not run.
@@ -520,6 +534,21 @@ def test_collector_silence(change, silent):
     # Hourly at :15, last run 5 h ago → fired 07:15 … 11:15 unrun.
     status.sources = (_source(**{"cron": "15 * * * *", **change}),)
     assert bool(health.silent_sources(status)) is silent
+
+
+def test_a_sources_cron_the_scheduler_cannot_read_is_named_not_judged():
+    """The worker falls back to the seeded cron (worker.slot_trigger); the
+    owner is told the row is wrong instead of a silence nobody can judge."""
+    status = healthy_status()
+    status.sources = (_source(cron="0 23 1-7 * 4"),)
+    assert health.silent_sources(status) == []
+    [problem] = health.problems(status)
+    assert problem.key == "collector_silent"
+    assert problem.text == (
+        "⚠️ OLX sotuvchilari: jadval («0 23 1-7 * 4») notoʻgʻri — oʻrniga dastlabki "
+        "jadval ishlatilmoqda; /manbalar"
+    )
+    assert uz_problems(problem.text, rendered=True) == set()
 
 
 def test_a_global_pause_or_crawling_off_silences_nothing_and_recovers_nothing(
@@ -631,6 +660,28 @@ async def _company_and_candidate(session, state="approved"):
         {"c": company, "s": state},
     )
     return company, candidate
+
+
+async def test_review_backlog_counts_from_the_card_not_the_last_rescore(session):
+    """A rescore or an enrichment touches lead_candidates.updated_at; the
+    card the owner has not answered for four days still waits four days."""
+    _, waiting = await _company_and_candidate(session, state="review")
+    await session.execute(
+        sa.text(
+            "INSERT INTO lead_reviews (candidate_id, kind, asked_at) "
+            "VALUES (:c, 'owner', :at)"
+        ),
+        {"c": waiting, "at": NOW - timedelta(days=4)},
+    )
+    # A candidate in review that was never shown and changed an hour ago.
+    await _company_and_candidate(session, state="review")
+    await session.execute(
+        sa.text("UPDATE lead_candidates SET updated_at = :at"),
+        {"at": NOW - timedelta(hours=1)},
+    )
+    await session.commit()
+    status = await _gather(session)
+    assert status.review_backlog == 1
 
 
 async def _push(session, company, candidate, *, status, error, at, http=None):
@@ -1113,6 +1164,53 @@ async def test_ask_holds_its_cost_cap_line_inside_quiet_hours(session):
         worker.set_owner_notifier(None)
 
 
+def _low_precision(*sources: tuple[str, str, int]) -> health.Problem:
+    status = healthy_status()
+    _reported(
+        "source_low_precision",
+        sources=[{"key": k, "title": t, "pct": pct} for k, t, pct in sources],
+    )(status)
+    [problem] = health.problems(status)
+    return problem
+
+
+async def test_low_precision_is_said_once_per_source_per_week(session):
+    """06 §4.2: a second source paused two days after the first is said at
+    once, and only it; each source is repeated after its own week."""
+    notify = Notify()
+    olx = ("olx_business", "OLX sotuvchilari", 14)
+    hh = ("hh_vacancies", "hh.uz vakansiyalari", 11)
+    monday = datetime(2026, 10, 26, 10, 0, tzinfo=TZ)
+    assert (
+        await health.tell(session, [_low_precision(olx)], notify, now=monday)
+    ).said == ("source_low_precision",)
+    wednesday = monday + timedelta(days=2)
+    both = _low_precision(olx, hh)
+    assert both.text.count("\n") == 1  # /holat shows both
+    report = await health.tell(session, [both], notify, now=wednesday)
+    assert report.said == ("source_low_precision",)
+    assert notify.sent[-1] == (
+        "⚠️ hh.uz vakansiyalari aniqligi 11% — bir haftaga toʻxtatildi "
+        "(/manbalar bilan yoqiladi)"
+    )
+    thursday = wednesday + timedelta(days=1)
+    assert (await health.tell(session, [both], notify, now=thursday)).said == ()
+    next_tuesday = monday + timedelta(days=8)
+    await health.tell(session, [both], notify, now=next_tuesday)
+    assert notify.sent[-1].startswith("⚠️ OLX sotuvchilari aniqligi 14%")
+    assert "hh.uz" not in notify.sent[-1]
+    assert len(notify.sent) == 3
+    refs = await session.scalars(sa.select(m.ReminderLog.ref).order_by(m.ReminderLog.id))
+    assert list(refs) == [
+        "source_low_precision:olx_business",
+        "source_low_precision:hh_vacancies",
+        "source_low_precision:olx_business",
+    ]
+    # Over for both: one recovery.
+    report = await health.tell(session, [], notify, now=next_tuesday + timedelta(hours=1))
+    assert report.recovered == ("source_low_precision",)
+
+
 async def test_two_speakers_at_once_say_a_line_once(session):
     """The worker's sweep and the bot's watchdog run the same tell at the
     same moment: the claim lets one of them speak."""
@@ -1260,6 +1358,39 @@ async def test_a_call_in_flight_is_not_a_silent_api(session):
     )
     assert seen["facts"] == AnthropicFacts(NOW - timedelta(hours=4), None, 1)
     assert "anthropic_silence" not in seen["keys"]  # type: ignore[operator]
+
+
+async def test_a_call_that_raised_is_the_failed_attempt_silence_counts(session):
+    session.add_all(
+        [
+            m.UsageLog(
+                provider="anthropic",
+                operation="classify",
+                model=settings.extract_model,
+                cost_usd=Decimal("0.001"),
+                input_tokens=500,
+                created_at=NOW - timedelta(hours=4),
+            ),
+            m.ModelJob(kind="classify", lane="instant", model="m", custom_id="cs-f-2"),
+        ]
+    )
+    await session.commit()
+
+    async def failing() -> int:
+        raise ConnectionError("down")
+
+    with pytest.raises(ConnectionError):
+        await costs.ask(
+            session,
+            operation="classify",
+            est_usd=Decimal("0.001"),
+            call=failing,
+            price=lambda _: costs.Priced(cost_usd=Decimal("0.001"), input_tokens=480),
+            now=NOW,
+        )
+    status = await _gather(session, now=NOW + timedelta(minutes=5))
+    assert status.anthropic == AnthropicFacts(NOW - timedelta(hours=4), NOW, 1)
+    assert "anthropic_silence" in [p.key for p in health.problems(status)]
 
 
 async def test_a_refused_op_takes_the_next_probe_slot(session):

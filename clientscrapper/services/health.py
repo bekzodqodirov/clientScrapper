@@ -54,7 +54,7 @@ import re
 import shutil
 from collections.abc import Awaitable, Callable, Collection, Iterable, Mapping
 from contextlib import AbstractAsyncContextManager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -168,6 +168,9 @@ DAILY_KEYS: Final = frozenset({costs.COST_CAP_KEY, costs.SPEND_HIGH_KEY})
 REPEAT_OVERRIDES: Final[Mapping[str, timedelta]] = {
     "source_low_precision": timedelta(days=7),
 }
+# Keys whose repeat window runs per subject (a source), not per key: the
+# ledger row's ``ref`` is ``<key>:<subject>``.
+PER_SUBJECT_KEYS: Final = frozenset({"source_low_precision"})
 # Raised and cleared by the module that sees them (raise_problem): the event
 # is that module's, so is the moment it is over.
 REPORTED_KEYS: Final = frozenset(
@@ -435,6 +438,9 @@ class SourceState:
     breaker_reason: str | None
     last_run_at: datetime | None
     last_skipped_at: datetime | None = None
+    # The row's last write: the clock of a source that has neither run nor
+    # been skipped since it was enabled (enabling it is a write).
+    updated_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -698,6 +704,7 @@ async def _sources(session: AsyncSession) -> tuple[SourceState, ...]:
             breaker_reason=row.breaker_reason,
             last_run_at=row.last_run_at,
             last_skipped_at=skipped.get(row.key),
+            updated_at=row.updated_at,
         )
         for row in rows
     )
@@ -838,12 +845,30 @@ async def gather(
             .order_by(sa.func.min(ModelJob.submitted_at))
         )
     ).all()
+    # How long a card has waited: since the owner was first shown it (an
+    # unanswered owner card's asked_at), else since the row last changed —
+    # updated_at alone moves on every rescore and enrichment, and would
+    # undercount old cards (06 §4.2 review_backlog).
+    shown = (
+        sa.select(
+            LeadReview.candidate_id, sa.func.min(LeadReview.asked_at).label("asked_at")
+        )
+        .where(
+            LeadReview.kind == "owner",
+            LeadReview.answered_at.is_(None),
+            LeadReview.asked_at.is_not(None),
+        )
+        .group_by(LeadReview.candidate_id)
+        .subquery()
+    )
     backlog = await session.scalar(
         sa.select(sa.func.count())
         .select_from(LeadCandidate)
+        .outerjoin(shown, shown.c.candidate_id == LeadCandidate.id)
         .where(
             LeadCandidate.state == "review",
-            LeadCandidate.updated_at < now - REVIEW_BACKLOG_AGE,
+            sa.func.coalesce(shown.c.asked_at, LeadCandidate.updated_at)
+            < now - REVIEW_BACKLOG_AGE,
         )
     )
     sources = await _sources(session)
@@ -967,30 +992,54 @@ def collectors_judged(status: Status) -> bool:
     return settings.collectors_enabled and not status.paused
 
 
+def _judged_sources(status: Status) -> list[SourceState]:
+    """The sources collector_silent judges: enabled, with a cron, not paused,
+    not blocked (collector_blocked says that one)."""
+    if not collectors_judged(status):
+        return []
+    return [
+        source
+        for source in status.sources
+        if source.enabled
+        and source.cron
+        and not (source.paused_until is not None and source.paused_until > status.now)
+        and not (source.breaker_until is not None and source.breaker_until > status.now)
+    ]
+
+
+def unreadable_crons(status: Status) -> list[SourceState]:
+    """Judged sources whose ``sources.cron`` the translator refuses (an owner
+    edit): the scheduler runs the seeded cron instead and says so in its
+    log; collector_silent names them, since their silence cannot be judged."""
+    found: list[SourceState] = []
+    for source in _judged_sources(status):
+        try:
+            crontab.trigger(source.cron or "", settings.tz)
+        except crontab.CrontabError:
+            found.append(source)
+    return found
+
+
 def silent_sources(status: Status) -> list[tuple[SourceState, timedelta]]:
     """06 §4.2 collector_silent: an enabled source with a cron, not paused,
     whose cron fired at least twice (plus a grace) since it last ran — or
     since the scheduler last fired it while it could not run (a ``skipped``
-    run: disabled, paused or globally paused). A source that has neither ever
-    run nor been skipped has no clock yet. Returns (source, silent for)."""
-    if not collectors_judged(status):
-        return []
+    run: disabled, paused or globally paused) — or, for a source that has
+    done neither, since its row was last written (it was enabled then, and
+    a built job that fails before it claims a run leaves no other trace).
+    Returns (source, silent for)."""
     found: list[tuple[SourceState, timedelta]] = []
-    for source in status.sources:
-        if not source.enabled or not source.cron:
-            continue
-        if source.paused_until is not None and source.paused_until > status.now:
-            continue
-        if source.breaker_until is not None and source.breaker_until > status.now:
-            continue  # blocked: collector_blocked says it
+    for source in _judged_sources(status):
         marks = [m for m in (source.last_run_at, source.last_skipped_at) if m is not None]
+        if not marks and source.updated_at is not None:
+            marks = [source.updated_at]
         if not marks:
             continue
         reference = max(marks)
         try:
             missed = list(
                 crontab.fires(
-                    source.cron,
+                    source.cron or "",
                     after=reference,
                     until=status.now - COLLECTOR_GRACE,
                     tz=settings.tz,
@@ -998,8 +1047,7 @@ def silent_sources(status: Status) -> list[tuple[SourceState, timedelta]]:
                 )
             )
         except crontab.CrontabError:
-            log.warning("health: unreadable sources.cron", extra={"source": source.key})
-            continue
+            continue  # unreadable_crons names it
         if len(missed) >= COLLECTOR_MISSED_RUNS:
             found.append((source, status.now - reference))
     return found
@@ -1042,6 +1090,10 @@ class Problem:
     severity: Severity
     # Uzbek, HTML-escaped, and it names the remedy.
     text: str
+    # A key said per subject (``PER_SUBJECT_KEYS``): (subject, its line), and
+    # ``text`` is their lines. The alert memory keeps one row per subject, so
+    # a new subject is said at once while the others keep their window.
+    subjects: tuple[tuple[str, str], ...] = ()
 
 
 def _since(component: Component) -> str:
@@ -1196,17 +1248,17 @@ def problems(status: Status) -> list[Problem]:
                 ]
             ),
         )
-    silent = silent_sources(status)
+    silent = [
+        f"⚠️ {escape(s.title_uz)} {age_label(age)} ishlamadi — /manbalar"
+        for s, age in silent_sources(status)
+    ]
+    silent += [
+        f"⚠️ {escape(s.title_uz)}: jadval («{escape(s.cron)}») notoʻgʻri — oʻrniga "
+        "dastlabki jadval ishlatilmoqda; /manbalar"
+        for s in unreadable_crons(status)
+    ]
     if silent:
-        add(
-            "collector_silent",
-            _lines(
-                [
-                    f"⚠️ {escape(s.title_uz)} {age_label(age)} ishlamadi — /manbalar"
-                    for s, age in silent
-                ]
-            ),
-        )
+        add("collector_silent", _lines(silent))
     for alert in costs.spend_alerts(
         status.spend,
         daily_cap=settings.daily_cost_cap_usd,
@@ -1302,7 +1354,13 @@ def problems(status: Status) -> list[Problem]:
     if "ig_token_expired" in rep:
         add("ig_token_expired", "⚠️ Instagram tokeni eskirdi — yangilang")
     if "source_low_precision" in rep:
-        add("source_low_precision", _low_precision_text(rep["source_low_precision"]))
+        subjects = _low_precision_lines(rep["source_low_precision"])
+        found["source_low_precision"] = Problem(
+            "source_low_precision",
+            "warning",
+            _lines([line for _, line in subjects]),
+            subjects,
+        )
     if "evidence_over_cap" in rep:
         add(
             "evidence_over_cap",
@@ -1312,21 +1370,27 @@ def problems(status: Status) -> list[Problem]:
     return [found[k] for k in PROBLEM_KEYS if k in found]
 
 
-def _low_precision_text(reported: Reported) -> str:
+def _low_precision_lines(reported: Reported) -> tuple[tuple[str, str], ...]:
+    """(source key, its line) per auto-paused source (T-36 raises
+    ``detail={"sources": [{"key", "title", "pct"}, …]}``)."""
     sources = reported.detail.get("sources")
     items = sources if isinstance(sources, list) else [reported.detail]
-    lines = []
+    lines: list[tuple[str, str]] = []
     for item in items:
         if not isinstance(item, Mapping):
             continue
+        key = str(item.get("key") or item.get("title") or "?")
         title = escape(item.get("title") or item.get("key") or "?")
         pct = escape(item.get("pct", "?"))
         lines.append(
-            f"⚠️ {title} aniqligi {pct}% — bir haftaga toʻxtatildi "
-            "(/manbalar bilan yoqiladi)"
+            (
+                key,
+                f"⚠️ {title} aniqligi {pct}% — bir haftaga toʻxtatildi "
+                "(/manbalar bilan yoqiladi)",
+            )
         )
-    return _lines(
-        lines or ["⚠️ Manba aniqligi past — bir haftaga toʻxtatildi (/manbalar)"]
+    return tuple(lines) or (
+        ("?", "⚠️ Manba aniqligi past — bir haftaga toʻxtatildi (/manbalar)"),
     )
 
 
@@ -1441,6 +1505,10 @@ def _told(last: Mapping[str, datetime], key: str) -> bool:
     return cleared is None or cleared < alerted
 
 
+def _repeat(key: str) -> timedelta:
+    return REPEAT_OVERRIDES.get(key, timedelta(hours=settings.alert_repeat_hours))
+
+
 def _alert_due(last: Mapping[str, datetime], key: str, now: datetime) -> bool:
     if key in TOLD_FIRST_ELSEWHERE and not _told(last, key):
         return False
@@ -1449,8 +1517,40 @@ def _alert_due(last: Mapping[str, datetime], key: str, now: datetime) -> bool:
         return True
     if key in DAILY_KEYS:
         return alerted < costs.day_start(now)
-    repeat = REPEAT_OVERRIDES.get(key, timedelta(hours=settings.alert_repeat_hours))
-    return now - alerted > repeat
+    return now - alerted > _repeat(key)
+
+
+def _subject_ref(key: str, subject: str) -> str:
+    return f"{key}:{subject}"
+
+
+async def _subject_ledger(session: AsyncSession, key: str) -> dict[str, datetime]:
+    """``ref`` → newest ``alert:<key>`` row, for a PER_SUBJECT_KEYS key."""
+    rows = await session.execute(
+        sa.select(ReminderLog.ref, sa.func.max(ReminderLog.sent_at))
+        .where(ReminderLog.kind == ALERT_KIND + key)
+        .group_by(ReminderLog.ref)
+    )
+    return {str(ref): at for ref, at in rows.all()}
+
+
+def _due_subjects(
+    problem: Problem, told: Mapping[str, datetime], now: datetime
+) -> tuple[tuple[str, str], ...]:
+    window = _repeat(problem.key)
+    return tuple(
+        (subject, line)
+        for subject, line in problem.subjects
+        if (at := told.get(_subject_ref(problem.key, subject))) is None
+        or now - at > window
+    )
+
+
+def _narrowed(problem: Problem, subjects: tuple[tuple[str, str], ...]) -> Problem:
+    """The problem as it is said now: only these subjects' lines."""
+    return replace(
+        problem, subjects=subjects, text=_lines([line for _, line in subjects])
+    )
 
 
 async def _ledger(session: AsyncSession, keys: Iterable[str]) -> dict[str, datetime]:
@@ -1477,11 +1577,23 @@ async def alerts_due(
     ALERT_REPEAT_HOURS (a ``DAILY_KEYS`` key: none in this Tashkent day; a
     ``REPEAT_OVERRIDES`` key: none within its own window). A key in
     TOLD_FIRST_ELSEWHERE is due only once its own job recorded the alert of
-    this episode, so the sweep repeats it but never says it first. A key has
+    this episode, so the sweep repeats it but never says it first. A
+    ``PER_SUBJECT_KEYS`` problem is due with the subjects not said within its
+    window, and only those (06 §4.2 «once per source per week»: a second
+    source paused two days after the first is said at once). A key has
     recovered when it is no longer a problem, is judged, and its last alert
     is newer than its last recovery."""
     last = await _ledger(session, PROBLEM_KEYS)
-    due = [p for p in found if _alert_due(last, p.key, now)]
+    due: list[Problem] = []
+    for problem in found:
+        if problem.key in PER_SUBJECT_KEYS and problem.subjects:
+            fresh = _due_subjects(
+                problem, await _subject_ledger(session, problem.key), now
+            )
+            if fresh:
+                due.append(_narrowed(problem, fresh))
+        elif _alert_due(last, problem.key, now):
+            due.append(problem)
     current = {p.key for p in found}
     recovered = [
         key
@@ -1512,11 +1624,30 @@ _own_session: Callable[[], AbstractAsyncContextManager[AsyncSession]] = session_
 OwnerNotify = Callable[[str], Awaitable[bool]]
 
 
-async def _claim(session: AsyncSession, kind: str, key: str, now: datetime) -> int | None:
+@dataclass(frozen=True, slots=True)
+class _Line:
+    key: str
+    text: str
+    # PER_SUBJECT_KEYS: what the text is made of, claimed one by one.
+    subjects: tuple[tuple[str, str], ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class _Claimed:
+    text: str
+    ids: tuple[int, ...]
+
+
+async def _claim(
+    session: AsyncSession, kind: str, line: _Line, now: datetime
+) -> _Claimed | None:
     """Re-check under the key's lock that ``kind`` is still due, then write
-    its row; the id, or None when another speaker got there first. The lock
-    is costs.ALERT_LOCK keyed on ``alert:<key>``, the one ``costs.ask``'s
-    cost_cap claim takes, and it lasts until the caller commits."""
+    its row (one per subject still due, for a PER_SUBJECT_KEYS line); what
+    is to be said and the ids, or None when another speaker got there first.
+    The lock is costs.ALERT_LOCK keyed on ``alert:<key>``, the one
+    ``costs.ask``'s cost_cap claim takes, and it lasts until the caller
+    commits."""
+    key = line.key
     await session.execute(
         sa.select(
             sa.func.pg_advisory_xact_lock(
@@ -1524,6 +1655,19 @@ async def _claim(session: AsyncSession, kind: str, key: str, now: datetime) -> i
             )
         )
     )
+    if kind == ALERT_KIND and line.subjects:
+        probe = Problem(key, "warning", line.text, line.subjects)
+        fresh = _due_subjects(probe, await _subject_ledger(session, key), now)
+        if not fresh:
+            return None
+        rows = [
+            ReminderLog(kind=kind + key, ref=_subject_ref(key, subject), sent_at=now)
+            for subject, _ in fresh
+        ]
+        session.add_all(rows)
+        await session.flush()
+        text = _lines([text for _, text in fresh])
+        return _Claimed(text, tuple(row.id for row in rows))
     last = await _ledger(session, [key])
     still = _alert_due(last, key, now) if kind == ALERT_KIND else _told(last, key)
     if not still:
@@ -1531,7 +1675,7 @@ async def _claim(session: AsyncSession, kind: str, key: str, now: datetime) -> i
     row = ReminderLog(kind=kind + key, ref=key, sent_at=now)
     session.add(row)
     await session.flush()
-    return row.id
+    return _Claimed(line.text, (row.id,))
 
 
 async def _release(ids: list[int]) -> None:
@@ -1546,31 +1690,36 @@ async def _release(ids: list[int]) -> None:
 
 async def _say(
     kind: str,
-    lines: list[tuple[str, str]],
+    lines: list[_Line],
     compose: Callable[[list[str]], str],
     *,
     now: datetime,
     notify: OwnerNotify,
 ) -> list[str]:
-    """Claim each (key, text), commit, tell what was claimed as one message
+    """Claim each line, commit, tell what was claimed as one message
     (``compose`` joins the texts), and take the claims back unless it was
-    delivered. Returns the keys said now; a key another speaker claimed first
-    is left out of the message."""
-    claimed: list[tuple[str, str, int]] = []
+    delivered. Returns the keys said now; a key (a subject) another speaker
+    claimed first is left out of the message."""
+    claimed: list[tuple[str, _Claimed]] = []
     async with _own_session() as own:
-        for key, text in lines:
-            row_id = await _claim(own, kind, key, now)
-            if row_id is not None:
-                claimed.append((key, text, row_id))
+        for line in lines:
+            got = await _claim(own, kind, line, now)
+            if got is not None:
+                claimed.append((line.key, got))
     if not claimed:
         return []
     delivered = False
     try:
-        delivered = await notify(compose([text for _, text, _ in claimed]))
+        delivered = await notify(compose([got.text for _, got in claimed]))
     finally:
         if not delivered:
-            await _release([row_id for _, _, row_id in claimed])
-    return [key for key, _, _ in claimed] if delivered else []
+            await _release([row_id for _, got in claimed for row_id in got.ids])
+    return [key for key, _ in claimed] if delivered else []
+
+
+def _line(problem: Problem) -> _Line:
+    subjects = problem.subjects if problem.key in PER_SUBJECT_KEYS else ()
+    return _Line(problem.key, problem.text, subjects)
 
 
 def bundle(texts: list[str]) -> str:
@@ -1613,7 +1762,7 @@ async def tell(
     for problem in due:
         if problem.severity == "critical":
             said += await _say(
-                ALERT_KIND, [(problem.key, problem.text)], bundle, now=now, notify=notify
+                ALERT_KIND, [_line(problem)], bundle, now=now, notify=notify
             )
     warnings = [p for p in due if p.severity != "critical"]
     if warnings and quiet:
@@ -1621,7 +1770,7 @@ async def tell(
     elif warnings:
         said += await _say(
             ALERT_KIND,
-            [(p.key, p.text) for p in warnings],
+            [_line(p) for p in warnings],
             bundle,
             now=now,
             notify=notify,
@@ -1632,7 +1781,7 @@ async def tell(
     elif recovered:
         back = await _say(
             RECOVERED_KIND,
-            [(key, recovery_text(key)) for key in recovered],
+            [_Line(key, recovery_text(key)) for key in recovered],
             "\n".join,
             now=now,
             notify=notify,

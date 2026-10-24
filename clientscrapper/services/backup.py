@@ -16,12 +16,21 @@ Telegram split into ``.partNN`` pieces of ≤ 45 MB (``split_for_telegram``)
 that ``tools/restore.py`` joins back. MIYA's legacy ``.sql.age`` format is
 gone: this project never wrote one.
 
-One change: the dump flows through this process on its way to ``age`` instead
-of an OS pipe between the two, so the bytes can be counted. A run whose
-pg_dump wrote nothing, or wrote something that is not a custom-format archive
-(``PGDMP``), is a failure — ``age`` would happily encrypt an empty input into
-a 200-byte file that looks like a backup (07 §4.1 T-08: «make backup →
-non-zero .age»). The bytes stay in memory one chunk at a time.
+Three changes:
+
+* The dump flows through this process on its way to ``age`` instead of an OS
+  pipe between the two, so the bytes can be counted. A run whose pg_dump
+  wrote nothing, or wrote something that is not a custom-format archive
+  (``PGDMP``), is a failure — ``age`` would happily encrypt an empty input
+  into a 200-byte file that looks like a backup (07 §4.1 T-08: «make backup
+  → non-zero .age»). The bytes stay in memory one chunk at a time.
+* ``age`` writes into a ``.partial`` this process created owner-only, so the
+  ciphertext is never readable by another user, not even while it is written
+  (``age -o`` would create it with the umask's mode).
+* The row counts the weekly drill compares with (``count_tables``) are taken
+  in the dump's own snapshot: a repeatable-read transaction exports it and
+  ``pg_dump --snapshot`` reads the same one, so a resolve run or a feed delta
+  landing during the dump cannot make the drill's comparison differ.
 """
 
 from __future__ import annotations
@@ -31,13 +40,17 @@ import contextlib
 import logging
 import os
 import re
-from dataclasses import dataclass
+from collections.abc import Awaitable, Callable, Sequence
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Final
+from typing import TYPE_CHECKING, Any, Final
 from urllib.parse import unquote, urlsplit, urlunsplit
 
 from clientscrapper.config import settings
+
+if TYPE_CHECKING:
+    import psycopg
 
 log = logging.getLogger(__name__)
 
@@ -72,6 +85,9 @@ class BackupResult:
     dump_bytes: int = 0
     pruned: int = 0
     error: str | None = None
+    # Rows of ``count_tables`` in the dump's snapshot (a table that does not
+    # exist is left out); empty when none were asked for.
+    counts: dict[str, int] = field(default_factory=dict)
 
     @property
     def ok(self) -> bool:
@@ -141,15 +157,60 @@ async def _pump(
     return total, head
 
 
+def _libpq(url: str) -> str:
+    return re.sub(r"^postgresql\+\w+://", "postgresql://", url)
+
+
+# Indirection for tests: awaited between the snapshot's export and pg_dump.
+_after_snapshot: Callable[[], Awaitable[None]] | None = None
+
+
+async def _open_snapshot(
+    url: str, tables: Sequence[str]
+) -> tuple[psycopg.AsyncConnection[Any], str, dict[str, int]]:
+    """A repeatable-read transaction: its exported snapshot (for ``pg_dump
+    --snapshot``) and the row counts of ``tables`` in it. The caller keeps
+    the connection open until pg_dump is done and then closes it."""
+    import psycopg
+    from psycopg import sql
+
+    conn = await psycopg.AsyncConnection.connect(
+        _libpq(url), autocommit=True, connect_timeout=10
+    )
+    try:
+        await conn.execute("BEGIN ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+        exported = await (await conn.execute("SELECT pg_export_snapshot()")).fetchone()
+        assert exported is not None
+        counts: dict[str, int] = {}
+        for table in tables:
+            found = await (
+                await conn.execute("SELECT to_regclass(%s)", (f"public.{table}",))
+            ).fetchone()
+            if found is None or found[0] is None:
+                continue
+            row = await (
+                await conn.execute(
+                    sql.SQL("SELECT count(*) FROM {}").format(sql.Identifier(table))
+                )
+            ).fetchone()
+            counts[table] = int(row[0]) if row is not None else 0
+    except BaseException:
+        await conn.close()
+        raise
+    return conn, str(exported[0]), counts
+
+
 async def create_backup(
     *,
     now: datetime | None = None,
     recipient: str | None = None,
     directory: Path | None = None,
     database_url: str | None = None,
+    count_tables: Sequence[str] = (),
 ) -> BackupResult:
     """Dump, encrypt, check, prune. Never raises — the caller is a scheduler
-    job. Each argument defaults to its setting."""
+    job. Each argument defaults to its setting; ``count_tables`` are counted
+    in the dump's snapshot (``BackupResult.counts``)."""
     recipient = recipient if recipient is not None else settings.backup_age_recipient
     recipient = recipient.strip()
     if not recipient:
@@ -165,19 +226,89 @@ async def create_backup(
 
     target = folder / backup_name(now)
     partial = target.with_name(target.name + ".partial")
-    dsn, dump_env = libpq_dsn_and_env(database_url or settings.database_url)
+    url = database_url or settings.database_url
+    snapshot: psycopg.AsyncConnection[Any] | None = None
+    counts: dict[str, int] = {}
+    snapshot_args: list[str] = []
+    if count_tables:
+        try:
+            snapshot, exported, counts = await _open_snapshot(url, count_tables)
+        except Exception as exc:
+            log.error("backup snapshot not taken", extra={"error": type(exc).__name__})
+            return BackupResult(error=f"snapshot: {type(exc).__name__}")
+        snapshot_args = [f"--snapshot={exported}"]
+        if _after_snapshot is not None:
+            await _after_snapshot()
+    try:
+        result = await _dump_and_encrypt(
+            url, recipient, partial, snapshot_args=snapshot_args
+        )
+    finally:
+        if snapshot is not None:
+            with contextlib.suppress(Exception):
+                await snapshot.close()
+    if result.error is not None:
+        return result
+
+    # Renamed only after both processes succeeded, so a crashed run never
+    # leaves behind a file that looks like a usable backup.
+    partial.replace(target)
+    size = target.stat().st_size
+    result = BackupResult(path=target, size=size, dump_bytes=result.dump_bytes)
+    result.counts = counts
+    result.pruned = prune_old(now=now, directory=folder)
+    log.info(
+        "backup written",
+        extra={
+            "file": target.name,
+            "bytes": size,
+            "dump_bytes": result.dump_bytes,
+            "pruned": result.pruned,
+        },
+    )
+    return result
+
+
+async def _dump_and_encrypt(
+    url: str, recipient: str, partial: Path, *, snapshot_args: list[str]
+) -> BackupResult:
+    """``pg_dump -Fc | age`` into ``partial``; ``error`` set on any failure,
+    in which case no ``partial`` is left behind."""
+    dsn, dump_env = libpq_dsn_and_env(url)
+    try:
+        # Owner-only from its first byte; age writes to it as its stdout.
+        sink = os.open(partial, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    except OSError as exc:
+        log.error("backup file not created", extra={"error": type(exc).__name__})
+        return BackupResult(error=f"backup file: {type(exc).__name__}")
+    try:
+        return await _run_pipeline(dsn, dump_env, recipient, sink, partial, snapshot_args)
+    finally:
+        os.close(sink)
+
+
+async def _run_pipeline(
+    dsn: str,
+    dump_env: dict[str, str],
+    recipient: str,
+    sink: int,
+    partial: Path,
+    snapshot_args: list[str],
+) -> BackupResult:
     try:
         dump = await asyncio.create_subprocess_exec(
             "pg_dump",
             "--format=custom",
             "--no-owner",
             "--no-privileges",
+            *snapshot_args,
             dsn,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=dump_env,
         )
     except (OSError, ValueError) as exc:
+        partial.unlink(missing_ok=True)
         log.error("pg_dump could not start", extra={"error": type(exc).__name__})
         return BackupResult(error=f"pg_dump: {type(exc).__name__}")
     try:
@@ -185,14 +316,14 @@ async def create_backup(
             "age",
             "-r",
             recipient,
-            "-o",
-            str(partial),
             stdin=asyncio.subprocess.PIPE,
+            stdout=sink,
             stderr=asyncio.subprocess.PIPE,
         )
     except (OSError, ValueError) as exc:
         dump.kill()
         await dump.wait()
+        partial.unlink(missing_ok=True)
         log.error("age could not start", extra={"error": type(exc).__name__})
         return BackupResult(error=f"age: {type(exc).__name__}")
     assert dump.stdout is not None and dump.stderr is not None
@@ -235,24 +366,7 @@ async def create_backup(
         partial.unlink(missing_ok=True)
         log.error("pg_dump produced no archive", extra={"bytes": total})
         return BackupResult(error="empty_dump", dump_bytes=total)
-
-    # Renamed only after both processes succeeded, so a crashed run never
-    # leaves behind a file that looks like a usable backup.
-    partial.replace(target)
-    os.chmod(target, 0o600)
-    size = target.stat().st_size
-    result = BackupResult(path=target, size=size, dump_bytes=total)
-    result.pruned = prune_old(now=now, directory=folder)
-    log.info(
-        "backup written",
-        extra={
-            "file": target.name,
-            "bytes": size,
-            "dump_bytes": total,
-            "pruned": result.pruned,
-        },
-    )
-    return result
+    return BackupResult(dump_bytes=total)
 
 
 def backup_stamp(path: Path) -> datetime | None:

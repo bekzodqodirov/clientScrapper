@@ -162,6 +162,9 @@ NETWORK_TIMEOUT_SECONDS = 10.0
 # The feed read the doctor makes: one entry, keyed, never followed (05 §B.1).
 CRM_FEED_PATH = "/api/agent/suppression"
 CRM_DEFAULT_BASE_URL = "https://erp.example.uz"
+# The host .env.example (and the settings default) ship: example.uz is not a
+# reserved name, so whoever owns it would receive the key. Never probed.
+CRM_PLACEHOLDER_HOST = "erp.example.uz"
 DOCTOR_USER_AGENT = "clientscrapper-doctor/1"
 SALT_ID = re.compile(r"[0-9a-f]{8}")
 # aiogram's exception classes, by name (the probe classifies whatever the Bot
@@ -353,6 +356,12 @@ def crm_base_url(env: Mapping[str, str]) -> str:
     return (env.get("CRM_BASE_URL") or "").strip() or CRM_DEFAULT_BASE_URL
 
 
+def is_placeholder(base_url: str) -> bool:
+    """The .env.example host, still in place (or CRM_BASE_URL left blank)."""
+    host = (httpx.URL(base_url).host or "").lower().rstrip(".")
+    return host == CRM_PLACEHOLDER_HOST
+
+
 def _crm(env: Mapping[str, str], state: CrmState | None) -> list[Finding]:
     """CRM_BASE_URL and the keyed feed GET (06 §3.3, 05 §A.5/§B.1)."""
     base = crm_base_url(env)
@@ -361,6 +370,14 @@ def _crm(env: Mapping[str, str], state: CrmState | None) -> list[Finding]:
             _error(
                 "❌ CRM_BASE_URL https:// bilan boshlanishi kerak — http:// soʻroviga "
                 "ERP 308 qaytaradi, agent unga ergashmaydi (erp_redirect)."
+            )
+        ]
+    keyed = bool((env.get("CRM_AGENT_KEY") or "").strip())
+    if keyed and is_placeholder(base):
+        return [
+            _error(
+                f"❌ CRM_BASE_URL hali namuna manzili ({CRM_PLACEHOLDER_HOST}) — .env ga "
+                "ERP ning haqiqiy https:// manzilini yoz; kalit u yerga yuborilmadi."
             )
         ]
     if not feeds_configured(env):
@@ -853,9 +870,11 @@ async def probe_crm(
     """One keyed ``GET /api/agent/suppression?limit=1`` (05 §A.5): both key
     headers, never a redirect followed, never a POST. Only for an https://
     base — the key never travels in clear. Never raises; the key is never in
-    a URL, a message or a log line."""
+    a URL, a message or a log line — nor sent to the .env.example host."""
     if not base_url.lower().startswith("https://"):
         return CrmState(None, error="not_https")
+    if is_placeholder(base_url):
+        return CrmState(None, error="placeholder")
     headers = {
         "X-GSR-Key": key,
         "X-ERP-Key": key,
@@ -906,7 +925,9 @@ async def probe_network(
     )
     crm: Awaitable[CrmState | None] = (
         probe_crm(base, (env.get("CRM_AGENT_KEY") or "").strip(), transport=transport)
-        if feeds_configured(env) and base.lower().startswith("https://")
+        if feeds_configured(env)
+        and base.lower().startswith("https://")
+        and not is_placeholder(base)
         else nothing()
     )
     found_telegram, found_crm = await asyncio.gather(telegram, crm)
