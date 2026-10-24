@@ -1,7 +1,7 @@
 # 05 — ERP integration (fullprompt branch `agent-feed` + agent push/feeds)
 
 Scope: both sides of the ERP contract. **Part A is what was built** on fullprompt branch
-`agent-feed` (head `a4f9f433`, 2026-10-24) — a summary for the Python side, not a proposal.
+`agent-feed` (head `d138b3bc`, 2026-10-24) — a summary for the Python side, not a proposal.
 **Part B** is `clientscrapper/services/crm_push.py` and `services/erp_feeds.py`, written to consume
 Part A. Tables referenced on the agent side (`push_log`, `outcomes`, `suppression`,
 `lead_candidates`, `sources.config`) are defined in `02-data-model.md` §2.8–2.11; this file does not
@@ -54,7 +54,7 @@ runs `pnpm db:migrate && pnpm db:seed`.
 ### A.0 Status (2026-10-24)
 
 - Repository `bekzodqodirov/fullprompt`, branch `agent-feed`, pushed to `origin/agent-feed` at
-  **`a4f9f433`** (2026-10-24 10:39 UTC). Twelve commits (`git rev-list 7bea3051..a4f9f433`) over
+  **`d138b3bc`** (2026-10-24 11:20 UTC). Fourteen commits (`git rev-list 7bea3051..d138b3bc`) over
   `origin/main` at `7bea3051` — the merge commit of PR #129 into `main` (parents `71025447` and `24607e8c`; the PR's
   head, the tip of `claude/gsr-logistics-wms-phase1-o8h4en`, is `24607e8c`, an ancestor of it), so the
   agent-feed PR targets `main`: the build (`98437a75`, `2ebafe83`, `fec8e1b4`,
@@ -62,31 +62,49 @@ runs `pnpm db:migrate && pnpm db:seed`.
   `f2d96526` — #1460–#1466), the second review's fixes (`aefbf278`, `23fe1736` — #1467–#1472) and
   the third review's (`bfb5625b` code, `a4f9f433` docs — #1473–#1475: cuts back to UTF-16 units with a
   whole-emoji back-off, NUL storable on every door, a `ref` that never throws, the `external_id`
-  spelled as postgres stores it).
+  spelled as postgres stores it) and the fourth review's (`021a2ca5` code, `d138b3bc` docs —
+  #1476–#1477: an `external_id` too long for the ledger's index lands whole).
+- **The fourth review, for the agent.** An `external_id` that the ledger's unique index
+  (`lead_intakes_external_idx`, a btree on `(channel, external_id)`) refuses for its size used to fail
+  the ledger row AFTER the lead and its lenta note (54000): a 503 on every retry here, a 200 with an
+  orphan the caps never counted on every other door. Now `record()` writes the row under the id as
+  sent and, only when postgres refuses it with 54000 AND the id is over 2,048 UTF-8 bytes
+  (`INDEX_SAFE_ID_BYTES` — only such an id can be refused; postgres compresses first and takes about
+  2,680 bytes it cannot compress, a repetitive 50 KB id fits), writes it again as `sha256:` + the hex
+  SHA-256 of its UTF-8 bytes (after the U+FFFD rule; `oversizeIdSpelling`). That arrival lands, its
+  retry is a replay (both fences — the landing's and the bot's `inboundLanded` — ask both spellings,
+  `externalIdSpellings`), and it never appears in the outcomes feed, which reports only `cs:` ids.
+  Every id the index holds keeps its own spelling. The agent's ids are `cs:<uuid>:<yyyymm>`, 46
+  bytes, so the agent is not affected: nothing changes in the push, the reconcile or the outcomes
+  logic (§B.1, §B.2).
 - **No PR is open, nothing is merged, nothing is deployed.** No migration: the journal stays at 136
   files, so a deploy is checked by the build stamp at `/api/version`, not by the migration count.
-- 41 files, +4061 / −63 (the 41st, the extended `tests/integration/field-map.integration.test.ts`,
-  came with the third review). The wire contract's ERP-side home is `docs/AGENT-FEED.md` (425 lines; §0 the
+- 42 files, +4370 / −79 (the 41st, the extended `tests/integration/field-map.integration.test.ts`,
+  came with the third review; the 42nd, the new `tests/unit/intake-id.test.ts`, with the fourth). The
+  wire contract's ERP-side home is `docs/AGENT-FEED.md` (443 lines; §0 the
   owner's five steps in Uzbek, §1 the door, §2 the landing, §3 the feeds, §4 privacy, §5 honest limits,
   §6 the «Boshqa» fallback).
-- Gates of the last round (the third review): a freshly recreated `gsr_ci` migrated (136 = 136), seeded
-  and demo-seeded; `pnpm typecheck` and `pnpm lint` exit 0; full vitest 675 files / 7636 tests green;
-  12 red proofs by string edit, all red. Playwright was not re-run in rounds 2 and 3 (no UI change);
-  round 1 ran `pnpm build`, the bundle host sweep and five e2e specs (16/16) and looked at the doors
-  card at 360 px. Red proofs over the three rounds: 16 + 21 + 16 + 12 (#1458, #1466, #1472, #1475).
-  The vitest and e2e counts come from the build session's own report: no fullprompt document records
-  them (DECISIONS records only the red proofs) — the PR's CI run is where they are re-checked.
-- The captured fixtures (07 §1.0) were taken at `23fe1736` and stay valid at `a4f9f433`: the third
-  review changes no captured answer — no captured value reaches a cut (the longest captured string is
-  a 128-unit note) and none carries a NUL, a lone surrogate or a deep body (checked over the v2
-  capture, 2026-10-24).
+- Gates of the last round (the fourth review): full vitest 676 files / 7642 tests green; 5 red proofs
+  by string edit with a hash-verified restore, all red (#1477). The third review's: a freshly
+  recreated `gsr_ci` migrated (136 = 136), seeded and demo-seeded; `pnpm typecheck` and `pnpm lint`
+  exit 0; full vitest 675 files / 7636 tests green; 12 red proofs by string edit, all red. Playwright
+  was not re-run in rounds 2–4 (no UI change); round 1 ran `pnpm build`, the bundle host sweep and five
+  e2e specs (16/16) and looked at the doors card at 360 px. Red proofs over the build and the review
+  rounds: 16 + 21 + 16 + 12 + 5 (#1458, #1466, #1472, #1475, #1477). The vitest and e2e counts come
+  from the build session's own report: no fullprompt document records them (DECISIONS records only the
+  red proofs) — the PR's CI run is where they are re-checked.
+- The captured fixtures (07 §1.0) were taken at `23fe1736` and stay valid at `d138b3bc`: neither the
+  third nor the fourth review changes a captured answer — no captured value reaches a cut (the longest
+  captured string is a 128-unit note), none carries a NUL, a lone surrogate or a deep body, and no
+  captured `external_id` is longer than 46 bytes, far under the 2,048 bytes at or under which an id is never
+  re-spelled (checked over the v2 capture, 2026-10-24).
 
 ### A.1 File map as built
 
 | File | What it holds now |
 |---|---|
 | `src/modules/wms/crm/agent-source.ts` (new) | `AGENT_SOURCE_KEY = 'agent'`, `isAgentSource()`, `personPickableSources()` (lead forms never offer «Agent (qidiruv)» except as a record's own stored value). No imports, on purpose (an import cycle through `inbound-notify` → `first-contact` would read the constant in its temporal dead zone). |
-| `src/modules/wms/crm/inbound.ts` | `'agent'` in `INBOUND_SOURCE_KEYS` (between `sayt` and `other`); `inboundSourceKey(raw, channel)` — `agent` only on channel `webhook`, else `other`; `formSourceKey()` — `/ariza?manba=agent` is «Sayt»; `landInboundLead` = a per-`(channel, external_id)` in-process chain around `landOnce`, the id normalised by `storableText` first (the chain key, the replay SELECT and the bot fence `inboundLanded` all use that spelling); the agent's `no_phone` drop, per-family phone cap, belt, `company` onto the card; every text cut by `clipUnits` (UTF-16 units, an emoji left out whole) and made storable (NUL and lone surrogates → U+FFFD — name, note, company, the card's phone); `ref` decided before any write by `storedRef` (`storableJson`, or `{"_truncated":true}` for a body too deep to serialise). |
+| `src/modules/wms/crm/inbound.ts` | `'agent'` in `INBOUND_SOURCE_KEYS` (between `sayt` and `other`); `inboundSourceKey(raw, channel)` — `agent` only on channel `webhook`, else `other`; `formSourceKey()` — `/ariza?manba=agent` is «Sayt»; `landInboundLead` = a per-`(channel, external_id)` in-process chain around `landOnce`, the id normalised by `storableText` first (the chain key, the replay SELECT and the bot fence `inboundLanded` all use that spelling); `record()` writes the ledger row under that id and, only when postgres refuses it for its size (54000) and it is over `INDEX_SAFE_ID_BYTES` = 2,048 UTF-8 bytes, again under `oversizeIdSpelling` (`sha256:` + hex digest), both fences asking `externalIdSpellings` (the id, plus the hash for an id over the limit); the agent's `no_phone` drop, per-family phone cap, belt, `company` onto the card; every text cut by `clipUnits` (UTF-16 units, an emoji left out whole) and made storable (NUL and lone surrogates → U+FFFD — name, note, company, the card's phone); `ref` decided before any write by `storedRef` (`storableJson`, or `{"_truncated":true}` for a body too deep to serialise). |
 | `src/modules/wms/crm/inbound-webhook.ts` | `InboundFields.company` read from `company` then `firma` (key names case-insensitive), **beside** — not instead of — the note line and question pair those keys always produced. |
 | `src/modules/wms/crm/agent-feed.ts` (new, 524 lines) | `hashTail`, `saltIdFor`, `HASH_RULE`, the cursor codec, `parseSince`, `clampLimit`, `noContactReasons()`, the derived suppression table (`suppressionTailsSql`), `suppressionPage`, the belt `isSuppressedTail`, `outcomesPage`. |
 | `src/modules/wms/crm/agent-feed-door.ts` (new) | `agentFeedResponse(request, feed)` (`feed` = `'suppression'` or `'outcomes'`) — the one GET door both routes share (key, 400/404/503, body, `Cache-Control`). |
@@ -98,14 +116,14 @@ runs `pnpm db:migrate && pnpm db:seed`.
 | `src/modules/wms/crm/analytics.ts` | /crm/tahlil's «Birinchi aloqa» median takes only contacts within `CONTACT_LOOKBACK_DAYS` of the clock (late agent contacts stay in the late counts). |
 | `src/modules/wms/crm/field-map.ts`, `src/modules/wms/crm/service.ts` | `clipUnits` cuts in `normalizeKey`/`capturePairs` (key 80, value 300) and in `addActivity`'s 200-unit audit excerpt — the UTF-16 budget the old `slice` had, so a `lead_field_map` key saved before the deploy is spelled the same and still matches (#1473). |
 | `src/modules/wms/client-cabinet/service.ts` | `activeClientsByPhone` reads a non-array `clients.phones` as no phones (one such card used to fail every arrival). |
-| `src/modules/platform/text/clip.ts` (new) | `storableText` (every lone surrogate and NUL → U+FFFD, one unit for one), `clipUnits` (`storableText(t).slice(0, max)`, minus a high surrogate left dangling at the edge), `storableJson` (`JSON.stringify` untouched, then its `\u0000` and lone `\udXXX` escapes rewritten to `\ufffd` in the output). |
+| `src/modules/platform/text/clip.ts` (new) | `storableText` (every lone surrogate and NUL → U+FFFD, one unit for one), `clipUnits` (`storableText(t).slice(0, max)`, minus a high surrogate left dangling at the edge), `storableJson` (`JSON.stringify` untouched, then its `\u0000` and lone `\udXXX` escapes rewritten to `\ufffd` in the output — so two keys of one object that differ only there become one key, postgres keeping the last value). |
 | `src/modules/platform/settings/reason-list.ts` (new), `settings/service.ts`, `src/app/(protected)/admin/settings/page.tsx` | Setting `agent_no_contact_reasons` (default `Qayta qilinmasin`), its validator and the refusal sentence `badValueReasons`. |
 | `messages/{ru,uz,zh-CN,en}.json` | `settings.descriptions.agent_no_contact_reasons` and `badValueReasons` in all four locales. |
 | `scripts/seed.ts` | `{ key: 'agent', name: 'Agent (qidiruv)', sortOrder: 190 }` (just above «Boshqa» 200; 90 is «Oʻzi keldi»'s). |
 | `src/app/(protected)/crm/(pages)/kelganlar/door-views.ts` (new), `doors.tsx`, `page.tsx` | The doors screen decided on the server: no form or bot link for the agent's door; a door's key sent only to `admin.settings.manage`. |
 | `src/app/(protected)/crm/leads/new/page.tsx`, `crm/leads/[id]/page.tsx`, `src/app/(public)/ariza/page.tsx` | Person doors never claim the agent's source. |
-| `docs/AGENT-FEED.md` (new), `docs/ADS.md` §1 §5.3, `DECISIONS.md` #1455–#1475, `CHANGELOG.md` (Uzbek) | Docs. |
-| `tests/unit/agent-feed.test.ts`, `agent-feed-door.test.ts`, `agent-door-landing.test.ts`, `inbound-source-keys.test.ts`, `text-clip.test.ts`; `tests/integration/agent-feed.integration.test.ts` (1373 lines); `tests/integration/field-map.integration.test.ts` (extended, +30) | Tests (§A.12). |
+| `docs/AGENT-FEED.md` (new), `docs/ADS.md` §1 §5.3, `DECISIONS.md` #1455–#1477, `CHANGELOG.md` (Uzbek) | Docs. |
+| `tests/unit/agent-feed.test.ts`, `agent-feed-door.test.ts`, `agent-door-landing.test.ts`, `inbound-source-keys.test.ts`, `text-clip.test.ts`, `intake-id.test.ts`; `tests/integration/agent-feed.integration.test.ts` (1445 lines); `tests/integration/field-map.integration.test.ts` (extended, +30) | Tests (§A.12). |
 
 `platform` imports nothing from `wms` (the reason parser lives in `platform/settings` because the
 settings validator needs it).
@@ -157,10 +175,20 @@ carries (`"\ud83d"` and `"\u0000"` are valid JSON) is stored as U+FFFD wherever 
 the note, the company, the card's phone, every pair, the `ref` (`storableJson` rewrites only the
 `\u0000` and lone `\udXXX` escapes in `JSON.stringify`'s output) **and the `external_id`**: the id is
 normalised before the chain key and the replay SELECT, so the outcomes feed hands such an id back with
-U+FFFD in its place (the agent's own `cs:` ids carry neither). The `name` is not checked for a
-minimum: an empty one becomes `agent · <digits>`.
+U+FFFD in its place (the agent's own `cs:` ids carry neither). It follows that two `external_id`s
+that differ only by a NUL against a U+FFFD, or by which lone surrogate, are ONE id — the second
+delivery is a replay — and that two `ref` keys of one object that differ only that way collapse to one
+key, the last value kept (AGENT-FEED.md §1, #1477). The agent's payload tests already keep every NUL
+and lone surrogate out of every value (07 §1.6), so neither reaches it. The `name` is not checked for
+a minimum: an empty one becomes `agent · <digits>`.
 
-**`external_id`** = `cs:<company_uuid>:<yyyymm>`; the outcomes feed reports only ids starting `cs:`.
+**`external_id`** = `cs:<company_uuid>:<yyyymm>` (46 bytes); the outcomes feed reports only ids
+starting `cs:` (`agent-feed.ts`, `external_id LIKE 'cs:%'`). An id that the ledger's unique index
+refuses for its size — only one over 2,048 UTF-8 bytes can be refused, and postgres takes about 2,680
+bytes it cannot compress — is stored as `sha256:` + the hex SHA-256 of its UTF-8 bytes (after the
+U+FFFD rule): it lands, its retry is a replay, and the outcomes feed never shows it. Every id the
+index holds keeps its own spelling (#1476). The agent's ids are far below the limit, so this never
+applies to them.
 
 **Answer** (captured in `post_*.json`, `err_post_404_*.txt`; the 503 is read from the code):
 
@@ -184,10 +212,17 @@ so each channel's deliveries meet in one map; production runs one app process) a
 replay; across processes only the ledger's unique index stands (one ledger row, not one lead). The
 wait has no bound (§A.13 (iv)). A landing that failed AFTER its lead was written (only a database
 failure half-way does that now: no text the body carries — an emoji at a cut, a lone surrogate, a
-NUL, a body nested too deep — makes a write refuse any more, #1467, #1473) leaves that lead standing
-with no ledger row; the retry normally JOINS it, so the outcome reads `joined` and the seller hears
-«🔁 Qayta yozdi» about a lead whose «🆕» never came (AGENT-FEED.md §1, §5) — §A.13 lists when it
-makes a second lead or comes back `capped` instead.
+NUL, a body nested too deep, an id too long for the index — makes a write refuse any more, #1467,
+#1473, #1476) leaves that lead standing with no ledger row; the retry normally JOINS it, so the
+outcome reads `joined` and the seller hears «🔁 Qayta yozdi» about a lead whose «🆕» never came
+(AGENT-FEED.md §1, §5) — §A.13 lists when it makes a second lead or comes back `capped` instead. One
+input-driven cause that repeats on every attempt is known (AGENT-FEED.md §1, §5; #1477): a body of
+tens of megabytes — `ref` is the whole body, nothing caps a route handler's body, and postgres
+refuses a jsonb past its limits (measured in postgres, not through the route: an array of twenty
+million zeros, about 40 MB of JSON, is refused; ten million is stored) — would land its lead and fail
+its ledger row every time: a 503 on every retry and one more lenta note each. The agent's bodies are
+a few KB (note ≤ 700 chars, §B.1), so they cannot reach it; the ERP's cure (write the ledger row
+first) is deferred.
 
 **Caps** (counted over the arrivals ledger, dropped arrivals included, each over a **rolling 24 h**
 of `lead_intakes.created_at` — `inboundCount`, not a calendar day): 3 per phone and 200 per source →
@@ -442,7 +477,10 @@ Unit: `agent-feed.test.ts` (hash/salt vectors `k`/`901234567` → `2ea6869e504ce
 `8254c329`; cursor round trip incl. 2-part and rolled dates; `parseSince`; `clampLimit`; reason
 parser), `agent-feed-door.test.ts`, `agent-door-landing.test.ts` (503 on a landing / key-lookup throw,
 200 elsewhere), `inbound-source-keys.test.ts` (seed fence, `inboundSourceKey`, `formSourceKey`,
-`company` parse), `text-clip.test.ts`. Integration: `agent-feed.integration.test.ts` — full/paged/
+`company` parse), `text-clip.test.ts`, `intake-id.test.ts` (`oversizeIdSpelling`/`externalIdSpellings`:
+no second spelling at or under 2,048 UTF-8 bytes — ASCII, 4-byte emoji, 2-byte Cyrillic — and
+`sha256:` + the digest computed in the test one byte past it; deterministic, two ids stay two).
+Integration: `agent-feed.integration.test.ts` — full/paged/
 delta feeds, kinds (active, inactive, person, won, attached, listed lost), tail splitting and the
 998-run rule, the belt incl. the 7–8-digit suffix, per-family caps, `no_phone`, `company` on the
 card, the clock (`contact_due_at NULL`, 90-day stamp, joined-live), the outcomes window, labels only,
@@ -451,12 +489,16 @@ value's 300-unit and the lenta note's 200-unit audit-excerpt edge (left out whol
 lone surrogate and a NUL anywhere in the body through the real route (each 200, `created`, one note,
 its retry a replay, in the outcomes, no `\u0000` stored — on the tiktok door and the public form too,
 where the daily caps now count it), a NUL `external_id` (stored with U+FFFD, the retry a replay), a
-body nested 3,000 deep stored whole and one 50,000 deep kept as `{"_truncated":true}`; it walks the
-full feed (green on a 17,000-entry copy). `field-map.integration.test.ts` maps the old 80-unit
+body nested 3,000 deep stored whole and one 50,000 deep kept as `{"_truncated":true}`, an
+`external_id` longer than the ledger's index holds through the agent's real route (three posts: 200
+×3, one lead, one note, the ledger row under the hash, `inboundLanded` true) and on the Google door
+(created, a replay, the per-phone cap counts it), and the control — a 2,6xx-byte random id and a
+20,000-byte repetitive one on the `telegram` channel stored as sent and replayed; it walks the full
+feed (green on a 17,000-entry copy). `field-map.integration.test.ts` maps the old 80-unit
 spelling of a question with an emoji in its first 80 units and lands the whole question (kub filled);
 `text-clip.test.ts` is a property test that `clipUnits` equals `slice` for every text `slice` could
 store. Red proofs (fullprompt DECISIONS): 16 for the build (#1458), 21 for the first review (#1466),
-16 for the second review (#1472), 12 for the third (#1475).
+16 for the second review (#1472), 12 for the third (#1475), 5 for the fourth (#1477).
 
 ### A.13 ERP-stated limits the agent designs around
 
@@ -481,7 +523,9 @@ store. Red proofs (fullprompt DECISIONS): 16 for the build (#1458), 21 for the f
   meanwhile (no open lead to join), or comes back `dropped/capped` (no `lead_id`) while the orphan
   stands, when other agent arrivals on that phone filled the cap;
   (iii) a cause that repeated on every attempt would answer 503 to every retry and add one lenta note
-  each — up to 9 notes for the agent's 9 POSTs (§B.1); none is known since #1473;
+  each — up to 9 notes for the agent's 9 POSTs (§B.1); one is known since #1477 and no agent body
+  reaches it: a body of tens of megabytes (about 40 MB of JSON, measured in postgres), which postgres
+  refuses as jsonb after the lead was written (§A.2) — the agent's bodies are a few KB;
   (iv) the in-flight chain is per copy of the landing module — each channel that carries an id has one
   lander, production runs one app process, and across processes only the ledger's unique index stands
   (one ledger row, not one lead) — and its wait has no bound: a first delivery that never settles (a
@@ -955,7 +999,9 @@ the captured fixtures (07 §1.7) and this fake change together.
 - **State**: `posted: list[tuple[source, headers, body]]`, `intakes: dict[external_id, row]` keyed
   by the id as the ERP stores it — `storable_text(external_id)` (every NUL and lone surrogate →
   U+FFFD) BEFORE the replay check, so the outcomes it serves hand such an id back with U+FFFD in its
-  place, as the ERP does (A.2; the agent's own `cs:` ids are unaffected) (`intake_id` uuid4,
+  place, as the ERP does (A.2; the agent's own `cs:` ids are unaffected; the ERP's `sha256:` spelling
+  of an id over 2,048 UTF-8 bytes the index refuses is not modelled — the agent's ids are 46 bytes and
+  such an id never reaches the outcomes feed) (`intake_id` uuid4,
   `created_at` microseconds), `leads: dict[lead_id, lead]` (an orphan lead may
   exist without an intake), `entries: list[(tail, kind, at_us, id, n)]`, `outcome_overrides`,
   `secret`, `modes: dict[external_id, mode]`, `held: dict[external_id, asyncio.Event]`.
@@ -1072,8 +1118,9 @@ quarter 90 d / year neither — `since` always ends in `Z`), `test_outcomes_igno
 `auto_push_forbidden`), `test_manual_import_retired_after_full_pull`, `test_suppression_fresh`
 (26 h / 3 h / `salt_id` edges; feed unconfigured → true), `test_feeds_not_called_during_fallback`.
 Recorded fixtures: `tests/fixtures/erp/` — captured from `agent-feed` at `23fe1736` on a seeded
-database (07 §1.0 lists the files) and still valid at `a4f9f433`: the third review changes no captured
-answer (no captured value reaches a cut or carries a NUL, a lone surrogate or a deep body, A.0);
+database (07 §1.0 lists the files) and still valid at `d138b3bc`: neither the third nor the fourth
+review changes a captured answer (no captured value reaches a cut or carries a NUL, a lone surrogate
+or a deep body, and no captured `external_id` is over 46 bytes, A.0);
 `tests/test_erp_feeds_contract.py` runs the parsers over them.
 
 ### B.5 Sequences
@@ -1110,7 +1157,7 @@ SUPPRESSION (full, salt changed)              OUTCOMES (nightly)
 |---|---|---|
 | ERP down (conn refused / connect timeout / 503 / any other 5xx — the ERP's empty-body 500, a proxy's HTML page) on push | 3 tries in ≤ 15 s; `failed`; attempt 2 after 5 min, 3 after 30 min; then `review` | `/holat` `push_failing`; digest line |
 | Read timeout / dropped connection after the request was sent | `unknown`, no resend; the 10-minute `unknown` walk or the nightly read promotes it; 48 h without an outcome → `push_unconfirmed` + one re-push (02 §2.10 rule 5) | nothing, or `push_unconfirmed` |
-| ERP database fails half-way through a landing | 503 → retry; the retry normally joins the orphan lead (`joined`, «🔁 Qayta yozdi» to the seller). It can instead make a SECOND lead (the orphan was moved to won/lost meanwhile) or come back `dropped/capped` while the orphan stands (A.13 (ii)) — the outcome row is the retry's; and a cause that repeats on every try adds one lenta note per POST, ≤ 9, with no Telegram push (A.13 (iii)) | nothing; stated in A.2, A.13 |
+| ERP database fails half-way through a landing | 503 → retry; the retry normally joins the orphan lead (`joined`, «🔁 Qayta yozdi» to the seller). It can instead make a SECOND lead (the orphan was moved to won/lost meanwhile) or come back `dropped/capped` while the orphan stands (A.13 (ii)) — the outcome row is the retry's; and a cause that repeats on every try adds one lenta note per POST, ≤ 9, with no Telegram push (A.13 (iii) — the one known is a body of tens of MB, which the agent's few-KB bodies cannot reach) | nothing; stated in A.2, A.13 |
 | The ERP's ledger row commits but its answer is lost (A.13 (i)) | 503 → the in-attempt retry is a replay, 200 → `sent`, `pushed`; the outcome reads `created` and never gets `contacted_at` → `open_untouched`, `stale_open` after 30 d — although no seller was told | nothing; a `stale_open` row nobody was told about (reasoned by the ERP, not reproduced) |
 | A first delivery that never settles in the ERP (A.13 (iv)) | every later POST of that id waits in the ERP's per-id chain until it restarts; the agent's 20 s read timeout ends the try as `unknown` (no resend); the `unknown` walk, then rule 5 settle it | nothing, or `push_unconfirmed` |
 | ERP down on feeds | `with_backoff` 4 tries (503 is retried, never `push_404`); collector run `failed`; `suppression_fresh()` false (no full pull ≤ 26 h or no delta ≤ 3 h) → gate `suppression_stale` → pushes stop | alert «ERP roʻyxati 26 soatdan beri yangilanmadi — push toʻxtatildi» (06 §4.2 renders the real `{age}`) |
@@ -1180,7 +1227,7 @@ what the ERP side would have to do:
 
 ## Acceptance criteria
 
-- fullprompt `agent-feed` (head `a4f9f433`: built and twice reviewed at `23fe1736`, the third review's fixes `bfb5625b`; T-07): `pnpm typecheck && pnpm lint && pnpm test` green on a fresh `gsr_ci` in CI's order (met, by the build session's report: 675 files / 7636 tests after the third review — re-checked by the PR's CI); an arrival carrying an emoji at a cut, a lone surrogate, a NUL (in any field or the `external_id`) or a body nested too deep lands whole with 200 and one note, its retry a replay (met, pinned through the real route); a `lead_field_map` key saved before the deploy still matches (met); no migration (met); `GET /api/agent/suppression` and `/outcomes` answer 404 without a key or with `X-ERP-Key` only, 400 `bad_cursor`/`bad_since` on a bad cursor or `since`, 503 JSON when the database fails after the key was sent, 200 gzipped ≥ 1 KB with the documented bodies and `resume` (met; captured except the 503 — no capture has the ERP database down — which is read from the code and pinned by fullprompt `tests/unit/agent-feed-door.test.ts` and `agent-door-landing.test.ts`); an `agent` arrival on a client-book (active or inactive, card, person or won/attached lead, 7–8-digit card by suffix) or «Qayta qilinmasin» phone writes `dropped/suppressed`, creates nothing and notifies nobody (met); an `agent` lead has `contact_clock_at` set and `contact_due_at NULL`, is never claimed by `remindUntouched`, and gets `contacted_at` from `stampFirstContacts` for 90 days (met); the agent door answers 503 to a landing that threw and every other door keeps its 200 (met); `tiktok`/form arrivals behave exactly as before (control group, met); the setting is described in 4 locales (met); the seed adds exactly one row (met); `docs/AGENT-FEED.md` lets the Python side be built without reading TypeScript (met). **Still open: the PR, the merge, the deploy and the owner's five steps (A.14).**
+- fullprompt `agent-feed` (head `d138b3bc`: built and twice reviewed at `23fe1736`, the third review's fixes `bfb5625b`, the fourth's `021a2ca5`; T-07): `pnpm typecheck && pnpm lint && pnpm test` green on a fresh `gsr_ci` in CI's order (met, by the build session's report: 675 files / 7636 tests after the third review, full vitest 676 files / 7642 tests after the fourth — re-checked by the PR's CI); an arrival carrying an emoji at a cut, a lone surrogate, a NUL (in any field or the `external_id`), a body nested too deep or an `external_id` too long for the ledger's index lands whole with 200 and one note, its retry a replay (met, pinned through the real route; the long id also on the Google door's landing); a `lead_field_map` key saved before the deploy still matches (met); no migration (met); `GET /api/agent/suppression` and `/outcomes` answer 404 without a key or with `X-ERP-Key` only, 400 `bad_cursor`/`bad_since` on a bad cursor or `since`, 503 JSON when the database fails after the key was sent, 200 gzipped ≥ 1 KB with the documented bodies and `resume` (met; captured except the 503 — no capture has the ERP database down — which is read from the code and pinned by fullprompt `tests/unit/agent-feed-door.test.ts` and `agent-door-landing.test.ts`); an `agent` arrival on a client-book (active or inactive, card, person or won/attached lead, 7–8-digit card by suffix) or «Qayta qilinmasin» phone writes `dropped/suppressed`, creates nothing and notifies nobody (met); an `agent` lead has `contact_clock_at` set and `contact_due_at NULL`, is never claimed by `remindUntouched`, and gets `contacted_at` from `stampFirstContacts` for 90 days (met); the agent door answers 503 to a landing that threw and every other door keeps its 200 (met); `tiktok`/form arrivals behave exactly as before (control group, met); the setting is described in 4 locales (met); the seed adds exactly one row (met); `docs/AGENT-FEED.md` lets the Python side be built without reading TypeScript (met). **Still open: the PR, the merge, the deploy and the owner's five steps (A.14).**
 - Agent: `make test` green with the fake ERP covering 200 / 404 / 503 / 503 committed (the retry a replay) / non-JSON 5xx (empty-body 500, proxy HTML) / read timeout with the first request still running / replay / joined / orphan-joined / client (fallback) / `throw200` (fallback) / badjson and both feeds; a 404 trips the breaker and alerts once; a 3xx is never followed and trips `erp_redirect`; a 503 is retried and never trips it; a read timeout is never resent inside the attempt and lands as `unknown`, promoted by the next outcomes read; a 2xx with an unreadable body lands as `unknown`, never `sent`; an unconfirmed `sent`/`unknown` row is re-pushed at most once (02 §2.10 rule 5); `salt_id` change forces a full pull before any push; a full pull never sends `since` or `cursor`, and only it deletes; `suppression_fresh()` refuses pushes at 26 h without a full pull or 3 h without a delta; a shrunk full pull deletes nothing; a full pull retires exactly the `manual_import` tails whose hash it carries; the four outcomes walks send the documented params and the stored cursor is the last non-null `resume`; outcome rows the agent never pushed are ignored; labels match the table for every row kind and the local suppression rows follow the labels both ways (retractions); precision/auto-push flips both ways at the thresholds and never on while `auto_push_forbidden`; the fallback (`other` + both headers + `utm_source` after the note) passes the same push tests and makes no feed call; no U+0000 or lone surrogate ever reaches a body, the landed note skips empty values, and every band routes by its low end; `make push-test` makes a new `external_id` every run; `tests/test_no_telegram_writes.py` stays green (nothing here sends to a prospect); no secret in repo or logs (`RedactBodies` covers `X-GSR-Key`/`X-ERP-Key` headers and the payload's `phone`).
 
 ## Review pass changelog
@@ -1235,3 +1282,9 @@ others point here):
 - B.4 `clamp_limit`: `js_number` is ECMAScript `StringToNumber` (JS whitespace incl. U+FEFF, signed decimals and `Infinity`, unsigned `0x`/`0o`/`0b`), with the vectors recomputed in Node.
 - B.1 `landed_note`: a value JS `trim()` leaves empty makes no line (`fromPlain`'s `str()`); `js_trim` written out.
 - B.1 `BAND_HAJM`: `textVolume` reads the number right before the first «kub», so «taxminan 1–3 kub» routed as 3 and «3–10 kub» as 10; the words now put the low end there («taxminan 1 kubdan 3 kubgacha» → 1, «taxminan 3 kubdan 10 kubgacha» → 3; container 28 and truck 80 unchanged), with `TEXT_VOLUME_RE` and a routing test; the note template and A.14 follow.
+
+**T-07 fourth review (2026-10-24)** — fullprompt `agent-feed` moved to `d138b3bc` (`021a2ca5` code, `d138b3bc` docs; DECISIONS #1476–#1477). Each fact re-read at that head (`inbound.ts` `record`/`oversizeIdSpelling`/`externalIdSpellings`/`inboundLanded`, `platform/text/clip.ts`, `agent-feed.ts`'s `LIKE 'cs:%'`, `tests/unit/intake-id.test.ts`, the integration test's two new cases, `docs/AGENT-FEED.md` §1 §5, DECISIONS) and the v2 capture re-checked (longest `external_id` 46 bytes, no string over 2,048 bytes):
+
+- Header, A.0 (14 commits, 42 files +4370/−79, AGENT-FEED.md 443 lines, the fourth review's gates 676 files / 7642 tests by the build session's report, red proofs 16 + 21 + 16 + 12 + 5, a new bullet stating the fix for the agent: an `external_id` the ledger's unique index refuses for its size — only one over 2,048 UTF-8 bytes can be; postgres takes about 2,680 incompressible bytes — is stored as `sha256:` + hex SHA-256, lands, replays, and never appears in the outcomes feed; the agent's 46-byte ids are not affected, so the push, reconcile and outcomes logic are unchanged); A.1 (`inbound.ts`, `clip.ts`, docs and tests rows; integration test 1445 lines, `intake-id.test.ts`).
+- A.2: two `external_id`s that differ only by NUL vs U+FFFD or by which lone surrogate are one id, and `ref` keys that differ only that way collapse to one key keeping the last value (the agent's payload tests already keep both out, 07 §1.6); the `external_id` paragraph gains the 46 bytes, the `cs:` filter and the hashed spelling; the replay-fence paragraph names #1476 and the one known input-driven repeating cause — a body of tens of MB (about 40 MB of JSON, measured in postgres), 503 on every retry plus a lenta note each, out of the agent's reach. A.13 (iii) and the B.6 half-way row follow.
+- A.12: `intake-id.test.ts`, the long-id integration cases and the control, 5 red proofs (#1477). B.4: the fake does not model the `sha256:` spelling (the agent's ids are 46 bytes); the fixtures stay valid at `d138b3bc`. Acceptance criteria restated at the new head.
