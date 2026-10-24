@@ -1188,7 +1188,9 @@ async def test_a_disabled_row_is_skipped(session, erp_row):
 
 
 def test_the_jobs_are_03_s_cadences():
-    assert [(j.id, j.cron, j.variant) for j in erp_sync.JOBS] == [
+    # The suppression pulls; the outcomes walks' three are pinned with them
+    # in tests/test_outcomes.py.
+    assert [(j.id, j.cron, j.variant) for j in erp_sync.JOBS[:2]] == [
         ("erp_sync_delta", "15 * * * *", "delta"),
         ("erp_sync_full", "30 2 * * *", "full"),
     ]
