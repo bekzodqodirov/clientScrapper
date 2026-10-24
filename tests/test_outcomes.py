@@ -1177,7 +1177,7 @@ async def test_a_foreign_row_is_never_validated(world, session):
     # A stranger's card can carry any kub; a field of the wrong form; an id
     # that is no string at all.
     world.fake.outcome_overrides[shaped] = {"quoted_volume_m3": 1e12, "intake_id": "17"}
-    world.fake.outcome_overrides[nameless] = {"external_id": None}
+    world.fake.outcome_overrides[nameless] = {"external_id": 17}
     sent = [r["external_id"] for _, _, r in world.fake.outcome_rows()]
     assert long_id in sent and len(long_id) == 2600
     report = await world.walk()
