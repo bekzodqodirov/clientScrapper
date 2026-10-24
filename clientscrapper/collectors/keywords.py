@@ -143,6 +143,43 @@ CHINA_WORDS = (
     "Кашгар",
     "Shenzhen",
 )
+# A channel's about names its companion «xaridorlar/buyers» group (03 §2.3) the
+# way it names its admin: «Xaridorlar guruhi: @…» beside «Murojaat uchun: @…».
+# Only a handle these words introduce is a companion group; any other is
+# usually a person's account and is not queued (06 §5.1). Not 03 §1.4's.
+COMPANION_WORDS = (
+    "xaridor",
+    "haridor",
+    "guruh",
+    "gurux",
+    "chat",
+    "muhokama",
+    "харидор",
+    "гуруҳ",
+    "гурух",
+    "муҳокама",
+    "покупатель",
+    "группа",
+    "чат",
+    "чата",
+    "чате",
+    "обсуждение",
+    "buyer",
+    "buyers",
+    "group",
+    "groups",
+    "discussion",
+)
+# The same said by a handle's own name («@namuna_xaridorlar», «@optom_chat»).
+COMPANION_HANDLE_STEMS = (
+    "xaridor",
+    "haridor",
+    "buyer",
+    "guruh",
+    "gurux",
+    "group",
+    "chat",
+)
 GEO = (
     "Toshkent",
     "Тошкент",
@@ -491,6 +528,29 @@ B2C_RE = re.compile(
     r"zakaz\s+qilib\s+ber|в\s+розницу|доставка\s+по\s+городу)(?!\w)",
     re.I,
 )
+# A price in a message (03 §2.3 tout filter): 03's ``\d{2,}\s*(?:so'm|сум|\$|usd|
+# y\.e)`` with every apostrophe (and none: «25000 som»), the Uzbek Cyrillic
+# «сўм» and the Cyrillic «у.е.» beside the Latin «y.e.», the Uzbek unit endings
+# on so'm/сўм («25000 so'mdan», «120 сўмдан» — how a price list is written),
+# and no letter after the unit («сумка» is a bag, not a price). A price list is
+# PRICELIST_MIN_PRICES of them, or a message longer than PRICELIST_MIN_CHARS
+# (03 §2.3); the reader's prefilter stores the first shape and T-14's tout rule
+# counts both — one home for the two (userbot/ and collectors/ may not import
+# each other).
+PRICE_RE = re.compile(
+    rf"\d{{2,}}\s*(?:so{_A}?m{_UNIT_LATN}|сўм{_UNIT_CYRL}|сум|\$|usd|y\.e\.?|у\.е\.?)"
+    r"(?![^\W\d_])",
+    re.I,
+)
+PRICELIST_MIN_PRICES = 3
+PRICELIST_MIN_CHARS = 1500
+
+
+def price_count(text: str) -> int:
+    """How many PRICE_RE prices ``text`` names."""
+    return sum(1 for _ in PRICE_RE.finditer(text))
+
+
 # The normaliser validates operator codes (services/keys.phone_e164 / phone_kind).
 PHONE_RE = re.compile(
     r"(?<!\d)(?:\+?998[\s\-]?)?\(?(\d{2})\)?[\s\-]?(\d{3})[\s\-]?(\d{2})[\s\-]?(\d{2})(?!\d)"
@@ -569,6 +629,7 @@ def terms_re(terms: Iterable[str], *, inflect: bool = True) -> re.Pattern[str]:
 
 B2B_RE = terms_re(chain.from_iterable(B2B_MARKERS.values()))
 CHINA_RE = terms_re(CHINA_WORDS)
+COMPANION_RE = terms_re(COMPANION_WORDS)
 GEO_RE = terms_re(GEO)
 CITY_RES: dict[str, re.Pattern[str]] = {city: terms_re(t) for city, t in GEO_CITY.items()}
 TASHKENT_PLACES_RE = terms_re(GEO_TASHKENT_PLACES)

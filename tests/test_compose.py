@@ -4,9 +4,11 @@ String and YAML checks: no Docker daemon is needed to see that a port opened
 to the network, an app service lost its memory cap, its .env, its log
 rotation or its wait on ``init``, or that a service appeared that §3.1 does
 not name. «Healthy» for the app services is «running, and a fresh heartbeat»
-(06 §4.1): their containers carry no healthcheck of their own (T-08's health
-job reads the heartbeats); ``db`` is the one with a ``healthcheck``, which
-``init`` and every app service wait on.
+(06 §4.1): since T-08 each app container's healthcheck is
+``python -m clientscrapper.tools.healthcheck <service>``, which asks the
+health job's own rule, so ``make ps`` shows them healthy (the go-live
+checklist, 06 §7) exactly when the owner's alert would call them alive;
+``db``'s ``pg_isready`` is the one ``init`` and every app service wait on.
 """
 
 from __future__ import annotations
@@ -91,3 +93,32 @@ def test_searxng_is_optional_and_unpublished():
     searxng = _services()["searxng"]
     assert searxng["profiles"] == ["searxng"]
     assert "ports" not in searxng and searxng.get("mem_limit")
+
+
+def test_every_app_container_is_healthy_by_its_heartbeat():
+    services = _services()
+    beat = {"interval": "60s", "timeout": "20s", "retries": 3, "start_period": "120s"}
+    for name in APP_SERVICES:
+        check = services[name]["healthcheck"]
+        assert check["test"] == [
+            "CMD",
+            "python",
+            "-m",
+            "clientscrapper.tools.healthcheck",
+            name,
+        ], name
+        assert {k: v for k, v in check.items() if k != "test"} == beat, name
+    # No other service but the database carries one: init runs once and the
+    # optional searxng is nobody's dependency.
+    assert sorted(n for n, s in services.items() if "healthcheck" in s) == [
+        "bot",
+        "db",
+        "userbot",
+        "worker",
+    ]
+
+
+def test_the_healthcheck_names_a_component_the_tool_knows():
+    from clientscrapper.tools import healthcheck
+
+    assert set(APP_SERVICES) == set(healthcheck.COMPONENTS)

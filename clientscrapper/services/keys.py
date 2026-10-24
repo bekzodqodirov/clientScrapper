@@ -23,7 +23,8 @@ import hashlib
 import hmac
 import re
 import unicodedata
-from typing import Literal
+from typing import Final, Literal
+from urllib.parse import urlsplit
 
 from clientscrapper.services.text import fold_apostrophes, to_latin
 
@@ -478,6 +479,30 @@ def erp_phone_hash(secret: str, tail9: str) -> str:
         raise ValueError("erp_phone_hash needs the 9-digit phone tail")
     digest = hmac.new(secret.encode(), tail9.encode(), hashlib.sha256)
     return digest.hexdigest()[:20]
+
+
+# The host .env.example (and the settings default) ship for CRM_BASE_URL:
+# example.uz is not a reserved name, so whoever owns it would receive the key.
+ERP_PLACEHOLDER_HOST: Final = "erp.example.uz"
+ErpBaseRefusal = Literal["not_https", "placeholder"]
+
+
+def is_erp_placeholder(base_url: str) -> bool:
+    """The .env.example host, still in place."""
+    host = (urlsplit(base_url.strip()).hostname or "").rstrip(".")
+    return host == ERP_PLACEHOLDER_HOST
+
+
+def erp_base_refusal(base_url: str) -> ErpBaseRefusal | None:
+    """Why the agent key may not be sent to ``base_url`` (05 §B.1, 06 §3.3):
+    not ``https://`` (the key would cross the wire in clear, and the ERP's
+    308 is never followed), or the placeholder host. One rule for
+    ``make doctor``'s probe and every ERP client."""
+    if not base_url.strip().lower().startswith("https://"):
+        return "not_https"
+    if is_erp_placeholder(base_url):
+        return "placeholder"
+    return None
 
 
 def erp_salt_id(secret: str) -> str:

@@ -1096,3 +1096,30 @@ class Fetcher:
         return self._robots_entry(
             text[head.end() :], int(head["status"]), fetched_at + self.robots_ttl
         )
+
+
+# --- the dead-man ping (06 §4.2) ---------------------------------------------------
+
+PING_TIMEOUT: Final = 10.0
+
+
+async def ping(
+    url: str,
+    *,
+    timeout: float = PING_TIMEOUT,
+    transport: httpx.AsyncBaseTransport | None = None,
+) -> int | None:
+    """One GET of ``DEADMAN_PING_URL`` (a healthchecks.io-style monitor), the
+    only alarm that does not depend on the bot. Not a crawl — no robots.txt,
+    no budget, no breaker: the monitor's own URL, which the owner chose. The
+    HTTP status, or None when it did not answer. Never raises; the URL is not
+    logged (a monitor's URL is its secret)."""
+    try:
+        async with httpx.AsyncClient(
+            transport=transport, timeout=timeout, follow_redirects=False
+        ) as client:
+            response = await client.get(url, headers={"User-Agent": USER_AGENT})
+        return response.status_code
+    except Exception as exc:
+        log.warning("dead-man ping failed", extra={"error": type(exc).__name__})
+        return None

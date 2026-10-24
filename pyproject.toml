@@ -58,7 +58,34 @@ files = [
     "scripts/check_compose_env.py",
     # T-01/T-02 review
     "scripts/revision_id.py",
+    # T-08
+    "clientscrapper/services/crontab.py",
+    "clientscrapper/services/backup.py",
+    "clientscrapper/services/restore_drill.py",
+    "clientscrapper/tools/restore.py",
+    "clientscrapper/tools/healthcheck.py",
+    # T-17
+    "clientscrapper/services/companies.py",
+    "clientscrapper/services/contacts.py",
+    # T-13: the reader's Telethon-free modules (its Telethon code stays out)
+    "clientscrapper/services/chats.py",
+    "clientscrapper/userbot/prefilter.py",
+    "clientscrapper/userbot/limits.py",
+    # T-09
+    "clientscrapper/services/erp_feeds.py",
+    "clientscrapper/collectors/erp_sync.py",
+    "clientscrapper/tools/erp_sync.py",
+    # T-11
+    "clientscrapper/services/client_import.py",
+    "clientscrapper/tools/import_clients.py",
+    # T-10
+    "clientscrapper/services/outcomes.py",
 ]
+
+# APScheduler 3 ships no type information.
+[[tool.mypy.overrides]]
+module = ["apscheduler", "apscheduler.*"]
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

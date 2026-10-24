@@ -1,0 +1,1 @@
+{"mode":"full","generated_at":"2026-10-24T08:56:38.620Z","salt_id":"7a659490","rule":"hmac-sha256(secret, last9digits) hex[0:20]","entries":[],"next":null,"resume":"MjAyNi0xMC0yNFQwODo1NjozNy4yMTQwMDBafDAxYTE2ZDFmLWUyNWMtNzBhZC05OTNiLWVjM2JmM2FiZmYzYXwy"}

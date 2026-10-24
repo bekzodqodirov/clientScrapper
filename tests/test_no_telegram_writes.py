@@ -153,6 +153,17 @@ HISTORY_ALLOWED = {
     ("userbot/about.py", "read_about"),
 }
 
+# 06 §2 «Never … GetParticipants, … media download (v1)» and 06 §5.1 (member
+# lists and profile photos are forbidden data): Telethon's member-list and
+# download methods appear nowhere in the package, called or kept (T-13's
+# ``test_no_participants_calls``). The raw requests behind them
+# (GetParticipantsRequest, GetFileRequest …) are already refused by
+# RAW_REQUEST.
+PARTICIPANT_CALLS = frozenset({"get_participants", "iter_participants"})
+DOWNLOAD_CALLS = frozenset(
+    {"download_media", "download_profile_photo", "download_file", "iter_download"}
+)
+
 # --- the aiogram side (06 §5.3) ------------------------------------------------
 
 # Bot API methods that put something into a chat. They may be called only in
@@ -490,6 +501,18 @@ def _offences(path_rel: str, source: str) -> list[str]:
 def test_the_scan_reaches_every_telethon_module():
     names = {rel(p) for p in SCANNED}
     assert {"userbot/__init__.py", "userbot/main.py"} <= names
+    # T-13's reader, its Telethon-free helpers (under userbot/ all the same)
+    # and the login tool, which imports Telethon.
+    assert {
+        "userbot/about.py",
+        "userbot/backfill.py",
+        "userbot/ingest.py",
+        "userbot/joiner.py",
+        "userbot/limits.py",
+        "userbot/prefilter.py",
+        "userbot/tg.py",
+        "tools/userbot_login.py",
+    } <= names
     # A second, textual reading of "imports telethon": if _imports_telethon
     # ever stopped seeing an import, the module would silently leave the scan.
     textual = re.compile(
@@ -548,6 +571,39 @@ def test_history_is_only_read_where_the_owner_asked_for_it(path):
             "reader follows live events and must not pull history on its own. "
             f"Only {sorted(HISTORY_ALLOWED)} may, to read what the owner asked for."
         )
+
+
+def test_no_participants_calls():
+    """No member list is ever read and no media downloaded, anywhere."""
+    offending = {}
+    for path in modules():
+        uses = _uses_by_function(
+            path.read_text(encoding="utf-8"),
+            PARTICIPANT_CALLS | DOWNLOAD_CALLS,
+            called_only=(),
+        )
+        found = sorted(f"{f or '<module>'}: {sorted(n)}" for f, n in uses.items())
+        if found:
+            offending[rel(path)] = found
+    assert offending == {}, f"member lists and media are never read (06 §2): {offending}"
+
+
+def test_the_participants_detector_catches_each_shape():
+    source = (
+        "async def members(client, chat):\n"
+        "    return await client.get_participants(chat)\n"
+        "async def kept(client):\n"
+        "    walk = client.iter_participants\n"
+        "async def photo(client, message):\n"
+        "    await client.download_media(message)\n"
+        "    await getattr(client, 'download_profile_photo')(1)\n"
+    )
+    uses = _uses_by_function(source, PARTICIPANT_CALLS | DOWNLOAD_CALLS, called_only=())
+    assert uses == {
+        "members": {"get_participants"},
+        "kept": {"iter_participants"},
+        "photo": {"download_media", "download_profile_photo"},
+    }
 
 
 # Outside the scan a module may still be handed the reader's client (T-13's

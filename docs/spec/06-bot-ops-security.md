@@ -378,7 +378,8 @@ clientscrapper`, `CMD ["python", "-m", "clientscrapper.worker.main"]`. Image ≈
 | `userbot-login` | `compose run --rm -it userbot python -m clientscrapper.tools.userbot_login` |
 | `backup` / `backup-key` / `backup-key-show` / `restore FILE= [DRY=1] [FORCE=1]` | MIYA verbatim (§4.4) |
 | `update` | `backup` (fails = stop) → `git pull --ff-only` → `compose stop worker userbot bot` → `up IN_UPDATE=1` → `docker image prune -f` → «Yangilandi. Botda /holat ni tekshir.» |
-| `import-clients FILE= [APPLY=1]` | `tools/import_clients.py` → `suppression(manual_import)`; dry run by default |
+| `import-clients FILE= [APPLY=1]` | `tools/import_clients.py` → `suppression(manual_import)`; dry run by default; a written import deletes its file from `data/imports/` (the export is every client's phones) |
+| `erp-sync WALK=full\|delta\|outcomes\|quarter\|year [ACCEPT_SHRINK=1]` | `tools/erp_sync.py --<walk>`: one ERP feed walk by hand, the run the scheduler makes; exit 0 ran, 1 failed, 3 skipped (disabled, feeds not configured, already running); any other `WALK` stops make |
 | `push-test` | 05 §B.1 synthetic push |
 | `purge --company <uuid> \| --phone <tail9> \| --tg-user <id> [--apply]` | `tools/purge.py` (§5.4) |
 | `reload` | `compose up -d --force-recreate worker userbot bot` after editing `.env` |
@@ -554,13 +555,20 @@ Anthropic success, ERP (last `push_log.sent`, `erp_sync.config` timestamps, brea
 depths, today's pushes/cards/spend, per-source rows. The alert ledger is `reminder_log` with
 kinds `alert:<key>` / `recovered:<key>` (MIYA constants; 02 §2.13's column comment carries the
 same names). Whichever of the worker's `health_job` (every 5 min) or the bot's watchdog is
-alive speaks; neither repeats the other.
+alive speaks; neither repeats the other. One scheduler at a time: the worker schedules only while it
+holds the session-level advisory lock `cs:worker` on a connection of its own (`worker.Leadership`);
+a second worker process stands by — alive, logging, beating nothing — and takes over when the
+leader's connection goes; a leader that finds the lock taken by another (its connection dropped)
+pauses its scheduler until the lock is its own again; a database that cannot be asked is no other
+leader, so the worker runs and can say `db_down`. The startup catch-up hands a missed backup and
+missed nightly outcomes walks (`erp_feeds.NIGHTLY_MAX_AGE`) to the scheduler's own jobs
+(`next_run_time = now`), so `max_instances=1` keeps them from running beside their cron.
 
 ### 4.2 Problems (`PROBLEM_KEYS`, ordered as shown; each has Uzbek text with its remedy and a recovery line)
 
 | key | severity | condition | alert text (first line) |
 |---|---|---|---|
-| `db_down` | critical | the bot cannot reach Postgres (in-memory memo) | «⛔ Baza javob bermayapti — `make ps`, `make logs`» |
+| `db_down` | critical | the bot cannot reach Postgres (in-memory memo; the first sweep that reaches the database again writes the memo into the ledger as `alert:<key>` at the moment each was said, so the recovery line is said — `health.adopt_offline`) | «⛔ Baza javob bermayapti — `make ps`, `make logs`» |
 | `disk_low` | critical | free < `DISK_MIN_FREE_GB` | «⛔ Diskda {free} GB qoldi — `make backup` tekshir, `EVIDENCE_MAX_GB` kamaytir» |
 | `worker_silent` | critical | `worker` beat older than `HEARTBEAT_STALE_MINUTES` | «⛔ Rejalashtiruvchi {age} jim — `make worker`» |
 | `userbot_unauthorized` | critical | userbot detail `authorized=false` | «⛔ Telegram oʻquvchi akkaunti chiqib ketgan/cheklangan ({code}). @SpamBot tekshiring; `make userbot-login`» |
@@ -568,13 +576,14 @@ alive speaks; neither repeats the other.
 | `erp_redirect` | critical | a push or a feed call got a 3xx (05 §B.1: never followed; breaker 6 h with `breaker_reason='erp_redirect'`, `/yoq crm` clears it) — almost always an `http://` `CRM_BASE_URL` behind production's Caddy | «⛔ ERP manzili yoʻnaltiryapti (HTTP {code}): `.env` dagi CRM_BASE_URL `https://` bilan boshlanishi kerak; `make reload`; `/yoq crm`» |
 | `backup_failed` | critical | `backup` heartbeat `ok=false` | «⛔ Tungi zaxira yozilmadi: {error}» |
 | `restore_drill_failed` | critical | drill beat `ok=false` | «⛔ Zaxirani tiklash sinovi oʻtmadi — zaxiralar ishonchsiz» |
-| `suppression_stale` | warning → critical after 6 h | `services/erp_feeds.suppression_fresh()` is false (the one home, 05 §B.2 / 03 §2.2): feed configured and last successful full pull > `FULL_MAX_AGE_H` = 26 h, or last delta > `DELTA_MAX_AGE_H` = 3 h, or `salt_id` mismatch; the push gate refuses meanwhile | «⚠️ ERP bostirish roʻyxati yangilanmadi: toʻliq {full_age} (chegara 26 soat) · farq {delta_age} (chegara 3 soat) — push toʻxtatildi» |
+| `suppression_stale` | warning → critical after 6 h | `services/erp_feeds.suppression_fresh()` is false (the one home, 05 §B.2 / 03 §2.2): feed configured and last successful full pull > `FULL_MAX_AGE_H` = 26 h, or last delta > `DELTA_MAX_AGE_H` = 3 h, or `salt_id` mismatch; during the «Boshqa» fallback (feeds not configured, 05 §B.3): no XLSX import yet, the last one older than `IMPORT_MAX_AGE_D` = 8 days, or older than the last completed full pull (critical 6 h after the 8 days ran out; never imported stays a warning); the push gate refuses meanwhile; with the feeds configured but `sources.erp_sync.enabled=false` (the seed ships it off, so no pull ever runs) the line adds «· «erp_sync» manbasi oʻchiq — /manbalar orqali yoqing» | «⚠️ ERP bostirish roʻyxati yangilanmadi: toʻliq {full_age} (chegara 26 soat) · farq {delta_age} (chegara 3 soat) — push toʻxtatildi»; fallback: «⚠️ Mijozlar roʻyxati hali import qilinmagan: ERP → Mijozlar → XLSX, `make import-clients` — push toʻxtatildi» / «… {age} oldin import qilingan (chegara 8 kun): …» / «… ERP roʻyxatidan oldin import qilingan, «Boshqa» eshigida qayta import kerak: …» |
 | `suppression_selftest_failed` | warning | a full pull completed but the hash of a tail the agent knows is a client (the `push_log.phone_tail` of the newest `landed_client` **or `won`** outcome — `landed_client` exists only through the fallback door, 05 §B.2 step 5(b)) is absent from the feed (04 §7); the pull is still applied; a client recognised by a 7–8-digit card can fail it spuriously (05 §A.8) | «⚠️ ERP roʻyxati oʻz-oʻzini tekshirishdan oʻtmadi — maʼlum mijoz raqami roʻyxatda yoʻq; kalit, salt va ERP feedini tekshiring» |
 | `suppression_stale_hit` | warning | the outcomes feed reports a push `outcome='dropped', reason='suppressed'` — the ERP's belt refused a phone our gate passed: our copy was stale, or the client card holds a 7–8-digit number the feed can never carry as a hash (05 §A.8). The tail is written to local `suppression` at once (02 §2.11), so the same number is never pushed again; cleared by the next completed full pull (no extra pull is forced — the nightly one is already due) | «⚠️ ERP {n} ta pushni «bostirilgan» deb qaytardi — bu raqamlar endi bizda ham yopiq; tungi toʻliq yuklashdan keyin bu ogohlantirish oʻchadi» |
 | `userbot_silent` | warning | userbot beat > `USERBOT_STALE_MINUTES`, not disabled | «⚠️ Telegram oʻquvchi {age} jim — `make userbot`» |
 | `flood_breaker` | warning | `runtime_flags.flood_until > now` | «⚠️ Telegram FloodWait ({seconds} s) — oʻquvchi {until} gacha qoʻshilmaydi/oʻqimaydi (jonli xabarlar davom etadi)» |
 | `collector_blocked` | warning | any `sources.breaker_until > now` with reason `host_blocked:<host>` (the runner writes it beside `paused_until`, same reason, 03 §1.1) | «⚠️ {title}: sayt bloklayapti (403/429) — {until} gacha toʻxtadi» |
 | `collector_silent` | warning | enabled source with cron, `last_run_at` older than 2× its interval — **excluding** sources that are disabled, paused (`paused_until > now`), breaker-paused or globally paused (`/toxtat`): a skipped run writes its `collector_runs(status='skipped')` row but never beats (03 §1.2) | «⚠️ {title} {age} ishlamadi — `/manbalar`» |
+| `job_failing` | warning | the worker is fresh and (a) a scheduler job's last `JOB_FAILING_STREAK` = 3 runs raised (the `job:<id>` beat carries `{ok, error, failures}`, `failures` = runs in a row that raised, reset by a success), or (b) a cadence (`source_key` + `meta.variant`) of a source `collector_silent` judges ended its last 3 finished runs `failed` with an error other than `host_blocked` (that is `collector_blocked`) or `cancelled` (a deploy) — a run that fails every time moves `sources.last_run_at`, so `collector_silent` never sees it — or (c) the oldest `observations(status='new')` is older than `RESOLVE_BACKLOG_AGE` = 6 h (the resolver takes 6,000 an hour); one line per item | «⚠️ `{job}` ishi oxirgi {n} marta xato bilan tugadi ({error}) — `make worker` loglari» / «⚠️ {title} · {variant}: oxirgi {n} ta ishga tushirish xato bilan tugadi ({error}) — `make worker` loglari; /manbalar» / «⚠️ {n} ta topilma navbatda kutmoqda (eng eskisi {age}) — saralash (resolve) ishlamayapti; `make worker` loglari» |
 | `cost_cap` | warning, told first by `costs.ask` (once per Tashkent day through `costs.claim_alert`, 04 §8; delivered by the notifier T-08 registers with `costs.set_cap_notifier`) | today ≥ `DAILY_COST_CAP_USD` or month ≥ monthly cap | «💸 Kunlik xarajat chegarasi ($10) — ertagacha pullik chaqiruvlar toʻxtadi; kollektorlar bepul qismini davom ettiradi» |
 | `spend_high` | warning | ≥ `SPEND_ALERT_PCT` of either cap | «⚠️ Xarajat {pct}% ga yetdi (${d}/${cap})» |
 | `no_signals_24h` | warning | userbot enabled, ≥ 1 chat on, zero `interactions` in 24 h | «⚠️ 24 soatda bitta ham Telegram signal yoʻq — chatlar oʻlikmi? `/chats`» |
@@ -597,8 +606,10 @@ This table is the one list of keys: 04 §8 raises `spend_high` (its former `cost
 `suppression_selftest_failed`, `suppression_stale_hit`; 05 raises `push_404`, `erp_redirect`, `feed_contract`,
 `suppression_stale`, `suppression_shrunk`, `suppression_stale_hit`; `tests/test_health.py`
 fails on a key raised anywhere that is not a row here. Critical problems ignore `QUIET_HOURS`.
-`TOLD_FIRST_ELSEWHERE = {cost_cap, push_404, erp_redirect, flood_breaker}` (their own job says it at once; the
-sweep repeats after `ALERT_REPEAT_HOURS`). `cost_cap` and `spend_high` are said once per Tashkent day by
+`TOLD_FIRST_ELSEWHERE = {cost_cap, push_404, erp_redirect}` (their own job says it at once; the
+sweep repeats after `ALERT_REPEAT_HOURS`). `flood_breaker` is not one of them: the reader writes
+`runtime_flags.flood_until` and says nothing (§4.3 — a component never reports its own problem), so
+the worker's sweep says it first and announces its end (seam review 2026-10-24). `cost_cap` and `spend_high` are said once per Tashkent day by
 `costs` (04 §8) — the repeat rule and that rule disagree for `cost_cap`; T-08 reconciles them (04 Q11:
 recommended, the money keys keep once a day).
 Dead-man: the worker GETs `DEADMAN_PING_URL` every `DEADMAN_PING_MINUTES` from `heartbeat_job`
@@ -615,7 +626,10 @@ outside watcher watches the worker).
 ### 4.4 Backups
 
 - `backup_job` at `BACKUP_TIME`: `pg_dump -Fc | age -r $BACKUP_AGE_RECIPIENT -o
-  /data/backups/clientscrapper-<yyyymmdd-hhmmss>.dump.age` (plaintext only inside the pipe),
+  /data/backups/clientscrapper-<yyyymmdd-hhmmss>.dump.age` (plaintext only inside the pipe; age
+  writes into a `.<pid>-<random>.partial` of its own, created `O_EXCL` 0600 and renamed only when
+  whole, so two runs in one second never share a file; a `.partial` older than twice the dump
+  timeout is a killed run's and is swept),
   prune older than `BACKUP_RETENTION_DAYS`, then send the file to the owner's Telegram as a
   document (`BACKUP_TO_TELEGRAM`, split into ≤ 45 MB `.partNN` pieces, ciphertext), beat
   `backup` with `{ok, size, sent, path}` and `backup_counts` with row counts of
@@ -625,7 +639,10 @@ outside watcher watches the worker).
   off the server. Losing the key loses every backup.
 - `restore_drill` weekly (`RESTORE_DRILL_DAY` 05:00): restore the newest file into
   `clientscrapper_restore_drill`, compare counts with `backup_counts`, drop the scratch db, beat
-  `restore_drill`. Monthly the owner also runs the real procedure on a scratch VPS or laptop:
+  `restore_drill`. One drill at a time (advisory lock `cs:restore_drill`): a second one skips
+  `busy` and writes no beat. A restore (the drill and `make restore`) never puts plaintext on a
+  disk: the file is decrypted twice — once to check all of it authenticates to a pg_dump archive
+  before the target is touched, then straight into `pg_restore`'s stdin (`--list` too). Monthly the owner also runs the real procedure on a scratch VPS or laptop:
   `docker compose up -d db` → `make restore FILE=… DRY=1` → `make restore FILE=…` → `make up`
   (`FORCE=1` only on a non-empty database).
 - Not in the dump: `EVIDENCE_DIR` (cards and ERP notes need only `evidence.url/excerpt`, which
@@ -675,8 +692,8 @@ the durable record.
 | Duplicate pushes suspected | manager reports two leads for one company | `SELECT external_id, attempt, status, http_status FROM push_log WHERE company_id=… ORDER BY sent_at`; one `sent` per month per company is correct; two different months with new signals is correct by design (02 §2.9); two `sent` in one month is impossible (`ux_push_log_delivered`) — if the ERP shows two leads, they came through different doors (`other` fallback + `agent`): delete the `manba=other` route (05 §B.3) and tell the manager to join the leads in the ERP. One lead with a «🔁 Qayta yozdi» but no «🆕» is the ERP's orphan after a 503 half-way (05 §A.2) — not a duplicate. The one known cause that repeats on every attempt (503 each time, one more lenta note each) is a body of tens of MB (about 40 MB of JSON, ERP AGENT-FEED.md §1 §5); the agent's few-KB bodies cannot reach it, so a note per retry on an agent lead points at the ERP's database failing half-way again, not at the payload | `push_log` matches `outcomes`; `push_unconfirmed` clear |
 | Worker silent | `worker_silent` | `make worker` → traceback; usually a migration or a failing job at startup; `make update` rollback = `git checkout <prev>` + `make up` + `make restore` only if a migration broke data | heartbeat fresh; `/holat` |
 | Backup failed | `backup_failed` | `make backup` by hand → error: pg_dump major (rebuild image), disk, missing recipient | `backup` beat `ok=true`, file in Telegram |
-| «Qayta qilinmasin» renamed in the dictionary | a seller says a «never again» lead came back, or `/holat` shows no new `lost` rows for weeks | Renaming a lost-reason label never rewrites old leads (they keep suppressing while the setting lists the old spelling), but NEW losses under the new spelling are not in `agent_no_contact_reasons`: they never enter the feed and arrive with `no_contact=false` (05 §B.6). **Boshqaruv → Sozlamalar → `agent_no_contact_reasons`**: add the new spelling (`;`), keep the old one while old leads carry it; then `tools/erp_sync.py --full` | the next full pull holds the new losses as `kind='lost'`; their outcome rows read `no_contact=true` |
-| Feed shrank | `suppression_shrunk` | Nothing deleted; check the ERP: did a client export change, did `agent_no_contact_reasons` get renamed (05 §A.10), did the ERP retire a class of tails (05 §B.2 step 4)? Fix the label, then `tools/erp_sync.py --full --accept-shrink` once | full pull count ≥ 90 % of the previous one |
+| «Qayta qilinmasin» renamed in the dictionary | a seller says a «never again» lead came back, or `/holat` shows no new `lost` rows for weeks | Renaming a lost-reason label never rewrites old leads (they keep suppressing while the setting lists the old spelling), but NEW losses under the new spelling are not in `agent_no_contact_reasons`: they never enter the feed and arrive with `no_contact=false` (05 §B.6). **Boshqaruv → Sozlamalar → `agent_no_contact_reasons`**: add the new spelling (`;`), keep the old one while old leads carry it; then `make erp-sync WALK=full` | the next full pull holds the new losses as `kind='lost'`; their outcome rows read `no_contact=true` |
+| Feed shrank | `suppression_shrunk` | Nothing deleted; check the ERP: did a client export change, did `agent_no_contact_reasons` get renamed (05 §A.10), did the ERP retire a class of tails (05 §B.2 step 4)? Fix the label, then `make erp-sync WALK=full ACCEPT_SHRINK=1` once | full pull count ≥ 90 % of the previous one |
 
 ## 5. Security and legal as code
 
@@ -920,3 +937,10 @@ Not applied here (other files' homes): 2, 5, 11, 16, 20–23, 25, 26, 28, 32, 36
 - §4.5 the redactor as built: the key-header row scheme-aware (`x-gsr-key | x-erp-key | proxy-authorization | authorization | x-api-key`), phones by `keywords.PHONE_RE`, `EMAIL_RE` → `<email>`, `IG_RE` → the handle masked. §5.2 `test_imports_fence.py` holds the anthropic half, the telethon half lives in `test_collector_imports` (telethon also allowed in `tools/userbot_login.py`), the httpx homes are package-wide, `EMAIL_RE` lives in `keywords.py`.
 - §5.4 a purged company's candidate that has `push_log` rows (RESTRICT) is not deleted: it moves to `suppressed`, or to `excluded` (`owner`) for other reasons, and `merged_into` pointing at the company is cleared (decided here). §5.6 pinned requirements. §7.1 steps 3, 6, 7 and 8 (Brave 32/day).
 - Open question 9 added: app-service healthchecks.
+
+**Wave 2 seam review (2026-10-24)** — found by probing the merged T-08/T-09/T-10/T-11/T-13/T-17 code:
+
+- §4.1: one scheduler at a time (`cs:worker` advisory lock, standby workers beat nothing; the new leader closes the dead worker's `running` collector runs of its own cadences); the startup catch-up moves a missed backup and missed nightly outcomes walks onto the scheduler's own jobs.
+- §4.2: new warning key `job_failing` (a job raising 3 runs in a row, a cadence failing its last 3 finished runs, a resolver queue older than 6 h — a collector failing every run still moves `last_run_at`, so `collector_silent` never saw it); `flood_breaker` left `TOLD_FIRST_ELSEWHERE` (the reader never reports its own problem, so the sweep says it); `db_down`'s recovery line is said once the database answers (`health.adopt_offline`); `suppression_stale` covers the «Boshqa» fallback (an XLSX import ≤ 8 days old and newer than the last full pull, 05 §B.3) and names a switched-off `erp_sync` source.
+- §3.3: `make erp-sync WALK=…` (07 §5.6 named a `make job` that never existed); a written `import-clients` deletes its file from `data/imports/`, an unreadable one is given to uid 10001 rather than opened to all (02 §4 R6b sweeps leftovers, T-31).
+- §4.4: per-run `.partial` names created `O_EXCL`; one restore drill at a time; a restore decrypts twice and never to disk. Evidence files are written 0600.

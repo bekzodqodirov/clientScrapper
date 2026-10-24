@@ -12,8 +12,9 @@ Telethon read is ``userbot/about.py`` draining ``chat_monitors`` (03 §2.3,
 A second walk covers the whole package: Telethon is imported only by the
 reader (``clientscrapper/userbot/``) and its login tool, and an HTTP
 connection is opened only in httpx's four homes (``services/http.py``,
-``serp.py``, ``erp_feeds.py``, ``crm_push.py`` — 07 §1.2); elsewhere httpx
-is types and exceptions, and no other HTTP client exists. The package-wide
+``serp.py``, ``erp_feeds.py``, ``crm_push.py`` — 07 §1.2) and in one function
+beside them, ``tools/doctor.py::probe_crm`` (06 §3.3); elsewhere httpx is
+types and exceptions, and no other HTTP client exists. The package-wide
 ``anthropic`` allow-list is 06 §5.2's ``tests/test_imports_fence.py``.
 
 Written to hold on a tree with or without services/http.py and
@@ -94,6 +95,11 @@ HTTPX_HOMES = {
     "services/erp_feeds.py",
     "services/crm_push.py",
 }
+# One function outside the homes may open a client, for one keyed GET:
+# ``make doctor``'s ERP probe (06 §3.3). The doctor may not import the
+# settings (it diagnoses a .env they refuse), so it cannot use Fetcher; the
+# allowance is that function by name, not the module.
+HTTPX_FUNCTION_HOMES = {("tools/doctor.py", "probe_crm")}
 HTTPX_OPENERS = {
     "Client",
     "AsyncClient",
@@ -224,6 +230,8 @@ def _http_offences(path_rel: str, tree: ast.Module, module: str) -> list[str]:
         if resolved and resolved[0] == "httpx" and resolved[1] in HTTPX_OPENERS:
             function = owner.get(id(node))
             where = function.name if function else "<module>"
+            if (path_rel, where) in HTTPX_FUNCTION_HOMES:
+                continue
             found.append(f"{where}: httpx.{resolved[1]}")
     return sorted(found)
 
@@ -264,8 +272,9 @@ def test_an_http_connection_opens_only_in_httpx_s_homes():
         if (found := _http_offences(rel(p), tree_of(p), dotted_name(p)))
     }
     assert offending == {}, (
-        "httpx clients live in services/http.py, serp.py, erp_feeds.py and "
-        f"crm_push.py; nothing else opens a connection (07 §1.2): {offending}"
+        "httpx clients live in services/http.py, serp.py, erp_feeds.py, "
+        "crm_push.py and doctor.probe_crm; nothing else opens a connection "
+        f"(07 §1.2, 06 §3.3): {offending}"
     )
 
 
@@ -291,6 +300,13 @@ def test_the_http_detector_catches_each_shape():
         "imports httpx.AsyncClient"
     ]
     assert found("tools/doctor.py", "import requests\n") == ["imports requests"]
+    # The doctor's one probe may open a client; any other function of it may not.
+    probe = sender.replace("async def notify", "async def probe_crm")
+    assert found("tools/doctor.py", probe) == ["once: httpx.post"]
+    assert found("tools/other.py", probe) == [
+        "once: httpx.post",
+        "probe_crm: httpx.AsyncClient",
+    ]
     assert found("services/http.py", "from urllib import request\n") == [
         "imports urllib.request"
     ]

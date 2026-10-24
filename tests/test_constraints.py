@@ -198,6 +198,34 @@ async def test_one_delivered_push_per_external_id(session, company, candidate):
     assert await refused(session, insert, a=3, s="failed", h=503, **params) is None
 
 
+async def test_a_superseded_delivery_frees_the_index_for_its_re_push(
+    session, company, candidate
+):
+    """0002_erp_contract: rule 5's re-push (and /push tekshir) sets
+    ``superseded_at`` on the delivered row — never ``failed``, which
+    ck_push_log_sent forbids on a 2xx — and the attempt that re-sends it may
+    then be delivered under the same id; a second LIVE delivery still may not."""
+    insert = (
+        "INSERT INTO push_log (external_id, attempt, candidate_id, company_id, "
+        "phone_tail, endpoint, source_key_sent, payload_sha256, status, http_status, "
+        "superseded_at) VALUES (:e, :a, :cand, :c, '900000001', "
+        "'/api/leads/in/agent', 'agent', :sha, :s, :h, :gone)"
+    )
+    params = {
+        "e": EXTERNAL.format(company),
+        "cand": candidate,
+        "c": company,
+        "sha": "0" * 64,
+    }
+    first = {"a": 1, "s": "sent", "h": 200}
+    assert await refused(session, insert, gone=None, **first, **params) is None
+    await _run(session, "UPDATE push_log SET superseded_at = now() WHERE attempt = 1")
+    re_push = {"a": 2, "s": "unknown", "h": None, "gone": None}
+    assert await refused(session, insert, **re_push, **params) is None
+    third = await refused(session, insert, a=3, s="sent", h=200, gone=None, **params)
+    assert third is not None and '"ux_push_log_delivered"' in third
+
+
 @pytest.mark.parametrize(
     ("status", "http", "ok"),
     [

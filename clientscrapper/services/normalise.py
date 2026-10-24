@@ -768,7 +768,13 @@ def to_observation_json(
     for raw_key, value in obs.external_ids.items():
         handles[_EXTERNAL_ID_RENAMES.get(raw_key, raw_key)] = clean(str(value))
     handles["telegram"] = telegram_key(obs.telegram) if obs.telegram else None
-    if person_ok and handles["telegram"] is None and obs.person_telegram:
+    # ``person_telegram`` is a group poster's username (03 §1.2): only on an
+    # intent post is ``handles.telegram`` the poster's (02 §2.5 «company
+    # channel OR poster username», scrubbed by R3). On every other kind the
+    # resolver reads ``handles.telegram`` as the firm's own channel, so a
+    # person's handle there would become a company-tier column — a vacancy's
+    # HR person's above all (03 §2.7).
+    if kind == "intent_post" and handles["telegram"] is None and obs.person_telegram:
         handles["telegram"] = telegram_key(obs.person_telegram)
     handles["tg_user_id"] = attrs.get("tg_user_id") if person_ok else None
     handles["instagram"] = instagram_key(obs.instagram) if obs.instagram else None

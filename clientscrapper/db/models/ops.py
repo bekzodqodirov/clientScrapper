@@ -148,7 +148,13 @@ class ReminderLog(Base):
 
 class RuntimeFlag(Base):
     """A switch that survives a restart and is read by bot, worker and userbot:
-    'paused' {"since", "reason"} | 'flood_until' | 'review_hours_override'."""
+    'paused' {"since", "reason"} | 'flood_until' | 'review_hours_override'.
+
+    T-08 adds two kinds of row, no schema change: 'problem:<key>'
+    {"since", "until", "detail"} — a health problem raised by the module that
+    owns it (``health.raise_problem``, the REPORTED_KEYS of 06 §4.2), deleted
+    when it clears — and 'anthropic_probe' {"at"} — the half-open probe slot
+    that keeps ``anthropic_silence`` from latching (``health.anthropic_down``)."""
 
     __tablename__ = "runtime_flags"
 

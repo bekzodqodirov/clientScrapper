@@ -5,9 +5,14 @@
 # Makefile does not change when the tool lands.
 .DEFAULT_GOAL := help
 COMPOSE := docker compose
+# A switch on the command line (DRY=1, FORCE=1, APPLY=1, ACCEPT_FEWER=1): «1»
+# is on, empty or «0» is off, and any other value stops make with a message
+# — so DRY=yes never runs a real restore and APPLY=0 never applies. A plain
+# $(if $(X),…) would read every non-empty value, «0» included, as on.
+switch = $(if $(filter-out 0 1,$(strip $($(1)))),$(error $(1)=$($(1)): use $(1)=1 (on) or $(1)=0 (off)),$(filter 1,$(strip $($(1)))))
 .PHONY: help env doctor up update down reload logs ps psql migrate revision downgrade \
         bot worker userbot userbot-login backup backup-key backup-key-show restore \
-        import-clients push-test purge install test lint fmt typecheck check db-test hooks smoke
+        import-clients erp-sync push-test purge install test lint fmt typecheck check db-test hooks smoke
 
 help: ## Show this help
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -21,7 +26,7 @@ doctor: env ## Check .env, the server and the database before make up
 	$(COMPOSE) build worker
 	$(COMPOSE) run --rm --no-deps -e CS_IN_UPDATE=$(IN_UPDATE) worker python -m clientscrapper.tools.doctor
 
-up: env $(if $(SKIP_DOCTOR),,doctor) ## Build and start everything; init migrates (SKIP_DOCTOR=1 to skip the check)
+up: env $(if $(filter 1,$(strip $(SKIP_DOCTOR))),,doctor) ## Build and start everything; init migrates (SKIP_DOCTOR=1 to skip the check)
 	$(COMPOSE) up -d --build db init
 	$(COMPOSE) up -d --build worker userbot bot
 
@@ -82,10 +87,13 @@ userbot-login: ## One-time Telethon login; prints TELETHON_SESSION for .env
 	$(COMPOSE) run --rm -it userbot python -m clientscrapper.tools.userbot_login
 
 # --- Backups ----------------------------------------------------------------
+# The key is written through init's ./secrets mount: the app services mount
+# it read-only (MIYA's worker mounted it writable). As the app's uid, so the
+# worker can read the 0600 file it writes; `up init` handed /secrets over.
 backup-key: ## Create the backup key and print the .env line
 	@test ! -e secrets/backup-key.txt || { echo "secrets/backup-key.txt allaqachon bor — yangisi yaratilmaydi (eski zaxiralar faqat eski kalit bilan ochiladi)."; exit 1; }
 	$(COMPOSE) up init
-	$(COMPOSE) run --rm --no-deps worker age-keygen -o /app/secrets/backup-key.txt
+	$(COMPOSE) run --rm --no-deps --user 10001:10001 init age-keygen -o /secrets/backup-key.txt
 	@echo "Quyidagi qatorni .env faylidagi BACKUP_AGE_RECIPIENT= oʻrniga yoz:"
 	@$(COMPOSE) run --rm --no-deps worker sh -c 'printf "BACKUP_AGE_RECIPIENT=%s\n" "$$(age-keygen -y /app/secrets/backup-key.txt)"'
 	@echo "Maxfiy kalitni server tashqarisida saqla: make backup-key-show — chiqqan qatorlarni parol menejeriga koʻchir."
@@ -93,21 +101,36 @@ backup-key: ## Create the backup key and print the .env line
 backup-key-show: ## Print the secret backup key (store it off the server)
 	$(COMPOSE) run --rm --no-deps worker cat /app/secrets/backup-key.txt
 
+# The nightly job itself, not create_backup alone: the `backup` heartbeat, the
+# drill's counts and the Telegram copy, so a good run clears backup_failed.
 backup: ## Run the encrypted database backup now (fails when the backup does, so make update stops)
-	$(COMPOSE) run --rm --no-deps worker python -c \
-		"import asyncio, sys; from clientscrapper.services.backup import create_backup; \
-		 result = asyncio.run(create_backup()); print(result); \
-		 sys.exit(0 if result.ok else 1)"
+	$(COMPOSE) run --rm --no-deps worker python -m clientscrapper.worker.main backup
 
 restore: ## Restore a backup: make restore FILE=/data/backups/clientscrapper-….dump.age [DRY=1] [FORCE=1]
 	@test -n "$(FILE)" || (echo "usage: make restore FILE=/data/backups/clientscrapper-….dump.age [DRY=1] [FORCE=1]" && exit 1)
 	$(COMPOSE) run --rm --no-deps worker python -m clientscrapper.tools.restore "$(FILE)" \
-		--identity /app/secrets/backup-key.txt $(if $(DRY),--dry-run,) $(if $(FORCE),--force,)
+		--identity /app/secrets/backup-key.txt $(if $(call switch,DRY),--dry-run,) $(if $(call switch,FORCE),--force,)
 
 # --- Data -------------------------------------------------------------------
-import-clients: ## Load the ERP client export as suppression: make import-clients FILE=/data/imports/clients.xlsx [APPLY=1]
-	@test -n "$(FILE)" || (echo "usage: make import-clients FILE=/data/imports/clients.xlsx [APPLY=1]" && exit 1)
-	$(COMPOSE) run --rm worker python -m clientscrapper.tools.import_clients "$(FILE)" $(if $(APPLY),--apply,)
+# The file goes into the server's data/imports/ first (mounted as /data); a
+# bare FILE name is looked for there, a name with a «/» is passed as given. A
+# dry run by default. ACCEPT_FEWER=1 lets one export with fewer rows than the
+# previous import's through (it reads like a filtered screen otherwise); only
+# «1» switches a flag on (``switch``), so ACCEPT_FEWER=0 is off.
+import-clients: ## Load the ERP client export as suppression: make import-clients FILE=clients.xlsx [APPLY=1] [ACCEPT_FEWER=1]
+	@test -n "$(FILE)" || (echo "usage: make import-clients FILE=clients.xlsx (in data/imports/) [APPLY=1] [ACCEPT_FEWER=1]" && exit 1)
+	$(COMPOSE) run --rm worker python -m clientscrapper.tools.import_clients \
+		"$(if $(findstring /,$(FILE)),$(FILE),/data/imports/$(FILE))" \
+		$(if $(call switch,APPLY),--apply,) $(if $(call switch,ACCEPT_FEWER),--accept-fewer,)
+
+# One ERP feed walk by hand (06 §4.6, 07 §5.6): the run the scheduler makes.
+# Exit 3 when it was skipped (disabled, feeds not configured, already running).
+# A WALK that is not exactly one of ERP_WALKS stops make with the list.
+ERP_WALKS := full delta outcomes quarter year
+erp_walk = $(if $(and $(filter $(ERP_WALKS),$(WALK)),$(filter 1,$(words $(WALK)))),$(strip $(WALK)),$(error WALK=$(WALK): use one of $(ERP_WALKS)))
+erp-sync: ## One ERP feed walk: make erp-sync WALK=full|delta|outcomes|quarter|year [ACCEPT_SHRINK=1]
+	$(COMPOSE) run --rm worker python -m clientscrapper.tools.erp_sync --$(erp_walk) \
+		$(if $(call switch,ACCEPT_SHRINK),--accept-shrink,)
 
 push-test: ## Push one visibly synthetic lead to the ERP (05 §B.1)
 	$(COMPOSE) run --rm worker python -m clientscrapper.tools.push_test
@@ -116,7 +139,7 @@ purge: ## Forget a subject: make purge COMPANY=<uuid> | PHONE=<tail9> | TG_USER=
 	@test -n "$(COMPANY)$(PHONE)$(TG_USER)" || (echo "usage: make purge COMPANY=<uuid> | PHONE=<tail9> | TG_USER=<id> [APPLY=1]" && exit 1)
 	$(COMPOSE) run --rm worker python -m clientscrapper.tools.purge \
 		$(if $(COMPANY),--company "$(COMPANY)",) $(if $(PHONE),--phone "$(PHONE)",) \
-		$(if $(TG_USER),--tg-user "$(TG_USER)",) $(if $(APPLY),--apply,)
+		$(if $(TG_USER),--tg-user "$(TG_USER)",) $(if $(call switch,APPLY),--apply,)
 
 # --- Local development ------------------------------------------------------
 install: ## Install dev dependencies into the active virtualenv
