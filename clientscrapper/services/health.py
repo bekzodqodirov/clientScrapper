@@ -79,6 +79,7 @@ from clientscrapper.db.models import (
     LeadCandidate,
     LeadReview,
     ModelJob,
+    Observation,
     PushLog,
     ReminderLog,
     RuntimeFlag,
@@ -128,6 +129,7 @@ PROBLEM_KEYS: Final = (
     "flood_breaker",
     "collector_blocked",
     "collector_silent",
+    "job_failing",
     costs.COST_CAP_KEY,
     costs.SPEND_HIGH_KEY,
     "no_signals_24h",
@@ -161,10 +163,10 @@ CRITICAL_KEYS: Final = frozenset(
 # «warning → critical after 6 h» (06 §4.2).
 SUPPRESSION_STALE_CRITICAL_AFTER: Final = timedelta(hours=6)
 # Said first by their own job at once; the sweep only repeats them after the
-# repeat window and announces their recovery (06 §4.2).
-TOLD_FIRST_ELSEWHERE: Final = frozenset(
-    {costs.COST_CAP_KEY, "push_404", "erp_redirect", "flood_breaker"}
-)
+# repeat window and announces their recovery (06 §4.2). Not flood_breaker:
+# the reader that trips it must not be the one to report it (06 §4.3 — the
+# worker watches the userbot), so the sweep says it first.
+TOLD_FIRST_ELSEWHERE: Final = frozenset({costs.COST_CAP_KEY, "push_404", "erp_redirect"})
 # 04 §8: the spend alerts are said once per Tashkent business day, not every
 # ALERT_REPEAT_HOURS — cost_cap holds all day once it is reached, and the
 # monthly cap all month.
@@ -221,6 +223,18 @@ BATCH_STUCK_AFTER: Final = timedelta(hours=26)
 # gets this long past its fire time before it counts as missed.
 COLLECTOR_MISSED_RUNS: Final = 2
 COLLECTOR_GRACE: Final = timedelta(minutes=30)
+# job_failing (06 §4.2): a scheduler job whose last runs all raised, or a
+# collector cadence whose last finished runs all failed — a run that fails
+# every time still moves sources.last_run_at, so collector_silent never
+# sees it. A blocked host is collector_blocked's, a deploy's cancel is not a
+# fault.
+JOB_FAILING_STREAK: Final = 3
+FAILING_NOT_COUNTED: Final = frozenset({BLOCKED_REASON_PREFIX, "cancelled"})
+# Far enough back to hold three runs of the monthly cadence (erp_sync.year).
+FAILING_LOOKBACK: Final = timedelta(days=100)
+# The resolver takes ≤ 200 observations every 2 minutes (04 §0, 6,000 an
+# hour): one still 'new' after this long means it is not working them off.
+RESOLVE_BACKLOG_AGE: Final = timedelta(hours=6)
 # Lines of a list inside one problem (collector_blocked, collector_silent …).
 MAX_LINES: Final = 10
 
@@ -498,6 +512,22 @@ class Queues:
     pushes_today: int = 0
     cards_today: int = 0
     last_push_at: datetime | None = None
+    # observations(status='new'): what the resolver has still to take.
+    observations_new: int = 0
+    observations_new_oldest_at: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class FailingRun:
+    """A collector cadence (``source_key`` and its variant, ``""`` for the
+    primary) whose last ``JOB_FAILING_STREAK`` finished runs all failed with
+    an error that counts (``FAILING_NOT_COUNTED`` does not)."""
+
+    source_key: str
+    variant: str
+    runs: int
+    error: str
+    last_at: datetime
 
 
 @dataclass(slots=True)
@@ -533,6 +563,7 @@ class Status:
     review_backlog: int = 0
     push_failing_streak: int = 0
     queues: Queues = field(default_factory=Queues)
+    failing_runs: tuple[FailingRun, ...] = ()
     erp_breaker_until: datetime | None = None
     erp_breaker_reason: str | None = None
     # sources.erp_sync.config.suppression, for /holat (never judged here).
@@ -772,6 +803,14 @@ async def _queues(session: AsyncSession, now: datetime) -> Queues:
     last_push = await session.scalar(
         sa.select(sa.func.max(PushLog.sent_at)).where(PushLog.status == "sent")
     )
+    # Read through ix_observations_queue (partial on the queue's statuses).
+    waiting, oldest_new = (
+        await session.execute(
+            sa.select(sa.func.count(), sa.func.min(Observation.created_at)).where(
+                Observation.status == "new"
+            )
+        )
+    ).one()
     review = by_state.get("review", (0, None))
     return Queues(
         review=review[0],
@@ -782,7 +821,64 @@ async def _queues(session: AsyncSession, now: datetime) -> Queues:
         pushes_today=int(pushes or 0),
         cards_today=int(cards or 0),
         last_push_at=last_push,
+        observations_new=int(waiting or 0),
+        observations_new_oldest_at=oldest_new,
     )
+
+
+async def _failing_runs(session: AsyncSession, now: datetime) -> tuple[FailingRun, ...]:
+    """Each collector cadence whose last ``JOB_FAILING_STREAK`` finished runs
+    (skipped and running ones are not runs here) all failed with an error that
+    counts — one window over ``ix_collector_runs_source_started``, bounded by
+    ``FAILING_LOOKBACK``."""
+    variant = sa.func.coalesce(CollectorRun.meta["variant"].astext, "")
+    ranked = (
+        sa.select(
+            CollectorRun.source_key.label("key"),
+            variant.label("variant"),
+            CollectorRun.status.label("status"),
+            CollectorRun.error.label("error"),
+            CollectorRun.started_at.label("at"),
+            sa.func.row_number()
+            .over(
+                partition_by=(CollectorRun.source_key, variant),
+                order_by=(CollectorRun.started_at.desc(), CollectorRun.id.desc()),
+            )
+            .label("rn"),
+        )
+        .where(
+            CollectorRun.status.in_(["ok", "partial", "failed"]),
+            CollectorRun.started_at >= now - FAILING_LOOKBACK,
+        )
+        .subquery()
+    )
+    rows = (
+        await session.execute(
+            sa.select(
+                ranked.c.key,
+                ranked.c.variant,
+                ranked.c.status,
+                ranked.c.error,
+                ranked.c.at,
+            )
+            .where(ranked.c.rn <= JOB_FAILING_STREAK)
+            .order_by(ranked.c.key, ranked.c.variant, ranked.c.rn)
+        )
+    ).all()
+    runs: dict[tuple[str, str], list[tuple[str, str | None, datetime]]] = {}
+    for key, var, status, error, at in rows:
+        runs.setdefault((str(key), str(var)), []).append((status, error, at))
+    found: list[FailingRun] = []
+    for (key, var), latest in runs.items():
+        if len(latest) < JOB_FAILING_STREAK:
+            continue
+        if all(
+            status == "failed" and (error or "") not in FAILING_NOT_COUNTED
+            for status, error, _ in latest
+        ):
+            _, error, at = latest[0]
+            found.append(FailingRun(key, var, len(latest), str(error or "?"), at))
+    return tuple(found)
 
 
 async def gather(
@@ -941,6 +1037,7 @@ async def gather(
         review_backlog=int(backlog or 0),
         push_failing_streak=await _push_failing_streak(session),
         queues=await _queues(session, now),
+        failing_runs=await _failing_runs(session, now),
         erp_breaker_until=erp.breaker_until if erp is not None else None,
         erp_breaker_reason=erp.breaker_reason if erp is not None else None,
         erp_suppression=dict(erp_config) if isinstance(erp_config, Mapping) else {},
@@ -1131,8 +1228,60 @@ def unjudged(status: Status) -> frozenset[str]:
         # Telegram was not asked: the account is neither lost nor back.
         keys.add("userbot_unauthorized")
     if not collectors_judged(status):
-        keys.add("collector_silent")
+        keys.update({"collector_silent", "job_failing"})
+    if not worker_fresh(status):
+        # The job beats and the runs are the worker's: worker_silent says it.
+        keys.add("job_failing")
     return frozenset(keys)
+
+
+def worker_fresh(status: Status) -> bool:
+    worker = status.components.get("worker")
+    return worker is not None and not worker.stale
+
+
+def _streak(component: Component) -> int:
+    failures = component.detail.get("failures")
+    if component.detail.get("ok") is not False or isinstance(failures, bool):
+        return 0
+    return failures if isinstance(failures, int) else 0
+
+
+def failing_jobs(status: Status) -> list[tuple[Component, int]]:
+    """06 §4.2 job_failing, the scheduler half: a ``job:<id>`` whose last
+    ``JOB_FAILING_STREAK`` runs or more raised (``failures`` in its beat)."""
+    if not worker_fresh(status):
+        return []
+    return [
+        (job, n)
+        for _, job in sorted(status.jobs.items())
+        if (n := _streak(job)) >= JOB_FAILING_STREAK
+    ]
+
+
+def failing_collectors(status: Status) -> list[tuple[SourceState, FailingRun]]:
+    """job_failing, the collector half: a cadence of a judged source
+    (collector_silent's set: enabled, scheduled, not paused, not blocked)
+    whose last runs all failed."""
+    if not worker_fresh(status):
+        return []
+    judged = {s.key: s for s in _judged_sources(status)}
+    return [
+        (judged[run.source_key], run)
+        for run in status.failing_runs
+        if run.source_key in judged
+    ]
+
+
+def resolve_backlog(status: Status) -> timedelta | None:
+    """How long the oldest observation has waited for the resolver, when
+    that is past ``RESOLVE_BACKLOG_AGE`` (and the worker is up — a dead
+    worker is worker_silent), else None."""
+    oldest = status.queues.observations_new_oldest_at
+    if oldest is None or not worker_fresh(status):
+        return None
+    age = status.now - oldest
+    return age if age > RESOLVE_BACKLOG_AGE else None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1299,6 +1448,28 @@ def problems(status: Status) -> list[Problem]:
     ]
     if silent:
         add("collector_silent", _lines(silent))
+    failing = [
+        f"⚠️ <code>{escape(job.name)}</code> ishi oxirgi {n} marta xato bilan "
+        f"tugadi ({escape(job.detail.get('error') or '?')}) — "
+        "<code>make worker</code> loglari"
+        for job, n in failing_jobs(status)
+    ]
+    failing += [
+        f"⚠️ {escape(source.title_uz)}"
+        f"{' · ' + escape(run.variant) if run.variant else ''}: oxirgi {run.runs} ta "
+        f"ishga tushirish xato bilan tugadi ({escape(run.error)}) — "
+        "<code>make worker</code> loglari; /manbalar"
+        for source, run in failing_collectors(status)
+    ]
+    waited = resolve_backlog(status)
+    if waited is not None:
+        failing.append(
+            f"⚠️ {status.queues.observations_new} ta topilma navbatda kutmoqda (eng "
+            f"eskisi {age_label(waited)}) — saralash (resolve) ishlamayapti; "
+            "<code>make worker</code> loglari"
+        )
+    if failing:
+        add("job_failing", _lines(failing))
     for alert in costs.spend_alerts(
         status.spend,
         daily_cap=settings.daily_cost_cap_usd,
@@ -1454,6 +1625,7 @@ _RECOVERY: Final[Mapping[str, str]] = {
     "flood_breaker": "✅ Telegram FloodWait tugadi — oʻquvchi yana qoʻshiladi — tiklandi",
     "collector_blocked": "✅ Saytlar yana ochiq — kollektorlar davom etadi — tiklandi",
     "collector_silent": "✅ Kollektorlar yana ishlayapti — tiklandi",
+    "job_failing": "✅ Rejalashtirilgan ishlar yana xatosiz tugayapti — tiklandi",
     costs.COST_CAP_KEY: (
         "✅ Xarajat chegarasi yangilandi — pullik chaqiruvlar davom etadi"
     ),
@@ -1850,6 +2022,25 @@ async def tell_offline(
             memo[problem.key] = now
             said.append(problem.key)
     return said
+
+
+async def adopt_offline(memo: dict[str, datetime]) -> list[str]:
+    """The database answers again: what :func:`tell_offline` said while it
+    was gone goes into the ledger as ``alert:<key>`` at the moment it was
+    said, then the memo is emptied. The next :func:`tell` then repeats such a
+    key on the ledger's clock and — ``db_down`` above all — announces its
+    recovery (06 §4.2: every key has its recovery line), which an in-memory
+    memo alone never could. Its own transaction; if it fails the memo stays
+    and the next sweep tries again. Returns the keys written."""
+    if not memo:
+        return []
+    written = sorted(memo)
+    async with _own_session() as own:
+        for key in written:
+            mark_alerted(own, [key], now=memo[key])
+    for key in written:
+        memo.pop(key, None)
+    return written
 
 
 # --- the Anthropic switch costs.ask reads (04 §8 step 6) ----------------------

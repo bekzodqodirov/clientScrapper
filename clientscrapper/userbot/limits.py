@@ -8,7 +8,9 @@ forgets nothing:
   reads, resolves and dialog sync for ``USERBOT_FLOOD_BREAKER_HOURS`` (24);
   live messages keep flowing (a push from Telegram, not a request). The value
   is ``{"until", "seconds", "since", "where"}``, which ``health`` reads as
-  the ``flood_breaker`` problem — writing it is how the problem is raised.
+  the ``flood_breaker`` problem — writing it is how the problem is raised,
+  and the worker's health sweep is what tells the owner (06 §4.3: the reader
+  never reports its own problem).
 * ``userbot_quota`` — the day's counts of what Telegram is asked: ``joins``
   (≤ USERBOT_JOINS_PER_DAY, 3), ``resolves`` (≤ 20), ``about_channels``
   (≤ 20), ``about_users`` (≤ 50). One row, reset at the Tashkent midnight.

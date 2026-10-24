@@ -560,7 +560,7 @@ alive speaks; neither repeats the other.
 
 | key | severity | condition | alert text (first line) |
 |---|---|---|---|
-| `db_down` | critical | the bot cannot reach Postgres (in-memory memo) | «⛔ Baza javob bermayapti — `make ps`, `make logs`» |
+| `db_down` | critical | the bot cannot reach Postgres (in-memory memo; the first sweep that reaches the database again writes the memo into the ledger as `alert:<key>` at the moment each was said, so the recovery line is said — `health.adopt_offline`) | «⛔ Baza javob bermayapti — `make ps`, `make logs`» |
 | `disk_low` | critical | free < `DISK_MIN_FREE_GB` | «⛔ Diskda {free} GB qoldi — `make backup` tekshir, `EVIDENCE_MAX_GB` kamaytir» |
 | `worker_silent` | critical | `worker` beat older than `HEARTBEAT_STALE_MINUTES` | «⛔ Rejalashtiruvchi {age} jim — `make worker`» |
 | `userbot_unauthorized` | critical | userbot detail `authorized=false` | «⛔ Telegram oʻquvchi akkaunti chiqib ketgan/cheklangan ({code}). @SpamBot tekshiring; `make userbot-login`» |
@@ -575,6 +575,7 @@ alive speaks; neither repeats the other.
 | `flood_breaker` | warning | `runtime_flags.flood_until > now` | «⚠️ Telegram FloodWait ({seconds} s) — oʻquvchi {until} gacha qoʻshilmaydi/oʻqimaydi (jonli xabarlar davom etadi)» |
 | `collector_blocked` | warning | any `sources.breaker_until > now` with reason `host_blocked:<host>` (the runner writes it beside `paused_until`, same reason, 03 §1.1) | «⚠️ {title}: sayt bloklayapti (403/429) — {until} gacha toʻxtadi» |
 | `collector_silent` | warning | enabled source with cron, `last_run_at` older than 2× its interval — **excluding** sources that are disabled, paused (`paused_until > now`), breaker-paused or globally paused (`/toxtat`): a skipped run writes its `collector_runs(status='skipped')` row but never beats (03 §1.2) | «⚠️ {title} {age} ishlamadi — `/manbalar`» |
+| `job_failing` | warning | the worker is fresh and (a) a scheduler job's last `JOB_FAILING_STREAK` = 3 runs raised (the `job:<id>` beat carries `{ok, error, failures}`, `failures` = runs in a row that raised, reset by a success), or (b) a cadence (`source_key` + `meta.variant`) of a source `collector_silent` judges ended its last 3 finished runs `failed` with an error other than `host_blocked` (that is `collector_blocked`) or `cancelled` (a deploy) — a run that fails every time moves `sources.last_run_at`, so `collector_silent` never sees it — or (c) the oldest `observations(status='new')` is older than `RESOLVE_BACKLOG_AGE` = 6 h (the resolver takes 6,000 an hour); one line per item | «⚠️ `{job}` ishi oxirgi {n} marta xato bilan tugadi ({error}) — `make worker` loglari» / «⚠️ {title} · {variant}: oxirgi {n} ta ishga tushirish xato bilan tugadi ({error}) — `make worker` loglari; /manbalar» / «⚠️ {n} ta topilma navbatda kutmoqda (eng eskisi {age}) — saralash (resolve) ishlamayapti; `make worker` loglari» |
 | `cost_cap` | warning, told first by `costs.ask` (once per Tashkent day through `costs.claim_alert`, 04 §8; delivered by the notifier T-08 registers with `costs.set_cap_notifier`) | today ≥ `DAILY_COST_CAP_USD` or month ≥ monthly cap | «💸 Kunlik xarajat chegarasi ($10) — ertagacha pullik chaqiruvlar toʻxtadi; kollektorlar bepul qismini davom ettiradi» |
 | `spend_high` | warning | ≥ `SPEND_ALERT_PCT` of either cap | «⚠️ Xarajat {pct}% ga yetdi (${d}/${cap})» |
 | `no_signals_24h` | warning | userbot enabled, ≥ 1 chat on, zero `interactions` in 24 h | «⚠️ 24 soatda bitta ham Telegram signal yoʻq — chatlar oʻlikmi? `/chats`» |
@@ -597,8 +598,10 @@ This table is the one list of keys: 04 §8 raises `spend_high` (its former `cost
 `suppression_selftest_failed`, `suppression_stale_hit`; 05 raises `push_404`, `erp_redirect`, `feed_contract`,
 `suppression_stale`, `suppression_shrunk`, `suppression_stale_hit`; `tests/test_health.py`
 fails on a key raised anywhere that is not a row here. Critical problems ignore `QUIET_HOURS`.
-`TOLD_FIRST_ELSEWHERE = {cost_cap, push_404, erp_redirect, flood_breaker}` (their own job says it at once; the
-sweep repeats after `ALERT_REPEAT_HOURS`). `cost_cap` and `spend_high` are said once per Tashkent day by
+`TOLD_FIRST_ELSEWHERE = {cost_cap, push_404, erp_redirect}` (their own job says it at once; the
+sweep repeats after `ALERT_REPEAT_HOURS`). `flood_breaker` is not one of them: the reader writes
+`runtime_flags.flood_until` and says nothing (§4.3 — a component never reports its own problem), so
+the worker's sweep says it first and announces its end (seam review 2026-10-24). `cost_cap` and `spend_high` are said once per Tashkent day by
 `costs` (04 §8) — the repeat rule and that rule disagree for `cost_cap`; T-08 reconciles them (04 Q11:
 recommended, the money keys keep once a day).
 Dead-man: the worker GETs `DEADMAN_PING_URL` every `DEADMAN_PING_MINUTES` from `heartbeat_job`

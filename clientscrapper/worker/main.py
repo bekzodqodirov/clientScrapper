@@ -67,7 +67,7 @@ from clientscrapper.collectors import erp_sync
 from clientscrapper.collectors.base import Collector
 from clientscrapper.collectors.runner import run_collector
 from clientscrapper.config import settings
-from clientscrapper.db.models import Source
+from clientscrapper.db.models import Heartbeat, Source
 from clientscrapper.db.session import engine, session_scope
 from clientscrapper.logs import setup_logging
 from clientscrapper.services import (
@@ -376,14 +376,28 @@ def collector_job(cls: type[Collector], variant: str | None = None) -> Job:
 
 
 async def record_job_event(job_id: str, *, ok: bool, error: str | None) -> None:
-    """Upsert the ``job:<id>`` heartbeat for one finished scheduler run. Its
-    own session, and it never raises: a heartbeat that cannot be written is a
-    log line, not a second failure on top of the job's own. The error is the
-    exception's class: a message may carry what a row said."""
+    """Upsert the ``job:<id>`` heartbeat for one finished scheduler run:
+    ``{ok, error, failures}``, ``failures`` being how many runs in a row have
+    raised (06 §4.2 job_failing; a success resets it). Its own session, and it
+    never raises: a heartbeat that cannot be written is a log line, not a
+    second failure on top of the job's own. The error is the exception's
+    class: a message may carry what a row said."""
+    component = health.JOB_PREFIX + job_id
     try:
         async with session_scope() as session:
+            failures = 0
+            if not ok:
+                before = await session.scalar(
+                    sa.select(Heartbeat.detail).where(Heartbeat.component == component)
+                )
+                count = before.get("failures") if isinstance(before, dict) else None
+                if isinstance(count, bool) or not isinstance(count, int):
+                    count = 0
+                failures = count + 1
             await health.beat(
-                session, health.JOB_PREFIX + job_id, detail={"ok": ok, "error": error}
+                session,
+                component,
+                detail={"ok": ok, "error": error, "failures": failures},
             )
     except Exception as exc:
         log.error(
@@ -474,6 +488,18 @@ def _log_problems(found: list[health.Problem], now: datetime) -> None:
             )
 
 
+async def _adopt_offline() -> None:
+    """What this process said with the database gone, into the ledger now that
+    it answers — so «Baza qayta javob beryapti» is said once it is back."""
+    try:
+        await health.adopt_offline(_offline_alerted_at)
+    except Exception as exc:
+        log.warning(
+            "offline alerts not recorded; tried again next sweep",
+            extra={"error": type(exc).__name__},
+        )
+
+
 async def health_job(
     *, now: datetime | None = None, notify: health.OwnerNotify | None = None
 ) -> health.TellReport | None:
@@ -483,7 +509,8 @@ async def health_job(
     a problem is said once per ALERT_REPEAT_HOURS while it lasts (the spend
     alerts once per Tashkent day), and once more as «tiklandi» when it clears;
     critical ones ignore quiet hours. With the database unreachable only the
-    critical problems are said, deduped in this process."""
+    critical problems are said, deduped in this process; the first sweep that
+    reaches it again writes them into the ledger, so their recovery is said."""
     now = now or datetime.now(settings.tz)
     speak = notify or _seams.notify
     status: health.Status | None = None
@@ -491,6 +518,7 @@ async def health_job(
         async with session_scope() as session:
             status = await health.gather(session, now=now)
             if status.db_ok:
+                await _adopt_offline()
                 found = health.problems(status)
                 _log_problems(found, now)
                 return await health.tell(

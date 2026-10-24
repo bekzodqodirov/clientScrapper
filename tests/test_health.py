@@ -59,6 +59,7 @@ SPEC_KEYS = (
     "flood_breaker",
     "collector_blocked",
     "collector_silent",
+    "job_failing",
     "cost_cap",
     "spend_high",
     "no_signals_24h",
@@ -125,12 +126,9 @@ def test_problem_keys_are_06_s_table_in_its_order():
 
 def test_the_critical_keys_and_the_ones_told_first_elsewhere():
     assert health.CRITICAL_KEYS == SPEC_CRITICAL
-    assert {
-        "cost_cap",
-        "push_404",
-        "erp_redirect",
-        "flood_breaker",
-    } == health.TOLD_FIRST_ELSEWHERE
+    # Not flood_breaker: the reader never reports its own problem (06 §4.3),
+    # so nothing but the sweep can say it first.
+    assert {"cost_cap", "push_404", "erp_redirect"} == health.TOLD_FIRST_ELSEWHERE
     assert {"cost_cap", "spend_high"} == health.DAILY_KEYS
     assert set(health.PROBLEM_KEYS) >= health.REPORTED_KEYS
 
@@ -306,6 +304,18 @@ TRIGGERS: dict[str, tuple[Callable[[Status], None], str]] = {
     "collector_silent": (
         _set(sources=(_source(cron="15 * * * *"),)),
         "OLX sotuvchilari 5 soat ishlamadi",
+    ),
+    "job_failing": (
+        lambda s: s.jobs.update(
+            resolve=_beat(
+                "resolve",
+                timedelta(minutes=1),
+                ok=False,
+                error="ProgrammingError",
+                failures=3,
+            )
+        ),
+        "<code>resolve</code> ishi oxirgi 3 marta xato bilan tugadi (ProgrammingError)",
     ),
     "cost_cap": (_set(spend=_spend("10.00")), "Kunlik xarajat chegarasi ($10)"),
     "spend_high": (_set(spend=_spend("8.50")), "Kunlik xarajat 85% ga yetdi"),
@@ -652,6 +662,130 @@ def test_a_weekly_cron_is_read_as_crontab_not_as_apscheduler():
     assert health.silent_sources(status) == []
 
 
+# --- job_failing: a job or a collector that fails every time ------------------------
+
+
+def _job(**detail: object) -> health.Component:
+    return _beat("resolve", timedelta(minutes=1), **detail)
+
+
+@pytest.mark.parametrize(
+    ("detail", "failing"),
+    [
+        ({"ok": False, "error": "ProgrammingError", "failures": 3}, True),
+        ({"ok": False, "error": "ProgrammingError", "failures": 9}, True),
+        ({"ok": False, "error": "ProgrammingError", "failures": 2}, False),
+        # A success resets the streak; a stale count beside ok=true is history.
+        ({"ok": True, "error": None, "failures": 5}, False),
+        # The beat T-08 wrote before the streak existed; a bool is no count.
+        ({"ok": False, "error": "OSError"}, False),
+        ({"ok": False, "error": "OSError", "failures": True}, False),
+    ],
+)
+def test_a_job_is_failing_after_three_raises_in_a_row(detail, failing):
+    status = healthy_status()
+    status.jobs = {"resolve": _job(**detail)}
+    assert bool(health.failing_jobs(status)) is failing
+    assert ("job_failing" in [p.key for p in health.problems(status)]) is failing
+
+
+def _failing_run(**kw: object) -> health.FailingRun:
+    fields: dict[str, object] = {
+        "source_key": "olx_business",
+        "variant": "",
+        "runs": 3,
+        "error": "KeyError",
+        "last_at": NOW - timedelta(hours=1),
+    }
+    fields.update(kw)
+    return health.FailingRun(**fields)  # type: ignore[arg-type]
+
+
+def test_a_collector_that_fails_every_run_is_named_though_it_is_not_silent():
+    status = healthy_status()
+    # It ran an hour ago, so collector_silent has nothing to say.
+    status.sources = (_source(last_run_at=NOW - timedelta(hours=1)),)
+    status.failing_runs = (_failing_run(), _failing_run(variant="full"))
+    assert health.silent_sources(status) == []
+    [problem] = health.problems(status)
+    assert (problem.key, problem.severity) == ("job_failing", "warning")
+    assert problem.text == (
+        "⚠️ OLX sotuvchilari: oxirgi 3 ta ishga tushirish xato bilan tugadi "
+        "(KeyError) — <code>make worker</code> loglari; /manbalar\n"
+        "⚠️ OLX sotuvchilari · full: oxirgi 3 ta ishga tushirish xato bilan tugadi "
+        "(KeyError) — <code>make worker</code> loglari; /manbalar"
+    )
+    assert uz_problems(problem.text, rendered=True) == set()
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"enabled": False},
+        {"cron": None},
+        {"paused_until": NOW + timedelta(hours=1)},
+        # Blocked: collector_blocked says it.
+        {
+            "breaker_until": NOW + timedelta(hours=1),
+            "breaker_reason": "host_blocked:x",
+        },
+    ],
+)
+def test_a_source_collector_silent_does_not_judge_is_not_failing_either(change):
+    status = healthy_status()
+    status.sources = (_source(**change),)
+    status.failing_runs = (_failing_run(),)
+    assert health.failing_collectors(status) == []
+
+
+def test_job_failing_needs_a_fresh_worker_and_judged_collectors(monkeypatch):
+    status = healthy_status()
+    status.sources = (_source(),)
+    status.failing_runs = (_failing_run(),)
+    status.jobs = {"resolve": _job(ok=False, error="X", failures=3)}
+    status.queues = replace(
+        status.queues,
+        observations_new=40,
+        observations_new_oldest_at=NOW - timedelta(hours=7),
+    )
+    assert len(health.failing_jobs(status)) == 1
+    assert health.resolve_backlog(status) == timedelta(hours=7)
+    # A dead worker is worker_silent's; its stale beats say nothing more.
+    status.components["worker"] = _beat("worker", timedelta(minutes=25))
+    assert [p.key for p in health.problems(status)] == ["worker_silent"]
+    assert "job_failing" in health.unjudged(status)
+    status.components["worker"] = _beat("worker", timedelta(minutes=1))
+    status.paused = True
+    assert health.failing_collectors(status) == []
+    assert "job_failing" in health.unjudged(status)
+
+
+@pytest.mark.parametrize(
+    ("waited", "said"),
+    [(timedelta(hours=6), False), (timedelta(hours=6, minutes=1), True)],
+)
+def test_a_resolver_backlog_older_than_six_hours_is_said(waited, said):
+    status = healthy_status()
+    status.queues = replace(
+        status.queues, observations_new=812, observations_new_oldest_at=NOW - waited
+    )
+    found = {p.key: p for p in health.problems(status)}
+    assert ("job_failing" in found) is said
+    if said:
+        assert found["job_failing"].text == (
+            "⚠️ 812 ta topilma navbatda kutmoqda (eng eskisi 6 soat) — saralash "
+            "(resolve) ishlamayapti; <code>make worker</code> loglari"
+        )
+
+
+def test_failing_ignores_what_other_keys_say_and_matches_the_runner():
+    from clientscrapper.collectors import runner
+    from clientscrapper.services import http as http_layer
+
+    expected = {http_layer.BLOCKED_ERROR, runner.CANCELLED}
+    assert expected == health.FAILING_NOT_COUNTED
+
+
 # --- anthropic_silence: no false start, no latch ----------------------------------
 
 
@@ -846,6 +980,80 @@ async def test_gather_reads_each_table_fact(session):
             .values(breaker_until=None, breaker_reason=None)
         )
         await session.commit()
+
+
+def _run(key: str, status: str, error: str | None, hours: float, variant: str = ""):
+    return m.CollectorRun(
+        source_key=key,
+        status=status,
+        error=error,
+        started_at=NOW - timedelta(hours=hours),
+        finished_at=None if status == "running" else NOW - timedelta(hours=hours),
+        meta={"variant": variant} if variant else {},
+    )
+
+
+async def test_gather_reads_the_failing_cadences_and_the_resolver_queue(session):
+    session.add_all(
+        [
+            # hh_vacancies: three failures in a row, older successes behind them;
+            # a skipped and a running row are not runs.
+            _run("hh_vacancies", "ok", None, 30),
+            *(_run("hh_vacancies", "failed", "KeyError", h) for h in (12, 8, 4)),
+            _run("hh_vacancies", "skipped", None, 2),
+            _run("hh_vacancies", "running", None, 0.1),
+            # olx_business: the newest run got through.
+            *(_run("olx_business", "failed", "KeyError", h) for h in (72, 48, 24)),
+            _run("olx_business", "partial", None, 1),
+            # directories: a blocked host is collector_blocked's.
+            _run("directories", "failed", "KeyError", 30),
+            _run("directories", "failed", "host_blocked", 20),
+            _run("directories", "failed", "KeyError", 10),
+            # erp_sync: the delta works, the outcomes walk fails every night —
+            # a cadence is judged by its own runs.
+            *(_run("erp_sync", "ok", None, h, "delta") for h in (3, 2, 1)),
+            *(
+                _run("erp_sync", "failed", "ErpHttpError", h, "outcomes")
+                for h in (57, 33, 9)
+            ),
+            # maps: only two runs yet.
+            *(_run("maps", "failed", "KeyError", h) for h in (20, 10)),
+        ]
+    )
+    evidence = m.Evidence(
+        source_key="hh_vacancies",
+        url="https://api.hh.ru/vacancies/1",
+        source_ref="1",
+        fetched_at=NOW,
+        sha256="a" * 64,
+        content_type="application/json",
+        bytes=0,
+        excerpt="",
+        expires_at=NOW + timedelta(days=180),
+    )
+    session.add(evidence)
+    await session.flush()
+    for i, (status, hours) in enumerate([("new", 7), ("new", 1), ("resolved", 30)]):
+        session.add(
+            m.Observation(
+                evidence_id=evidence.id,
+                ordinal=i,
+                source_key="hh_vacancies",
+                status=status,
+                parsed={},
+                created_at=NOW - timedelta(hours=hours),
+            )
+        )
+    await session.commit()
+    status = await _gather(session)
+    assert {(r.source_key, r.variant, r.runs, r.error) for r in status.failing_runs} == {
+        ("hh_vacancies", "", 3, "KeyError"),
+        ("erp_sync", "outcomes", 3, "ErpHttpError"),
+    }
+    [hh] = [r for r in status.failing_runs if r.source_key == "hh_vacancies"]
+    assert hh.last_at == NOW - timedelta(hours=4)
+    assert status.queues.observations_new == 2
+    assert status.queues.observations_new_oldest_at == NOW - timedelta(hours=7)
 
 
 async def test_a_push_that_got_through_ends_the_failing_streak(session):

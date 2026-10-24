@@ -21,6 +21,7 @@ from apscheduler.events import JobExecutionEvent
 
 from clientscrapper.collectors import erp_sync
 from clientscrapper.collectors.base import Collector, Observation
+from clientscrapper.collectors.runner import run_collector
 from clientscrapper.config import settings
 from clientscrapper.db import models as m
 from clientscrapper.services import companies, costs, crontab, erp_feeds, health
@@ -331,8 +332,8 @@ async def test_a_job_outcome_is_its_job_heartbeat(session):
         future = await asyncio.to_thread(worker.on_job_event, event, loop=loop)
         await asyncio.wrap_future(future)
     rows = await health.beats(session)
-    assert rows["job:health"].detail == {"ok": True, "error": None}
-    assert rows["job:backup"].detail == {"ok": False, "error": "OSError"}
+    assert rows["job:health"].detail == {"ok": True, "error": None, "failures": 0}
+    assert rows["job:backup"].detail == {"ok": False, "error": "OSError", "failures": 1}
     await health.beat(session, "job:retired_job", now=NOW)
     await session.commit()
     assert await worker.prune_job_heartbeats(["job:health", "job:backup"]) == 1
@@ -373,6 +374,143 @@ async def test_health_job_with_the_database_down_says_the_critical_once(monkeypa
     ]
     await worker.health_job(now=NOW + timedelta(minutes=5), notify=notify)
     assert len(notify.sent) == 1
+
+
+async def test_a_job_s_beat_counts_the_raises_in_a_row(session):
+    for _ in range(3):
+        await worker.record_job_event("resolve", ok=False, error="ProgrammingError")
+    beat = (await health.beats(session))["job:resolve"]
+    assert beat.detail == {"ok": False, "error": "ProgrammingError", "failures": 3}
+    await worker.record_job_event("resolve", ok=True, error=None)
+    beat = (await health.beats(session))["job:resolve"]
+    assert beat.detail == {"ok": True, "error": None, "failures": 0}
+    await worker.record_job_event("resolve", ok=False, error="OSError")
+    beat = (await health.beats(session))["job:resolve"]
+    assert beat.detail["failures"] == 1
+
+
+async def _fresh(session, now=NOW):
+    for name in health.COMPONENTS:
+        await health.beat(session, name, detail={"enabled": True}, now=now)
+    await session.commit()
+
+
+async def test_a_resolver_that_raises_every_run_is_told(session, monkeypatch):
+    notify = Notify()
+    monkeypatch.setattr(settings, "backup_age_recipient", "")
+    await _fresh(session)
+    for _ in range(3):
+        await worker.record_job_event("resolve", ok=False, error="ProgrammingError")
+    report = await worker.health_job(now=NOW, notify=notify)
+    assert report is not None and "job_failing" in report.said
+    assert any(
+        "<code>resolve</code> ishi oxirgi 3 marta xato bilan tugadi "
+        "(ProgrammingError)" in text
+        for text in notify.sent
+    )
+    await worker.record_job_event("resolve", ok=True, error=None)
+    await _fresh(session, NOW + timedelta(minutes=5))
+    back = await worker.health_job(now=NOW + timedelta(minutes=5), notify=notify)
+    assert back is not None and back.recovered == ("job_failing",)
+    assert notify.sent[-1] == health.recovery_text("job_failing")
+
+
+async def test_a_collector_that_fails_every_run_is_told(session, monkeypatch):
+    class Broken(Collector):
+        key = "hh_vacancies"
+        family = "vacancy"
+
+        async def collect(self, session, budget) -> list[Observation]:
+            raise KeyError("items")
+
+    notify = Notify()
+    monkeypatch.setattr(settings, "backup_age_recipient", "")
+    monkeypatch.setattr(settings, "collectors_enabled", True)
+    source = await session.get(m.Source, "hh_vacancies")
+    assert source is not None
+    was = (source.enabled, source.cron)
+    source.enabled, source.cron = True, "20 */4 * * *"
+    await session.commit()
+    try:
+        runs = [NOW - timedelta(hours=h) for h in (8, 4, 0)]
+        for at in runs:
+            report = await run_collector(
+                Broken,
+                fetcher=worker.shared_fetcher(),
+                now=at,
+                cost_gate_for=None,
+            )
+            assert (report.status, report.error) == ("failed", "KeyError")
+        await _fresh(session)
+        told = await worker.health_job(now=NOW + timedelta(minutes=1), notify=notify)
+        assert told is not None and "job_failing" in told.said
+        assert any(
+            "oxirgi 3 ta ishga tushirish xato bilan tugadi (KeyError)" in text
+            for text in notify.sent
+        )
+    finally:
+        source = await session.get(m.Source, "hh_vacancies", populate_existing=True)
+        assert source is not None
+        source.enabled, source.cron = was
+        await session.commit()
+        if worker._shared.fetcher is not None:
+            await worker._shared.fetcher.aclose()
+            worker._shared.fetcher = None
+
+
+async def test_the_flood_breaker_is_said_by_the_sweep_and_its_end_too(
+    session, monkeypatch
+):
+    """06 §4.3: the reader writes runtime_flags.flood_until and says nothing;
+    the worker's sweep is what tells the owner, and tells the end."""
+    from clientscrapper.userbot import limits
+
+    notify = Notify()
+    monkeypatch.setattr(settings, "backup_age_recipient", "")
+    await _fresh(session)
+    until = await limits.trip_breaker(session, seconds=900, now=NOW, where="join")
+    await session.commit()
+    assert until is not None
+    report = await worker.health_job(now=NOW, notify=notify)
+    assert report is not None and "flood_breaker" in report.said
+    assert any("⚠️ Telegram FloodWait (900 s)" in text for text in notify.sent)
+    after = until + timedelta(minutes=1)
+    if health.in_quiet_hours(after):  # the end is said outside the quiet hours
+        after = after.replace(hour=12, minute=0)
+    await _fresh(session, after)
+    back = await worker.health_job(now=after, notify=notify)
+    assert back is not None and "flood_breaker" in back.recovered
+    assert health.recovery_text("flood_breaker") in notify.sent[-1]
+
+
+async def test_the_database_back_is_said_once_it_answers(session, monkeypatch):
+    notify = Notify()
+    monkeypatch.setattr(settings, "backup_age_recipient", "")
+    real = health.gather
+
+    async def unreachable(session, *, now, **kw):
+        return health.Status.unreachable(now, (100 * 1000**3, 200 * 1000**3))
+
+    monkeypatch.setattr(health, "gather", unreachable)
+    assert await worker.health_job(now=NOW, notify=notify) is None
+    assert notify.sent == [
+        "⛔ Baza javob bermayapti — <code>make ps</code>, <code>make logs</code>"
+    ]
+    monkeypatch.setattr(health, "gather", real)
+    later = NOW + timedelta(minutes=10)
+    await _fresh(session, later)
+    report = await worker.health_job(now=later, notify=notify)
+    assert report is not None and report.recovered == ("db_down",)
+    assert notify.sent[-1] == "✅ Baza qayta javob beryapti — tiklandi"
+    assert worker._offline_alerted_at == {}
+    # The ledger keeps the moment it was said, not the moment it was written.
+    rows = await session.execute(
+        sa.select(m.ReminderLog.kind, m.ReminderLog.sent_at).order_by(m.ReminderLog.id)
+    )
+    assert [(k, at) for k, at in rows.all() if k.endswith(":db_down")] == [
+        ("alert:db_down", NOW),
+        ("recovered:db_down", later),
+    ]
 
 
 async def test_backup_job_without_a_recipient_writes_and_beats_nothing(
