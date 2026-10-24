@@ -59,11 +59,11 @@ class Suppression(Base):
             "key_type <> 'stir' OR key ~ '^[0-9]{9}$'", name="ck_suppression_stir"
         ),
         sa.CheckConstraint(
-            "key_type <> 'tg_username' OR key = cs_username_key(key)",
+            "key_type <> 'tg_username' OR key IS NOT DISTINCT FROM cs_username_key(key)",
             name="ck_suppression_username",
         ),
         sa.CheckConstraint(
-            "key_type <> 'domain' OR key = cs_domain_key(key)",
+            "key_type <> 'domain' OR key IS NOT DISTINCT FROM cs_domain_key(key)",
             name="ck_suppression_domain",
         ),
         sa.CheckConstraint(

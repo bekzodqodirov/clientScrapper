@@ -69,7 +69,9 @@ class Signal(Base):
 class ScoringWeight(Base):
     """One key of one weights version. A version is a complete set; the
     active one is the newest approved. ``cs_scoring_weights_frozen`` refuses
-    any change to an approved row but the approval itself, and every delete."""
+    every change to a row once it is approved (approving it is the last
+    write: approved_by and approved_at are set together, while approved_at is
+    still NULL), and every delete."""
 
     __tablename__ = "scoring_weights"
 
@@ -104,6 +106,12 @@ class ScoringWeight(Base):
             "decayed_factor BETWEEN 0 AND 1", name="ck_scoring_weights_decayed_factor"
         ),
         check_in("scoring_weights", "key", e.SIGNAL_KEYS + e.DERIVED_KEYS),
+        # Not in 02 §2.7: approval is one act with a name, and the freeze makes
+        # it permanent, so a half-set approval would stay anonymous for ever.
+        sa.CheckConstraint(
+            "(approved_by IS NULL) = (approved_at IS NULL)",
+            name="ck_scoring_weights_approved",
+        ),
         sa.Index(
             "ix_scoring_weights_approved",
             "version",

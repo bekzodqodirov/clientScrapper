@@ -109,6 +109,24 @@ ANTHROPIC_KEY = "sk-ant-" + "x" * 24
         ("sent X-ERP-Key: abc123secret", "abc123secret", "X-ERP-Key=<key>"),
         ("header x-gsr-key=zzzsecret", "zzzsecret", "x-gsr-key=<key>"),
         ("Authorization: Bearer-tokenvalue", "Bearer-tokenvalue", "Authorization=<key>"),
+        # The scheme word is not the credential: the token after it goes too.
+        (
+            "Authorization: Bearer apify_api_namuna1",
+            "apify_api_namuna1",
+            "Authorization=<key>",
+        ),
+        ("authorization: Api-Key AQVNnamunakey", "AQVNnamunakey", "authorization=<key>"),
+        (
+            "Proxy-Authorization: Basic bmFtdW5hOm5hbXVuYQ==",
+            "bmFtdW5hOm5hbXVuYQ",
+            "Proxy-Authorization=<key>",
+        ),
+        (
+            "headers {'Authorization': 'Bearer namuna.jwt.sig', 'n': 1}",
+            "namuna.jwt.sig",
+            "Authorization=<key>",
+        ),
+        ('sent {"X-GSR-Key": "namunasecret"}', "namunasecret", "X-GSR-Key=<key>"),
         (f"model key {ANTHROPIC_KEY}", ANTHROPIC_KEY, "<secret>"),
         (f"bot {BOT_TOKEN} failed", BOT_TOKEN, "<secret>"),
         ("TELETHON_SESSION=1BVtsOKABu0abc", "1BVtsOKABu0abc", "<secret>"),
@@ -127,6 +145,53 @@ def test_patterns_are_rewritten_in_the_message(install, fmt, message, leaked, ke
     out = stream.getvalue()
     assert leaked not in out
     assert kept in out
+
+
+@pytest.mark.parametrize("fmt", ["json", "text"])
+def test_the_values_of_other_extras_are_redacted(install, fmt):
+    stream = install("worker", fmt)
+    dsn = "postgresql+psycopg://cs:hunter2namuna@db:5432/cs"
+    logging.getLogger("clientscrapper.x").warning(
+        "db down",
+        extra={
+            "error": f"OperationalError: {dsn}",
+            "sender": "+998 90 000 00 07",
+            "context": {"where": "@namuna_04", "tries": [3, "+998900000008"]},
+            "request": {"Authorization": "Bearer namunatoken9", "text": "namuna matn"},
+            "attempt": 3,
+        },
+    )
+    out = stream.getvalue()
+    leaks = ("hunter2namuna", "000 00 07", "namuna_04", "900000008", "namunatoken9",
+             "namuna matn")  # fmt: skip
+    for leaked in leaks:
+        assert leaked not in out
+    if fmt == "json":
+        (line,) = _lines(stream)
+        assert line["error"] == (
+            "OperationalError: postgresql+psycopg://cs:***@db:5432/cs"
+        )
+        assert line["sender"] == "<phone>"
+        assert line["context"] == {"where": "@…", "tries": [3, "<phone>"]}
+        assert line["request"] == {"Authorization": "<key>", "text": "<redacted>"}
+        assert line["attempt"] == 3
+
+
+def test_an_extra_that_is_not_json_is_redacted_as_printed(install):
+    class Raw:
+        def __str__(self) -> str:
+            return "dsn postgresql://cs:hunter3namuna@db/cs"
+
+    stream = install()
+    logging.getLogger("clientscrapper.x").info("x", extra={"thing": Raw()})
+    (line,) = _lines(stream)
+    assert line["thing"] == "dsn postgresql://cs:***@db/cs"
+
+
+def test_redacting_an_extra_leaves_the_callers_object_alone():
+    context = {"phone_like": "+998 90 000 00 09"}
+    assert logs.redact_value(context) == {"phone_like": "<phone>"}
+    assert context == {"phone_like": "+998 90 000 00 09"}
 
 
 def test_arguments_are_redacted_too(install):

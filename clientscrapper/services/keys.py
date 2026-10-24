@@ -164,7 +164,13 @@ def phone_kind(e164: str) -> PhoneKind:
 
 # --- Telegram usernames (mirror of cs_username_key) --------------------------
 
-_TG_PREFIX = re.compile(r"\A([A-Za-z]+://)?(www\.)?(t\.me/|telegram\.me/)?@?")
+# The scheme, www. and the t.me/telegram.me host in either case, spelled as
+# ASCII classes exactly as cs_username_key spells them (re.I would also fold
+# the Kelvin sign and the long s, which the SQL does not).
+_TG_PREFIX = re.compile(
+    r"\A([A-Za-z]+://)?([Ww][Ww][Ww]\.)?"
+    r"([Tt]\.[Mm][Ee]/|[Tt][Ee][Ll][Ee][Gg][Rr][Aa][Mm]\.[Mm][Ee]/)?@?"
+)
 _PATH_TAIL = re.compile(r"[/?#].*\Z", re.DOTALL)
 _USERNAME = re.compile(r"[a-z0-9_]{5,32}")
 
@@ -173,7 +179,8 @@ def username_key(raw: str | None) -> str | None:
     """Strip https://, www., t.me/, telegram.me/, '@', anything from '/', '?', '#';
     lowercase; must match ^[a-z0-9_]{5,32}$ and not end with 'bot'.
 
-    The prefix is matched case-sensitively, exactly as the SQL does. Reserved
+    The prefix is matched in either case (ASCII only), exactly as the SQL
+    does: «HTTPS://T.ME/x» is a link to x. Reserved
     t.me paths (joinchat, s, share, …) are the normaliser's business
     (``normalise.telegram_key``), because the SQL mirror does not know them.
     """

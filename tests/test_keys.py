@@ -76,8 +76,19 @@ USERNAME_CASES: list[Case] = [
     ("namuna-optom", None),
     ("namuna.optom", None),
     ("@@namuna_optom", None),
-    # The prefix is case-sensitive in SQL, so it is in Python.
-    ("T.ME/namuna_optom", None),
+    # The prefix in either case, on both sides (02 §1's SQL stripped only
+    # lower case, so a link typed in capitals keyed to NULL).
+    ("T.ME/namuna_optom", "namuna_optom"),
+    ("T.me/namuna_optom", "namuna_optom"),
+    ("HTTPS://T.ME/namuna_optom", "namuna_optom"),
+    ("Http://WWW.Telegram.Me/@Namuna_Optom", "namuna_optom"),
+    ("WWW.t.me/namuna_optom", "namuna_optom"),
+    # ASCII only: the Kelvin sign is not the k of a scheme to either side
+    # (Python's re.I would have folded it), so the prefix stays and the
+    # whole string is no username.
+    ("Kttps://t.me/namuna_optom", None),
+    # A bare host without the slash is no prefix.
+    ("T.ME", None),
     # Reserved paths are the normaliser's job: the mirror keeps them.
     ("t.me/joinchat/AAAAAEnamuna", "joinchat"),
     ("t.me/+AbCdEfGh12", None),

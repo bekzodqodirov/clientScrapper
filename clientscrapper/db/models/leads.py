@@ -49,6 +49,8 @@ class LeadCandidate(Base):
         sa.Text, sa.ForeignKey("sources.key")
     )
     exclude_reason: Mapped[str | None] = mapped_column(sa.Text)
+    # NULL on a 'suppressed' candidate: its suppression row was retired (R6,
+    # a full ERP pull, an outcomes retraction) — the «row is gone» of 02 §2.9.
     suppressed_by: Mapped[int | None] = mapped_column(
         sa.BigInteger, sa.ForeignKey("suppression.id", ondelete="SET NULL")
     )
@@ -96,10 +98,11 @@ class LeadCandidate(Base):
             "OR score IS NOT NULL",
             name="ck_lead_candidates_scored",
         ),
-        sa.CheckConstraint(
-            "state <> 'suppressed' OR suppressed_by IS NOT NULL",
-            name="ck_lead_candidates_suppressed",
-        ),
+        # No ck_lead_candidates_suppressed: a CHECK spanning suppressed_by, an
+        # ON DELETE SET NULL column, made every retirement of a suppression row
+        # a candidate points at fail (fullprompt #809). The pointer may go
+        # («the suppression row is gone», 02 §2.9); entering 'suppressed'
+        # without one is refused by trg_lead_candidates_suppressed (0001).
         sa.Index(
             "ux_lead_candidates_open",
             "company_id",
@@ -201,6 +204,8 @@ class PushLog(Base):
     id: Mapped[int] = bigint_pk()
     external_id: Mapped[str] = mapped_column(sa.Text)
     attempt: Mapped[int] = mapped_column(sa.SmallInteger)
+    # RESTRICT on purpose: a candidate with push history is never deleted, so
+    # 02 §4 R6's hold sweep must skip it (tests/test_constraints.py).
     candidate_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), sa.ForeignKey("lead_candidates.id", ondelete="RESTRICT")
     )
@@ -232,8 +237,10 @@ class PushLog(Base):
         sa.UniqueConstraint(
             "external_id", "attempt", name="uq_push_log_external_attempt"
         ),
-        # sent ⇒ 2xx, and 2xx ⇒ sent | unknown (an unparseable 2xx body is
-        # 'unknown' with error='http_2xx_badbody').
+        # sent ⇒ 2xx or no answer at all, and 2xx ⇒ sent | unknown (an
+        # unparseable 2xx body is 'unknown' with error='http_2xx_badbody'). The
+        # NULL passes on purpose: an 'unknown' row the outcomes walk confirms
+        # becomes 'sent' with no HTTP status ever received (02 §2.10 rule 5b).
         sa.CheckConstraint(
             "(status <> 'sent' OR http_status BETWEEN 200 AND 299) "
             "AND (http_status IS NULL OR http_status NOT BETWEEN 200 AND 299 "
