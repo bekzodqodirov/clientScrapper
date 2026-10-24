@@ -695,7 +695,8 @@ class SyncReport:
     generated_at: str | None = None
 
     def as_meta(self) -> dict[str, Any]:
-        return {k: v for k, v in asdict(self).items() if v is not None and v is not False}
+        """Every field that holds an answer (a ``selftest`` of False is one)."""
+        return {k: v for k, v in asdict(self).items() if v is not None}
 
 
 async def sync_suppression(
@@ -725,7 +726,7 @@ async def sync_suppression(
     try:
         return await _apply_walk(session, erp, cfg, params, report, now, accept_shrink)
     except FeedError as exc:
-        await _record_failure(session, exc, feed=FEED_SUPPRESSION, now=now)
+        await record_failure(session, exc, feed=FEED_SUPPRESSION, now=now)
         raise
 
 
@@ -1003,7 +1004,7 @@ def breaker_key(exc: FeedError) -> BreakerKey | None:
     return None
 
 
-async def _record_failure(
+async def record_failure(
     session: AsyncSession, exc: FeedError, *, feed: FeedName, now: datetime
 ) -> None:
     """What 05 §B.6 says a failed feed call leaves behind, committed before
