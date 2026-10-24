@@ -13,9 +13,9 @@ never a pydantic traceback (``get_settings``).
 from __future__ import annotations
 
 from datetime import time
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from functools import lru_cache
-from typing import Annotated, Literal, NamedTuple
+from typing import Annotated, Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import (
@@ -26,6 +26,10 @@ from pydantic import (
     model_validator,
 )
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+
+# Prices are code (04 §8): parse_price, the price table and the shipped model
+# ids live in usage.py, which the doctor can import without these settings.
+from clientscrapper.services.usage import DEFAULT_MODELS, parse_price
 
 COMMENT_VALUE_ERROR = (
     "{key} qiymati izohga oʻxshaydi ('#…'): .env faylida izohni kalitdan "
@@ -101,29 +105,6 @@ OptionalInt = Annotated[int | None, BeforeValidator(_blank_to_none)]
 TelegramIds = Annotated[tuple[int, ...], NoDecode, BeforeValidator(_csv_ints)]
 
 
-class ModelPrice(NamedTuple):
-    """USD per million tokens; the cache prices are optional in the override."""
-
-    input: Decimal
-    output: Decimal
-    cache_read: Decimal | None = None
-    cache_write: Decimal | None = None
-
-
-def parse_price(text: str) -> ModelPrice | None:
-    """'0.10/0.50' or '0.10/0.50/0.01/0.125' → ModelPrice; None when unreadable."""
-    parts = [p.strip() for p in (text or "").split("/")]
-    if len(parts) not in (2, 4):
-        return None
-    try:
-        values = [Decimal(p) for p in parts]
-    except InvalidOperation:
-        return None
-    if any(not v.is_finite() or v < 0 for v in values):
-        return None
-    return ModelPrice(*values)
-
-
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -146,9 +127,9 @@ class Settings(BaseSettings):
 
     # --- Claude -------------------------------------------------------------
     anthropic_api_key: str = ""
-    extract_model: str = "claude-haiku-5-5"
-    verdict_model: str = "claude-sonnet-5-5"
-    batch_model: str = "claude-opus-5-5"
+    extract_model: str = DEFAULT_MODELS["EXTRACT_MODEL"]
+    verdict_model: str = DEFAULT_MODELS["VERDICT_MODEL"]
+    batch_model: str = DEFAULT_MODELS["BATCH_MODEL"]
     # Blank = the code table in usage.py; a model it does not know is refused.
     extract_model_price: str = ""
     verdict_model_price: str = ""
