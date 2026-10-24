@@ -127,6 +127,9 @@ REQUIRED_NOW = (
     "tests/test_forbidden_strings.py",
     "tests/timetravel.py",
     "scripts/check_compose_env.py",
+    # T-11
+    "clientscrapper/services/client_import.py",
+    "clientscrapper/tools/import_clients.py",
 )
 
 SCANNED_SUFFIXES = {".py", ".yml", ".yaml", ".ini", ".toml", ".cfg", ".sh", ".mako"}

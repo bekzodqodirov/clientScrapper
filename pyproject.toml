@@ -62,6 +62,9 @@ files = [
     "clientscrapper/services/erp_feeds.py",
     "clientscrapper/collectors/erp_sync.py",
     "clientscrapper/tools/erp_sync.py",
+    # T-11
+    "clientscrapper/services/client_import.py",
+    "clientscrapper/tools/import_clients.py",
 ]
 
 [tool.pytest.ini_options]

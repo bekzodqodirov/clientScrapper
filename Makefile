@@ -105,9 +105,13 @@ restore: ## Restore a backup: make restore FILE=/data/backups/clientscrapper-…
 		--identity /app/secrets/backup-key.txt $(if $(DRY),--dry-run,) $(if $(FORCE),--force,)
 
 # --- Data -------------------------------------------------------------------
-import-clients: ## Load the ERP client export as suppression: make import-clients FILE=/data/imports/clients.xlsx [APPLY=1]
-	@test -n "$(FILE)" || (echo "usage: make import-clients FILE=/data/imports/clients.xlsx [APPLY=1]" && exit 1)
-	$(COMPOSE) run --rm worker python -m clientscrapper.tools.import_clients "$(FILE)" $(if $(APPLY),--apply,)
+# The file goes into the server's data/imports/ first (mounted as /data); a
+# dry run by default. ACCEPT_FEWER=1 lets one export with fewer rows than the
+# previous import's through (it reads like a filtered screen otherwise).
+import-clients: ## Load the ERP client export as suppression: make import-clients FILE=/data/imports/clients.xlsx [APPLY=1] [ACCEPT_FEWER=1]
+	@test -n "$(FILE)" || (echo "usage: make import-clients FILE=/data/imports/clients.xlsx [APPLY=1] [ACCEPT_FEWER=1]" && exit 1)
+	$(COMPOSE) run --rm worker python -m clientscrapper.tools.import_clients "$(FILE)" \
+		$(if $(APPLY),--apply,) $(if $(ACCEPT_FEWER),--accept-fewer,)
 
 push-test: ## Push one visibly synthetic lead to the ERP (05 §B.1)
 	$(COMPOSE) run --rm worker python -m clientscrapper.tools.push_test
