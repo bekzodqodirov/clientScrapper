@@ -58,6 +58,10 @@ files = [
     "scripts/check_compose_env.py",
     # T-01/T-02 review
     "scripts/revision_id.py",
+    # T-13: the reader's Telethon-free modules (its Telethon code stays out)
+    "clientscrapper/services/chats.py",
+    "clientscrapper/userbot/prefilter.py",
+    "clientscrapper/userbot/limits.py",
 ]
 
 [tool.pytest.ini_options]

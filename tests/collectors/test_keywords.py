@@ -304,6 +304,42 @@ CASES: dict[str, tuple[re.Pattern[str], Extract, Cases]] = {
             ),
         },
     ),
+    # T-13: a price in a message (03 §2.3 tout filter's price-list shape).
+    "PRICE_RE": (
+        kw.PRICE_RE,
+        _whole,
+        {
+            "uz-Latn": (
+                [
+                    ("Narxi 25000 so'm", "25000 so'm"),
+                    ("futbolka 45000 soʻm dan", "45000 soʻm"),
+                    ("kurtka 120000 som", "120000 som"),
+                    ("narxi 25000 soʻmdan", "25000 soʻmdan"),
+                    ("1 kub 250$", "250$"),
+                    ("Yetkazish 30 usd", "30 usd"),
+                ],
+                ["Narxi kelishiladi", "25000 sumka", "3 som"],
+            ),
+            "uz-Cyrl": (
+                [
+                    ("Нархи 45000 сўм", "45000 сўм"),
+                    ("Футболка 25000 сум", "25000 сум"),
+                    ("Нарх 120 сўмдан", "120 сўмдан"),
+                    ("Куртка 30 у.е.", "30 у.е."),
+                ],
+                ["Нархи келишилади", "сумка 25 сумка", "5 сўм"],
+            ),
+            "ru": (
+                [
+                    ("Цена 150 000 сум", "000 сум"),
+                    ("Доставка 25$", "25$"),
+                    ("Опт от 40 usd", "40 usd"),
+                    ("Цена 30 у.е.", "30 у.е."),
+                ],
+                ["Цена договорная", "25 сумок", "Сумма заказа 100"],
+            ),
+        },
+    ),
     "PHONE_RE": (
         kw.PHONE_RE,
         _digits,

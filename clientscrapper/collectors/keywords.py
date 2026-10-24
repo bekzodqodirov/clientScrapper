@@ -491,6 +491,29 @@ B2C_RE = re.compile(
     r"zakaz\s+qilib\s+ber|в\s+розницу|доставка\s+по\s+городу)(?!\w)",
     re.I,
 )
+# A price in a message (03 §2.3 tout filter): 03's ``\d{2,}\s*(?:so'm|сум|\$|usd|
+# y\.e)`` with every apostrophe (and none: «25000 som»), the Uzbek Cyrillic
+# «сўм» and the Cyrillic «у.е.» beside the Latin «y.e.», the Uzbek unit endings
+# on so'm/сўм («25000 so'mdan», «120 сўмдан» — how a price list is written),
+# and no letter after the unit («сумка» is a bag, not a price). A price list is
+# PRICELIST_MIN_PRICES of them, or a message longer than PRICELIST_MIN_CHARS
+# (03 §2.3); the reader's prefilter stores the first shape and T-14's tout rule
+# counts both — one home for the two (userbot/ and collectors/ may not import
+# each other).
+PRICE_RE = re.compile(
+    rf"\d{{2,}}\s*(?:so{_A}?m{_UNIT_LATN}|сўм{_UNIT_CYRL}|сум|\$|usd|y\.e\.?|у\.е\.?)"
+    r"(?![^\W\d_])",
+    re.I,
+)
+PRICELIST_MIN_PRICES = 3
+PRICELIST_MIN_CHARS = 1500
+
+
+def price_count(text: str) -> int:
+    """How many PRICE_RE prices ``text`` names."""
+    return sum(1 for _ in PRICE_RE.finditer(text))
+
+
 # The normaliser validates operator codes (services/keys.phone_e164 / phone_kind).
 PHONE_RE = re.compile(
     r"(?<!\d)(?:\+?998[\s\-]?)?\(?(\d{2})\)?[\s\-]?(\d{3})[\s\-]?(\d{2})[\s\-]?(\d{2})(?!\d)"
