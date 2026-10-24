@@ -193,6 +193,14 @@ def test_a_name_after_a_nested_object_inside_user_is_scrubbed():
     assert "Rustam" not in out and "Akmal" not in out
 
 
+def test_a_brace_inside_a_value_does_not_end_the_user_object():
+    plain = '{"user":{"bio":"salom :}","photo":{"w":1},"name":"Akmal Aliyev"}}'
+    escaped = plain.replace('"', '\\"')
+    for body in (f"<div>{plain}</div>", f'<script>s = "{escaped}";</script>'):
+        out = sf.scrub_bytes(body.encode(), kind="html").body.decode()
+        assert "Akmal" not in out and "Seller 01" in out
+
+
 def test_foreign_numbers_keep_their_country_code_and_become_synthetic():
     text = (
         "Tel: +86 138 0013 8000, KZ +7 701 234 5678, KG +996 555 123 456, "
@@ -208,7 +216,8 @@ def test_foreign_numbers_keep_their_country_code_and_become_synthetic():
 def test_stirs_and_platform_ids_stay_and_a_bare_mobile_number_goes():
     raw = (
         b'{"inn": "301234567", "stir": 331234567, "ad_id": 901234567, '
-        b'"user": {"id": 901234568}, "phone": "301234567", "note": "aloqa 901234569"}'
+        b'"user": {"id": 901234568}, "phone_number_id": 901234572, '
+        b'"phone": "301234567", "note": "aloqa 901234569", "contact_phone": 901234573}'
     )
     out = json.loads(sf.scrub_bytes(raw, kind="json").body)
     assert (out["inn"], out["stir"], out["ad_id"], out["user"]["id"]) == (
@@ -217,8 +226,10 @@ def test_stirs_and_platform_ids_stay_and_a_bare_mobile_number_goes():
         901234567,
         901234568,
     )
+    assert out["phone_number_id"] == 901234572  # an id, though it names a phone
     assert out["phone"] == "900000001"  # a phone key: every valid number is one
     assert out["note"] == "aloqa 900000002"
+    assert out["contact_phone"] == 900000003
     page = (
         '<tr><td>STIR</td><td>331234567</td></tr><p data-id="901234567">'
         "Murojaat: 901234570, yoki <a href='tel:301234571'>qo'ng'iroq</a></p>"
@@ -245,7 +256,7 @@ def test_a_name_written_as_a_whole_text_node_or_title_attribute_goes():
         "<title>Dilshod Rahimov</title>"
         '<div class="tgme_page_title"><span dir="auto">Dilshod Rahimov</span></div>'
         '<meta property="og:title" content="Dilshod Rahimov">'
-        "<a>@namuna_person_90</a><li>Karimov MChJ</li><li>Namuna Mebel</li>"
+        "<a>@namuna_karimov</a><li>Karimov MChJ</li><li>Namuna Mebel</li>"
     )
     out = sf.scrub_bytes(page.encode(), kind="html").body.decode()
     assert out == (
@@ -253,7 +264,7 @@ def test_a_name_written_as_a_whole_text_node_or_title_attribute_goes():
         '<div class="tgme_page_title"><span dir="auto">Seller 01</span></div>'
         '<meta property="og:title" content="Seller 01">'
         "<a>@namuna_01</a><li>Karimov MChJ</li><li>Namuna Mebel</li>"
-    )
+    )  # a handle that reads like a surname stays a handle
 
 
 def test_meta_uses_the_body_mapping():
