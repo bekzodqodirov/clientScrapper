@@ -130,7 +130,13 @@ class Collector(ABC):
     sets one of its own is refused at class creation rather than ignored.
     ``found`` is what the runner keeps when ``collect`` stops on a budget or a
     breaker: a collector that appends to it as it goes loses nothing it
-    already parsed."""
+    already parsed. ``started_at`` is the run's ``now``. ``run_meta`` is
+    merged into the run's ``collector_runs.meta`` (a key the runner writes
+    itself wins) — for a collector whose work is not observations
+    (``erp_sync``'s feed report, 05 §B.2). ``unavailable()`` names a reason
+    the collector cannot run now whatever its ``sources`` row says (an ERP
+    feed that is not configured, 05 §B.3): the runner skips the run with it,
+    as it skips a disabled row."""
 
     key: ClassVar[str]
     family: ClassVar[str]
@@ -161,6 +167,15 @@ class Collector(ABC):
         self.serp = serp
         self.variant: str | None = None
         self.found: list[Observation] = []
+        self.run_meta: dict[str, Any] = {}
+        # The run's ``now`` (the runner sets it before ``collect``): the clock
+        # of a collector whose work is not a fetch (the ERP feeds' ``now``).
+        self.started_at: datetime | None = None
+
+    @classmethod
+    def unavailable(cls) -> str | None:
+        """A reason this collector cannot run now (None = it can)."""
+        return None
 
     @abstractmethod
     async def collect(self, session: AsyncSession, budget: Budget) -> list[Observation]:

@@ -1,0 +1,236 @@
+{
+ "note": "Synthetic client book for T-11 (never real data): the input of make_clients_xlsx.mjs and of the fake ERP's cards in tests/test_client_import.py.",
+ "custom_field": "Shahar",
+ "cards": [
+  {
+   "code": "NMN01",
+   "name": "Namuna Savdo 01",
+   "manager": "Namuna Menejer",
+   "phones": [
+    "+998 90 000 00 01"
+   ],
+   "active": true,
+   "custom": "Toshkent"
+  },
+  {
+   "code": "NMN02",
+   "name": "Namuna Tekstil 02",
+   "manager": "Namuna Menejer",
+   "phones": [
+    "+998 90 000 00 02",
+    "+998 (93) 000-00-03"
+   ],
+   "active": true,
+   "custom": ""
+  },
+  {
+   "code": "NMN03",
+   "name": "Namuna Mebel 03",
+   "manager": "",
+   "phones": [
+    "+998 90 000 00 04 / +998 91 000 00 05"
+   ],
+   "active": true,
+   "custom": "Toshkent"
+  },
+  {
+   "code": "NMN04",
+   "name": "Namuna Import 04",
+   "manager": "",
+   "phones": [
+    "998900000006998900000007"
+   ],
+   "active": true,
+   "custom": ""
+  },
+  {
+   "code": "NMN05",
+   "name": "Namuna Qurilish 05",
+   "manager": "",
+   "phones": [
+    "900000008900000009900000010"
+   ],
+   "active": true,
+   "custom": "Toshkent"
+  },
+  {
+   "code": "NMN06",
+   "name": "Namuna Avto 06",
+   "manager": "",
+   "phones": [
+    "8 90 000 00 12 8 90 000 00 13"
+   ],
+   "active": true,
+   "custom": ""
+  },
+  {
+   "code": "NMN07",
+   "name": "Namuna Elektr 07",
+   "manager": "",
+   "phones": [
+    "9989000000169989000000169989000000169989000000169989000000169989000000169989000000169989000000169989000000169989000000161900000015"
+   ],
+   "active": true,
+   "custom": "Toshkent"
+  },
+  {
+   "code": "NMN08",
+   "name": "Namuna Optom 08",
+   "manager": "",
+   "phones": [
+    "900000018900000019900000020900000021900000022900000023900000024900000025900000026900000027900000028900000029900000030900000031"
+   ],
+   "active": true,
+   "custom": ""
+  },
+  {
+   "code": "NMN09",
+   "name": "Namuna Kimyo 09",
+   "manager": "",
+   "phones": [
+    "998900000032998900000033998900000034998900000035998900000036998900000037998900000038998900000039998900000040998900000041998900000042"
+   ],
+   "active": true,
+   "custom": "Toshkent"
+  },
+  {
+   "code": "NMN10",
+   "name": "Namuna Mato 10",
+   "manager": "",
+   "phones": [
+    "998900000043998900000044998900000045998900000046998900000047998900000048998900000049998900000050998900000051998900000052"
+   ],
+   "active": true,
+   "custom": ""
+  },
+  {
+   "code": "NMN11",
+   "name": "Namuna Eski 11",
+   "manager": "",
+   "phones": [
+    "000-00-05"
+   ],
+   "active": true,
+   "custom": "Toshkent"
+  },
+  {
+   "code": "NMN12",
+   "name": "Namuna Faol emas 12",
+   "manager": "Namuna Menejer",
+   "phones": [
+    "+998 90 000 00 56"
+   ],
+   "active": false,
+   "custom": ""
+  },
+  {
+   "code": "NMN13",
+   "name": "Namuna Telefonsiz 13",
+   "manager": "",
+   "phones": [],
+   "active": true,
+   "custom": "Toshkent"
+  },
+  {
+   "code": "NMN14",
+   "name": "Namuna Ikki 14",
+   "manager": "",
+   "phones": [
+    "90/000-00-57",
+    "+998 90 000 00 58"
+   ],
+   "active": true,
+   "custom": ""
+  },
+  {
+   "code": "NMN15",
+   "name": "Namuna Qator 15",
+   "manager": "",
+   "phones": [
+    "+998 90 000 00 59\n+998 90 000 00 60"
+   ],
+   "active": true,
+   "custom": "Toshkent"
+  },
+  {
+   "code": "NMN16",
+   "name": "Namuna Qator 16",
+   "manager": "",
+   "phones": [
+    "+998 90 000 00 61\r\n+998 90 000 00 62"
+   ],
+   "active": true,
+   "custom": ""
+  },
+  {
+   "code": "NMN17",
+   "name": "Namuna Ikki bosh joy 17",
+   "manager": "",
+   "phones": [
+    "+998 90 000 00 63  90 000 00 64"
+   ],
+   "active": true,
+   "custom": "Toshkent"
+  },
+  {
+   "code": "NMN18",
+   "name": "Namuna Tab 18",
+   "manager": "",
+   "phones": [
+    "+998 90 000 00 65\t+998 90 000 00 66"
+   ],
+   "active": true,
+   "custom": ""
+  },
+  {
+   "code": "NMN19",
+   "name": "Namuna Uchta 19",
+   "manager": "",
+   "phones": [
+    "998900000067998900000068998900000069"
+   ],
+   "active": true,
+   "custom": "Toshkent"
+  },
+  {
+   "code": "NMN20",
+   "name": "Namuna Ofis 20",
+   "manager": "",
+   "phones": [
+    "Tel: +998 90 000 00 70; ofis +998 71 200 00 71"
+   ],
+   "active": true,
+   "custom": ""
+  },
+  {
+   "code": "NMN21",
+   "name": "Namuna Xitoy 21",
+   "manager": "",
+   "phones": [
+    "+998 90 000 00 72 +86 138 0000 0075"
+   ],
+   "active": true,
+   "custom": "Toshkent"
+  },
+  {
+   "code": "NMN22",
+   "name": "Namuna Juft 22",
+   "manager": "",
+   "phones": [
+    "900000053900000054"
+   ],
+   "active": true,
+   "custom": ""
+  },
+  {
+   "code": "NMN23",
+   "name": "Namuna Savdo 01 ikkinchi kod",
+   "manager": "Namuna Menejer",
+   "phones": [
+    "+998 90 000 00 01"
+   ],
+   "active": true,
+   "custom": "Toshkent"
+  }
+ ]
+}

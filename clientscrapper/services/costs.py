@@ -1124,13 +1124,19 @@ async def snapshot(session: AsyncSession, now: datetime) -> SpendSnapshot:
     )
 
 
-async def alert_due(session: AsyncSession, key: str, now: datetime) -> bool:
-    """No ``alert:<key>`` row yet in this business day."""
+async def alert_due(
+    session: AsyncSession, key: str, now: datetime, *, since: datetime | None = None
+) -> bool:
+    """No ``alert:<key>`` row yet in this business day — or, with ``since``,
+    none from ``since`` on (the ERP breaker's «once per 6 h», 05 §B.1)."""
+    window = (
+        (ReminderLog.sent_at >= since,)
+        if since is not None
+        else (ReminderLog.sent_at >= day_start(now), ReminderLog.sent_at < day_end(now))
+    )
     sent = await session.scalar(
         sa.select(sa.func.count(ReminderLog.id)).where(
-            ReminderLog.kind == ALERT_KIND + key,
-            ReminderLog.sent_at >= day_start(now),
-            ReminderLog.sent_at < day_end(now),
+            ReminderLog.kind == ALERT_KIND + key, *window
         )
     )
     return not sent
@@ -1141,18 +1147,26 @@ def mark_alerted(session: AsyncSession, key: str, now: datetime) -> None:
     session.add(ReminderLog(kind=ALERT_KIND + key, ref=key, sent_at=now))
 
 
-async def claim_alert(session: AsyncSession, key: str, now: datetime) -> int | None:
-    """Claim ``alert:<key>`` for ``now``'s business day: the id of the
-    ``reminder_log`` row written, or None when one already stands. The check
-    and the write hold ``pg_advisory_xact_lock(ALERT_LOCK, hashtext(kind))``
-    until the caller's transaction ends, so of two claims at once one wins —
-    the alert is said once, not once per process that saw the cap. Commit
-    before notifying: the lock must not be held across a network call."""
+async def claim_alert(
+    session: AsyncSession, key: str, now: datetime, *, since: datetime | None = None
+) -> int | None:
+    """Claim ``alert:<key>`` for ``now``'s business day (or from ``since`` on,
+    ``alert_due``): the id of the ``reminder_log`` row written, or None when
+    one already stands. The check and the write hold
+    ``pg_advisory_xact_lock(ALERT_LOCK, hashtext(kind))`` until the caller's
+    transaction ends, so of two claims at once one wins — the alert is said
+    once, not once per process that saw the cap. Commit before notifying: the
+    lock must not be held across a network call."""
     kind = ALERT_KIND + key
     await session.execute(
         sa.select(sa.func.pg_advisory_xact_lock(ALERT_LOCK, sa.func.hashtext(kind)))
     )
-    if not await alert_due(session, key, now):
+    due = (
+        await alert_due(session, key, now)
+        if since is None
+        else await alert_due(session, key, now, since=since)
+    )
+    if not due:
         return None
     row = ReminderLog(kind=kind, ref=key, sent_at=now)
     session.add(row)
@@ -1160,12 +1174,19 @@ async def claim_alert(session: AsyncSession, key: str, now: datetime) -> int | N
     return row.id
 
 
-async def _say_once(key: str, text: str, now: datetime, notify: CapNotifier) -> bool:
+async def _say_once(
+    key: str,
+    text: str,
+    now: datetime,
+    notify: CapNotifier,
+    *,
+    since: datetime | None = None,
+) -> bool:
     """Claim, then tell; a claim whose message did not arrive is taken back,
     so the next refusal (or health run) tries again. Each step is its own
     transaction: the claim is committed before ``notify`` is awaited."""
     async with _own_session() as own:
-        claim = await claim_alert(own, key, now)
+        claim = await claim_alert(own, key, now, since=since)
     if claim is None:
         return False
     delivered = False
@@ -1186,6 +1207,26 @@ async def _say_once(key: str, text: str, now: datetime, notify: CapNotifier) -> 
                     extra={"key": key, "error": type(exc).__name__},
                 )
     return delivered
+
+
+async def tell_once(
+    key: str,
+    text: str,
+    *,
+    now: datetime,
+    since: datetime | None = None,
+    notify: CapNotifier | None = None,
+) -> bool:
+    """Tell the owner ``text`` under ``alert:<key>`` unless it was said in this
+    business day (or from ``since`` on): the claim-then-tell of ``cost_cap``,
+    for the other problems a job says first (06 §4.2 TOLD_FIRST_ELSEWHERE —
+    the ERP breaker's ``push_404`` / ``erp_redirect``). ``notify`` defaults to
+    the owner notifier registered with ``set_cap_notifier``; with none, nothing
+    is claimed and nothing said (False)."""
+    notify = notify or _hooks.notify_cap
+    if notify is None:
+        return False
+    return await _say_once(key, text, now, notify, since=since)
 
 
 async def fire_spend_alerts(

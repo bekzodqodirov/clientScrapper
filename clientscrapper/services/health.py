@@ -40,6 +40,11 @@ Three ways a condition reaches the status:
    Until it is registered the key is *unjudged*: neither raised nor
    announced as recovered.
 
+``erp_breaker_text`` (T-09) is the one home of the ERP breaker's owner line
+(06 §4.2 ``push_404`` / ``erp_redirect``): the feed sync says it at once
+(``TOLD_FIRST_ELSEWHERE``) and :func:`problems` renders both keys through it,
+so the line the owner was told first and the one ``/holat`` shows are one.
+
 Nothing here sends anything: :func:`tell` is handed the owner notifier — the
 one seam, whose only recipient is ``OWNER_TELEGRAM_ID`` (06 §4.3) — and
 records only what was delivered.
@@ -976,6 +981,25 @@ def erp_breaker(status: Status, key: str) -> str | None:
     return None
 
 
+def erp_breaker_text(key: str, detail: str = "") -> str:
+    """The owner's line for an ERP breaker in force (06 §4.2): ``key`` is
+    ``push_404`` or ``erp_redirect``, ``detail`` what follows «<key>:» in
+    ``breaker_reason`` (the redirect's HTTP status)."""
+    if key == "push_404":
+        return (
+            "⛔ ERP kaliti yoki manba notoʻgʻri: 404. Kelgan arizalar → Reklama "
+            "havolalari → Agent → kalit; <code>.env</code> CRM_AGENT_KEY; "
+            "<code>make reload</code>; /yoq crm"
+        )
+    if key == "erp_redirect":
+        return (
+            f"⛔ ERP manzili yoʻnaltiryapti (HTTP {escape(detail or '3xx')}): "
+            "<code>.env</code> dagi CRM_BASE_URL <code>https://</code> bilan "
+            "boshlanishi kerak; <code>make reload</code>; /yoq crm"
+        )
+    raise ValueError(f"{key!r} is not an ERP breaker key")
+
+
 def blocked_sources(status: Status) -> list[SourceState]:
     return [
         s
@@ -1170,21 +1194,10 @@ def problems(status: Status) -> list[Problem]:
             "⛔ Telegram oʻquvchi akkaunti chiqib ketgan/cheklangan "
             f"({escape(code)}). @SpamBot tekshiring; <code>make userbot-login</code>",
         )
-    if erp_breaker(status, "push_404") is not None:
-        add(
-            "push_404",
-            "⛔ ERP kaliti yoki manba notoʻgʻri: 404. Kelgan arizalar → Reklama "
-            "havolalari → Agent → kalit; <code>.env</code> CRM_AGENT_KEY; "
-            "<code>make reload</code>; /yoq crm",
-        )
-    redirect = erp_breaker(status, "erp_redirect")
-    if redirect is not None:
-        add(
-            "erp_redirect",
-            f"⛔ ERP manzili yoʻnaltiryapti (HTTP {escape(redirect or '3xx')}): "
-            "<code>.env</code> dagi CRM_BASE_URL <code>https://</code> bilan "
-            "boshlanishi kerak; <code>make reload</code>; /yoq crm",
-        )
+    for key in ERP_BREAKER_KEYS:
+        detail = erp_breaker(status, key)
+        if detail is not None:
+            add(key, erp_breaker_text(key, detail))
     info = status.backup
     if info.configured and info.ok is False:
         add(

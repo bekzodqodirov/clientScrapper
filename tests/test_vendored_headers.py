@@ -136,6 +136,9 @@ REQUIRED_NOW = (
     # T-13
     "clientscrapper/services/chats.py",
     "clientscrapper/tools/userbot_login.py",
+    # T-11
+    "clientscrapper/services/client_import.py",
+    "clientscrapper/tools/import_clients.py",
 )
 
 SCANNED_SUFFIXES = {".py", ".yml", ".yaml", ".ini", ".toml", ".cfg", ".sh", ".mako"}

@@ -71,6 +71,13 @@ files = [
     "clientscrapper/services/chats.py",
     "clientscrapper/userbot/prefilter.py",
     "clientscrapper/userbot/limits.py",
+    # T-09
+    "clientscrapper/services/erp_feeds.py",
+    "clientscrapper/collectors/erp_sync.py",
+    "clientscrapper/tools/erp_sync.py",
+    # T-11
+    "clientscrapper/services/client_import.py",
+    "clientscrapper/tools/import_clients.py",
 ]
 
 # APScheduler 3 ships no type information.
