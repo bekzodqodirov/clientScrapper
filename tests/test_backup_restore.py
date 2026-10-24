@@ -522,8 +522,8 @@ async def test_a_truncated_backup_is_refused_before_the_target_is_touched(
     await session.execute(
         sa.text(
             "INSERT INTO suppression (kind, key_type, key, source, reason) "
-            "SELECT 'dnc', 'phone_tail', lpad(g::text, 9, '1'), 'owner_bot', "
-            "'owner_command' FROM generate_series(1000, 40999) AS g"
+            "SELECT 'dnc', 'phone_tail', (910000000 + g)::text, 'owner_bot', "
+            "'owner_command' FROM generate_series(1, 40000) AS g"
         )
     )
     await session.commit()
