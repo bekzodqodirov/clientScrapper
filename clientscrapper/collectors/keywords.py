@@ -21,7 +21,13 @@ forced a change — each is named in a comment beside it:
   needs a word start and a separator, else «big shop» read as the handle
   «shop» and «Instagramda» as «da»;
 * STIR_RE's label needs a word start («Martin 301234567» is not a STIR);
-* LEGAL_FORM_RE gained МЧЖ, ХЧК and СП, the Cyrillic forms of MChJ, XChK, SP.
+* LEGAL_FORM_RE gained МЧЖ, ХЧК and СП, the Cyrillic forms of MChJ, XChK, SP;
+* TONNES_RE, VACANCY_IMPORT_RE, NON_CN_ORIGIN_RE and STATE_BODY_RE are not
+  03 §1.4's: they are 04 §5.1's detections of ``vol_stated_*`` (tonnes),
+  ``vol_vacancy_import``, ``neg_non_cn_origin`` and ``neg_state_body``, kept
+  here because this is where every regex lives (the rule signals of
+  ``services/signals.py`` and the gates read them); each gained the Uzbek
+  Cyrillic spellings of its Latin words and the endings people write.
 
 The word lists are matched through ``terms_re``: whole words, case-blind,
 apostrophe-blind, е/ё-blind, and inflection-aware — «Guangzhoudan» is
@@ -142,6 +148,25 @@ CHINA_WORDS = (
     "Qashqar",
     "Кашгар",
     "Shenzhen",
+)
+# An origin other than China (04 §5.1 ``neg_non_cn_origin``: «Rossiya|Россия|
+# Turkiya|Турция|Koreya|Корея|Yevropa|Европа|Eron|Иран»), plus the Uzbek
+# Cyrillic «Туркия», «Эрон» and the genitive «Ирана», which a four-letter word
+# does not grow by itself (INFLECT_MIN / RU_INFLECT_MIN below). Not 03 §1.4's.
+NON_CN_ORIGIN_WORDS = (
+    "Rossiya",
+    "Россия",
+    "Turkiya",
+    "Туркия",
+    "Турция",
+    "Koreya",
+    "Корея",
+    "Yevropa",
+    "Европа",
+    "Eron",
+    "Эрон",
+    "Иран",
+    "Ирана",
 )
 # A channel's about names its companion «xaridorlar/buyers» group (03 §2.3) the
 # way it names its admin: «Xaridorlar guruhi: @…» beside «Murojaat uchun: @…».
@@ -472,6 +497,17 @@ CONTAINER_RE = re.compile(
     rf"|20\s*(?:ft|fut|фут|{_A})|40\s*(?:ft|fut|фут|{_A}))(?!\w)",
     re.I,
 )
+# A weight next to a tonne word (04 §5.1 ``vol_stated_3plus``: «(\d+)\s*(tonna|
+# тонн)»; 1 t of mixed goods ≈ 3 m³ at the low end, 04 §4.3). Group 1 = the
+# number, a decimal allowed («1,5 tonna»); the unit takes its endings
+# («tonnadan», «тоннали», «3 тонны», «10 тонн»). A tonne word with no number
+# is CONTAINER_RE's (and counts as nothing there, 04 §5.3 rule 2).
+TONNES_RE = re.compile(
+    r"(?<![\d.,])(\d{1,3}(?:[.,]\d{1,2})?)\s*"
+    rf"(?:tonna{_UNIT_LATN}|тонна{_UNIT_CYRL}|тонн{_RU_NOUN})"
+    rf"{_NO_LETTER}",
+    re.I,
+)
 # Buyer intent (groups): Latin, Cyrillic Uzbek, Russian. «олиб кел(иш|ади|…)»
 # mirrors the Latin endings (03 §1.4 has only the bare «олиб кел», so «ким олиб
 # келади?» — the commonest Cyrillic ask — never matched). The question forms
@@ -526,6 +562,29 @@ B2C_RE = re.compile(
     rf"(?<!\w)(?:o{_A}?zim\s+uchun|ўзим\s+учун|для\s+себя|1\s*(?:dona|шт\.?|штук[аи]?)|"
     r"bitta\s+(?:dona|narsa)|битта|shaxsiy|шахсий|лично\s+для|taobao\s*zakaz|"
     r"zakaz\s+qilib\s+ber|в\s+розницу|доставка\s+по\s+городу)(?!\w)",
+    re.I,
+)
+# An import duty in a vacancy (04 §5.1 ``vol_vacancy_import``: «ВЭД|деклар|
+# закуп\w*\s.{0,20}Кита|tashqi savdo|xitoy tili|китайск\w+ язык»). The Uzbek
+# Cyrillic spellings of the Latin words and the Latin «VED» join; «деклар» and
+# the phrases keep their endings («деклараций», «xitoy tilini»). Read on a
+# vacancy's text only (04 §9.3): a vacancy's other duties are not volume.
+VACANCY_IMPORT_RE = re.compile(
+    r"(?<!\w)(?:ВЭД|VED(?!\w)|деклар\w*|закуп\w*\s.{0,20}?Кита[йяею]|"
+    r"tashqi\s+savdo|ташқи\s+савдо|xitoy\s+til\w*|хитой\s+тил\w*|"
+    r"китайск\w+\s+язык\w*)",
+    re.I,
+)
+# A state body (04 §5.1 ``neg_state_body``: «davlat|ГУП|ДУК|министер|vazirlig|
+# hokimiyat|hokimligi|agentlig|maktab|shifoxona|поликлиник|МВД|IIB»), the
+# stems with their endings («hokimligi», «Министерство», «поликлиника») and the
+# Uzbek Cyrillic spellings (with ҳ and with х). Gate 7 reads it on the name; a
+# word in the text only is the −20 negative, never an exclusion (04 §6).
+STATE_BODY_RE = re.compile(
+    r"(?<!\w)(?:davlat\w*|давлат\w*|ГУП|ДУК|министер\w*|vazirlig\w*|вазирлиг\w*|"
+    r"hokimiyat\w*|hokimlig\w*|[ҳх]окимият\w*|[ҳх]окимлиг\w*|agentlig\w*|"
+    r"агентлиг\w*|maktab\w*|мактаб\w*|shifoxona\w*|шифохона\w*|поликлиник\w*|"
+    r"МВД|IIB|ИИБ)(?!\w)",
     re.I,
 )
 # A price in a message (03 §2.3 tout filter): 03's ``\d{2,}\s*(?:so'm|сум|\$|usd|
@@ -629,6 +688,7 @@ def terms_re(terms: Iterable[str], *, inflect: bool = True) -> re.Pattern[str]:
 
 B2B_RE = terms_re(chain.from_iterable(B2B_MARKERS.values()))
 CHINA_RE = terms_re(CHINA_WORDS)
+NON_CN_ORIGIN_RE = terms_re(NON_CN_ORIGIN_WORDS)
 COMPANION_RE = terms_re(COMPANION_WORDS)
 GEO_RE = terms_re(GEO)
 CITY_RES: dict[str, re.Pattern[str]] = {city: terms_re(t) for city, t in GEO_CITY.items()}

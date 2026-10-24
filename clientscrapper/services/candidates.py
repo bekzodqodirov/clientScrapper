@@ -1,0 +1,672 @@
+"""The candidate state machine (02 §2.9) and the job that scores (04 §0, §5).
+
+``TRANSITIONS`` is 02 §2.9's table and the only statement of it: every state
+change of a ``lead_candidates`` row goes through :func:`transition`, which
+refuses a step the table does not have (``IllegalTransition``) and a step that
+lacks what its target state means — an exclusion without a reason, a
+suppression without its row, an approval without a well-formed
+``approved_by`` or without a usable phone («it is never pushed without a
+usable phone», 04 §5.2). The database checks values and invariants only.
+
+Producers built here:
+
+* the resolver's hook (``after_resolve``, registered with
+  ``companies.register_after_resolve`` when this module is imported): the
+  observation's rule signals (``services/signals``) and, when the company has
+  no open candidate and 02 §2.9's re-opening rule allows one, a ``found``
+  candidate attributed to the observation's source;
+* ``score_job`` (04 §0: on ``NOTIFY cs_interaction``, sweep every 15 min):
+  each open candidate marked stale (``last_scored_at`` NULL — set by every
+  signal written and every resolution — or older than the company's newest
+  signal) is scored and routed by its tier: ``found``/``scored`` → ``review``
+  (hot; ``approved(auto:<source>)`` when the source pushes itself),
+  ``enriching`` (warm, ``next_enrich_at`` in one hour) or ``hold`` (cold). A
+  ``found`` candidate waits for a volume signal (02 §2.9). The gates
+  (``services/gates``, T-19) step in before the routing;
+* ``phone_less_review`` — 02 §2.9's ``enriching → review`` for a candidate
+  that kept no phone after the third enrichment attempt but scores ≥ 60 and
+  has a Telegram username (``tier='warm'``, ``gates.no_phone=true``; T-24's
+  ``enrich_job`` calls it);
+* ``manager_phone_rescore`` — a manager's ``/tel`` phone: ``hold → scored →
+  approved(approved_by='manager:<tg_id>')`` (06 §1.7; the owner's earlier
+  ``handoff`` answer was the owner's approval).
+"""
+
+from __future__ import annotations
+
+import logging
+import re
+import uuid
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
+from typing import Any, Final
+
+import sqlalchemy as sa
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from clientscrapper.config import settings
+from clientscrapper.db import enums as e
+from clientscrapper.db.enums import sql_list
+from clientscrapper.db.models import (
+    Company,
+    LeadCandidate,
+    Observation,
+    Outcome,
+    Signal,
+    Source,
+)
+from clientscrapper.db.session import SessionLocal
+from clientscrapper.services import companies, scoring, signals
+from clientscrapper.services.scoring import ScoreResult, Tier
+
+log = logging.getLogger(__name__)
+
+# 02 §2.9, row by row.
+TRANSITIONS: Final[Mapping[str, frozenset[str]]] = {
+    "found": frozenset({"enriching", "scored", "excluded", "suppressed"}),
+    "enriching": frozenset({"scored", "review", "hold", "excluded", "suppressed"}),
+    "scored": frozenset(
+        {"review", "enriching", "hold", "approved", "excluded", "suppressed"}
+    ),
+    "review": frozenset({"approved", "rejected", "hold", "suppressed", "excluded"}),
+    "approved": frozenset({"pushed", "review", "suppressed"}),
+    "hold": frozenset({"scored", "excluded", "suppressed"}),
+    "pushed": frozenset(),
+    "rejected": frozenset(),
+    "excluded": frozenset(),
+    "suppressed": frozenset(),
+}
+TERMINAL_STATES: Final = frozenset(s for s, to in TRANSITIONS.items() if not to)
+# 02 §2.9: 'owner:<id>' | 'auto:<source_key>' | 'manager:<tg_id>', exactly.
+APPROVED_BY_RE: Final = re.compile(r"^(?:owner:\d+|manager:\d+|auto:[a-z][a-z0-9_]*)$")
+# 9.1: a warm candidate's first enrichment attempt is an hour away.
+FIRST_ENRICH_DELAY: Final = timedelta(hours=1)
+# enrich_attempts' CHECK; the phone-less review is the third attempt's verdict.
+MAX_ENRICH_ATTEMPTS: Final = 3
+# 02 §2.9 re-opening windows.
+REOPEN_AFTER_PUSH: Final = timedelta(days=90)
+REOPEN_AFTER_REJECT: Final = timedelta(days=180)
+# An exclusion that holds while the company flag behind it stands (02 §2.9:
+# «never (owner can clear the company flag by hand)»).
+FLAGGED_EXCLUSIONS: Final = frozenset({"competitor", "supplier_cn", "liquidated"})
+SCORE_LIMIT: Final = 200
+RESCORE_STATES: Final = signals.RESCORE_STATES
+
+
+class IllegalTransition(Exception):
+    def __init__(self, source: str, target: str, why: str = "not in TRANSITIONS") -> None:
+        super().__init__(f"{source} → {target}: {why}")
+        self.source = source
+        self.target = target
+        self.why = why
+
+
+def check_transition(source: str, target: str) -> None:
+    """Raise unless 02 §2.9's table has the step ``source → target``."""
+    if target not in TRANSITIONS.get(source, frozenset()):
+        raise IllegalTransition(source, target)
+
+
+async def _has_usable_phone(session: AsyncSession, company_id: uuid.UUID) -> bool:
+    company = await session.get(Company, company_id)
+    if company is None:
+        return False
+    _, contacts = await scoring.views_for(session, company)
+    return any(scoring.usable_phone(c) for c in contacts)
+
+
+async def transition(
+    session: AsyncSession,
+    candidate: LeadCandidate,
+    target: str,
+    *,
+    now: datetime,
+    exclude_reason: str | None = None,
+    suppressed_by: int | None = None,
+    approved_by: str | None = None,
+    hold_until: datetime | None = None,
+    next_enrich_at: datetime | None = None,
+    external_id: str | None = None,
+) -> None:
+    """Move ``candidate`` to ``target`` (02 §2.9) and set what the target
+    state carries; flushes. Raises IllegalTransition for a step the table
+    does not have or a target whose meaning is missing."""
+    source = candidate.state
+    check_transition(source, target)
+    if target in ("scored", "review", "approved") and candidate.score is None:
+        raise IllegalTransition(source, target, "not scored")
+    if target == "excluded":
+        if exclude_reason not in e.EXCLUDE_REASONS:
+            raise IllegalTransition(source, target, "exclude_reason")
+        candidate.exclude_reason = exclude_reason
+    elif target == "suppressed":
+        if suppressed_by is None:
+            raise IllegalTransition(source, target, "suppressed_by")
+        candidate.suppressed_by = suppressed_by
+    elif target == "approved":
+        if approved_by is None or not APPROVED_BY_RE.match(approved_by):
+            raise IllegalTransition(source, target, "approved_by")
+        if not await _has_usable_phone(session, candidate.company_id):
+            raise IllegalTransition(source, target, "no usable phone")
+        candidate.approved_by = approved_by
+        candidate.approved_at = now
+    elif target == "rejected":
+        candidate.rejected_at = now
+    elif target == "pushed":
+        if external_id is None:
+            raise IllegalTransition(source, target, "external_id")
+        candidate.external_id = external_id
+        candidate.pushed_at = now
+    elif target == "hold":
+        candidate.hold_until = hold_until
+    elif target == "enriching":
+        candidate.next_enrich_at = (
+            next_enrich_at or candidate.next_enrich_at or (now + FIRST_ENRICH_DELAY)
+        )
+    if source == "hold" and target != "hold":
+        candidate.hold_until = None
+    candidate.state = target
+    await session.flush()
+
+
+# --- routing (pure) ------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class RouteFacts:
+    auto_push: bool = False
+    hold_until: datetime | None = None
+    enrich_attempts: int = 0
+
+
+def route(state: str, tier: Tier, facts: RouteFacts, *, now: datetime) -> tuple[str, ...]:
+    """The states a fresh score walks ``state`` through (02 §2.9), in order;
+    empty = the candidate stays where it is (its score is still updated).
+
+    * ``found``/``scored``: hot → review (approved when the source pushes
+      itself), warm → enriching, cold → hold — through ``scored``;
+    * ``enriching``: hot → review, cold → hold; warm stays (enrichment's own
+      clock runs on);
+    * ``hold``: a hold that has not run out stays (a cooldown, a handoff);
+      else hot → review, warm → enriching while attempts are left; cold stays;
+    * ``review``: stays — the owner answers it."""
+    hot_to = "approved" if facts.auto_push else "review"
+    if state in ("found", "scored"):
+        to = {"hot": hot_to, "warm": "enriching", "cold": "hold"}[tier]
+        return ("scored", to) if state == "found" else (to,)
+    if state == "enriching":
+        return {"hot": ("scored", hot_to), "warm": (), "cold": ("scored", "hold")}[tier]
+    if state == "hold":
+        if facts.hold_until is not None and facts.hold_until > now:
+            return ()
+        if tier == "hot":
+            return ("scored", hot_to)
+        if tier == "warm" and facts.enrich_attempts < MAX_ENRICH_ATTEMPTS:
+            return ("scored", "enriching")
+        return ()
+    return ()
+
+
+# --- the 'found' candidate (02 §2.9) ------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class LastCandidate:
+    state: str
+    pushed_at: datetime | None = None
+    rejected_at: datetime | None = None
+    suppressed_by: int | None = None
+    exclude_reason: str | None = None
+    updated_at: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ReopenFacts:
+    newest_signal_at: datetime | None = None
+    # The pushed lead's ERP outcome: True terminal, False still open, None absent.
+    outcome_terminal: bool | None = None
+    is_competitor: bool = False
+    is_supplier_cn: bool = False
+    liquidated: bool = False
+
+
+def _month(moment: datetime) -> tuple[int, int]:
+    local = moment.astimezone(settings.tz)
+    return local.year, local.month
+
+
+def _newer(facts: ReopenFacts, than: datetime | None) -> bool:
+    return (
+        facts.newest_signal_at is not None
+        and than is not None
+        and facts.newest_signal_at > than
+    )
+
+
+def may_reopen(last: LastCandidate, facts: ReopenFacts, *, now: datetime) -> bool:
+    """02 §2.9: may a new candidate follow ``last``, the company's newest one?
+    After ``pushed``: the outcome is terminal, or absent for 90 days; a signal
+    is newer than ``pushed_at``; and the month differs (the external id is the
+    month's). After ``rejected``: 180 days and a newer signal. After
+    ``suppressed``: only when the suppression row is gone. After ``excluded``
+    as a competitor, a Chinese supplier or liquidated: only once the company
+    flag is cleared; another exclusion: on a signal newer than it."""
+    if last.state == "pushed":
+        pushed = last.pushed_at
+        if pushed is None:
+            return False
+        settled = facts.outcome_terminal is True or (
+            facts.outcome_terminal is None and now - pushed >= REOPEN_AFTER_PUSH
+        )
+        return settled and _newer(facts, pushed) and _month(now) != _month(pushed)
+    if last.state == "rejected":
+        rejected = last.rejected_at
+        return (
+            rejected is not None
+            and now - rejected >= REOPEN_AFTER_REJECT
+            and _newer(facts, rejected)
+        )
+    if last.state == "suppressed":
+        return last.suppressed_by is None
+    if last.state == "excluded":
+        if last.exclude_reason == "competitor":
+            return not facts.is_competitor
+        if last.exclude_reason == "supplier_cn":
+            return not facts.is_supplier_cn
+        if last.exclude_reason == "liquidated":
+            return not facts.liquidated
+        return _newer(facts, last.updated_at)
+    return False
+
+
+def outcome_terminal(outcome: Outcome | None) -> bool | None:
+    """A pushed lead's outcome is terminal when the ERP closed it (won/lost)
+    or never kept it as a lead of its own (landed on a client, dropped)."""
+    if outcome is None:
+        return None
+    return outcome.landing in ("client", "dropped") or outcome.stage_kind in (
+        "won",
+        "lost",
+    )
+
+
+async def open_candidate(
+    session: AsyncSession, company_id: uuid.UUID
+) -> LeadCandidate | None:
+    found: LeadCandidate | None = await session.scalar(
+        sa.select(LeadCandidate).where(
+            LeadCandidate.company_id == company_id,
+            LeadCandidate.state.in_(e.CANDIDATE_OPEN_STATES),
+        )
+    )
+    return found
+
+
+async def ensure_found(
+    session: AsyncSession,
+    company: Company,
+    *,
+    source_key: str,
+    contact_id: uuid.UUID | None,
+    now: datetime,
+) -> LeadCandidate | None:
+    """The company's open candidate, or a new ``found`` one attributed to
+    ``source_key`` (``primary_source_key``, the precision attribution) when
+    02 §2.9 allows one; None when it does not. A concurrent resolution that
+    made the same candidate first wins (ON CONFLICT on the open index)."""
+    held = await open_candidate(session, company.id)
+    if held is not None:
+        return held
+    if company.state in ("excluded", "merged", "purged"):
+        return None
+    last = await session.scalar(
+        sa.select(LeadCandidate)
+        .where(LeadCandidate.company_id == company.id)
+        .order_by(LeadCandidate.created_at.desc(), LeadCandidate.id.desc())
+        .limit(1)
+    )
+    if last is not None:
+        outcome = (
+            await session.get(Outcome, last.external_id) if last.external_id else None
+        )
+        facts = ReopenFacts(
+            newest_signal_at=company.last_signal_at,
+            outcome_terminal=outcome_terminal(outcome),
+            is_competitor=company.is_competitor,
+            is_supplier_cn=company.is_supplier_cn,
+            liquidated=company.registry_status == "liquidated",
+        )
+        previous = LastCandidate(
+            state=last.state,
+            pushed_at=last.pushed_at,
+            rejected_at=last.rejected_at,
+            suppressed_by=last.suppressed_by,
+            exclude_reason=last.exclude_reason,
+            updated_at=last.updated_at,
+        )
+        if not may_reopen(previous, facts, now=now):
+            return None
+    await session.execute(
+        pg_insert(LeadCandidate)
+        .values(
+            company_id=company.id,
+            contact_id=contact_id,
+            state="found",
+            primary_source_key=source_key,
+        )
+        .on_conflict_do_nothing(
+            index_elements=["company_id"],
+            index_where=sa.text(f"state IN ({sql_list(e.CANDIDATE_OPEN_STATES)})"),
+        )
+    )
+    return await open_candidate(session, company.id)
+
+
+async def after_resolve(
+    session: AsyncSession,
+    obs: Observation,
+    resolution: companies.Resolution,
+    now: datetime,
+) -> None:
+    """The resolver's hook (04 §0 «→ signals, lead_candidates(found)»): the
+    observation's rule signals, the ``found`` candidate, and the open
+    candidate marked for re-scoring — a resolution may have added a phone or
+    a handle even when it brought no signal."""
+    company = resolution.company
+    if company.state in ("merged", "purged"):
+        return
+    contact_id = resolution.contact.id if resolution.contact is not None else None
+    evidence = signals.EvidenceRef(
+        id=obs.evidence_id,
+        source_key=obs.source_key,
+        fetched_at=obs.created_at or now,
+        observation_id=obs.id,
+        contact_id=contact_id,
+    )
+    facts = await signals.company_facts(session, company)
+    drafts = signals.from_rules(evidence, obs.parsed, facts)
+    weights = await scoring.load_weights(session)
+    await signals.emit(session, company.id, drafts, weights=weights)
+    await session.refresh(company, ["last_signal_at"])
+    await ensure_found(
+        session, company, source_key=obs.source_key, contact_id=contact_id, now=now
+    )
+    await signals.mark_stale(session, company.id)
+
+
+companies.register_after_resolve(after_resolve)
+
+
+# --- scoring a candidate ------------------------------------------------------------
+
+
+def _carried(
+    previous: Mapping[str, Any] | None, breakdown: dict[str, Any]
+) -> dict[str, Any]:
+    """A re-score keeps what other writers put in the breakdown: the gates'
+    verdicts (T-19, incl. ``gates.no_phone``) and the enrichment trail (T-24)."""
+    merged = dict(breakdown)
+    if previous:
+        gates = previous.get("gates")
+        enrichment = previous.get("enrichment")
+        if isinstance(gates, Mapping):
+            merged["gates"] = {**dict(gates), **merged["gates"]}
+        if isinstance(enrichment, list):
+            merged["enrichment"] = list(enrichment)
+    return merged
+
+
+async def rescore(
+    session: AsyncSession,
+    candidate: LeadCandidate,
+    *,
+    now: datetime,
+    weights: scoring.WeightSet | None = None,
+    families: Mapping[str, str] | None = None,
+) -> ScoreResult:
+    """Score ``candidate``'s company now and write the score (not the state):
+    ``score``, ``tier``, ``score_breakdown`` (other writers' keys carried),
+    ``weights_version``, ``last_scored_at``, and ``companies.best_score``."""
+    company = await session.get(Company, candidate.company_id)
+    if company is None:
+        raise LookupError(f"company {candidate.company_id} is gone")
+    weights = weights or await scoring.load_weights(session)
+    if families is None:
+        families = await source_families(session)
+    signal_views, contact_views = await scoring.views_for(session, company)
+    result = scoring.score(
+        signal_views, contact_views, source_families=families, weights=weights, now=now
+    )
+    candidate.score = result.total
+    candidate.tier = result.tier
+    candidate.score_breakdown = _carried(candidate.score_breakdown, result.breakdown)
+    candidate.weights_version = weights.version
+    candidate.last_scored_at = now
+    company.best_score = max(company.best_score or 0, result.total)
+    await session.flush()
+    return result
+
+
+async def source_families(session: AsyncSession) -> dict[str, str]:
+    rows = await session.execute(sa.select(Source.key, Source.family))
+    return {str(k): str(f) for k, f in rows.all()}
+
+
+async def _auto_push(session: AsyncSession, source_key: str | None) -> bool:
+    if source_key is None:
+        return False
+    found = await session.scalar(
+        sa.select(Source.auto_push).where(Source.key == source_key)
+    )
+    return bool(found)
+
+
+async def apply_score(
+    session: AsyncSession,
+    candidate: LeadCandidate,
+    result: ScoreResult,
+    *,
+    now: datetime,
+    auto_push: bool,
+) -> tuple[str, ...]:
+    """Walk ``candidate`` through ``route``'s states; returns the walk."""
+    facts = RouteFacts(
+        auto_push=auto_push,
+        hold_until=candidate.hold_until,
+        enrich_attempts=candidate.enrich_attempts,
+    )
+    walk = route(candidate.state, result.tier, facts, now=now)
+    for target in walk:
+        approved_by = (
+            f"auto:{candidate.primary_source_key}" if target == "approved" else None
+        )
+        await transition(session, candidate, target, now=now, approved_by=approved_by)
+    return walk
+
+
+# --- the two other producers ----------------------------------------------------------
+
+
+async def phone_less_review(
+    session: AsyncSession, candidate: LeadCandidate, *, now: datetime
+) -> None:
+    """02 §2.9 / 04 §5.2 F-12: ``enriching → review`` after the third attempt
+    for a candidate with no usable phone, ``score ≥ 60`` and a Telegram
+    username on a contact: ``tier='warm'``, ``score_breakdown.gates.no_phone
+    = true`` (the owner card's handoff variant, 06 §1.3). Raises
+    IllegalTransition when any of that does not hold."""
+    source = candidate.state
+    if source != "enriching":
+        raise IllegalTransition(source, "review", "not enriching")
+    if candidate.enrich_attempts < MAX_ENRICH_ATTEMPTS:
+        raise IllegalTransition(source, "review", "attempts left")
+    if candidate.score is None or candidate.score < scoring.HOT_MIN:
+        raise IllegalTransition(source, "review", "score below 60")
+    company = await session.get(Company, candidate.company_id)
+    if company is None:
+        raise LookupError(f"company {candidate.company_id} is gone")
+    _, contacts = await scoring.views_for(session, company)
+    if any(scoring.usable_phone(c) for c in contacts):
+        raise IllegalTransition(source, "review", "has a phone")
+    if not any(c.telegram_username and not c.anonymised for c in contacts):
+        raise IllegalTransition(source, "review", "no telegram username")
+    breakdown = dict(candidate.score_breakdown or {})
+    breakdown["gates"] = {**dict(breakdown.get("gates") or {}), "no_phone": True}
+    candidate.score_breakdown = breakdown
+    candidate.tier = "warm"
+    await transition(session, candidate, "review", now=now)
+
+
+async def manager_phone_rescore(
+    session: AsyncSession, candidate: LeadCandidate, *, tg_id: int, now: datetime
+) -> ScoreResult:
+    """A manager's ``/tel`` phone after a handoff (06 §1.7): re-score at once
+    and, with a usable phone, ``hold → scored → approved`` with
+    ``approved_by='manager:<tg_id>'``. Without one the candidate stays in
+    ``hold`` with its new score. Raises IllegalTransition unless in hold."""
+    if candidate.state != "hold":
+        raise IllegalTransition(candidate.state, "scored", "not in hold")
+    result = await rescore(session, candidate, now=now)
+    if result.usable_phone:
+        await transition(session, candidate, "scored", now=now)
+        await transition(
+            session, candidate, "approved", now=now, approved_by=f"manager:{tg_id}"
+        )
+    return result
+
+
+# --- score_job (04 §0) --------------------------------------------------------------
+
+SessionFactory = Callable[[], AsyncSession]
+
+
+@dataclass(slots=True)
+class ScoreReport:
+    claimed: int = 0
+    scored: int = 0
+    failed: int = 0
+    moved: dict[str, int] = field(default_factory=dict)
+
+    def as_dict(self) -> dict[str, int]:
+        counts = {"claimed": self.claimed, "scored": self.scored, "failed": self.failed}
+        counts.update({f"to_{state}": n for state, n in sorted(self.moved.items())})
+        return counts
+
+
+def _stale() -> sa.ColumnElement[bool]:
+    """A candidate score_job owes a score: open in a re-scored state, marked
+    stale or older than its company's newest signal, and — for ``found`` — a
+    volume signal to score on (02 §2.9)."""
+    has_volume = (
+        sa.select(Signal.id)
+        .where(
+            Signal.company_id == LeadCandidate.company_id,
+            Signal.key.in_(signals.VOLUME_KEYS),
+        )
+        .exists()
+    )
+    return sa.and_(
+        LeadCandidate.state.in_(RESCORE_STATES),
+        sa.or_(
+            LeadCandidate.last_scored_at.is_(None),
+            Company.last_signal_at > LeadCandidate.last_scored_at,
+        ),
+        sa.or_(LeadCandidate.state != "found", has_volume),
+    )
+
+
+async def _score_one(
+    session_factory: SessionFactory,
+    *,
+    now: datetime,
+    done: set[uuid.UUID],
+    weights: scoring.WeightSet,
+    families: Mapping[str, str],
+    report: ScoreReport,
+) -> bool:
+    """Claim the oldest stale candidate (FOR UPDATE SKIP LOCKED) and score it
+    in its own transaction. False when nothing is owed."""
+    async with session_factory() as session, session.begin():
+        stmt = (
+            sa.select(LeadCandidate)
+            .join(Company, Company.id == LeadCandidate.company_id)
+            .where(_stale())
+        )
+        if done:
+            stmt = stmt.where(LeadCandidate.id.not_in(done))
+        candidate = await session.scalar(
+            stmt.order_by(LeadCandidate.created_at, LeadCandidate.id)
+            .limit(1)
+            .with_for_update(of=LeadCandidate, skip_locked=True)
+        )
+        if candidate is None:
+            return False
+        report.claimed += 1
+        done.add(candidate.id)
+        try:
+            async with session.begin_nested():
+                result = await rescore(
+                    session, candidate, now=now, weights=weights, families=families
+                )
+                walk = await apply_score(
+                    session,
+                    candidate,
+                    result,
+                    now=now,
+                    auto_push=await _auto_push(session, candidate.primary_source_key),
+                )
+        except Exception as exc:
+            # A candidate that cannot be scored costs only itself; the error
+            # class only (a message may carry a row's values, 06 §4.5).
+            log.error(
+                "scoring failed",
+                extra={"candidate_id": str(candidate.id), "error": type(exc).__name__},
+            )
+            report.failed += 1
+            return True
+        report.scored += 1
+        if walk:
+            report.moved[walk[-1]] = report.moved.get(walk[-1], 0) + 1
+    return True
+
+
+async def score_batch(
+    session_factory: SessionFactory = SessionLocal,
+    *,
+    now: datetime,
+    limit: int = SCORE_LIMIT,
+) -> ScoreReport:
+    """Score up to ``limit`` stale candidates, one transaction each, with the
+    weights and source families read once for the batch."""
+    async with session_factory() as session:
+        weights = await scoring.load_weights(session)
+        families = await source_families(session)
+    report = ScoreReport()
+    done: set[uuid.UUID] = set()
+    for _ in range(limit):
+        if not await _score_one(
+            session_factory,
+            now=now,
+            done=done,
+            weights=weights,
+            families=families,
+            report=report,
+        ):
+            break
+    return report
+
+
+async def score_job(
+    *, now: datetime | None = None, limit: int = SCORE_LIMIT
+) -> dict[str, int]:
+    """The scheduled job: the ``score`` slot of the worker table (every 15
+    min, and at once on ``NOTIFY cs_interaction``, 04 §0); its listener
+    records the ``job:score`` heartbeat. Counts are logged (ids and counts
+    only) and returned."""
+    report = await score_batch(now=now or datetime.now(settings.tz), limit=limit)
+    counts = report.as_dict()
+    if report.claimed:
+        log.info("score_job", extra={"counts": counts})
+    return counts

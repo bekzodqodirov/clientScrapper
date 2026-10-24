@@ -6,18 +6,24 @@ as the oracle: enums.WEIGHTS_V1 (what the scorer's tests load), the
 migration's frozen copy and the seeded rows must each equal it — a typo made
 in both enums.py and 0001 is still a difference from the spec. Plus: one row
 per key of SIGNAL_KEYS ∪ DERIVED_KEYS, caps of the positive groups summing to
-100, approved by the seed. ``validate_version``'s ±30 % rule belongs to
-services/scoring.py (T-18).
+100, approved by the seed. And services/scoring.validate_version (T-18),
+which a later version passes before it is approved: completeness, caps, and
+each weight within ±30 % of the previous version unless the owner proposed it.
 """
 
 from __future__ import annotations
 
 import importlib.util
+from dataclasses import replace
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
+import pytest
 import sqlalchemy as sa
 
 from clientscrapper.db import enums as e
+from clientscrapper.services import scoring
 
 ROOT = Path(__file__).resolve().parents[1]
 POSITIVE_GROUPS = ("volume", "origin", "solidity", "recency", "contact", "corroboration")
@@ -149,3 +155,127 @@ async def test_version_1_is_seeded_approved_and_equal_to_the_tuple(session):
         )
     ).one()
     assert versions == [1]
+
+
+# --- validate_version (02 §2.7, 07 §1.3 «Weights contract») --------------------
+
+V1 = scoring.weights_v1()
+
+
+def _with(key: str, **change: object) -> scoring.WeightSet:
+    rows = dict(V1.rows)
+    rows[key] = replace(rows[key], **change)  # type: ignore[arg-type]
+    return scoring.WeightSet(version=2, rows=rows)
+
+
+def test_version_1_against_itself_is_valid():
+    assert scoring.validate_version(V1, previous=None, proposed_by="seed") == []
+    copy = scoring.WeightSet(version=2, rows=dict(V1.rows))
+    assert (
+        scoring.validate_version(copy, previous=V1, proposed_by="fit_weights@2026-11-01")
+        == []
+    )
+
+
+def test_an_incomplete_version_is_refused():
+    rows = {k: w for k, w in V1.rows.items() if k != "derived_corroboration"}
+    problems = scoring.validate_version(
+        scoring.WeightSet(version=2, rows=rows), previous=V1, proposed_by="seed"
+    )
+    assert "missing:derived_corroboration" in problems
+
+
+@pytest.mark.parametrize(
+    ("points", "ok"),
+    [(21, True), (30, True), (39, True), (20, False), (40, False)],
+)
+def test_each_weight_moves_at_most_thirty_percent(points, ok):
+    """vol_stated_3plus is 30 in version 1: 21 … 39 pass, 20 and 40 do not."""
+    candidate = _with("vol_stated_3plus", points=points)
+    problems = scoring.validate_version(
+        candidate, previous=V1, proposed_by="fit_weights@x"
+    )
+    assert problems == ([] if ok else ["jump:vol_stated_3plus"])
+
+
+def test_a_thirty_one_percent_jump_is_refused_unless_the_owner_proposed_it():
+    up = _with("vol_stated_3plus", points=40)  # +33 %
+    down = _with("vol_stated_1_3", points=13)  # −35 %
+    edge = _with("vol_stated_1_3", points=26)  # +30 % exactly
+    for candidate, key in ((up, "vol_stated_3plus"), (down, "vol_stated_1_3")):
+        assert f"jump:{key}" in scoring.validate_version(
+            candidate, previous=V1, proposed_by="fit_weights@2026-11-01"
+        )
+        assert (
+            scoring.validate_version(candidate, previous=V1, proposed_by="owner:1001")
+            == []
+        )
+    assert scoring.validate_version(edge, previous=V1, proposed_by="seed") == []
+
+
+def test_a_zero_weight_stays_zero_and_signs_stay():
+    gate = _with("flag_competitor", points=5)
+    assert "points:flag_competitor" in scoring.validate_version(
+        gate, previous=V1, proposed_by="owner:1001"
+    )
+    flipped = _with("neg_b2c_words", points=10)
+    assert "points:neg_b2c_words" in scoring.validate_version(
+        flipped, previous=V1, proposed_by="owner:1001"
+    )
+
+
+def test_caps_must_agree_and_sum_to_a_hundred():
+    split = _with("vol_container", cap=30)
+    problems = scoring.validate_version(split, previous=V1, proposed_by="owner:1001")
+    assert "caps:volume" in problems
+    rows = {
+        k: (replace(w, cap=35) if w.group == "volume" else w) for k, w in V1.rows.items()
+    }
+    rows["vol_container"] = replace(rows["vol_container"], points=35)
+    problems = scoring.validate_version(
+        scoring.WeightSet(version=2, rows=rows), previous=V1, proposed_by="owner:1001"
+    )
+    assert "caps_sum:95" in problems
+
+
+def test_a_key_may_not_change_group():
+    moved = _with("derived_fresh_7d", group="volume", cap=40)
+    assert "group_changed:derived_fresh_7d" in scoring.validate_version(
+        moved, previous=V1, proposed_by="owner:1001"
+    )
+
+
+async def test_activation_approves_a_valid_version_and_refuses_a_jump(session):
+    """A version 2 inserted and approved, then rolled back: scoring_weights is
+    seeded configuration the test truncate keeps (07 §1.0)."""
+    now = datetime(2026, 11, 1, 9, 0, tzinfo=ZoneInfo("Asia/Tashkent"))
+    insert = sa.text(
+        "INSERT INTO scoring_weights (version, key, group_key, points, group_cap, "
+        "decay_days, proposed_by) SELECT 2, key, group_key, "
+        "CASE WHEN key = 'vol_stated_3plus' THEN :p ELSE points END, group_cap, "
+        "decay_days, :by FROM scoring_weights WHERE version = 1"
+    )
+    try:
+        await session.execute(insert, {"p": 40, "by": "fit_weights@2026-11-01"})
+        with pytest.raises(scoring.VersionRefused) as refused:
+            await scoring.activate_version(
+                session, 2, by="fit_weights@2026-11-01", now=now
+            )
+        assert refused.value.problems == ("jump:vol_stated_3plus",)
+        assert await scoring.active_version(session) == 1
+        await session.execute(
+            sa.text(
+                "UPDATE scoring_weights SET points = 36 "
+                "WHERE version = 2 AND key = 'vol_stated_3plus'"
+            )
+        )
+        await scoring.activate_version(session, 2, by="owner:1001", now=now)
+        assert await scoring.active_version(session) == 2
+        loaded = await scoring.load_weights(session)
+        assert (loaded.version, loaded.points("vol_stated_3plus")) == (2, 36)
+        with pytest.raises(scoring.VersionRefused) as again:
+            await scoring.activate_version(session, 2, by="owner:1001", now=now)
+        assert again.value.problems == ("already_approved",)
+    finally:
+        await session.rollback()
+    assert await scoring.active_version(session) == 1

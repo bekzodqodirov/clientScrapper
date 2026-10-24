@@ -1,0 +1,306 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://clientscrapper.example.uz/schemas/score_breakdown.json",
+  "title": "lead_candidates.score_breakdown (04 §5.2, 02 §2.9)",
+  "description": "What services/scoring.score writes and score_job stores. `gates` is filled by services/gates.py (T-19) and `enrichment` by services/enrich.py (T-24); score_job carries both over when it re-scores.",
+  "type": "object",
+  "required": [
+    "version",
+    "computed_at",
+    "groups",
+    "negatives",
+    "flags",
+    "total",
+    "tier",
+    "usable_phone",
+    "gates",
+    "enrichment"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "computed_at": {
+      "type": "string",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?[+-]\\d{2}:\\d{2}$"
+    },
+    "groups": {
+      "type": "object",
+      "required": [
+        "volume",
+        "origin",
+        "solidity",
+        "recency",
+        "contact",
+        "corroboration"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "volume": {
+          "$ref": "#/$defs/observedGroup"
+        },
+        "origin": {
+          "$ref": "#/$defs/observedGroup"
+        },
+        "solidity": {
+          "$ref": "#/$defs/observedGroup"
+        },
+        "recency": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/groupTotals"
+            }
+          ],
+          "required": [
+            "signals"
+          ],
+          "properties": {
+            "signals": {
+              "type": "array",
+              "maxItems": 1,
+              "items": {
+                "type": "object",
+                "required": [
+                  "key",
+                  "points",
+                  "age_days"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "key": {
+                    "enum": [
+                      "derived_fresh_7d",
+                      "derived_fresh_30d",
+                      "derived_fresh_90d"
+                    ]
+                  },
+                  "points": {
+                    "$ref": "#/$defs/points"
+                  },
+                  "age_days": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                }
+              }
+            }
+          },
+          "unevaluatedProperties": false
+        },
+        "contact": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/groupTotals"
+            }
+          ],
+          "required": [
+            "signals"
+          ],
+          "properties": {
+            "signals": {
+              "type": "array",
+              "maxItems": 3,
+              "items": {
+                "type": "object",
+                "required": [
+                  "key",
+                  "points"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "key": {
+                    "enum": [
+                      "derived_contact_mobile",
+                      "derived_contact_decision_maker",
+                      "derived_contact_dm_channel"
+                    ]
+                  },
+                  "points": {
+                    "$ref": "#/$defs/points"
+                  }
+                }
+              }
+            }
+          },
+          "unevaluatedProperties": false
+        },
+        "corroboration": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/groupTotals"
+            }
+          ],
+          "required": [
+            "families"
+          ],
+          "properties": {
+            "families": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": {
+                "$ref": "#/$defs/family"
+              }
+            }
+          },
+          "unevaluatedProperties": false
+        }
+      }
+    },
+    "negatives": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/counted"
+      }
+    },
+    "flags": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "key",
+          "signal_id",
+          "evidence_id"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "key": {
+            "enum": [
+              "flag_competitor",
+              "flag_supplier_cn"
+            ]
+          },
+          "signal_id": {
+            "type": "integer"
+          },
+          "evidence_id": {
+            "type": "integer"
+          }
+        }
+      }
+    },
+    "total": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100
+    },
+    "tier": {
+      "enum": [
+        "hot",
+        "warm",
+        "cold"
+      ]
+    },
+    "usable_phone": {
+      "type": "boolean"
+    },
+    "gates": {
+      "type": "object"
+    },
+    "enrichment": {
+      "type": "array"
+    }
+  },
+  "$defs": {
+    "points": {
+      "type": "number",
+      "minimum": -100,
+      "maximum": 100
+    },
+    "family": {
+      "enum": [
+        "telegram",
+        "instagram",
+        "olx",
+        "marketplace",
+        "directory",
+        "vacancy",
+        "exhibitor",
+        "maps",
+        "brand",
+        "search",
+        "registry",
+        "erp",
+        "manual"
+      ]
+    },
+    "groupTotals": {
+      "type": "object",
+      "required": [
+        "cap",
+        "raw",
+        "used"
+      ],
+      "properties": {
+        "cap": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "raw": {
+          "type": "number",
+          "minimum": 0
+        },
+        "used": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100
+        }
+      }
+    },
+    "counted": {
+      "type": "object",
+      "required": [
+        "key",
+        "points",
+        "factor",
+        "signal_id",
+        "evidence_id"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "key": {
+          "type": "string",
+          "pattern": "^(vol|cn|ent|neg)_[a-z0-9_]+$"
+        },
+        "points": {
+          "$ref": "#/$defs/points"
+        },
+        "factor": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "signal_id": {
+          "type": "integer"
+        },
+        "evidence_id": {
+          "type": "integer"
+        },
+        "value": {
+          "type": "number"
+        }
+      }
+    },
+    "observedGroup": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/groupTotals"
+        }
+      ],
+      "required": [
+        "signals"
+      ],
+      "properties": {
+        "signals": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/counted"
+          }
+        }
+      },
+      "unevaluatedProperties": false
+    }
+  }
+}
