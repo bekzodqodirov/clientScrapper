@@ -404,6 +404,10 @@ def looks_like_captcha(body: bytes) -> bool:
     marker anywhere, or a word marker in the title / a heading, or in the
     visible text of a page that shows little else (03 §1.1 CAPTCHA_MARKERS)."""
     text = body.decode("utf-8", errors="ignore")
+    if text.lstrip()[:1] in ("{", "["):
+        # A JSON answer is data: «captcha» in it is somebody's bio or title.
+        # An API that wants a challenge answers 403/429, which count anyway.
+        return False
     lowered = text.lower()
     words = [m.lower() for m in CAPTCHA_MARKERS if m not in MARKUP_MARKERS]
     if any(marker in lowered for marker in MARKUP_MARKERS):

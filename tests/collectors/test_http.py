@@ -578,6 +578,11 @@ def test_a_page_embedding_a_recaptcha_widget_is_not_a_captcha_page():
     assert http.looks_like_captcha(RECAPTCHA_FORM.encode()) is False
 
 
+def test_a_json_answer_mentioning_captcha_is_data():
+    bio = b'{"biography": "Namuna Savdo: captcha bilan himoyalangan sayt", "id": 1}'
+    assert http.looks_like_captcha(bio) is False
+
+
 def test_a_long_page_with_a_captcha_label_is_not_a_captcha_page():
     listing = "".join(f"<li>Namuna Savdo {i}, optom mebel</li>" for i in range(100))
     body = f"<html><body><ul>{listing}</ul><label>Captcha</label></body></html>"
