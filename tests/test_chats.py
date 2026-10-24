@@ -193,3 +193,41 @@ async def test_the_calibration_chat_is_never_queued_for_a_join(session):
     row = await chats.ensure_monitor(session, gsr, now=NOW, status="queued")
     assert row.role == "calibration"
     assert await chats.queued(session, limit=5) == []
+
+
+# --- the reader's brakes (userbot/limits.py) ------------------------------------------
+
+
+async def test_a_quota_is_taken_under_its_cap_and_resets_at_tashkent_midnight(session):
+    from clientscrapper.userbot import limits
+
+    taken = [await limits.take(session, "joins", now=NOW) for _ in range(4)]
+    assert taken == [True, True, True, False]
+    assert await limits.used(session, "joins", now=NOW) == 3
+    # Another kind keeps its own count; 23:59 is still the same day.
+    assert await limits.take(session, "resolves", now=NOW)
+    late = NOW.replace(hour=23, minute=59)
+    assert not await limits.take(session, "joins", now=late)
+    midnight = NOW.replace(hour=0, minute=0) + timedelta(days=1)
+    assert await limits.take(session, "joins", now=midnight)
+    assert await limits.used(session, "joins", now=midnight) == 1
+    with pytest.raises(ValueError):
+        limits.quota_limit("sends")
+
+
+async def test_the_breaker_is_set_past_300_seconds_and_never_shortened(session):
+    from clientscrapper.userbot import limits
+
+    assert await limits.trip_breaker(session, seconds=300, now=NOW, where="t") is None
+    assert await limits.flood_until(session, now=NOW) is None
+    until = await limits.trip_breaker(session, seconds=301, now=NOW, where="t")
+    assert until == NOW + timedelta(hours=24)
+    # A second wait an hour later moves the end on; an earlier clock never back.
+    later = await limits.trip_breaker(
+        session, seconds=900, now=NOW + timedelta(hours=1), where="t"
+    )
+    assert later == NOW + timedelta(hours=25)
+    kept = await limits.trip_breaker(session, seconds=900, now=NOW, where="t")
+    assert kept == NOW + timedelta(hours=25)
+    assert await limits.blocked(session, now=NOW + timedelta(hours=24)) == "flood"
+    assert await limits.blocked(session, now=NOW + timedelta(hours=25)) is None
