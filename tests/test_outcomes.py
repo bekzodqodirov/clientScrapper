@@ -596,6 +596,43 @@ async def test_the_feed_s_hash_keeps_a_revived_won_company_a_client(world, sessi
     assert (await company(session, p.company_id)).state == "client"
 
 
+async def test_a_won_tail_the_client_export_lists_survives_the_retraction(
+    world, session, tmp_path
+):
+    """Seam review (T-10/T-11): the XLSX import of a tail an outcome already
+    held as a client was «held elsewhere», so a later won → open took the
+    only row away while the export still listed the card. The import now
+    takes the row over."""
+    from clientscrapper.services import client_import as ci
+    from tests.test_client_import import write_xlsx
+
+    p = await world.push(18)
+    world.fake.win(world.lead(p).id)
+    await world.walk()
+    assert await local(session) == {("client", "phone_tail", p.tail, because(p))}
+    export = write_xlsx(
+        tmp_path / "clients.xlsx",
+        [["Code", "Name", "Manager", "Phones", "Active"],
+         ["NMN18", "Namuna Savdo 18", "", phone(18), "✓"]],
+    )  # fmt: skip
+    plan = await ci.plan_import(session, ci.read_rows(export))
+    applied = await ci.apply_import(session, plan, now=NOW)
+    await session.commit()
+    assert (applied.inserted, applied.restamped, applied.elsewhere) == (0, 0, 1)
+    world.clock.set(NOW + timedelta(hours=1))
+    world.fake.revive(world.lead(p).id)
+    await world.walk("recent", now=NOW + timedelta(hours=2))
+    assert (await outcome(session, p.external_id)).label == "open_untouched"
+    held = await session.scalar(
+        sa.select(Suppression.source).where(
+            Suppression.kind == "client",
+            Suppression.key_type == "phone_tail",
+            Suppression.key == p.tail,
+        )
+    )
+    assert held == "manual_import"
+
+
 async def test_a_shared_phone_s_row_passes_to_the_other_company(world, session):
     first = await world.push(17)
     world.fake.win(world.lead(first).id)

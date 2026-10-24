@@ -52,8 +52,10 @@ to, but the phones of an ERP client card — and so how a cell is read:
   «Active» is cautioned (``view``) and its inactive count is not claimed.
 * **An import only adds.** A tail absent from the new file is not removed: a
   filtered export must not un-suppress anybody (fail closed). Rows already
-  there from an earlier import get ``last_seen_at`` moved; a phone another
-  source already holds as a ``client`` tail (an outcome) is left to it.
+  there from an earlier import get ``last_seen_at`` moved; a phone an
+  outcome already holds as a ``client`` tail passes to the import (the
+  outcome's row would go with a retracted label, won → open, while the
+  client book still lists the phone).
 """
 
 from __future__ import annotations
@@ -615,6 +617,20 @@ async def apply_import(
                 .returning(Suppression.id)
             )
             restamped += len(result.all())
+            # A tail an outcome holds (won / landed / the belt) passes to the
+            # import: the client book says so too, and an outcome's row goes
+            # when its label is retracted (won → open) — which would leave a
+            # phone the export lists unsuppressed until the next import. Still
+            # counted as held elsewhere: it was suppressed already.
+            await session.execute(
+                sa.update(Suppression)
+                .where(
+                    _client_tails(),
+                    Suppression.source == "outcomes",
+                    Suppression.key.in_(earlier),
+                )
+                .values(source="manual_import", reason=None, last_seen_at=now)
+            )
     await _store_last(
         session,
         LastImport(rows=plan.rows, tails=len(plan.tails), sha256=plan.sha256, at=now),

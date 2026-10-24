@@ -556,7 +556,10 @@ async def test_a_second_run_of_the_same_file_adds_nothing(session, erp_row):
     assert {(r.created_at, r.last_seen_at) for r in rows} == {(NOW, later)}
 
 
-async def test_a_tail_another_source_holds_is_left_to_it(session, erp_row):
+async def test_a_tail_an_outcome_holds_passes_to_the_import(session, erp_row):
+    """An outcome's client row goes with its label (won → open); the client
+    book still lists the phone, so the import takes the row over — counted
+    as held elsewhere, it was suppressed already (seam review 2026-10-24)."""
     session.add(
         Suppression(
             kind="client",
@@ -581,7 +584,7 @@ async def test_a_tail_another_source_holds_is_left_to_it(session, erp_row):
             Suppression.kind == "client", Suppression.key == "900000001"
         )
     )
-    assert (held.source, held.reason) == ("outcomes", "outcome:cs:namuna")
+    assert (held.source, held.reason, held.last_seen_at) == ("manual_import", None, NOW)
     kinds = await session.scalars(
         sa.select(Suppression.kind)
         .where(Suppression.key == "900000002")
