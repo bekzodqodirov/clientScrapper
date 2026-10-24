@@ -371,7 +371,7 @@ async def test_the_counts_are_the_dumps_own_snapshot(
 
 
 async def test_the_ciphertext_is_owner_only_while_it_is_written(
-    keys, tmp_path, monkeypatch
+    session, keys, tmp_path, monkeypatch
 ):
     """age gets a .partial this process created 0600: `age -o` would create
     it with the umask's mode and the bytes would sit readable until the
