@@ -40,6 +40,8 @@ GOOD = (
     "NIMA OLIB KELADI: mato, aksessuar · Xitoy: ehtimol (Guangzhou)",
     "Bugun: push 3/10 · karta 7/40 · xarajat $1.20/10 · oy $14/250",
     "🩺 Agent holati — 24.10.2026 09:00",
+    # A verbatim quote keeps the source's own apostrophes.
+    "🔎 «to'g'ri, 2 kub kerak, ma'lumot bering» — OLX, 20.10.2026",
 )
 
 # (text, the rules it trips). Rules: okina (oʻ/gʻ need U+02BB), tutuq (the
@@ -57,7 +59,11 @@ BAD = (
     ("CRM не ответила", {"cyrillic"}),
     ("📞 <PHONE_1> · @namuna_1", {"pseudonym"}),
     ("Masʼul: <NAME_2>", {"pseudonym"}),
+    # A quote is the source's text, but a token left in it is ours.
+    ("🔎 «<PHONE_1> ga qoʻngʻiroq qiling» — OLX", {"pseudonym"}),
+    ("Masʼul: «Seller <NAME_2>»", {"pseudonym"}),
     ("Salom, {full_name}!", {"placeholder"}),
+    ("🔎 «{quote}» — OLX, 20.10.2026", {"placeholder"}),
     ("a" * 4097, {"too_long"}),
 )
 

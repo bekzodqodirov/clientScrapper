@@ -19,10 +19,15 @@ the same rule as 07's regexes, seen from the other character (``oʼ`` is the
 commonest wrong apostrophe on an Android keyboard).
 
 Collected: string literals of the owner-text modules by AST — not
-docstrings, not logging-call arguments, not ``raise`` messages, not ``re``
-patterns (those are code-facing English) — and the rendered output of the
-renderers that exist. In rendered output a «…» span is a verbatim evidence
-quote (data, not text) and is left alone. bot/texts.py, services/cards.py,
+docstrings, not logging-call arguments, not ``re`` patterns, not the
+developer's ``raise`` messages (code-facing English) — and the rendered
+output of the renderers that exist. A raise message is the owner's text in
+config.py (every validator error ends in get_settings()'s one-line
+SystemExit) and wherever the exception is a SystemExit. In rendered output a
+«…» span is a verbatim evidence quote: its spelling and script are the
+source's, so the apostrophe and Cyrillic rules leave it alone — but an
+unrestored pseudonym or an unfilled placeholder inside it is still ours, and
+those two rules read the whole text. bot/texts.py, services/cards.py,
 crm_push.py, digest.py and health.py arrive in later tasks; costs.py's alert
 texts, the doctor's lines and config.py's error lines reach the owner today
 and are held to the same rules.
@@ -60,6 +65,8 @@ OWNER_TEXT_MODULES = (
     "tools/doctor.py",
     "config.py",
 )
+# Modules whose raise messages reach the owner (see the docstring).
+OWNER_RAISE_MODULES = frozenset({"config.py"})
 # Literals allowed to carry Cyrillic: Russian phrases the code matches or
 # quotes as data. Empty until a module needs one.
 RU_ALLOWED: frozenset[str] = frozenset()
@@ -77,6 +84,8 @@ RULES: dict[str, re.Pattern[str]] = {
 }
 PLACEHOLDER = re.compile(r"\{[a-z_]+\}")
 QUOTE = re.compile(r"«[^»]*»")
+# The rules a verbatim quote is exempt from: the source's spelling and script.
+QUOTE_EXEMPT = frozenset({"okina", "tutuq", "okina_misplaced", "cyrillic"})
 LOG_METHODS = {"debug", "info", "warning", "error", "exception", "critical", "log"}
 
 
@@ -85,13 +94,13 @@ def problems(text: str, *, rendered: bool = False) -> set[str]:
     found = set()
     if len(text) > TELEGRAM_MESSAGE_MAX:
         found.add("too_long")
-    checked = QUOTE.sub("«»", text) if rendered else text
+    unquoted = QUOTE.sub("«»", text) if rendered else text
     for code, rule in RULES.items():
         if code == "cyrillic" and text in RU_ALLOWED:
             continue
-        if rule.search(checked):
+        if rule.search(unquoted if code in QUOTE_EXEMPT else text):
             found.add(code)
-    if rendered and PLACEHOLDER.search(checked):
+    if rendered and PLACEHOLDER.search(text):
         found.add("placeholder")
     return found
 
@@ -103,12 +112,19 @@ def button_problems(label: str) -> set[str]:
     return found
 
 
-def _code_facing(tree: ast.Module) -> set[int]:
-    """Literals in logging calls, raise statements and re calls."""
+def _raises_system_exit(node: ast.Raise) -> bool:
+    exc = node.exc.func if isinstance(node.exc, ast.Call) else node.exc
+    named = isinstance(exc, ast.Name | ast.Attribute)
+    return named and attr_chain(exc)[-1] == "SystemExit"
+
+
+def _code_facing(tree: ast.Module, *, raises_reach_owner: bool = False) -> set[int]:
+    """Literals in logging calls, re calls and the developer's raises."""
     ids: set[int] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Raise):
-            ids.update(id(n) for n in ast.walk(node))
+            if not (raises_reach_owner or _raises_system_exit(node)):
+                ids.update(id(n) for n in ast.walk(node))
         elif isinstance(node, ast.Call):
             chain = attr_chain(node.func)
             is_log = chain[-1] in LOG_METHODS and chain[0] in {
@@ -122,8 +138,10 @@ def _code_facing(tree: ast.Module) -> set[int]:
     return ids
 
 
-def owner_literals(tree: ast.Module) -> list[tuple[int, str]]:
-    skip = _code_facing(tree)
+def owner_literals(
+    tree: ast.Module, *, raises_reach_owner: bool = False
+) -> list[tuple[int, str]]:
+    skip = _code_facing(tree, raises_reach_owner=raises_reach_owner)
     return [(t.node.lineno, t.value) for t in texts(tree) if id(t.node) not in skip]
 
 
@@ -158,6 +176,10 @@ def test_a_quote_is_data_but_only_inside_its_guillemets():
     quoted = "🔎 «Нужен 1 куб, кто привезёт?» — OLX, 20.10.2026"
     assert problems(quoted, rendered=True) == set()
     assert problems("🔎 Нужен 1 куб — OLX", rendered=True) == {"cyrillic"}
+    # The source's spelling is data; what we left inside the quote is not.
+    assert problems("🔎 «to'g'ri, ma'lumot bering» — OLX", rendered=True) == set()
+    assert problems("🔎 «<TG_3> yozdi» — OLX", rendered=True) == {"pseudonym"}
+    assert problems("🔎 «{quote}» — OLX", rendered=True) == {"placeholder"}
     # A literal is not rendered output: its placeholders are the template's.
     assert problems("{key} boʻsh — toʻldir: {hint}") == set()
 
@@ -172,9 +194,10 @@ def test_the_owner_text_modules_present_today_are_scanned():
 
 @pytest.mark.parametrize("path", _present_owner_modules(), ids=rel)
 def test_owner_literals_follow_the_rules(path):
+    raises = rel(path) in OWNER_RAISE_MODULES
     bad = {
         f"line {line}: {sorted(found)}"
-        for line, text in owner_literals(tree_of(path))
+        for line, text in owner_literals(tree_of(path), raises_reach_owner=raises)
         if (found := problems(text))
     }
     assert bad == set()
@@ -193,6 +216,19 @@ def test_the_literal_collector_skips_code_facing_strings():
         '    return f"{x} to\'xtadi"\n'
     )
     assert owner_literals(ast.parse(source)) == [(4, "Toʻxtatildi"), (9, "{} to'xtadi")]
+    # A raise message is the owner's where it reaches him: in config.py
+    # (raises_reach_owner) and in any SystemExit.
+    exits = (
+        "def g(v):\n"
+        '    raise ValueError(f"noma\'lum vaqt mintaqasi: {v}") from None\n'
+        "def h():\n"
+        '    raise SystemExit("TELETHON_SESSION bo\'sh")\n'
+    )
+    assert owner_literals(ast.parse(exits)) == [(4, "TELETHON_SESSION bo'sh")]
+    assert owner_literals(ast.parse(exits), raises_reach_owner=True) == [
+        (2, "noma'lum vaqt mintaqasi: {}"),
+        (4, "TELETHON_SESSION bo'sh"),
+    ]
 
 
 def test_the_spend_alerts_render_clean():
