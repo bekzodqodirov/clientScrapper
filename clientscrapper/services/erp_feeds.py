@@ -795,8 +795,15 @@ async def suppression_probe(
     (``register_health_probe``) and the push gate's question (T-28): it reads
     the feed's config and, for the fallback, the last XLSX import."""
     cfg = await suppression_config(session)
-    imported_at = None if feeds_configured() else await last_import_at(session)
-    return freshness(cfg, key=settings.crm_agent_key, now=now, imported_at=imported_at)
+    on = feeds_configured()
+    imported_at = None if on else await last_import_at(session)
+    report = freshness(cfg, key=settings.crm_agent_key, now=now, imported_at=imported_at)
+    if on and not report.fresh:
+        enabled = await session.scalar(
+            sa.select(Source.enabled).where(Source.key == ERP_SOURCE)
+        )
+        report = replace(report, source_off=enabled is False)
+    return report
 
 
 def register_health_probe() -> None:

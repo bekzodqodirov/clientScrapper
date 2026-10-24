@@ -483,6 +483,9 @@ class SuppressionHealth:
     imported_at: datetime | None = None
     import_max_d: int = 0
     import_before_feed: bool = False
+    # The feeds are configured but sources.erp_sync is switched off: no pull
+    # ever runs (the seed ships it off), so the line says what to switch on.
+    source_off: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -1343,10 +1346,15 @@ def _suppression_text(status: Status, health: SuppressionHealth) -> str:
             f"(chegara {health.import_max_d} kun): {remedy}"
         )
     salt = "" if health.salt_ok else " · kalit almashgan (salt_id)"
+    off = (
+        " · «erp_sync» manbasi oʻchiq — /manbalar orqali yoqing"
+        if health.source_off
+        else ""
+    )
     return (
         f"{head} ERP bostirish roʻyxati yangilanmadi: toʻliq {age(health.full_at)} "
         f"(chegara {health.full_max_h} soat) · farq {age(health.delta_at)} "
-        f"(chegara {health.delta_max_h} soat){salt} — push toʻxtatildi"
+        f"(chegara {health.delta_max_h} soat){salt}{off} — push toʻxtatildi"
     )
 
 

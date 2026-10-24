@@ -289,8 +289,29 @@ async def test_the_probe_reads_the_stored_config(session, monkeypatch):
     monkeypatch.setattr(settings, "crm_push_source", "agent")
     monkeypatch.setattr(settings, "crm_agent_key", KEY)
     report = await erp_feeds.suppression_probe(session, NOW)
-    # The seed: never pulled.
+    # The seed: never pulled, and the source shipped off — the line says so.
     assert (report.fresh, report.full_at, report.salt_ok) == (False, None, False)
+    assert report.source_off is True
+    status = health.Status(
+        now=NOW,
+        db_ok=True,
+        disk_free_bytes=None,
+        disk_total_bytes=None,
+        disk_low=False,
+        backup=health.BackupInfo(configured=True),
+        suppression=report,
+    )
+    [line] = [p.text for p in health.problems(status) if p.key == "suppression_stale"]
+    assert "«erp_sync» manbasi oʻchiq — /manbalar orqali yoqing" in line
+    row = await session.get(erp_feeds.Source, erp_feeds.ERP_SOURCE)
+    assert row is not None and row.enabled is False
+    row.enabled = True
+    await session.commit()
+    try:
+        assert (await erp_feeds.suppression_probe(session, NOW)).source_off is False
+    finally:
+        row.enabled = False
+        await session.commit()
     erp_feeds.register_health_probe()
     try:
         assert health._probes.suppression is erp_feeds.suppression_probe
