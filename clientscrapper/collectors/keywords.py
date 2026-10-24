@@ -11,18 +11,23 @@ forced a change — each is named in a comment beside it:
   folds (ʻ ʼ ‘ ’ ` ʹ '), because these patterns run on text as written;
 * SUPPLY_RE and COMPETITOR_RE gained the Uzbek Cyrillic spellings of their
   Uzbek Latin alternatives, and INTENT_RE the Cyrillic endings of «olib kel…»;
-* «оптовые цен» (SUPPLY_RE) and «bojxona xizmat» (COMPETITOR_RE) take their
-  word ending — cut before ``(?!\\w)`` they matched no text anyone writes;
+* the words of VOLUME_RE, CONTAINER_RE, SUPPLY_RE, INTENT_RE and COMPETITOR_RE
+  take their Uzbek suffixes and Russian endings («20 кубов», «5 kubdan»,
+  «фуру», «konteynerda», «Yangi tovarlar keldi», «Ищем», «kargoxonasi»,
+  «логистикой») — cut before ``(?!\\w)``, 03's bare words missed the forms
+  people write (04 §9.3 itself reads «контейнеров» with CONTAINER_RE);
 * EMAIL_RE is new (06 §5.2 puts it beside the others);
-* IG_RE's label branch («instagram:», «insta @…», «ig:») needs a word start
-  and a separator, else «big shop» read as the handle «shop»;
+* IG_RE's label branch («instagram:», «insta @…», «Instagram namuna_shop»)
+  needs a word start and a separator, else «big shop» read as the handle
+  «shop» and «Instagramda» as «da»;
 * STIR_RE's label needs a word start («Martin 301234567» is not a STIR);
 * LEGAL_FORM_RE gained МЧЖ, ХЧК and СП, the Cyrillic forms of MChJ, XChK, SP.
 
 The word lists are matched through ``terms_re``: whole words, case-blind,
-apostrophe-blind, and inflection-aware — «Guangzhoudan» is Guangzhou + -dan,
-«в Китае» is Китай in the prepositional case (04 §9.1 and §9.3 quote both as
-China evidence) — while «оптика» stays out of «опт».
+apostrophe-blind, е/ё-blind, and inflection-aware — «Guangzhoudan» is
+Guangzhou + -dan, «в Китае» is Китай in the prepositional case (04 §9.1 and
+§9.3 quote both as China evidence), «импортер» is «импортёр» — while «оптика»
+stays out of «опт».
 
 Python's ``re`` is Unicode-aware for ``str`` patterns, so ``(?<!\\w)`` works on
 Cyrillic; the JS ``\\b`` trap does not apply here.
@@ -173,33 +178,13 @@ GEO = (
     "Nukus",
     "Нукус",
 )
-# GEO by the canonical Latin city it places a company in (04 §1.6: «Ташкент» →
-# «Toshkent»); the Tashkent bazaars and districts are Toshkent.
-# tests/collectors/test_keywords.py holds this partition equal to GEO.
+# GEO by the canonical Latin city it names (04 §1.6: «Ташкент» → «Toshkent»),
+# and the Tashkent bazaars and districts apart: a place is Toshkent only when
+# no city is named, so «Chorsu bozori Samarqand» and «Malika Karimova,
+# Samarqand» are Samarqand. tests/collectors/test_keywords.py holds the two
+# equal to GEO.
 GEO_CITY: dict[str, tuple[str, ...]] = {
-    "Toshkent": (
-        "Toshkent",
-        "Тошкент",
-        "Ташкент",
-        "Tashkent",
-        "Abu Saxiy",
-        "Abu Sahiy",
-        "Абу Сахий",
-        "Bek Baraka",
-        "Chorsu",
-        "Чорсу",
-        "Urikzor",
-        "Урикзор",
-        "Yangiobod",
-        "Янгиобод",
-        "Malika",
-        "Малика",
-        "Qo'yliq",
-        "Куйлюк",
-        "Sergeli",
-        "Сергели",
-        "Chinni bozor",
-    ),
+    "Toshkent": ("Toshkent", "Тошкент", "Ташкент", "Tashkent"),
     "Andijon": ("Andijon", "Андижан"),
     "Samarqand": ("Samarqand", "Самарканд"),
     "Fargʻona": ("Farg'ona", "Фергана"),
@@ -207,6 +192,25 @@ GEO_CITY: dict[str, tuple[str, ...]] = {
     "Buxoro": ("Buxoro", "Бухара"),
     "Nukus": ("Nukus", "Нукус"),
 }
+GEO_TASHKENT_PLACES = (
+    "Abu Saxiy",
+    "Abu Sahiy",
+    "Абу Сахий",
+    "Bek Baraka",
+    "Chorsu",
+    "Чорсу",
+    "Urikzor",
+    "Урикзор",
+    "Yangiobod",
+    "Янгиобод",
+    "Malika",
+    "Малика",
+    "Qo'yliq",
+    "Куйлюк",
+    "Sergeli",
+    "Сергели",
+    "Chinni bozor",
+)
 BULKY_CATEGORIES: dict[str, tuple[str, ...]] = {
     # canonical key → terms in the three scripts (also the SERP <category> axis, 17 keys)
     "textile": ("mato", "gazlama", "мато", "газлама", "ткани", "текстиль"),
@@ -281,99 +285,11 @@ BULKY_CATEGORIES: dict[str, tuple[str, ...]] = {
     "sport": ("sport", "trenajyor", "спорт", "тренажер"),
 }
 
-# Volume: a number next to a cubic-metre word. Group 1 = the number.
-VOLUME_RE = re.compile(
-    r"(?<![\d.,])(\d{1,3}(?:[.,]\d)?)\s*"
-    r"(?:kub|куб(?:\.?\s*м)?|m3|м3|m³|м³|kubometr|кубометр)"
-    rf"(?![a-zа-яё]|{_A})",
-    re.I,
-)
-# Container / truck / batch words (no number needed).
-CONTAINER_RE = re.compile(
-    r"(?<!\w)(?:konteyner|kontayner|контейнер|fura|фура|yarim\s*fura|полфуры|"
-    rf"20\s*(?:ft|fut|фут|{_A})|40\s*(?:ft|fut|фут|{_A})|"
-    r"tonna|тонн[аы]?|partiya|партия|партиями)(?!\w)",
-    re.I,
-)
-# Buyer intent (groups): Latin, Cyrillic Uzbek, Russian. «олиб кел(иш|ади|…)»
-# mirrors the Latin endings (03 §1.4 has only the bare «олиб кел», so «ким олиб
-# келади?» — the commonest Cyrillic ask — never matched).
-INTENT_RE = re.compile(
-    rf"(?<!\w)(?:kim\s+olib\s+kel|olib\s+kel(?:ish|adi|asiz|ib)|kerak|kere|kimda\s+bor|"
-    rf"kim\s+sotadi|ta{_A}?minotchi|"
-    r"ким\s+олиб\s+кел|олиб\s+кел(?:иш|ади|асиз|иб)?|керак|кимда\s+бор|таъминотчи|"
-    r"ищу|нужен|нужна|нужно|требуется|кто\s+(?:возит|доставит|привез[её]т)|поставщик|"
-    r"закуп(?:аю|ить|ка))(?!\w)",
-    re.I,
-)
-# Supply-side posts by a wholesaler (channel posts): arrival of stock.
-# The second line is the Uzbek Cyrillic of the first (not in 03 §1.4); «оптовые
-# цен\w*» takes its ending (03 §1.4's «цен» before (?!\w) matched no real text).
-SUPPLY_RE = re.compile(
-    r"(?<!\w)(?:konteyner\s+keldi|yangi\s+(?:tovar|partiya|konteyner)|yuk\s+keldi|"
-    r"контейнер\s+келди|янги\s+(?:товар|партия|контейнер)|юк\s+келди|"
-    r"фура\s+пришла|контейнер\s+(?:пришёл|пришел)|"
-    r"новое\s+поступление|новая\s+партия|zavod\s+narxida|завод\s+нархида|optom\s+narx|"
-    r"оптом\s+нарх|оптов(?:ые|ая)\s+цен\w*)(?!\w)",
-    re.I,
-)
-# Competitors / touts (forwarders, buying agents, brokers) — exclusion, their
-# channels are seeds. The third line is the Uzbek Cyrillic of the Latin
-# alternatives (not in 03 §1.4); «bojxona xizmat\w*» takes its ending, as
-# «Bojxona xizmati» is how it is written.
-COMPETITOR_RE = re.compile(
-    r"(?<!\w)(?:kargo|karg[oa]|cargo|карго|logistik[a]?|логистик[аи]|ekspeditor|экспедитор|"
-    r"dostavka|доставка|yetkazib\s+beramiz|yuk\s+tashi(?:sh|ymiz|sh\s+xizmati)|"
-    r"етказиб\s+берамиз|юк\s+таши(?:ш|ймиз|ш\s+хизмати)|божхона\s+(?:хизмат|брокер)\w*|"
-    r"грузоперевозк\w*|broker|брокер|rastamojka|растамож\w*|bojxona\s+(?:xizmat|broker)\w*|"
-    r"таможенн(?:ое|ый)\s+оформлен\w*|vikup|выкуп|avia\s*kargo|авиа\s*карго|express|"
-    r"экспресс|1688\s*(?:kargo|cargo|карго|zakupka))(?!\w)",
-    re.I,
-)
-# B2C / personal use.
-B2C_RE = re.compile(
-    rf"(?<!\w)(?:o{_A}?zim\s+uchun|ўзим\s+учун|для\s+себя|1\s*(?:dona|шт\.?|штук[аи]?)|"
-    r"bitta\s+(?:dona|narsa)|битта|shaxsiy|шахсий|лично\s+для|taobao\s*zakaz|"
-    r"zakaz\s+qilib\s+ber|в\s+розницу|доставка\s+по\s+городу)(?!\w)",
-    re.I,
-)
-# The normaliser validates operator codes (services/keys.phone_e164 / phone_kind).
-PHONE_RE = re.compile(
-    r"(?<!\d)(?:\+?998[\s\-]?)?\(?(\d{2})\)?[\s\-]?(\d{3})[\s\-]?(\d{2})[\s\-]?(\d{2})(?!\d)"
-)
-# Names ending in "bot" and reserved t.me paths are rejected by
-# services/normalise.telegram_key, not here.
-TG_RE = re.compile(
-    r"(?:(?:https?://)?t\.me/(?!joinchat|\+|s/)|(?<![\w@])@)([A-Za-z][A-Za-z0-9_]{4,31})"
-)
-IG_RE = re.compile(
-    r"(?:instagram\.com/|(?<![\w.@])(?:инстаграм|instagram|insta|ig)(?:\s*[:\-]\s*@?|\s*@))"
-    r"([A-Za-z0-9._]{2,30})(?![\w.])",
-    re.I,
-)
-EMAIL_RE = re.compile(
-    r"(?<![\w.%+-])[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}(?![\w-])"
-)
-STIR_RE = re.compile(r"(?<!\w)(?:STIR|СТИР|ИНН|INN|TIN)\s*[:№#]?\s*(\d{9})(?!\d)", re.I)
-LEGAL_FORM_RE = re.compile(
-    r"(?<!\w)(MChJ|MCHJ|МЧЖ|OOO|ООО|LLC|XK|ХК|QK|ҚК|AJ|АЖ|AO|АО|ЧП|XChK|ХЧК|YaTT|ЯТТ|ИП|SP|СП|"
-    rf"ТОО|JV|QO{_A}?SHMA)(?!\w)",
-    re.I,
-)
-CAPTCHA_MARKERS = (
-    "captcha",
-    "anomaly.js",
-    "Are you a robot",
-    "Доступ ограничен",
-    "cf-chl",
-)
+# --- Inflection tables ----------------------------------------------------------
 
-
-# --- Word lists as patterns ---------------------------------------------------
-
-# Uzbek case/plural/possessive endings a list word may carry, up to two in a
-# row: «Xitoydan», «dilerlarga», «optomchilar», «skladimizdan». The Cyrillic set
-# is the same endings spelled by services/text.transliterate.
+# Uzbek case/plural/possessive endings a word may carry, up to two in a row:
+# «Xitoydan», «dilerlarga», «optomchilar», «skladimizdan». The Cyrillic set is
+# the same endings spelled by services/text.transliterate.
 UZ_SUFFIXES_LATN = (
     "larining",
     "laridan",
@@ -407,7 +323,8 @@ UZ_SUFFIXES_CYRL = tuple(transliterate(s) for s in UZ_SUFFIXES_LATN)
 UZ_SUFFIX_CHAIN = 2
 # Russian noun endings on the stem of a Cyrillic word: «Китае», «дилеров»,
 # «сантехники», «оборудования». A word ending in one of RU_STEM_DROP loses that
-# letter before the ending is added («Китай» → «Кита-» + «е»).
+# letter before the ending is added («Китай» → «Кита-» + «е», «сырьё» →
+# «сырь-» + «я»).
 RU_ENDINGS = (
     "ами",
     "ями",
@@ -432,7 +349,189 @@ RU_ENDINGS = (
     "о",
     "ь",
 )
-RU_STEM_DROP = frozenset("аяйьоеыи")
+RU_STEM_DROP = frozenset("аяйьоеёыи")
+# The endings of a measure word: «10 kubli», «5 kubdan ortiq», «20 kubga». Not
+# the diminutive «cha» or a bare «k», so «kubcha», «kubik» and «kubok» (a cube,
+# a toy cube, a cup) stay out.
+UNIT_SUFFIXES_LATN = (
+    "gacha",
+    "dagi",
+    "ning",
+    "lik",
+    "lar",
+    "dan",
+    "ga",
+    "da",
+    "li",
+    "ni",
+    "si",
+    "i",
+)
+UNIT_SUFFIXES_CYRL = tuple(transliterate(s) for s in UNIT_SUFFIXES_LATN)
+# A trade noun's Russian case endings: «кубов», «контейнера», «фуру», «тонн».
+RU_NOUN_ENDINGS = ("ами", "ах", "ам", "ов", "ой", "ом", "а", "у", "ы", "е")
+
+_CYRILLIC = re.compile(r"[Ѐ-ӿ]")
+_E_OR_YO = re.compile("[ЕЁеё]")
+
+
+def _alternation(options: Iterable[str]) -> str:
+    return "|".join(sorted(set(options), key=len, reverse=True))
+
+
+def _literal(word: str) -> str:
+    # re.escape leaves "'" alone (Python ≥ 3.7); widen it to every variant. A
+    # Russian е and ё are one letter as people type them («импортер» for
+    # «импортёр», «сырье» for «сырьё»); case is the pattern's re.I.
+    return _E_OR_YO.sub("[её]", re.escape(word).replace("'", _A))
+
+
+def _chain(suffixes: Iterable[str]) -> str:
+    """Up to UZ_SUFFIX_CHAIN of ``suffixes`` in a row, or none."""
+    return f"(?:{_alternation(map(_literal, suffixes))}){{0,{UZ_SUFFIX_CHAIN}}}"
+
+
+def _ending(endings: Iterable[str]) -> str:
+    """One of ``endings``, or none."""
+    return f"(?:{_alternation(map(_literal, endings))})?"
+
+
+_UZ_LATN = _chain(UZ_SUFFIXES_LATN)
+_UZ_CYRL = _chain(UZ_SUFFIXES_CYRL)
+_UNIT_LATN = _chain(UNIT_SUFFIXES_LATN)
+_UNIT_CYRL = _chain(UNIT_SUFFIXES_CYRL)
+_RU_NOUN = _ending(RU_NOUN_ENDINGS)
+# «kargoxona» / «каргохона» is a cargo office: kargo + -xona, then the usual
+# endings («kargoxonasi»).
+_KARGO_LATN = _chain((*UZ_SUFFIXES_LATN, "xona"))
+_KARGO_CYRL = _chain((*UZ_SUFFIXES_CYRL, "хона"))
+# Not followed by a letter of any script, nor by an apostrophe (oʻ, gʻ).
+_NO_LETTER = rf"(?![^\W\d_]|{_A})"
+
+
+# --- Regexes ----------------------------------------------------------------------
+
+# Volume: a number next to a cubic-metre word. Group 1 = the number. The unit
+# takes its ending — «20 кубов», «30 кубометров», «3 куба», «5 kubdan ortiq»,
+# «10 kubli yuk» are how volumes are written; 03 §1.4's bare unit before a
+# no-letter lookahead read none of them. «кубик» (a toy cube, a cc) is not a
+# unit here: «5 кубик ўйинчоқ» must not score as five cubic metres.
+VOLUME_RE = re.compile(
+    r"(?<![\d.,])(\d{1,3}(?:[.,]\d)?)\s*"
+    r"(?:куб\.?\s*м"
+    rf"|(?:kubometr|kub|m3|m³){_UNIT_LATN}"
+    rf"|(?:кубометр|куб|м3|м³)(?:{_alternation(map(_literal, UNIT_SUFFIXES_CYRL))}"
+    rf"|{_alternation(map(_literal, RU_NOUN_ENDINGS))}){{0,{UZ_SUFFIX_CHAIN}}})"
+    rf"{_NO_LETTER}",
+    re.I,
+)
+# Container / truck / batch words (no number needed), with their Uzbek suffixes
+# («konteynerda», «furaga», «партияси») and Russian case endings («контейнера»,
+# «фуру», «партии»): 03 §1.4's bare words missed the inflected forms.
+CONTAINER_RE = re.compile(
+    rf"(?<!\w)(?:(?:konteyner|kontayner|yarim\s*fura|fura|tonna|partiya){_UZ_LATN}"
+    rf"|(?:контейнер|фура|тонна|партия){_UZ_CYRL}"
+    rf"|(?:контейнер|фур|тонн){_RU_NOUN}|парти(?:ями|ях|ям|ей|я|и|ю|й)|полфуры"
+    rf"|20\s*(?:ft|fut|фут|{_A})|40\s*(?:ft|fut|фут|{_A}))(?!\w)",
+    re.I,
+)
+# Buyer intent (groups): Latin, Cyrillic Uzbek, Russian. «олиб кел(иш|ади|…)»
+# mirrors the Latin endings (03 §1.4 has only the bare «олиб кел», so «ким олиб
+# келади?» — the commonest Cyrillic ask — never matched). The question forms
+# «kerakmi?», «ищем», «нужны» and the plurals of «поставщик» / «закуп…» join
+# the 03 §1.4 words; «keraksiz», «kerakmas» (not needed) stay out.
+INTENT_RE = re.compile(
+    rf"(?<!\w)(?:kim\s+olib\s+kel|olib\s+kel(?:ish|adi|asiz|ib)|kerak(?:mi|dir)?|kere|"
+    rf"kimda\s+bor|kim\s+sotadi|ta{_A}?minotchi(?:lar)?|"
+    r"ким\s+олиб\s+кел|олиб\s+кел(?:иш|ади|асиз|иб)?|керак(?:ми|дир)?|кимда\s+бор|"
+    r"таъминотчи(?:лар)?|"
+    r"ищу|ищем|нужен|нужна|нужно|нужны|требуется|требуются|"
+    r"кто\s+(?:возит|доставит|привез[её]т)|поставщик(?:ами|ах|ам|ов|ом|а|и|у)?|"
+    r"закуп(?:аю|аем|ает|ают|ить|ками|кой|ка|ки|ку|ок))(?!\w)",
+    re.I,
+)
+# Supply-side posts by a wholesaler (channel posts): arrival of stock. The
+# Uzbek Cyrillic line spells the Latin one (not in 03 §1.4); plurals and endings
+# are 03's words as written («Yangi tovarlar keldi», «Konteynerlar keldi»,
+# «Новые поступления», «optom narxlarda»); «оптовые цен\w*» takes its ending.
+SUPPLY_RE = re.compile(
+    rf"(?<!\w)(?:konteyner(?:lar)?\s+keldi|yangi\s+(?:tovar|partiya|konteyner){_UZ_LATN}|"
+    rf"(?:yuk|tovar)(?:lar)?\s+keldi|zavod\s+narx(?:lar)?ida|optom\s+narx{_UZ_LATN}|"
+    rf"контейнер(?:лар)?\s+келди|янги\s+(?:товар|партия|контейнер){_UZ_CYRL}|"
+    rf"(?:юк|товар)(?:лар)?\s+келди|завод\s+нарх(?:лар)?ида|оптом\s+нарх{_UZ_CYRL}|"
+    r"фура\s+пришла|фуры\s+пришли|контейнер\s+приш[её]л|контейнеры\s+пришли|"
+    r"нов(?:ое|ые|ых)\s+поступлени[еяй]|нов(?:ая|ые|ую)\s+парти[яюи]|"
+    r"оптов(?:ые|ая)\s+цен\w*)(?!\w)",
+    re.I,
+)
+# Competitors / touts (forwarders, buying agents, brokers) — exclusion, their
+# channels are seeds. The Uzbek words take their suffixes («kargoxonasi»,
+# «kargomiz», «kargoga»), the Russian ones their endings («логистикой»,
+# «экспедиторская»), and the Uzbek Cyrillic spellings of the Latin alternatives
+# join (not in 03 §1.4); «bojxona xizmat\w*» takes its ending, as «Bojxona
+# xizmati» is how it is written.
+COMPETITOR_RE = re.compile(
+    rf"(?<!\w)(?:(?:avia\s*)?(?:kargo|cargo){_KARGO_LATN}|karga|"
+    rf"(?:авиа\s*)?карго{_KARGO_CYRL}|"
+    rf"logistika{_UZ_LATN}|logistik|logistics?|логистика{_UZ_CYRL}|"
+    r"логистик(?:ами|ах|ам|ой|а|е|и|у)|логистическ\w*|"
+    rf"(?:ekspeditor|broker|rastamojka|vikup){_UZ_LATN}|экспедитор\w*|экспедиров\w*|"
+    r"брокер\w*|растамож\w*|выкуп(?:ом|а|у)?|"
+    r"dostavka|доставка|yetkazib\s+beramiz|yuk\s+tashi(?:sh|ymiz|sh\s+xizmati)|"
+    r"етказиб\s+берамиз|юк\s+таши(?:ш|ймиз|ш\s+хизмати)|божхона\s+(?:хизмат|брокер)\w*|"
+    r"грузоперевозк\w*|bojxona\s+(?:xizmat|broker)\w*|"
+    r"таможенн(?:ое|ый)\s+оформлен\w*|express|"
+    r"экспресс|1688\s*(?:kargo|cargo|карго|zakupka))(?!\w)",
+    re.I,
+)
+# B2C / personal use.
+B2C_RE = re.compile(
+    rf"(?<!\w)(?:o{_A}?zim\s+uchun|ўзим\s+учун|для\s+себя|1\s*(?:dona|шт\.?|штук[аи]?)|"
+    r"bitta\s+(?:dona|narsa)|битта|shaxsiy|шахсий|лично\s+для|taobao\s*zakaz|"
+    r"zakaz\s+qilib\s+ber|в\s+розницу|доставка\s+по\s+городу)(?!\w)",
+    re.I,
+)
+# The normaliser validates operator codes (services/keys.phone_e164 / phone_kind).
+PHONE_RE = re.compile(
+    r"(?<!\d)(?:\+?998[\s\-]?)?\(?(\d{2})\)?[\s\-]?(\d{3})[\s\-]?(\d{2})[\s\-]?(\d{2})(?!\d)"
+)
+# Names ending in "bot" and reserved t.me paths are rejected by
+# services/normalise.telegram_key, not here.
+TG_RE = re.compile(
+    r"(?:(?:https?://)?t\.me/(?!joinchat|\+|s/)|(?<![\w@])@)([A-Za-z][A-Za-z0-9_]{4,31})"
+)
+# The label branch needs a word start («big shop» is not the handle «shop») and
+# a separator: a colon or dash, an «@», or at least one space — «Instagram
+# namuna_shop» is a handle and the pseudonymiser must mask it (04 §4.2), while
+# «Instagramda» is a word. The space-only form also catches ordinary words
+# («Instagram sahifamiz»); masking one is harmless, and
+# services/normalise.instagram_handles keeps only handle-shaped ones of it.
+IG_RE = re.compile(
+    r"(?:instagram\.com/|(?<![\w.@])(?:инстаграм|instagram|insta|ig)"
+    r"(?:\s*[:\-–—]\s*@?|\s*@|\s+))"
+    r"([A-Za-z0-9._]{2,30})(?![\w.])",
+    re.I,
+)
+EMAIL_RE = re.compile(
+    r"(?<![\w.%+-])[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}(?![\w-])"
+)
+STIR_RE = re.compile(r"(?<!\w)(?:STIR|СТИР|ИНН|INN|TIN)\s*[:№#]?\s*(\d{9})(?!\d)", re.I)
+LEGAL_FORM_RE = re.compile(
+    r"(?<!\w)(MChJ|MCHJ|МЧЖ|OOO|ООО|LLC|XK|ХК|QK|ҚК|AJ|АЖ|AO|АО|ЧП|XChK|ХЧК|YaTT|ЯТТ|ИП|SP|СП|"
+    rf"ТОО|JV|QO{_A}?SHMA)(?!\w)",
+    re.I,
+)
+CAPTCHA_MARKERS = (
+    "captcha",
+    "anomaly.js",
+    "Are you a robot",
+    "Доступ ограничен",
+    "cf-chl",
+)
+
+
+# --- Word lists as patterns ---------------------------------------------------
+
 # A word shorter than this is matched only as written: «опт» must not grow into
 # «оптика», nor «Иу» into anything.
 INFLECT_MIN = 4
@@ -440,30 +539,16 @@ INFLECT_MIN = 4
 # «мат-» and read «мать» as a textile word.
 RU_INFLECT_MIN = 5
 
-_CYRILLIC = re.compile(r"[Ѐ-ӿ]")
-
-
-def _literal(word: str) -> str:
-    # re.escape leaves "'" alone (Python ≥ 3.7); widen it to every variant.
-    return re.escape(word).replace("'", _A)
-
-
-def _alternation(options: Iterable[str]) -> str:
-    return "|".join(sorted(set(options), key=len, reverse=True))
-
 
 def _word_pattern(word: str, *, inflect: bool) -> str:
     if not inflect or len(word) < INFLECT_MIN:
         return _literal(word)
     if not _CYRILLIC.search(word):
-        return (
-            f"{_literal(word)}(?:{_alternation(UZ_SUFFIXES_LATN)}){{0,{UZ_SUFFIX_CHAIN}}}"
-        )
-    uz_cyrl = f"(?:{_alternation(UZ_SUFFIXES_CYRL)}){{0,{UZ_SUFFIX_CHAIN}}}"
-    forms = [f"{_literal(word)}{uz_cyrl}"]
+        return f"{_literal(word)}{_UZ_LATN}"
+    forms = [f"{_literal(word)}{_UZ_CYRL}"]
     if len(word) >= RU_INFLECT_MIN:
         stem = word[:-1] if word[-1].lower() in RU_STEM_DROP else word
-        forms.append(f"{_literal(stem)}(?:{_alternation(RU_ENDINGS)})")
+        forms.append(f"{_literal(stem)}(?:{_alternation(map(_literal, RU_ENDINGS))})")
     return "(?:" + "|".join(forms) + ")"
 
 
@@ -475,8 +560,8 @@ def _term_pattern(term: str, *, inflect: bool) -> str:
 
 
 def terms_re(terms: Iterable[str], *, inflect: bool = True) -> re.Pattern[str]:
-    """Any of ``terms`` as a whole word or phrase, any case, any apostrophe,
-    with an Uzbek or Russian ending on its last word when ``inflect``."""
+    """Any of ``terms`` as a whole word or phrase, any case, any apostrophe, е
+    or ё alike, with an Uzbek or Russian ending on its last word when ``inflect``."""
     ordered = sorted(set(terms), key=len, reverse=True)
     body = "|".join(_term_pattern(t, inflect=inflect) for t in ordered)
     return re.compile(rf"(?<!\w)(?:{body})(?!\w)", re.I)
@@ -486,6 +571,7 @@ B2B_RE = terms_re(chain.from_iterable(B2B_MARKERS.values()))
 CHINA_RE = terms_re(CHINA_WORDS)
 GEO_RE = terms_re(GEO)
 CITY_RES: dict[str, re.Pattern[str]] = {city: terms_re(t) for city, t in GEO_CITY.items()}
+TASHKENT_PLACES_RE = terms_re(GEO_TASHKENT_PLACES)
 BULKY_RES: dict[str, re.Pattern[str]] = {
     category: terms_re(t) for category, t in BULKY_CATEGORIES.items()
 }

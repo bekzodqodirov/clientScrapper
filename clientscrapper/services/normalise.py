@@ -26,11 +26,13 @@ from clientscrapper.collectors.keywords import (
     LEGAL_FORM_RE,
     PHONE_RE,
     STIR_RE,
+    TASHKENT_PLACES_RE,
     TG_RE,
 )
 from clientscrapper.services.keys import (
     LEGAL_FORM_TOKENS_RE,
     NOT_WEBSITE_HOSTS,
+    TENANT_HOSTS,
     PhoneKind,
     domain_key,
     instagram_key,
@@ -41,12 +43,15 @@ from clientscrapper.services.keys import (
     stir_key,
     username_key,
 )
-from clientscrapper.services.names import FIRST_NAMES, HONORIFICS
+from clientscrapper.services.names import FIRST_NAMES
 from clientscrapper.services.text import fold_apostrophes, to_latin
 
 __all__ = [
     "GENERIC_TOKENS",
     "LINK_HUB_HOSTS",
+    "PERSON_HONORIFICS",
+    "SHARED_HOSTS",
+    "TASHKENT_REGION",
     "TG_RESERVED",
     "LegalForm",
     "Phone",
@@ -171,9 +176,28 @@ def telegram_handles(text: str) -> list[str]:
     return _unique([telegram_key(m.group(0)) for m in TG_RE.finditer(text)])
 
 
+# IG_RE's label-and-a-space form («Instagram namuna_shop») is wide on purpose —
+# the pseudonymiser masks with it — so it also reads «Instagram sahifamiz» or
+# «Instagram 2024». A handle is an exact identity key (04 §2.1): a word read as
+# one would join every firm that writes it. After a bare space, only a
+# handle-shaped token (a letter and a dot, underscore or digit) is a handle.
+_IG_BARE_LABEL = re.compile(r"(?:инстаграм|instagram|insta|ig)\s+", re.I)
+_HANDLE_MARK = re.compile(r"[._0-9]")
+_HANDLE_LETTER = re.compile(r"[A-Za-z]")
+
+
 def instagram_handles(text: str) -> list[str]:
     """Every ``IG_RE`` hit in ``text`` that is a usable Instagram handle, in order."""
-    return _unique([instagram_key(m.group(1)) for m in IG_RE.finditer(text)])
+    keys: list[str | None] = []
+    for match in IG_RE.finditer(text):
+        handle = match.group(1)
+        label = text[match.start() : match.start(1)]
+        if _IG_BARE_LABEL.fullmatch(label) and not (
+            _HANDLE_MARK.search(handle) and _HANDLE_LETTER.search(handle)
+        ):
+            continue
+        keys.append(instagram_key(handle))
+    return _unique(keys)
 
 
 # --- Website (04 §1.3) --------------------------------------------------------
@@ -193,17 +217,102 @@ LINK_HUB_HOSTS: Final = frozenset(
         "api.whatsapp.com",
     }
 )
-_NOT_A_SITE = NOT_WEBSITE_HOSTS | LINK_HUB_HOSTS
+# Hosts whose pages belong to many companies: a card, a profile, a map pin or a
+# shop on one of them is never a company's own website. 04 §1.3 names only the
+# social hosts and the link hubs; the rule is the same for these — two firms
+# whose «website» is a 2GIS card or a sites.google.com page must not share a
+# website_key (an exact identity key, 04 §2.1), and ux_companies_domain would
+# refuse the second. The directory and news hosts are 03 §2.1's.
+SHARED_HOSTS: Final = frozenset(
+    {
+        # maps and search
+        "2gis.uz",
+        "2gis.ru",
+        "2gis.kz",
+        "2gis.com",
+        "yandex.uz",
+        "yandex.ru",
+        "yandex.com",
+        "yandex.kz",
+        "ya.ru",
+        "google.com",
+        "google.uz",
+        "google.ru",
+        "goo.gl",
+        "g.page",
+        "g.co",
+        # directories (03 §2.1 DIRECTORY_HOSTS)
+        "goldenpages.uz",
+        "yellowpages.uz",
+        "top.uz",
+        "glotr.uz",
+        "prom.uz",
+        "flagma.uz",
+        "orginfo.uz",
+        "uztender.com",
+        "hh.uz",
+        "hh.ru",
+        "enfsolar.com",
+        "all.biz",
+        "optlist.ru",
+        # news (03 §2.1 NEWS_HOSTS) and reference
+        "spot.uz",
+        "kun.uz",
+        "gazeta.uz",
+        "daryo.uz",
+        "uznews.uz",
+        "podrobno.uz",
+        "review.uz",
+        "afisha.uz",
+        "wikipedia.org",
+        # social, video, messengers
+        "tiktok.com",
+        "vk.com",
+        "ok.ru",
+        "x.com",
+        "twitter.com",
+        "linkedin.com",
+        "pinterest.com",
+        "threads.net",
+        "youtu.be",
+        "fb.com",
+        "fb.me",
+        "instagr.am",
+        "telegra.ph",
+        "whatsapp.com",
+        "wa.link",
+        # short links
+        "tinyurl.com",
+        "vk.cc",
+        "t.ly",
+        "is.gd",
+        # marketplaces and the Chinese suppliers' platforms
+        "wildberries.ru",
+        "wildberries.uz",
+        "ozon.ru",
+        "alibaba.com",
+        "1688.com",
+        "taobao.com",
+        "aliexpress.com",
+        "aliexpress.ru",
+        "made-in-china.com",
+    }
+)
+_NOT_A_SITE = NOT_WEBSITE_HOSTS | LINK_HUB_HOSTS | SHARED_HOSTS
 
 
 def website_key(raw: str | None) -> str | None:
     """``domain_key`` for a company website, or None when the host is a social or
     marketplace host, a link hub (the enrichment step E2 fetches those once and
-    parses them), or a subdomain of either (``m.facebook.com``)."""
+    parses them), a shared host (``SHARED_HOSTS``), a subdomain of any of them
+    (``m.facebook.com``, ``sites.google.com``), or a site builder's own host
+    (``blogspot.com`` — its tenants ``namuna.blogspot.com`` are websites)."""
     domain = domain_key(raw)
     if domain is None:
         return None
     if any(domain == host or domain.endswith("." + host) for host in _NOT_A_SITE):
+        return None
+    if domain in TENANT_HOSTS:
         return None
     return domain
 
@@ -300,10 +409,25 @@ def legal_form_in_name(name: str) -> LegalForm | None:
 # --- City (04 §1.6) -------------------------------------------------------------
 
 
+# The Tashkent region is not the city: its landlines are +998 70, the city's
+# +998 71, and a bare 7-digit number there is not a city landline (04 §1.1
+# rule 6). It keeps a value of its own so neither the phone rule nor the
+# resolver's city agreement (04 §2.1/§2.2) reads a region firm as a city one.
+TASHKENT_REGION: Final = "Toshkent viloyati"
+_TASHKENT_REGION_RE = re.compile(
+    r"(?<!\w)(?:(?:toshkent|тошкент|ташкент|tashkent)(?:\s+|\s*-\s*)"
+    r"(?:viloyat\w*|вилоят\w*|област\w*|обл\.?|oblast\w*|region\w*)"
+    r"|ташкентск(?:ая|ой|ую)\s+(?:област\w*|обл\.?))(?!\w)",
+    re.I,
+)
+
+
 def canonical_city(text: str | None) -> str | None:
-    """The canonical Latin city of the first ``GEO`` place in ``text`` (an address
-    or a city field): «г. Ташкент» → «Toshkent», «Chorsu bozori» → «Toshkent»,
-    «Фергана» → «Fargʻona»."""
+    """The canonical Latin city of ``text`` (an address or a city field): the
+    first city named — «г. Ташкент» → «Toshkent», «Фергана» → «Fargʻona»,
+    «Toshkent viloyati, Chirchiq» → «Toshkent viloyati» — else «Toshkent» when
+    a Tashkent bazaar or district is named («Chorsu bozori»). A city beats a
+    bazaar wherever it stands: «Chorsu bozori Samarqand» is Samarqand."""
     if not text:
         return None
     best: tuple[int, str] | None = None
@@ -311,7 +435,12 @@ def canonical_city(text: str | None) -> str | None:
         match = pattern.search(text)
         if match and (best is None or match.start() < best[0]):
             best = (match.start(), city)
-    return best[1] if best else None
+    region = _TASHKENT_REGION_RE.search(text)
+    if region and (best is None or region.start() <= best[0]):
+        return TASHKENT_REGION
+    if best:
+        return best[1]
+    return "Toshkent" if TASHKENT_PLACES_RE.search(text) else None
 
 
 # --- Person-shaped names (04 §1.6, §2.2) -----------------------------------------
@@ -359,6 +488,10 @@ _SURNAME_SUFFIXES = ("ovich", "evich", "ovna", "evna", "ova", "eva", "ov", "ev")
 # ordinary words («n-ova», «ki-ev», «l-ev»).
 _SURNAME_STEM_MIN = 3
 _PERSON_MAX_TOKENS = 3
+# 04 §1.6's honorific clause, «aka|opa|ака|опа», in name_key form. Not MIYA's
+# whole HONORIFICS list: «Ustoz Mebel», «Bro Shop», «Bobo Baraka» are shop
+# names, and a person-shaped name loses its place as the company name.
+PERSON_HONORIFICS: Final = frozenset({"aka", "opa"})
 _LOOSE_FIRST_NAMES: Final = frozenset(loose_key(n) for n in FIRST_NAMES)
 
 
@@ -384,7 +517,7 @@ def is_person_shaped(key: str) -> bool:
         return False
     if _INITIALS.fullmatch(key):
         return True
-    if any(_surname_shaped(t) or t in HONORIFICS for t in tokens):
+    if any(_surname_shaped(t) or t in PERSON_HONORIFICS for t in tokens):
         return True
     return (
         len(tokens) <= 2

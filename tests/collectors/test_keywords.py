@@ -48,14 +48,27 @@ CASES: dict[str, tuple[re.Pattern[str], Extract, Cases]] = {
                     ("Guangzhoudan 2 kub mato kerak", "2"),
                     ("Jami 12.5 m3 yuk bor", "12.5"),
                     ("hajmi 2,5 kubometr", "2,5"),
+                    ("5 kubdan ortiq yuk", "5"),
+                    ("10 kubli yuk bor", "10"),
+                    ("20 kubga yaqin", "20"),
+                    ("3 kubometrdan kam", "3"),
                 ],
-                ["5 kubok yutdik", "kub shaklidagi quti", "Narxi 3 mln so'm", "1250 kub"],
+                [
+                    "5 kubok yutdik",
+                    "kub shaklidagi quti",
+                    "Narxi 3 mln so'm",
+                    "1250 kub",
+                    "5 kubcha shakar",
+                    "3 kubik muz",
+                ],
             ),
             "uz-Cyrl": (
                 [
                     ("Хитойдан 5 куб юк керак", "5"),
                     ("20 м3 мато бор", "20"),
                     ("3 кубометр мебель", "3"),
+                    ("5 кубдан ортиқ юк", "5"),
+                    ("10 кубли юк", "10"),
                 ],
                 ["куб шаклидаги қути", "5 кубик ўйинчоқ", "Нархи 3 млн сўм"],
             ),
@@ -65,8 +78,20 @@ CASES: dict[str, tuple[re.Pattern[str], Extract, Cases]] = {
                     ("груз 15 м³ из Китая", "15"),
                     ("10 куб м ткани", "10"),
                     ("объём 2.5 м3", "2.5"),
+                    ("Нужно привезти 20 кубов из Китая", "20"),
+                    ("30 кубометров груза", "30"),
+                    ("3 куба мебели", "3"),
+                    ("в 1 кубе", "1"),
                 ],
-                ["кубик Рубика", "цена 3 млн сум", "объём не указан, звоните"],
+                [
+                    "кубик Рубика",
+                    "цена 3 млн сум",
+                    "объём не указан, звоните",
+                    # «кубик» is a toy cube or a cc as often as a cubic metre;
+                    # the model reads «12 кубиков груза» (04 §4.3), the rule does not.
+                    "12 кубиков",
+                    "2 кубка чемпиона",
+                ],
             ),
         },
     ),
@@ -81,8 +106,17 @@ CASES: dict[str, tuple[re.Pattern[str], Extract, Cases]] = {
                     ("40 fut konteyner kerak", "40 fut"),
                     ("2 tonna mato", "tonna"),
                     ("20ʼ konteyner", "20ʼ"),
+                    ("konteynerda keladi", "konteynerda"),
+                    ("furaga yuk kerak", "furaga"),
+                    ("2 ta konteynerlarimiz bor", "konteynerlarimiz"),
+                    ("tonnadan sotamiz", "tonnadan"),
                 ],
-                ["kontakt raqam", "furgon xizmati", "tonnel qurilishi"],
+                [
+                    "kontakt raqam",
+                    "furgon xizmati",
+                    "tonnel qurilishi",
+                    "partiyaviy ish",
+                ],
             ),
             "uz-Cyrl": (
                 [
@@ -90,6 +124,9 @@ CASES: dict[str, tuple[re.Pattern[str], Extract, Cases]] = {
                     ("фура юк керак", "фура"),
                     ("2 тонна шакар", "тонна"),
                     ("янги партия", "партия"),
+                    ("контейнерда келади", "контейнерда"),
+                    ("фурага юк", "фурага"),
+                    ("партияси тайёр", "партияси"),
                 ],
                 ["фургон хизмати", "тоннел", "контакт рақам"],
             ),
@@ -99,8 +136,14 @@ CASES: dict[str, tuple[re.Pattern[str], Extract, Cases]] = {
                     ("контейнер 40 фут", "контейнер"),
                     ("3 тонны груза", "тонны"),
                     ("поставки партиями", "партиями"),
+                    ("Ищу фуру до Ташкента", "фуру"),
+                    ("2 контейнера из Китая", "контейнера"),
+                    ("отгрузка контейнеров", "контейнеров"),
+                    ("5 фур в месяц", "фур"),
+                    ("10 тонн груза", "тонн"),
+                    ("новые партии", "партии"),
                 ],
-                ["фургон", "тоннель", "партийный билет"],
+                ["фургон", "тоннель", "партийный билет", "фурнитура"],
             ),
         },
     ),
@@ -114,8 +157,10 @@ CASES: dict[str, tuple[re.Pattern[str], Extract, Cases]] = {
                     ("Guangzhoudan mato kim olib keladi?", "olib keladi"),
                     ("Yiwudan tovar kimda bor?", "kimda bor"),
                     ("taʼminotchi qidiryapmiz", "taʼminotchi"),
+                    ("Mato kerakmi?", "kerakmi"),
+                    ("taʼminotchilar kerak", "taʼminotchilar"),
                 ],
-                ["keraksiz narsalar", "olib ketish xizmati", "Biz sotamiz"],
+                ["keraksiz narsalar", "olib ketish xizmati", "Biz sotamiz", "kerakmas"],
             ),
             "uz-Cyrl": (
                 [
@@ -123,8 +168,9 @@ CASES: dict[str, tuple[re.Pattern[str], Extract, Cases]] = {
                     ("ким олиб келади?", "олиб келади"),
                     ("кимда бор?", "кимда бор"),
                     ("таъминотчи қидиряпмиз", "таъминотчи"),
+                    ("Мато керакми?", "керакми"),
                 ],
-                ["кераксиз нарсалар", "олиб кетиш", "сотилади"],
+                ["кераксиз нарсалар", "олиб кетиш", "сотилади", "керакмас"],
             ),
             "ru": (
                 [
@@ -132,6 +178,10 @@ CASES: dict[str, tuple[re.Pattern[str], Extract, Cases]] = {
                     ("нужен контейнер", "нужен"),
                     ("кто доставит из Китая?", "кто доставит"),
                     ("требуется поставщик", "требуется"),
+                    ("Ищем поставщика мебели", "Ищем"),
+                    ("Срочно нужны поставщики", "нужны"),
+                    ("закупаем оптом", "закупаем"),
+                    ("Работаем с поставщиками из Китая", "поставщиками"),
                 ],
                 ["ищущий", "ненужное убрать", "закупочная цена"],
             ),
@@ -147,14 +197,20 @@ CASES: dict[str, tuple[re.Pattern[str], Extract, Cases]] = {
                     ("Yuk keldi, marhamat", "Yuk keldi"),
                     ("zavod narxida sotamiz", "zavod narxida"),
                     ("optom narx", "optom narx"),
+                    ("Yangi tovarlar keldi!", "Yangi tovarlar"),
+                    ("Konteynerlar keldi", "Konteynerlar keldi"),
+                    ("Tovarlar keldi, marhamat", "Tovarlar keldi"),
+                    ("optom narxlarda", "optom narxlarda"),
                 ],
-                ["yangi yil", "yuk kerak", "zavod manzili"],
+                ["yangi yil", "yuk kerak", "zavod manzili", "yangi tovarsiz"],
             ),
             "uz-Cyrl": (
                 [
                     ("Янги партия келди", "Янги партия"),
                     ("Контейнер келди!", "Контейнер келди"),
                     ("завод нархида", "завод нархида"),
+                    ("Янги товарлар келди", "Янги товарлар"),
+                    ("Контейнерлар келди", "Контейнерлар келди"),
                 ],
                 ["янги йил", "юк керак", "завод манзили"],
             ),
@@ -164,6 +220,9 @@ CASES: dict[str, tuple[re.Pattern[str], Extract, Cases]] = {
                     ("фура пришла", "фура пришла"),
                     ("оптовые цены", "оптовые цены"),
                     ("новая партия обуви", "новая партия"),
+                    ("Новые поступления каждую неделю", "Новые поступления"),
+                    ("Контейнеры пришли!", "Контейнеры пришли"),
+                    ("ждём новую партию", "новую партию"),
                 ],
                 ["новый год", "фура нужна", "оптика"],
             ),
@@ -179,6 +238,11 @@ CASES: dict[str, tuple[re.Pattern[str], Extract, Cases]] = {
                     ("Xitoydan yuk tashish xizmati", "yuk tashish"),
                     ("Bojxona xizmati", "Bojxona xizmati"),
                     ("Rastamojka va vikup", "Rastamojka"),
+                    ("Namuna kargoxonasi", "kargoxonasi"),
+                    ("Xitoydan kargomiz orqali", "kargomiz"),
+                    ("yukni kargoga topshiring", "kargoga"),
+                    ("Namuna kargosi", "kargosi"),
+                    ("Namuna Logistics", "Logistics"),
                 ],
                 ["Mato optom savdo", "Tikuv fabrikasi Toshkentda", "Narxlar kelishilgan"],
             ),
@@ -188,6 +252,8 @@ CASES: dict[str, tuple[re.Pattern[str], Extract, Cases]] = {
                     ("Хитойдан юк ташиш хизмати", "юк ташиш"),
                     ("Божхона брокер хизмати", "Божхона брокер"),
                     ("Растаможка хизмати", "Растаможка"),
+                    ("Намуна каргохонаси", "каргохонаси"),
+                    ("Хитойдан каргомиз орқали", "каргомиз"),
                 ],
                 ["Мато улгуржи савдо", "Тикув фабрикаси", "Нархлар келишилган"],
             ),
@@ -197,6 +263,9 @@ CASES: dict[str, tuple[re.Pattern[str], Extract, Cases]] = {
                     ("таможенное оформление грузов", "таможенное оформление"),
                     ("грузоперевозки по Узбекистану", "грузоперевозки"),
                     ("доставка из Китая", "доставка"),
+                    ("Занимаемся логистикой", "логистикой"),
+                    ("экспедиторская компания", "экспедиторская"),
+                    ("услуги выкупа", "выкупа"),
                 ],
                 ["Ткани оптом", "Мебельная фабрика", "Цены договорные"],
             ),
@@ -320,6 +389,10 @@ CASES: dict[str, tuple[re.Pattern[str], Extract, Cases]] = {
                     ("instagram.com/namuna_shop", "namuna_shop"),
                     ("Insta @namuna_uz", "namuna_uz"),
                     ("IG: namuna_mebel", "namuna_mebel"),
+                    # a space is a separator: the pseudonymiser masks with IG_RE
+                    ("Instagram namuna_shop", "namuna_shop"),
+                    ("IG namuna", "namuna"),
+                    ("Insta — namuna.uz", "namuna.uz"),
                 ],
                 [
                     "Instagramda kuzating",
@@ -336,6 +409,7 @@ CASES: dict[str, tuple[re.Pattern[str], Extract, Cases]] = {
                     ("Инстаграм: @namuna.tekstil", "namuna.tekstil"),
                     ("Инстаграм @namuna_uz", "namuna_uz"),
                     ("instagram.com/namuna_shop саҳифамиз", "namuna_shop"),
+                    ("Инстаграм namuna_uz", "namuna_uz"),
                 ],
                 [
                     "Инстаграмда кузатинг",
@@ -349,8 +423,15 @@ CASES: dict[str, tuple[re.Pattern[str], Extract, Cases]] = {
                     ("Инстаграм: @namuna_shop", "namuna_shop"),
                     ("наш instagram.com/namuna.tekstil/", "namuna.tekstil"),
                     ("insta: namuna_uz", "namuna_uz"),
+                    ("наш Instagram namuna.shop", "namuna.shop"),
                 ],
-                ["Инстаграм страница", "в инстаграме", "big sale", "Диван Zig-zag"],
+                [
+                    "Инстаграм страница",
+                    "в инстаграме",
+                    "big sale",
+                    "Диван Zig-zag",
+                    "подписывайтесь на Instagramm",
+                ],
             ),
         },
     ),
@@ -549,6 +630,37 @@ CASES: dict[str, tuple[re.Pattern[str], Extract, Cases]] = {
             ),
         },
     ),
+    "TASHKENT_PLACES_RE": (
+        kw.TASHKENT_PLACES_RE,
+        _whole,
+        {
+            "uz-Latn": (
+                [
+                    ("Chorsu bozori", "Chorsu"),
+                    ("Qoʻyliq bozorida", "Qoʻyliq"),
+                    ("Abu Sahiy savdo majmuasi", "Abu Sahiy"),
+                ],
+                # the city names are GEO_CITY's, never a place
+                ["Toshkent shahri", "Tashkent", "Samarqand"],
+            ),
+            "uz-Cyrl": (
+                [
+                    ("Чорсу бозори", "Чорсу"),
+                    ("Сергели тумани", "Сергели"),
+                    ("Урикзор бозорида", "Урикзор"),
+                ],
+                ["Тошкент шаҳри", "Самарқанд", "Москва"],
+            ),
+            "ru": (
+                [
+                    ("рынок Абу Сахий", "Абу Сахий"),
+                    ("Куйлюк, 3-й ряд", "Куйлюк"),
+                    ("Малика бозор", "Малика"),
+                ],
+                ["Ташкент", "Самарканд", "Алматы"],
+            ),
+        },
+    ),
 }
 
 PARAMS = [
@@ -633,8 +745,10 @@ def test_optom_is_wholesale_and_optika_is_not(text: str, hit: str | None) -> Non
         ("карго Гуанчжоу — Ташкент", "карго"),
         ("Avia kargo", "Avia kargo"),
         ("cargo service", "cargo"),
-        ("kargoxona", None),
+        ("kargoxona", "kargoxona"),
+        ("Kargoxonamiz Yiwuda", "Kargoxonamiz"),
         ("Kargopolov", None),
+        ("Qarg'a", None),
     ],
 )
 def test_kargo_is_a_competitor_word(text: str, hit: str | None) -> None:
@@ -657,6 +771,10 @@ def test_kargo_is_a_competitor_word(text: str, hit: str | None) -> None:
         ("Қурилиш моллари", {"building"}),
         ("Ткани оптом", {"textile"}),
         ("Мебельная фурнитура", {"furniture"}),
+        # Russian е for ё, as people type it
+        ("Сырье и гранулы", {"raw"}),
+        ("поставка сырья", {"raw"}),
+        ("Тренажёры для зала", {"sport"}),
         ("Сантехника и плитка", {"building"}),
         ("Бытовая техника и посуда", {"electronics", "household"}),
         ("Non va sut mahsulotlari", set()),
@@ -678,10 +796,39 @@ def test_bulky_categories_are_the_seventeen_serp_keys() -> None:
     assert len(kw.BULKY_CATEGORIES) == 17
 
 
-def test_geo_city_partitions_geo() -> None:
-    listed = list(chain.from_iterable(kw.GEO_CITY.values()))
+def test_geo_city_and_tashkent_places_partition_geo() -> None:
+    listed = [*chain.from_iterable(kw.GEO_CITY.values()), *kw.GEO_TASHKENT_PLACES]
     assert sorted(listed) == sorted(kw.GEO)
     assert len(listed) == len(set(listed))
+
+
+@pytest.mark.parametrize(
+    ("text", "hit"),
+    [
+        ("Мы прямой импортер из Китая", "импортер"),
+        ("официальный импортёр", "официальный импортёр"),
+        ("официальный импортер", "официальный импортер"),
+        ("ИМПОРТЕРЫ", "ИМПОРТЕРЫ"),
+    ],
+)
+def test_e_and_yo_are_one_letter(text: str, hit: str) -> None:
+    # 03 §1.4 lists «импортёр» and «официальный импортер»: text drops the ё.
+    match = kw.B2B_RE.search(text)
+    assert match is not None and match.group(0) == hit
+
+
+@pytest.mark.parametrize(
+    ("word", "forms"),
+    [
+        ("сырьё", ("сырьё", "сырье", "сырья", "сырьем", "сырьём")),
+        ("тренажер", ("тренажер", "тренажёр", "тренажёры", "тренажеров")),
+    ],
+)
+def test_a_yo_word_inflects_like_its_e_spelling(
+    word: str, forms: tuple[str, ...]
+) -> None:
+    pattern = kw.terms_re([word])
+    assert [f for f in forms if pattern.fullmatch(f)] == list(forms)
 
 
 def test_short_words_do_not_inflect() -> None:

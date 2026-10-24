@@ -283,11 +283,48 @@ SITE_SUFFIXES = frozenset(
 )
 
 
+# Site builders and free hosts that give every customer a subdomain: on them
+# the tenant label is the company, so they fold like a public suffix —
+# namuna.blogspot.com and boshqa.blogspot.com are two sites, never one
+# «blogspot.com» (04 §1.3 names no such list; without one, site_key turned
+# every free-hosted firm into the same exact-key identity, 04 §2.1).
+# services/normalise.website_key refuses the bare platform host itself.
+TENANT_HOSTS = frozenset(
+    {
+        "blogspot.com",
+        "wixsite.com",
+        "wordpress.com",
+        "tilda.ws",
+        "business.site",
+        "weebly.com",
+        "webflow.io",
+        "github.io",
+        "netlify.app",
+        "myshopify.com",
+        "jimdosite.com",
+        "nethouse.ru",
+        "ukit.me",
+        "narod.ru",
+        # uCoz's free domains
+        "ucoz.ru",
+        "ucoz.net",
+        "ucoz.com",
+        "ucoz.org",
+        "at.ua",
+        "3dn.ru",
+        "my1.ru",
+        "moy.su",
+    }
+)
+
+
 def site_key(domain: str) -> str:
-    """shop.example.uz and example.uz -> example.uz; example.co.uz stays itself."""
+    """shop.example.uz and example.uz -> example.uz; example.co.uz stays itself;
+    shop.namuna.blogspot.com -> namuna.blogspot.com (the tenant, not the host)."""
     labels = domain.split(".")
     for i in range(1, len(labels)):
-        if ".".join(labels[i:]) in SITE_SUFFIXES:
+        suffix = ".".join(labels[i:])
+        if suffix in SITE_SUFFIXES or suffix in TENANT_HOSTS:
             return ".".join(labels[i - 1 :])
     return domain
 
@@ -370,22 +407,39 @@ LEGAL_FORM_TOKENS_RE = re.compile(
 )
 _QUOTE_RE = re.compile(f"[{re.escape(QUOTES)}]")
 _NON_ALNUM = re.compile(r"[^a-z0-9]+")
+# Latin letters that do not decompose into a base letter and a mark.
+_LATIN_FOLDS = str.maketrans(
+    {"ı": "i", "ł": "l", "ø": "o", "đ": "d", "ð": "d", "ß": "ss", "æ": "ae", "œ": "oe"}
+)
 
 
 def _cut(text: str) -> str:
     return " ".join(text.split())[:NAME_KEY_MAX].rstrip()
 
 
+def _strip_marks(text: str) -> str:
+    # After to_latin, so the Cyrillic й, ё and ў (letters with a mark under
+    # NFD) are already Latin; what is left are Latin letters with diacritics.
+    decomposed = unicodedata.normalize("NFKD", text.translate(_LATIN_FOLDS))
+    return "".join(ch for ch in decomposed if not unicodedata.combining(ch))
+
+
 def name_key(raw: str) -> str:
     """fold_apostrophes -> transliterate (Cyrillic -> Latin) -> lower -> drop
-    apostrophes and quotes -> strip legal forms -> collapse spaces.
+    diacritics -> drop apostrophes and quotes -> strip legal forms -> collapse
+    spaces.
 
     ``ООО «Намуна Текстиль Савдо»`` and ``"NAMUNA TEKSTIL SAVDO" MChJ`` both give
     ``namuna tekstil savdo``. A name that is only a legal form keeps the form
     (``OOO`` -> ``ooo``), so the key is never empty for a non-empty name; such
-    a key is never fuzzy-matched (04 §2.2).
+    a key is never fuzzy-matched (04 §2.2). The diacritics step is not in 04
+    §1.4's pseudo-code: without it «Öztürk Tekstil» keyed as «zt rk tekstil»
+    (the marked letters fell out with the punctuation) and «İstanbul» as
+    «i stanbul» (Python lowers İ to i + a combining dot), so the Turkish and
+    old-alphabet spellings of a name never met their plain ones.
     """
     text = to_latin(fold_apostrophes(unicodedata.normalize("NFKC", raw)))
+    text = _strip_marks(text)
     text = _QUOTE_RE.sub(" ", text.replace("'", ""))
     text = _NON_ALNUM.sub(" ", text)
     key = _cut(LEGAL_FORM_TOKENS_RE.sub(" ", text))

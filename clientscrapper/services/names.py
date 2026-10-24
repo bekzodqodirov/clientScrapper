@@ -4,8 +4,11 @@
 ``HONORIFICS`` is MIYA's ``_HONORIFICS`` verbatim. ``FIRST_NAMES`` is new: common
 Uzbek, Russian and neighbouring given names in ``name_key`` form (Latin,
 lower-case, no apostrophes), with the usual spelling variants (x / kh / h,
-yo / e). ``normalise.is_person_shaped`` reads both; the resolver's fuzzy guard
-reads the same predicate (04 §2.2).
+yo / e). ``normalise.is_person_shaped`` reads ``FIRST_NAMES`` and, of the
+honorifics, only 04 §1.6's «aka»/«opa» (``normalise.PERSON_HONORIFICS``): the
+rest name shops as often as people («Ustoz Mebel»). The whole list stays for
+stripping an honorific off a person's name, as MIYA does. The resolver's fuzzy
+guard reads the same predicate (04 §2.2).
 
 Names that are also ordinary words a shop is called by («nur», «gul», «lola»,
 «oy») are left out on purpose: a false «person» renames a company card. A

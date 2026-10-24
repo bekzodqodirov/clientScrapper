@@ -14,8 +14,14 @@ from typing import get_args
 import pytest
 
 from clientscrapper.db.enums import LEGAL_FORMS
+from clientscrapper.services import keys
 from clientscrapper.services.keys import (
+    IG_RESERVED,
+    LANDLINE_CODES,
+    MOBILE_CODES,
+    MOBILE_CODES_UNCONFIRMED,
     NAME_KEY_MAX,
+    TENANT_HOSTS,
     instagram_key,
     loose_key,
     name_key,
@@ -25,6 +31,10 @@ from clientscrapper.services.keys import (
     stir_key,
 )
 from clientscrapper.services.normalise import (
+    LINK_HUB_HOSTS,
+    SHARED_HOSTS,
+    TASHKENT_REGION,
+    TG_RESERVED,
     LegalForm,
     Phone,
     canonical_city,
@@ -158,6 +168,59 @@ def test_phone_kind_edges(e164: str, kind: str) -> None:
     assert phone_kind(e164) == kind
 
 
+# 04 §1.1, written out: the two digits after +998.
+SPEC_MOBILE = ("33", "77", "88", "90", "91", "93", "94", "95", "97", "98", "99")
+SPEC_MOBILE_UNCONFIRMED = ("20", "50", "55")  # mobile only after 04 Q4
+SPEC_LANDLINE = (
+    "61",
+    "62",
+    "65",
+    "66",
+    "67",
+    "69",
+    "70",
+    "71",
+    "72",
+    "73",
+    "74",
+    "75",
+    "76",
+    "78",
+    "79",
+)
+CODE_KINDS = (
+    [(c, "mobile") for c in SPEC_MOBILE]
+    + [(c, "unknown") for c in SPEC_MOBILE_UNCONFIRMED]
+    + [(c, "landline") for c in SPEC_LANDLINE]
+)
+
+
+def test_the_operator_code_sets_are_the_spec_lists() -> None:
+    assert frozenset(SPEC_MOBILE) == MOBILE_CODES
+    assert frozenset(SPEC_MOBILE_UNCONFIRMED) == MOBILE_CODES_UNCONFIRMED
+    assert frozenset(SPEC_LANDLINE) == LANDLINE_CODES
+
+
+@pytest.mark.parametrize(("code", "kind"), CODE_KINDS)
+def test_every_listed_operator_code(code: str, kind: str) -> None:
+    raw = f"+998 {code} 200 00 01"
+    assert make_phone(raw) == Phone(
+        e164=f"+998{code}2000001",
+        tail=f"{code}2000001",
+        kind=kind,  # type: ignore[arg-type]
+        country="UZ",
+        raw=raw,
+    )
+
+
+@pytest.mark.parametrize(
+    "code",
+    [f"{n:02d}" for n in range(100) if f"{n:02d}" not in {c for c, _ in CODE_KINDS}],
+)
+def test_every_unlisted_operator_code_is_unknown(code: str) -> None:
+    assert phone_kind(f"+998{code}2000001") == "unknown"
+
+
 def test_parse_phones_finds_every_number_once_in_order() -> None:
     text = (
         "Tel: +998 90 000 00 01, 90 000-00-02; (71) 200-00-03 va yana +998 90 000 00 01"
@@ -233,6 +296,14 @@ NAMES: list[tuple[str, str]] = [
     ("Namuna   Savdo,  MChJ", "namuna savdo"),
     ("Ｎａｍｕｎａ Savdo", "namuna savdo"),
     ("Namuna Mebel №2", "namuna mebel no2"),
+    # Latin diacritics fold to the plain letter (Turkish suppliers, old Uzbek
+    # Latin): one key with the spelling that drops them
+    ("Öztürk Tekstil", "ozturk tekstil"),
+    ("Ozturk Tekstil", "ozturk tekstil"),
+    ("İstanbul Tekstil", "istanbul tekstil"),
+    ("Kırmızı Mebel", "kirmizi mebel"),
+    ("Şahin Çelik Group", "sahin celik group"),
+    ("Ğalla Savdo", "galla savdo"),
     # a name that is only a legal form keeps the form
     ("«ООО»", "ooo"),
     ("МЧЖ", "mchj"),
@@ -247,6 +318,81 @@ def test_name_key(raw: str, key: str) -> None:
 
 def test_the_name_table_is_big_enough() -> None:
     assert len(NAMES) >= 20
+
+
+# 04 §1.4's LEGAL_FORMS, written out, plus the spellings keys.LEGAL_FORMS adds
+# (to_latin's щ → sh, the Uzbek possessive -i/-si after a name).
+SPEC_LEGAL_FORMS = (
+    "masuliyati cheklangan jamiyat",
+    "obshchestvo s ogranichennoy otvetstvennostyu",
+    "xususiy korxona",
+    "qoshma korxona",
+    "oilaviy korxona",
+    "chastnoe predpriyatie",
+    "individualnyy predprinimatel",
+    "yakka tartibdagi tadbirkor",
+    "aksiyadorlik jamiyati",
+    "aktsionernoe obshchestvo",
+    "fermer xojaligi",
+    "mchj",
+    "ooo",
+    "llc",
+    "ltd",
+    "qk",
+    "xk",
+    "aj",
+    "ao",
+    "oao",
+    "zao",
+    "chp",
+    "xchk",
+    "ip",
+    "yatt",
+    "sp",
+    "too",
+    "jv",
+    "ok",
+    "fx",
+    "uk",
+    "dp",
+    "gup",
+)
+ADDED_LEGAL_FORMS = (
+    "masuliyati cheklangan jamiyati",
+    "obshestvo s ogranichennoy otvetstvennostyu",
+    "xususiy korxonasi",
+    "qoshma korxonasi",
+    "oilaviy korxonasi",
+    "individualniy predprinimatel",
+    "aktsiyadorlik jamiyati",
+    "aktsionernoe obshestvo",
+)
+ALL_LEGAL_FORMS = SPEC_LEGAL_FORMS + ADDED_LEGAL_FORMS
+
+
+def test_legal_forms_are_the_spec_list_and_its_spellings() -> None:
+    assert set(keys.LEGAL_FORMS) == set(ALL_LEGAL_FORMS)
+
+
+@pytest.mark.parametrize("form", ALL_LEGAL_FORMS)
+def test_every_legal_form_is_stripped_as_a_whole_token(form: str) -> None:
+    assert name_key(f"Namuna Savdo {form}") == "namuna savdo"
+    assert name_key(f"{form.upper()} «Namuna Savdo»") == "namuna savdo"
+    # glued to a letter it is part of a word of the name, not a form
+    assert name_key(f"Namuna {form}x") == f"namuna {form}x"
+    assert name_key(f"Namuna x{form}") == f"namuna x{form}"
+
+
+def test_short_forms_cost_what_the_spec_says() -> None:
+    # 04 AC-1: «Sklad Plus» keeps «plus» — «sp» is a form only as a token
+    # of its own, never the initials of two words.
+    assert name_key("Sklad Plus") == "sklad plus"
+    assert name_key("SP Namuna") == "namuna"
+    # «IP Telecom» loses «ip»: a lone «ip» token is the Russian ИП (an
+    # individual entrepreneur), so a firm named after the internet protocol
+    # keys as «telecom». Accepted: the alias table keeps the name as written.
+    assert name_key("IP Telecom") == "telecom"
+    assert name_key("VoIP Telecom") == "voip telecom"
 
 
 def test_name_key_is_cut_at_160_without_a_trailing_space() -> None:
@@ -298,6 +444,66 @@ def test_telegram_key(raw: str | None, key: str | None) -> None:
     assert telegram_key(raw) == key
 
 
+# 04 §1.2, written out.
+SPEC_TG_RESERVED = frozenset(
+    {
+        "joinchat",
+        "addstickers",
+        "addtheme",
+        "share",
+        "proxy",
+        "socks",
+        "iv",
+        "s",
+        "c",
+        "login",
+        "setlanguage",
+        "confirmphone",
+        "telegram",
+        "durov",
+    }
+)
+SPEC_IG_RESERVED = frozenset(
+    {
+        "p",
+        "reel",
+        "reels",
+        "explore",
+        "stories",
+        "tv",
+        "accounts",
+        "tags",
+        "direct",
+        "about",
+        "developer",
+        "legal",
+    }
+)
+
+
+def test_tg_reserved_is_the_spec_list() -> None:
+    assert SPEC_TG_RESERVED == TG_RESERVED
+
+
+@pytest.mark.parametrize("path", sorted(SPEC_TG_RESERVED))
+def test_a_reserved_telegram_path_names_nobody(path: str) -> None:
+    assert telegram_key(f"https://t.me/{path}") is None
+    assert telegram_key(f"@{path}") is None
+    if path != "s":  # t.me/s/<name> is that channel's public page
+        assert telegram_key(f"t.me/{path}/namuna_optom") is None
+
+
+def test_ig_reserved_is_the_spec_list() -> None:
+    assert SPEC_IG_RESERVED == IG_RESERVED
+
+
+@pytest.mark.parametrize("path", sorted(SPEC_IG_RESERVED))
+def test_a_reserved_instagram_path_names_nobody(path: str) -> None:
+    assert instagram_key(f"https://www.instagram.com/{path}/") is None
+    assert instagram_key(f"instagram.com/{path}?hl=ru") is None
+    assert instagram_key(path) is None
+
+
 def test_telegram_handles_in_text() -> None:
     text = (
         "Kanal: t.me/namuna_optom, admin @namuna_admin, t.me/share/url, "
@@ -336,6 +542,28 @@ def test_instagram_handles_in_text() -> None:
     assert instagram_handles(text) == ["namuna.tekstil", "namuna_shop", "namuna_uz"]
 
 
+@pytest.mark.parametrize(
+    ("text", "handles"),
+    [
+        ("Instagram namuna_shop", ["namuna_shop"]),
+        ("Insta namuna.uz", ["namuna.uz"]),
+        ("Инстаграм namuna_uz", ["namuna_uz"]),
+        ("IG namuna2", ["namuna2"]),
+        # after a bare space only a handle-shaped token is a handle: these are
+        # words and a year, and a handle is an exact identity key
+        ("Instagram sahifamizga obuna boʻling", []),
+        ("Instagram va Telegram", []),
+        ("Instagram 2024", []),
+        ("IG namuna", []),
+        # a colon, a dash or an «@» says a handle follows, whatever its shape
+        ("IG: namuna", ["namuna"]),
+        ("Instagram @namuna", ["namuna"]),
+    ],
+)
+def test_instagram_handles_after_a_bare_label(text: str, handles: list[str]) -> None:
+    assert instagram_handles(text) == handles
+
+
 # --- Website (04 §1.3) --------------------------------------------------------
 
 
@@ -354,10 +582,67 @@ def test_instagram_handles_in_text() -> None:
         ("https://wa.me/998900000001", None),
         ("t.me/namuna_optom", None),
         (None, None),
+        # shared hosts: a card or a page on them is never the firm's own site
+        ("https://2gis.uz/tashkent/firm/7000000000000001", None),
+        ("https://yandex.uz/maps/org/namuna/1", None),
+        ("https://sites.google.com/view/namuna", None),
+        ("https://maps.app.goo.gl/AbCdEf", None),
+        ("https://www.tiktok.com/@namuna", None),
+        ("vk.com/namuna", None),
+        ("https://yellowpages.uz/company/namuna", None),
+        ("orginfo.uz/organization/1", None),
+        ("https://kun.uz/news/1", None),
+        ("namuna.en.alibaba.com", None),
+        # site builders: the tenant is a website, the platform is not
+        ("https://namuna.blogspot.com/", "namuna.blogspot.com"),
+        ("namuna.wixsite.com/savdo", "namuna.wixsite.com"),
+        ("blogspot.com", None),
+        ("www.wixsite.com", None),
+        # a dot keeps a host from matching a longer name
+        ("box.example.uz", "box.example.uz"),
+        ("namunax.com", "namunax.com"),
     ],
 )
 def test_website_key(raw: str | None, key: str | None) -> None:
     assert website_key(raw) == key
+
+
+# 04 §1.3, written out.
+SPEC_LINK_HUB_HOSTS = frozenset(
+    {
+        "taplink.cc",
+        "taplink.ws",
+        "linktr.ee",
+        "lnk.bio",
+        "instabio.cc",
+        "bio.site",
+        "clck.ru",
+        "bit.ly",
+        "cutt.ly",
+        "wa.me",
+        "api.whatsapp.com",
+    }
+)
+
+
+def test_link_hub_hosts_are_the_spec_list() -> None:
+    assert SPEC_LINK_HUB_HOSTS == LINK_HUB_HOSTS
+
+
+@pytest.mark.parametrize("host", sorted(SPEC_LINK_HUB_HOSTS | SHARED_HOSTS))
+def test_a_link_hub_or_shared_host_is_no_website(host: str) -> None:
+    assert website_key(f"https://{host}/namuna") is None
+    assert website_key(f"https://www.{host}/namuna") is None
+    assert website_key(f"https://m.{host}/namuna") is None
+
+
+@pytest.mark.parametrize("host", sorted(TENANT_HOSTS))
+def test_a_site_builder_keeps_its_tenants_apart(host: str) -> None:
+    assert website_key(f"https://{host}/") is None
+    assert website_key(f"https://namuna.{host}/aloqa") == f"namuna.{host}"
+    assert site_key(f"namuna.{host}") == f"namuna.{host}"
+    assert site_key(f"shop.namuna.{host}") == f"namuna.{host}"
+    assert site_key(f"namuna.{host}") != site_key(f"boshqa.{host}")
 
 
 @pytest.mark.parametrize(
@@ -370,6 +655,15 @@ def test_website_key(raw: str | None, key: str | None) -> None:
         ("www2.namuna.com", "namuna.com"),
         ("namuna.example.de", "namuna.example.de"),
         ("co.uz", "co.uz"),
+        # a site builder's tenants stay apart: never one «blogspot.com»
+        ("namuna.blogspot.com", "namuna.blogspot.com"),
+        ("boshqa-firma.blogspot.com", "boshqa-firma.blogspot.com"),
+        ("shop.namuna.blogspot.com", "namuna.blogspot.com"),
+        ("namuna.wixsite.com", "namuna.wixsite.com"),
+        ("namuna.ucoz.ru", "namuna.ucoz.ru"),
+        ("namuna.narod.ru", "namuna.narod.ru"),
+        ("namuna.tilda.ws", "namuna.tilda.ws"),
+        ("namuna.business.site", "namuna.business.site"),
     ],
 )
 def test_site_key(domain: str, site: str) -> None:
@@ -505,6 +799,18 @@ def test_legal_form_in_name(name: str, code: str | None) -> None:
         ("Buxoro", "Buxoro"),
         ("Нукус", "Nukus"),
         ("Andijon viloyati, Toshkent koʻchasi", "Andijon"),
+        # the Tashkent region is not the city (landlines +998 70, not 71)
+        ("Toshkent viloyati, Chirchiq sh.", TASHKENT_REGION),
+        ("Тошкент вилояти, Чирчиқ", TASHKENT_REGION),
+        ("Ташкентская область, г. Чирчик", TASHKENT_REGION),
+        ("Ташкентская обл.", TASHKENT_REGION),
+        ("Tashkent region", TASHKENT_REGION),
+        ("Toshkent sh., Toshkent viloyati yoʻli", "Toshkent"),
+        # a city named anywhere beats a Tashkent bazaar or district
+        ("Chorsu bozori Samarqand", "Samarqand"),
+        ("Malika Karimova, Samarqand", "Samarqand"),
+        ("Sergeli, Toshkent", "Toshkent"),
+        ("Abu Saxiy savdo markazi", "Toshkent"),
         ("Moskva", None),
         ("", None),
         (None, None),
@@ -512,6 +818,17 @@ def test_legal_form_in_name(name: str, code: str | None) -> None:
 )
 def test_canonical_city(text: str | None, city: str | None) -> None:
     assert canonical_city(text) == city
+
+
+def test_a_region_address_does_not_make_a_city_landline() -> None:
+    # The pipeline hands canonical_city's answer to make_phone (04 §1.1 rule 6):
+    # a bare 7-digit number in the region is not +998 71.
+    region = canonical_city("Toshkent viloyati, Chirchiq sh., 200-00-01")
+    assert region == TASHKENT_REGION
+    assert make_phone("200-00-01", city=region) is None
+    city = canonical_city("г. Ташкент, ул. Намуна 1")
+    phone = make_phone("200-00-01", city=city)
+    assert phone is not None and (phone.e164, phone.kind) == ("+998712000001", "landline")
 
 
 # --- Person-shaped names (04 §1.6, §2.2) -----------------------------------------
@@ -555,6 +872,14 @@ def test_person_shaped(key: str) -> None:
         "ooo",
         "akmal karimov rustam savdo",
         "",
+        # MIYA's other honorifics name shops as often as people; 04 §1.6 names
+        # aka/opa only
+        "ustoz mebel",
+        "bro shop",
+        "bobo baraka",
+        "domla kitob",
+        "xola savdo",
+        "amaki market",
     ],
 )
 def test_not_person_shaped(key: str) -> None:
