@@ -521,14 +521,22 @@ async def test_a_truncated_backup_is_refused_before_the_target_is_touched(
     result = await backup.create_backup(recipient=recipient, directory=tmp_path, now=NOW)
     assert result.path is not None
     assert restore.restore(result.path, identity, to=scratch) == restore.EXIT_OK
+    # A row the backup does not hold: pg_restore --clean would drop it.
+    import psycopg
+
+    with psycopg.connect(scratch.replace("postgresql+psycopg://", "postgresql://")) as c:
+        c.execute(
+            "INSERT INTO suppression (kind, key_type, key, source, reason) "
+            "VALUES ('dnc', 'phone_tail', '900000009', 'owner_bot', 'owner_command')"
+        )
     cut = tmp_path / "clientscrapper-20261024-034501.dump.age"
     sealed = result.path.read_bytes()
     cut.write_bytes(sealed[: len(sealed) * 2 // 3])
     with pytest.raises(restore.RestoreError) as refused:
         restore.restore(cut, identity, to=scratch, force=True)
     assert "age could not decrypt" in str(refused.value)
-    # Nothing was dropped: the earlier restore stands whole.
-    assert restore_drill.count_rows(scratch)["suppression"] == 3
+    # Nothing was dropped: the target is as it was, the extra row included.
+    assert restore_drill.count_rows(scratch)["suppression"] == 4
 
 
 async def test_a_second_drill_at_once_stands_aside(session, keys, tmp_path):
