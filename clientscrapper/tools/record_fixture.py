@@ -1,0 +1,256 @@
+"""Record one page as a test fixture (07 §1.1, 03 §1.5).
+
+    python -m clientscrapper.tools.record_fixture <url> --key <source_key> --name <name>
+           [--json] [--header k=v]... [--post-json file] [--scrub auto|on|off]
+           [--note "..."] [--root tests/fixtures]
+
+The request goes through ``Fetcher`` — our User-Agent, robots.txt and the
+per-host rate apply, and a metered (paid) host is refused, since the
+recorder has no cost gate. Writes ``<root>/<key>/<name>.<html|json|xml>``,
+``<name>.headers.json`` (status, final URL and the response headers, with
+``Set-Cookie``, ``Authorization`` and every key header stripped and every URL
+through ``scrub_url``), and one line per file in ``<root>/<key>/README.md``:
+
+    file · date · url · sha256 · status · bytes · scrubbed: yes|no · note
+
+The sha256 is of the stored file. A re-recording replaces its own line.
+``--scrub auto`` scrubs person-tier sources and pages that name an individual
+entrepreneur (``scrub_fixture.needs_scrub``); company-tier pages are verbatim.
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import hashlib
+import json
+import re
+import sys
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+from decimal import Decimal
+from pathlib import Path
+from typing import Any, Final, Literal
+
+from clientscrapper.collectors.base import Budget
+from clientscrapper.config import settings
+from clientscrapper.services.http import Fetcher, FetchError, FetchResult, scrub_url
+from clientscrapper.tools.scrub_fixture import FixtureKind, needs_scrub, scrub_bytes
+
+ScrubMode = Literal["auto", "on", "off"]
+
+DEFAULT_ROOT: Final = Path("tests/fixtures")
+# Never stored: cookies, credentials and the providers' key headers.
+STRIPPED_HEADERS: Final = frozenset(
+    {
+        "set-cookie",
+        "cookie",
+        "authorization",
+        "proxy-authorization",
+        "x-api-key",
+        "x-subscription-token",
+        "x-goog-api-key",
+        "x-gsr-key",
+        "x-erp-key",
+    }
+)
+SEPARATOR: Final = " · "
+README_HEAD: Final = (
+    "# Fixtures: {key}\n\n"
+    "Recorded with `python -m clientscrapper.tools.record_fixture` (07 §1.1).\n"
+    "One line per file: file · date · url · sha256 · status · bytes · scrubbed · note\n\n"
+)
+_KEY = re.compile(r"[a-z][a-z0-9_]{2,40}")
+_NAME = re.compile(r"[a-z0-9][a-z0-9_.\-]{0,80}")
+
+
+@dataclass(frozen=True, slots=True)
+class Recorded:
+    path: Path
+    headers_path: Path
+    readme_line: str
+    sha256: str
+    scrubbed: bool
+
+
+def fixture_kind(result: FetchResult, *, json_mode: bool) -> FixtureKind:
+    if json_mode or "json" in result.content_type:
+        return "json"
+    if "xml" in result.content_type:
+        return "xml"
+    return "html"
+
+
+def stored_headers(headers: Mapping[str, str]) -> dict[str, str]:
+    return {
+        name.lower(): (scrub_url(value) if name.lower() == "location" else value)
+        for name, value in headers.items()
+        if name.lower() not in STRIPPED_HEADERS
+    }
+
+
+def readme_line(
+    *,
+    file: str,
+    day: str,
+    url: str,
+    sha256: str,
+    status: int,
+    size: int,
+    scrubbed: bool,
+    note: str,
+) -> str:
+    fields = [
+        file,
+        day,
+        scrub_url(url),
+        sha256,
+        str(status),
+        str(size),
+        f"scrubbed: {'yes' if scrubbed else 'no'}",
+        " ".join(note.split()) or "—",
+    ]
+    return SEPARATOR.join(fields)
+
+
+def update_readme(readme: Path, key: str, file: str, line: str) -> None:
+    """Append ``line``, or replace the line this file already has."""
+    if readme.is_file():
+        text = readme.read_text(encoding="utf-8")
+    else:
+        text = README_HEAD.format(key=key)
+    prefix = f"- {file}{SEPARATOR}"
+    lines = [
+        existing for existing in text.splitlines() if not existing.startswith(prefix)
+    ]
+    while lines and not lines[-1].strip():
+        lines.pop()
+    if not any(existing.startswith("- ") for existing in lines):
+        lines.append("")  # a blank line between the heading and the first entry
+    lines.append(f"- {line}")
+    readme.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+async def record(
+    url: str,
+    *,
+    key: str,
+    name: str,
+    fetcher: Fetcher,
+    now: datetime,
+    root: Path = DEFAULT_ROOT,
+    json_mode: bool = False,
+    headers: Mapping[str, str] | None = None,
+    post_json: Any = None,
+    scrub: ScrubMode = "auto",
+    note: str = "",
+) -> Recorded:
+    if not _KEY.fullmatch(key):
+        raise ValueError(f"not a sources.key: {key!r}")
+    if not _NAME.fullmatch(name):
+        raise ValueError(f"fixture names are [a-z0-9_.-]: {name!r}")
+    budget = Budget(pages=1, usd=Decimal("0"), deadline=now + timedelta(minutes=10))
+    request_headers = dict(headers or {})
+    if json_mode:
+        request_headers.setdefault("Accept", "application/json")
+    if post_json is not None:
+        result = await fetcher.post_json(
+            url, source=key, budget=budget, json=post_json, headers=request_headers
+        )
+    else:
+        result = await fetcher.get(
+            url, source=key, budget=budget, headers=request_headers, cache=False
+        )
+    kind = fixture_kind(result, json_mode=json_mode)
+    body = result.body
+    scrubbed = scrub == "on" or (scrub == "auto" and needs_scrub(key, body))
+    if scrubbed:
+        body = scrub_bytes(body, kind=kind).body
+
+    folder = root / key
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / f"{name}.{kind}"
+    path.write_bytes(body)
+    headers_path = folder / f"{name}.headers.json"
+    facts = {
+        "url": scrub_url(url),
+        "final_url": scrub_url(result.final_url),
+        "status": result.status,
+        "fetched_at": result.fetched_at.isoformat(),
+        "headers": stored_headers(result.headers),
+    }
+    headers_path.write_text(
+        json.dumps(facts, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    sha = hashlib.sha256(body).hexdigest()
+    line = readme_line(
+        file=path.name,
+        day=now.astimezone(settings.tz).date().isoformat(),
+        url=url,
+        sha256=sha,
+        status=result.status,
+        size=len(body),
+        scrubbed=scrubbed,
+        note=note,
+    )
+    update_readme(folder / "README.md", key, path.name, line)
+    return Recorded(path, headers_path, line, sha, scrubbed)
+
+
+def _header(text: str) -> tuple[str, str]:
+    name, sep, value = text.partition("=")
+    if not sep or not name.strip():
+        raise argparse.ArgumentTypeError("--header takes k=v")
+    return name.strip(), value
+
+
+def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Record one page as a test fixture.")
+    parser.add_argument("url")
+    parser.add_argument("--key", required=True)
+    parser.add_argument("--name", required=True)
+    parser.add_argument("--json", action="store_true", dest="json_mode")
+    parser.add_argument("--header", action="append", type=_header, default=[])
+    parser.add_argument("--post-json", type=Path)
+    parser.add_argument("--scrub", choices=("auto", "on", "off"), default="auto")
+    parser.add_argument("--note", default="")
+    parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
+    return parser.parse_args(argv)
+
+
+async def _main(args: argparse.Namespace) -> int:
+    post = (
+        json.loads(args.post_json.read_text(encoding="utf-8")) if args.post_json else None
+    )
+    robots_dir = Path(settings.evidence_dir).parent / "http-cache" / "robots"
+    async with Fetcher(robots_dir=robots_dir) as fetcher:
+        try:
+            done = await record(
+                args.url,
+                key=args.key,
+                name=args.name,
+                fetcher=fetcher,
+                now=datetime.now(settings.tz),
+                root=args.root,
+                json_mode=args.json_mode,
+                headers=dict(args.header),
+                post_json=post,
+                scrub=args.scrub,
+                note=args.note,
+            )
+        except (FetchError, ValueError) as exc:
+            print(f"not recorded: {type(exc).__name__}: {exc}", file=sys.stderr)
+            return 1
+    print(done.path)
+    print(done.readme_line)
+    return 0
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    return asyncio.run(_main(parse_args(argv)))
+
+
+if __name__ == "__main__":
+    sys.exit(main())
