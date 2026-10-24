@@ -842,7 +842,18 @@ def test_make_import_clients_passes_the_flags():
     assert dry_run("FILE=/data/imports/c.xlsx", "APPLY=0", "ACCEPT_FEWER=0").endswith(
         tool
     )
-    assert dry_run("FILE=/data/imports/c.xlsx", "ACCEPT_FEWER=yes").endswith(tool)
+    # Any other value stops make with the two spellings it takes (the
+    # Makefile's one ``switch``): «yes» must neither apply nor pass silently.
+    refused = subprocess.run(
+        ["make", "-s", "-n", "import-clients", "FILE=c.xlsx", "ACCEPT_FEWER=yes"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    assert refused.returncode != 0
+    assert "ACCEPT_FEWER=yes: use ACCEPT_FEWER=1 (on) or ACCEPT_FEWER=0 (off)" in (
+        refused.stderr
+    )
     # A bare name is a file in data/imports/ (the container's /data/imports),
     # which is how CLAUDE.md and the spec write it; a path is taken as given.
     assert dry_run("FILE=c.xlsx").endswith(tool)
