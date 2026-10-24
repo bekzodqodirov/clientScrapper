@@ -102,6 +102,29 @@ async def test_a_wake_during_a_run_runs_the_job_once_more_after_it():
     assert ran == ["a", "a", "a"]  # no wake pending: one run
 
 
+async def test_a_wake_while_the_scheduled_job_runs_is_not_lost():
+    """Through the scheduler build_scheduler makes: the second wake finds the
+    job running (max_instances=1 refuses a second instance) and is kept."""
+    ran: list[str] = []
+    hold = asyncio.Event()
+    slots = (_slot("a", ran, job=_recording(ran, "a", hold=hold)),)
+    scheduler = worker.build_scheduler(slots)
+    scheduler.start()
+    try:
+        assert worker.wake(scheduler, ("a",)) == ["a"]
+        await _until(lambda: ran == ["a"])
+        worker.wake(scheduler, ("a",))
+        await asyncio.sleep(0.3)
+        assert ran == ["a"]  # still the one run
+        hold.set()
+        await _until(lambda: ran == ["a", "a"])
+        await asyncio.sleep(0.3)
+        assert ran == ["a", "a"]
+    finally:
+        hold.set()
+        scheduler.shutdown(wait=False)
+
+
 async def test_a_notification_wakes_every_slot_but_the_one_that_said_it(session):
     ran: list[str] = []
     slots = (_slot("a", ran), _slot("b", ran))

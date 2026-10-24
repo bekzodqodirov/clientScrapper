@@ -795,14 +795,18 @@ async def test_rows_of_a_chat_the_reader_may_not_read_are_left_alone(
     session, enabled, offline, tmp_path
 ):
     off = await chat(session)
-    off.monitor_enabled = False
-    await session.commit()
+    await chat(session, GROUP_ID - 1, username="namuna_ochiq")  # read as usual
+    readable = await store(session, ASK, message_id=2, chat_id=GROUP_ID - 1)
     row_id = await store(session, ASK, message_id=1)
+    off.monitor_enabled = False  # the owner switched it off after the hit
+    await session.commit()
     report = await run(offline, tmp_path)
-    assert report.meta["telegram"]["messages"] == 0
+    assert report.meta["telegram"]["messages"] == 1
     row = await interaction(session, row_id)
     assert (row.evidence_id, row.processed_at) == (None, None)
-    assert await count(session, m.Observation) == 0
+    assert (await interaction(session, readable)).observation_id is not None
+    [obs] = await observations(session)
+    assert obs.parsed["source_ref"] == f"tg:{GROUP_ID - 1}:2"
 
 
 async def test_a_channel_post_is_stored_for_the_channel(
