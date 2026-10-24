@@ -28,7 +28,6 @@ reading.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import random
 from collections.abc import Awaitable, Callable
@@ -254,14 +253,15 @@ async def join_daily(
     session_factory: SessionFactory,
     *,
     clock: Clock,
-    sleep: Sleep = asyncio.sleep,
-    stopped: Stopped = _never,
+    sleep: Sleep,
+    stopped: Stopped,
 ) -> JoinReport:
     """The day's join run (see the module docstring). ``clock`` is read again
     after every pause, so the 90 s gaps and the day's cap use the real time.
     ``stopped`` answers True once the process is stopping: the reader's
     ``sleep`` returns early then, and a join right after it would break the
-    90 s gap, so the run ends instead (``skipped='stopped'``)."""
+    90 s gap, so the run ends instead (``skipped='stopped'``). Both are
+    required: a caller cannot forget the stop and keep the gap."""
     report = JoinReport()
     now = clock()
     report.resolved = await resolve_daily(

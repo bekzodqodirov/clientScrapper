@@ -35,6 +35,11 @@ CHANNELS = {
 LINKED = channel(3900, title="Namuna Kanal 1 muhokama", megagroup=True)
 
 
+def _running() -> bool:
+    """The process is not stopping (join_daily asks; see the stop test)."""
+    return False
+
+
 @pytest.fixture
 async def reader(session, tmp_path, monkeypatch):
     """A clean database, no seeds (the 03 list holds real handles; the source
@@ -96,7 +101,7 @@ async def test_three_joins_a_day_with_the_fake_clock(reader):
     clock = FakeClock(T0)
 
     first = await joiner.join_daily(
-        client, session_scope, clock=clock.now, sleep=clock.sleep
+        client, session_scope, clock=clock.now, sleep=clock.sleep, stopped=_running
     )
 
     joins = client.named("JoinChannelRequest")
@@ -111,7 +116,7 @@ async def test_three_joins_a_day_with_the_fake_clock(reader):
     # (resolves have their own cap; the fake knows no such chat).
     calls = len(client.calls)
     again = await joiner.join_daily(
-        client, session_scope, clock=clock.now, sleep=clock.sleep
+        client, session_scope, clock=clock.now, sleep=clock.sleep, stopped=_running
     )
     assert again.joined == []
     assert [(c.name, c.target) for c in client.calls[calls:]] == [
@@ -121,7 +126,7 @@ async def test_three_joins_a_day_with_the_fake_clock(reader):
     # The next Tashkent day: three more, and the queue is empty.
     clock.advance(timedelta(days=1).total_seconds())
     later = await joiner.join_daily(
-        client, session_scope, clock=clock.now, sleep=clock.sleep
+        client, session_scope, clock=clock.now, sleep=clock.sleep, stopped=_running
     )
     assert [c.target for c in client.named("JoinChannelRequest")[3:]] == NAMES[2:5]
     assert len(later.joined) == 3
@@ -137,7 +142,9 @@ async def test_a_join_reads_the_full_channel_and_keeps_its_about_as_evidence(rea
     await _queue(session, NAMES[0])
     client = _client()
     clock = FakeClock(T0)
-    await joiner.join_daily(client, session_scope, clock=clock.now, sleep=clock.sleep)
+    await joiner.join_daily(
+        client, session_scope, clock=clock.now, sleep=clock.sleep, stopped=_running
+    )
 
     rows = await _monitors(session)
     parent = rows[tg.peer_id(CHANNELS[NAMES[0]])]
@@ -175,7 +182,7 @@ async def test_the_sixty_chat_cap_stops_joining(reader, monkeypatch):
     client = _client()
     clock = FakeClock(T0)
     report = await joiner.join_daily(
-        client, session_scope, clock=clock.now, sleep=clock.sleep
+        client, session_scope, clock=clock.now, sleep=clock.sleep, stopped=_running
     )
     assert report.skipped == "max_chats"
     assert len(client.named("JoinChannelRequest")) == 2
@@ -193,7 +200,7 @@ async def test_a_long_flood_wait_trips_the_breaker_and_nothing_joins_while_it_ho
     clock = FakeClock(T0)
 
     report = await joiner.join_daily(
-        client, session_scope, clock=clock.now, sleep=clock.sleep
+        client, session_scope, clock=clock.now, sleep=clock.sleep, stopped=_running
     )
 
     assert report.joined == []
@@ -214,14 +221,14 @@ async def test_a_long_flood_wait_trips_the_breaker_and_nothing_joins_while_it_ho
     calls = len(client.calls)
     clock.advance(timedelta(hours=23).total_seconds())
     blocked = await joiner.join_daily(
-        client, session_scope, clock=clock.now, sleep=clock.sleep
+        client, session_scope, clock=clock.now, sleep=clock.sleep, stopped=_running
     )
     assert blocked.skipped == "flood"
     assert len(client.calls) == calls  # not even a resolve
 
     clock.advance(timedelta(hours=2).total_seconds())
     after = await joiner.join_daily(
-        client, session_scope, clock=clock.now, sleep=clock.sleep
+        client, session_scope, clock=clock.now, sleep=clock.sleep, stopped=_running
     )
     assert after.skipped is None and len(after.joined) == 3
 
@@ -235,7 +242,7 @@ async def test_a_short_flood_wait_ends_the_run_without_a_breaker(reader):
     )
     clock = FakeClock(T0)
     report = await joiner.join_daily(
-        client, session_scope, clock=clock.now, sleep=clock.sleep
+        client, session_scope, clock=clock.now, sleep=clock.sleep, stopped=_running
     )
     assert report.joined == [] and report.skipped is None
     assert len(client.named("JoinChannelRequest")) == 1
@@ -253,7 +260,7 @@ async def test_the_owners_pause_stops_the_join(reader):
     client = _client()
     clock = FakeClock(T0)
     report = await joiner.join_daily(
-        client, session_scope, clock=clock.now, sleep=clock.sleep
+        client, session_scope, clock=clock.now, sleep=clock.sleep, stopped=_running
     )
     assert report.skipped == "paused"
     assert client.calls == []
@@ -266,7 +273,7 @@ async def test_a_vanished_username_is_gone_and_costs_no_join(reader):
     client.fail[("get_entity", NAMES[0])] = errors.UsernameNotOccupiedError(request=None)
     clock = FakeClock(T0)
     report = await joiner.join_daily(
-        client, session_scope, clock=clock.now, sleep=clock.sleep
+        client, session_scope, clock=clock.now, sleep=clock.sleep, stopped=_running
     )
     assert report.gone == 1
     assert [c.target for c in client.named("JoinChannelRequest")] == [NAMES[1]]
@@ -284,7 +291,7 @@ async def test_a_refused_join_marks_the_chat_gone(reader):
     )
     clock = FakeClock(T0)
     report = await joiner.join_daily(
-        client, session_scope, clock=clock.now, sleep=clock.sleep
+        client, session_scope, clock=clock.now, sleep=clock.sleep, stopped=_running
     )
     assert report.gone == 1
     gone = await session.get(m.ChatMonitor, ids[0], populate_existing=True)
@@ -429,7 +436,7 @@ async def test_a_usernameless_linked_group_is_joined_after_a_restart(reader, mon
     first = FakeTelegramClient(entities=dict(CHANNELS), full=full)
     clock = FakeClock(T0)
     day1 = await joiner.join_daily(
-        first, session_scope, clock=clock.now, sleep=clock.sleep
+        first, session_scope, clock=clock.now, sleep=clock.sleep, stopped=_running
     )
     assert (len(day1.joined), day1.queued_linked) == (1, 1)
     linked = await chats.get_monitor(session, tg.peer_id(LONELY))
@@ -443,7 +450,7 @@ async def test_a_usernameless_linked_group_is_joined_after_a_restart(reader, mon
     restarted = FakeTelegramClient(entities={}, reachable=[LONELY])
     clock.advance(timedelta(days=1).total_seconds())
     day2 = await joiner.join_daily(
-        restarted, session_scope, clock=clock.now, sleep=clock.sleep
+        restarted, session_scope, clock=clock.now, sleep=clock.sleep, stopped=_running
     )
 
     assert day2.joined == [linked.id]
@@ -472,13 +479,15 @@ async def test_a_queued_chat_nobody_can_find_is_gone_not_retried_daily(reader):
     client = FakeTelegramClient()
     clock = FakeClock(T0)
     report = await joiner.join_daily(
-        client, session_scope, clock=clock.now, sleep=clock.sleep
+        client, session_scope, clock=clock.now, sleep=clock.sleep, stopped=_running
     )
     assert (report.gone, report.joined) == (1, [])
     gone = await session.get(m.ChatMonitor, row.id, populate_existing=True)
     assert gone is not None and gone.status == "gone"
     clock.advance(timedelta(days=1).total_seconds())
-    await joiner.join_daily(client, session_scope, clock=clock.now, sleep=clock.sleep)
+    await joiner.join_daily(
+        client, session_scope, clock=clock.now, sleep=clock.sleep, stopped=_running
+    )
     assert [c.target for c in client.named("get_entity")] == [tg.peer_id(LONELY)]
 
 
@@ -495,7 +504,9 @@ async def test_an_admins_handle_in_an_about_is_not_queued(reader):
     }
     client = FakeTelegramClient(entities=dict(CHANNELS), full=full)
     clock = FakeClock(T0)
-    await joiner.join_daily(client, session_scope, clock=clock.now, sleep=clock.sleep)
+    await joiner.join_daily(
+        client, session_scope, clock=clock.now, sleep=clock.sleep, stopped=_running
+    )
     flag = await session.get(m.RuntimeFlag, chats.PENDING_FLAG, populate_existing=True)
     assert flag is not None
     assert list(flag.value["names"]) == ["namuna_guruh2"]
