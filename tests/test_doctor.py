@@ -144,3 +144,74 @@ def test_missing_keys_after_an_update_are_one_warning_line():
 def test_errors_come_first():
     levels = [f.level for f in _check(_example())]
     assert levels == sorted(levels, key={"error": 0, "warn": 1, "info": 2}.__getitem__)
+
+
+# --- T-06: model prices and the allocations table (04 AC 13, 07 §1.9) -----------
+
+
+def _infos(findings: list[doctor.Finding]) -> list[str]:
+    return [f.text for f in findings if f.level == "info"]
+
+
+def test_each_configured_model_id_is_printed_with_its_price():
+    infos = _infos(_check(_filled()))
+    priced = [line for line in infos if line.startswith("✅ ") and "MODEL=" in line]
+    assert [line.split(":")[0] for line in priced] == [
+        f"✅ EXTRACT_MODEL={_filled()['EXTRACT_MODEL']}",
+        f"✅ VERDICT_MODEL={_filled()['VERDICT_MODEL']}",
+        f"✅ BATCH_MODEL={_filled()['BATCH_MODEL']}",
+    ]
+    assert "kirish $0.10 · chiqish $0.50 / 1 mln token" in priced[0]
+    assert "kirish $2.00 · chiqish $10.00" in priced[1]
+
+
+def test_an_unpriced_extract_model_makes_the_doctor_red():
+    env = _filled()
+    env["EXTRACT_MODEL"] = "model-nobody-priced"
+    findings = _check(env)
+    [error] = _errors(findings)
+    assert error.startswith("❌ EXTRACT_MODEL=model-nobody-priced: narxi nomaʼlum")
+    assert "EXTRACT_MODEL_PRICE" in error
+    assert doctor.exit_code(findings) == 1
+
+
+def test_a_price_override_prices_an_unknown_model_and_says_so():
+    env = _filled()
+    env.update(EXTRACT_MODEL="model-nobody-priced", EXTRACT_MODEL_PRICE="0.20/1.00")
+    findings = _check(env)
+    assert _errors(findings) == []
+    priced = "✅ EXTRACT_MODEL=model-nobody-priced: kirish $0.20 · chiqish $1.00"
+    assert any(
+        line.startswith(priced) and "EXTRACT_MODEL_PRICE" in line
+        for line in _infos(findings)
+    )
+
+
+def test_an_unreadable_price_override_or_a_blank_model_is_an_error():
+    env = _filled()
+    env.update(VERDICT_MODEL_PRICE="2,10", BATCH_MODEL="")
+    errors = _errors(_check(env))
+    assert any(e.startswith("❌ VERDICT_MODEL_PRICE oʻqilmadi") for e in errors)
+    assert any(e.startswith("❌ BATCH_MODEL boʻsh") for e in errors)
+
+
+def test_a_missing_model_key_falls_back_to_the_shipped_default():
+    env = _filled()
+    del env["BATCH_MODEL"]
+    assert not any("BATCH_MODEL=" in e for e in _errors(_check(env)))
+
+
+def test_the_allocations_table_is_printed():
+    assert doctor.allocations_table() in _infos(_check(_filled()))
+    assert doctor.allocations_table().splitlines() == [
+        "ℹ️ Kunlik byudjet taqsimoti (USD, Toshkent kuni) — jami $10.00:",
+        "   anthropic $5.00: classify 0.30 · verdict 1.50 · company_verdict 1.50 · "
+        "draft 0.20 · enrich_search 0.75 · model_reserve 0.75",
+        "   serp $1.00: serp_brave 0.165 · serp_yandex_night 0.00 · serp_searxng 0.00 · "
+        "serp_ddg 0.00 · serp_reserve 0.835",
+        "   places $1.00: places_text_ids 0.00 · places_details_contact 1.00 · "
+        "twogis_api 0.00",
+        "   apify $2.00: apify_olx 0.60 · apify_2gis 0.40 · apify_instagram 0.40 · "
+        "apify_uzum 0.60",
+        "   proxy $1.00: proxy_uzum 1.00",
+    ]

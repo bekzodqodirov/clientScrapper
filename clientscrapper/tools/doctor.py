@@ -232,8 +232,10 @@ def _model_prices(env: Mapping[str, str]) -> list[Finding]:
     """Each configured model id must be priced (04 §8): ``costs.ask`` refuses
     every call to an unpriced one, so a wrong id silently stops that work."""
     found: list[Finding] = []
+    # A missing key runs on the shipped default; a blank one is read by the
+    # settings as an empty id, which nothing prices.
     roles = tuple(
-        ((env.get(r.key) or r.default).strip(), env.get(r.price_key) or "")
+        (env.get(r.key, r.default).strip(), env.get(r.price_key) or "")
         for r in usage.MODEL_ROLES
     )
     for role, (model, override) in zip(usage.MODEL_ROLES, roles, strict=True):
