@@ -223,6 +223,14 @@ def test_a_name_without_its_apostrophe_is_the_same_name():
     assert result.reverse == {"<NAME_1>": "Otkir"}
 
 
+def test_one_name_is_one_token_in_both_scripts_however_declined():
+    """«Dilnoza» and «Дилнозы» are matched by one name word: one token, though
+    the stems differ («Dilnoza», «Дилноз»)."""
+    result = pseudonymise("Dilnoza keldi, Дилнозы нет", names=["Dilnoza"])
+    assert result.text == "<NAME_1> keldi, <NAME_1>ы нет"
+    assert result.reverse == {"<NAME_1>": "Dilnoza"}
+
+
 def test_a_declined_name_keeps_its_token_across_a_bundle():
     first = pseudonymise("Дилнозе скажите, Сергея нет", names=["Dilnoza", "Сергей"])
     assert first.text == "<NAME_1>е скажите, <NAME_2>я нет"
