@@ -767,6 +767,21 @@ async def test_no_raw_personal_data_reaches_the_batch_api(session, model_api):
         await model_jobs.enqueue(session, user="Namuna", now=NIGHT)  # type: ignore[arg-type]
 
 
+def test_the_batch_fence_reads_what_the_model_is_shown_not_the_custom_id():
+    # A real uuid4 whose hyphens make a phone-shaped run («65555-2015»): the
+    # lane's own key, never shown to the model, is not personal data.
+    key = "cs-a5f65555-2015-4e49-a9ab-ec2b9abdc64a"
+    assert pii_in({"custom_id": key}) == ["PHONE_RE"]
+    clean = {"custom_id": key, "params": {"messages": [{"content": "Tel <PHONE_1>"}]}}
+    assert batch_pii_in({"requests": [clean]}) == []
+    leaked = {
+        "custom_id": key,
+        "params": {"messages": [{"content": "+998 90 000 00 04"}]},
+    }
+    assert batch_pii_in({"requests": [clean, leaked]}) == ["PHONE_RE"]
+    assert batch_pii_in({"requests": [clean], "note": "@namuna_04"}) == ["TG_RE"]
+
+
 async def test_a_stored_request_that_is_not_masked_is_never_sent(session, model_api):
     tampered = await enqueue(session, "Namuna Bir: optom")
     clean = await enqueue(session, "Namuna Ikki: optom")
