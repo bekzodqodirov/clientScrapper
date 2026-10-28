@@ -24,9 +24,12 @@ on any key suppresses the whole company, not just that contact.
 
 **The agent's own events** (04 §7 «local events», 06 §1.3): the owner's 🔒
 on a card and the manager card's «🙅 Yozmang dedi» (``dnc_for_candidate``:
-the lead contact's phone tail, username and Instagram plus the company's
-channel, Instagram and domain, then the candidate → ``suppressed``);
-``/dnc <phone|@user>`` (``dnc_command``); a company-wide kind — gate 2's
+the phone a push would send — ``push_gate.lead_contact``, which the card
+shows — with its username and Instagram, the card's own contact's handles,
+the company's channel, Instagram and domain, then the candidate →
+``suppressed``); ``/dnc <phone|@user>`` (``dnc_command``: the row unless a
+lasting one already holds the key, and the open candidates of every company
+the key names → ``suppressed``); a company-wide kind — gate 2's
 ``competitor``, the owner's 🙍 ``b2c``, a manager's ``manager_veto`` —
 (``suppress_company``). ``client``/``lost`` belong to the ERP feed, the
 outcomes recompute and the XLSX import (``ck_suppression_erp_kinds``) and
@@ -41,7 +44,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Final
+from typing import Final
 
 import sqlalchemy as sa
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -49,11 +52,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from clientscrapper.config import settings
 from clientscrapper.db import enums as e
-from clientscrapper.db.models import Company, Contact, Suppression
+from clientscrapper.db.models import Company, Contact, LeadCandidate, Suppression
 from clientscrapper.services import companies, erp_feeds, keys, normalise
-
-if TYPE_CHECKING:
-    from clientscrapper.db.models import LeadCandidate
 
 # 06 §5.5: legal 0 · dnc 1 · client 2 · lost 3 · bounced 4 · competitor 5 ·
 # manager_veto 6 · b2c 7 · cooldown 8 — the one constant; the lookup's SQL is
@@ -104,6 +104,7 @@ class Hit:
     source: str
     reason: str | None = None
     expires_at: datetime | None = None
+    created_at: datetime | None = None
 
     @property
     def permanent(self) -> bool:
@@ -225,6 +226,7 @@ async def is_suppressed(
         source=row.source,
         reason=row.reason,
         expires_at=row.expires_at,
+        created_at=row.created_at,
     )
 
 
@@ -395,13 +397,18 @@ async def add(
     return ids
 
 
-def dnc_entries(company: Company, contact: Contact | None) -> list[Entry]:
-    """06 §1.3 🔒: the lead contact's phone tail, username and Instagram,
-    and the company's channel, Instagram and domain — each the stored key."""
+def dnc_entries(company: Company, *contacts: Contact | None) -> list[Entry]:
+    """06 §1.3 🔒: the lead contact's phone tail, username and Instagram —
+    and the card's own contact's, when that is another (the poster whose
+    handle the card shows, 9.1) — and the company's channel, Instagram and
+    domain; each the stored key. An anonymised contact is known by nothing
+    (``build_keys``' rule): its kept switchboard number is not the person."""
     found: list[Entry] = []
-    if contact is not None and contact.anonymised_at is None:
-        if contact.phone_tail:
-            found.append(Entry("dnc", "phone_tail", contact.phone_tail.strip()))
+    for contact in contacts:
+        if contact is None or contact.anonymised_at is not None:
+            continue
+        if (tail := _tail(contact.phone_tail)) is not None:
+            found.append(Entry("dnc", "phone_tail", tail))
         if contact.telegram_username:
             found.append(Entry("dnc", "tg_username", contact.telegram_username))
         if contact.instagram:
@@ -425,26 +432,38 @@ async def dnc_for_candidate(
     source: str = OWNER_SOURCE,
 ) -> int:
     """The owner's 🔒 (``lead_reviews.answer='dnc'``) or a manager's «🙅
-    Yozmang dedi»: the rows of ``dnc_entries`` — or, when the company has
-    none of those keys, its id — and the candidate → ``suppressed``,
-    pointing at the first row. Returns that row's id."""
-    from clientscrapper.services import candidates  # it imports gates → here
+    Yozmang dedi»: the rows of ``dnc_entries`` over the phone a push would
+    send (``push_gate.lead_contact`` — the card shows the same one; a 9.1
+    candidate's own contact is the poster with a username, the phone came
+    from enrichment on a company-tier contact) and the candidate's own
+    contact — or, when the company has none of those keys, its id. The
+    candidate is locked and re-read first (``FOR UPDATE``): an open one →
+    ``suppressed``, pointing at the first row; one a push or an answer
+    already ended keeps its state, the rows are written either way (the
+    person said «yozmang»). Returns that row's id."""
+    # They import gates → this module.
+    from clientscrapper.services import candidates, push_gate
 
-    company = await session.get(Company, candidate.company_id)
+    locked = await push_gate.lock_candidate(session, candidate.id)
+    if locked is None:
+        raise LookupError(f"candidate {candidate.id} is gone")
+    company = await session.get(Company, locked.company_id)
     if company is None:
-        raise LookupError(f"company {candidate.company_id} is gone")
-    contact = (
-        await session.get(Contact, candidate.contact_id)
-        if candidate.contact_id is not None
+        raise LookupError(f"company {locked.company_id} is gone")
+    own = (
+        await session.get(Contact, locked.contact_id)
+        if locked.contact_id is not None
         else None
     )
-    found = dnc_entries(company, contact)
+    lead = await push_gate.lead_contact(session, locked)
+    found = dnc_entries(company, lead, own)
     if not found:
         found = [Entry("dnc", "company_id", str(company.id))]
     ids = await add(session, found, source=source, reason=reason)
-    await candidates.transition(
-        session, candidate, "suppressed", now=now, suppressed_by=ids[0]
-    )
+    if locked.state not in candidates.TERMINAL_STATES:
+        await candidates.transition(
+            session, locked, "suppressed", now=now, suppressed_by=ids[0]
+        )
     return ids[0]
 
 
@@ -471,13 +490,85 @@ def dnc_command_entry(arg: str) -> Entry:
     raise ValueError("neither a phone nor a Telegram handle")
 
 
+@dataclass(frozen=True, slots=True)
+class DncResult:
+    """What ``/dnc`` did (06 §1.2): ``existing`` is the lasting row that
+    already held the key — «Allaqachon bor ({kind}, {dd.mm.yyyy})», nothing
+    written — else ``row_id`` is the new row («🔒 DNC yozildi — {key}») and
+    ``suppressed`` the open candidates it ended."""
+
+    entry: Entry
+    row_id: int | None = None
+    existing: Hit | None = None
+    suppressed: tuple[uuid.UUID, ...] = ()
+
+
+async def holders(session: AsyncSession, item: Entry) -> list[uuid.UUID]:
+    """The companies a ``phone_tail`` / ``tg_username`` key names: a live
+    contact's tail or username, a company's channel."""
+    if item.key_type == "phone_tail":
+        rows = await session.scalars(
+            sa.select(Contact.company_id).where(
+                Contact.phone_tail == item.key, Contact.anonymised_at.is_(None)
+            )
+        )
+    elif item.key_type == "tg_username":
+        rows = await session.scalars(
+            sa.union(
+                sa.select(Contact.company_id).where(
+                    Contact.telegram_username == item.key,
+                    Contact.anonymised_at.is_(None),
+                ),
+                sa.select(Company.id).where(Company.telegram_channel == item.key),
+            )
+        )
+    else:
+        return []
+    return sorted(set(rows))
+
+
 async def dnc_command(
-    session: AsyncSession, arg: str, *, reason: str | None = None
-) -> tuple[Entry, int]:
-    """Write ``/dnc``'s row (``source='owner_bot'``); the bot confirms first."""
+    session: AsyncSession, arg: str, *, now: datetime, reason: str | None = None
+) -> DncResult:
+    """``/dnc``'s write (``source='owner_bot'``; the bot confirms first): a
+    key a lasting row already holds is left as it is; else the row, and the
+    open candidates of every company the key names — over the lineage, a
+    merged source's key sits on its root — step to ``suppressed``."""
+    from clientscrapper.services import candidates, push_gate
+
     item = dnc_command_entry(arg)
+    held = await is_suppressed(session, [(item.key_type, item.key)], now=now)
+    if held is not None and held.permanent:
+        return DncResult(item, existing=held)
     [row_id] = await add(session, [item], source=OWNER_SOURCE, reason=reason)
-    return item, row_id
+    named = await holders(session, item)
+    lineage = sorted(
+        {
+            m
+            for group in (await companies.lineages(session, named)).values()
+            for m in group
+        }
+    )
+    open_ids = list(
+        await session.scalars(
+            sa.select(LeadCandidate.id)
+            .where(
+                LeadCandidate.company_id.in_(lineage),
+                LeadCandidate.state.in_(e.CANDIDATE_OPEN_STATES),
+            )
+            .order_by(LeadCandidate.id)
+        )
+    )
+    ended: list[uuid.UUID] = []
+    for candidate_id in open_ids:
+        locked = await push_gate.lock_candidate(session, candidate_id)
+        if locked is None or locked.state in candidates.TERMINAL_STATES:
+            continue
+        await candidates.transition(
+            session, locked, "suppressed", now=now, suppressed_by=row_id
+        )
+        ended.append(locked.id)
+    return DncResult(item, row_id=row_id, suppressed=tuple(ended))
 
 
 async def suppress_company(
@@ -510,6 +601,7 @@ __all__ = [
     "KIND_RANK",
     "CompanyKeys",
     "ContactKeys",
+    "DncResult",
     "Entry",
     "Hit",
     "Key",
@@ -521,6 +613,7 @@ __all__ = [
     "dnc_entries",
     "dnc_for_candidate",
     "entry",
+    "holders",
     "is_suppressed",
     "keys_for",
     "lookup_statement",

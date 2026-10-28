@@ -513,6 +513,78 @@ async def test_the_owner_s_dnc_writes_every_key_and_suppresses(session):
     assert (cand.state, cand.suppressed_by) == ("suppressed", first)
 
 
+async def test_the_owner_s_dnc_writes_the_phone_the_card_pushes(session):
+    """The review's probe (9.1 shape): the card's contact is the poster with
+    a username and no phone, the phone came from enrichment on a
+    company-tier contact. 🔒 writes that phone (06 §1.3), so the same mobile
+    at the director's second firm is suppressed too."""
+    from clientscrapper.services import push_gate
+
+    owner = await firm(session, "Namuna Tekstil Savdo")
+    person = await contact(
+        session,
+        owner,
+        None,
+        tier="person",
+        telegram_username="namuna_tekstil",
+        role="direktor",
+    )
+    await contact(session, owner, phone(32))
+    cand = await candidate(session, owner, state="review", lead=person, score=70)
+    lead = await push_gate.lead_contact(session, cand)
+    assert lead is not None and lead.phone == phone(32)
+    first = await suppression.dnc_for_candidate(session, cand, now=NOW)
+    rows = (
+        await session.execute(
+            sa.select(Suppression.kind, Suppression.key_type, Suppression.key).order_by(
+                Suppression.id
+            )
+        )
+    ).all()
+    assert [tuple(r) for r in rows] == [
+        ("dnc", "phone_tail", tail_of(32)),
+        ("dnc", "tg_username", "namuna_tekstil"),
+    ]
+    assert (cand.state, cand.suppressed_by) == ("suppressed", first)
+    other = await firm(session, "Namuna Mato Import")
+    await contact(session, other, phone(32))
+    hit = await suppression.check_company(session, other.id, now=NOW)
+    assert hit is not None and (hit.kind, hit.key_type) == ("dnc", "phone_tail")
+
+
+async def test_an_anonymised_contact_s_kept_number_is_no_dnc_key(session):
+    owner = await firm(session)
+    gone = await contact(
+        session, owner, "+998712000033", anonymised_at=NOW - timedelta(days=1)
+    )
+    cand = await candidate(session, owner, state="review", lead=gone, score=70)
+    await suppression.dnc_for_candidate(session, cand, now=NOW)
+    rows = (await session.execute(sa.select(Suppression.key_type))).scalars().all()
+    assert rows == ["company_id"]
+
+
+async def test_the_owner_s_dnc_reads_the_candidate_as_stored(session):
+    """The candidate is locked and re-read: one a push ended meanwhile keeps
+    ``pushed`` — the rows are written, the person said «yozmang»."""
+    owner = await firm(session)
+    lead = await contact(session, owner, phone(34))
+    cand = await candidate(session, owner, state="approved", lead=lead, score=70)
+    await session.execute(
+        sa.update(LeadCandidate)
+        .where(LeadCandidate.id == cand.id)
+        .values(
+            state="pushed",
+            external_id=f"cs:{owner.id}:202610",
+            pushed_at=NOW,
+        )
+    )
+    first = await suppression.dnc_for_candidate(session, cand, now=NOW)
+    got = await session.get(LeadCandidate, cand.id)
+    assert got is not None and (got.state, got.suppressed_by) == ("pushed", None)
+    held = await session.get(Suppression, first)
+    assert held is not None and (held.kind, held.key) == ("dnc", tail_of(34))
+
+
 async def test_a_dnc_on_a_keyless_company_names_the_company(session):
     owner = await firm(session)
     cand = await candidate(session, owner, state="hold", score=40)
@@ -532,17 +604,84 @@ async def test_a_dnc_on_a_keyless_company_names_the_company(session):
     ],
 )
 async def test_the_dnc_command_writes_one_row(session, arg, want):
-    item, row_id = await suppression.dnc_command(session, arg)
-    stored = await session.get(Suppression, row_id)
+    done = await suppression.dnc_command(session, arg, now=NOW)
+    assert done.row_id is not None and done.existing is None
+    stored = await session.get(Suppression, done.row_id)
     assert stored is not None
-    assert (item.key_type, item.key) == want
+    assert (done.entry.key_type, done.entry.key) == want
     assert (stored.kind, stored.key_type, stored.key, stored.source) == (
         "dnc",
         *want,
         "owner_bot",
     )
-    # A second /dnc of the same key keeps the one row.
-    assert (await suppression.dnc_command(session, arg))[1] == row_id
+    # A second /dnc of the same key writes nothing and names the row that
+    # holds it: «Allaqachon bor ({kind}, {dd.mm.yyyy})» (06 §1.2).
+    again = await suppression.dnc_command(session, arg, now=NOW)
+    assert again.row_id is None and again.existing is not None
+    assert (again.existing.id, again.existing.kind) == (done.row_id, "dnc")
+    assert again.existing.created_at == stored.created_at
+    assert await session.scalar(sa.select(sa.func.count(Suppression.id))) == 1
+
+
+async def test_a_dnc_command_on_a_key_a_client_row_holds_writes_nothing(session):
+    held = await row(session, "client", "phone_tail", tail_of(44), source="outcomes")
+    done = await suppression.dnc_command(session, phone(44), now=NOW)
+    assert done.existing is not None and (done.existing.id, done.existing.kind) == (
+        held.id,
+        "client",
+    )
+    assert (done.row_id, done.suppressed) == (None, ())
+
+
+async def test_a_dnc_command_over_a_cooldown_writes_the_lasting_row(session):
+    await row(
+        session,
+        "cooldown",
+        "phone_tail",
+        tail_of(45),
+        expires_at=NOW + timedelta(days=30),
+    )
+    done = await suppression.dnc_command(session, phone(45), now=NOW)
+    assert done.existing is None and done.row_id is not None
+
+
+async def test_a_dnc_command_suppresses_the_open_candidates_its_key_names(session):
+    """06 §1.2: «open lead_candidates of that company → suppressed» — the
+    company holding the tail on a live contact, the one whose channel is the
+    handle, and a merged source's key on its root; a pushed candidate keeps
+    its state, an anonymised contact names no company."""
+    by_phone = await firm(session)
+    await contact(session, by_phone, phone(46))
+    open_one = await candidate(session, by_phone, state="review", score=70)
+    by_channel = await firm(session, telegram_channel="namuna_kanal")
+    channel_one = await candidate(session, by_channel, state="hold", score=40)
+    root = await firm(session)
+    source = await firm(session)
+    await contact(session, source, phone(46))
+    root_one = await candidate(session, root, state="enriching", score=50)
+    await companies.merge_into(session, source, root, by="owner:111111111", now=NOW)
+    gone = await firm(session)
+    await contact(session, gone, phone(46), anonymised_at=NOW)
+    gone_one = await candidate(session, gone, state="review", score=70)
+    done_firm = await firm(session)
+    await contact(session, done_firm, phone(46))
+    pushed = await candidate(session, done_firm, state="pushed", score=70)
+
+    done = await suppression.dnc_command(session, phone(46), now=NOW)
+    assert done.row_id is not None
+    assert set(done.suppressed) == {open_one.id, root_one.id}
+    for cand, state in (
+        (open_one, "suppressed"),
+        (root_one, "suppressed"),
+        (gone_one, "review"),
+        (pushed, "pushed"),
+    ):
+        got = await session.get(LeadCandidate, cand.id, populate_existing=True)
+        assert got is not None and got.state == state
+        if state == "suppressed":
+            assert got.suppressed_by == done.row_id
+    by_handle = await suppression.dnc_command(session, "@namuna_kanal", now=NOW)
+    assert by_handle.suppressed == (channel_one.id,)
 
 
 @pytest.mark.parametrize("arg", ["hello", "1234", "@ab", "t.me/joinchat/xyz", ""])

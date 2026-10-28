@@ -77,6 +77,22 @@ async def pushable(
     return owner, lead, cand, body
 
 
+async def tapped(session, cand, *, note=None, minutes=5, state="approved") -> LeadReview:
+    """The owner's answer on the card (``push``, an answered row)."""
+    answered = state in ("approved", "declined", "merged")
+    found = LeadReview(
+        candidate_id=cand.id,
+        kind="owner",
+        state=state,
+        answer={"approved": "push", "declined": "decline"}.get(state),
+        answered_at=NOW - timedelta(minutes=minutes) if answered else None,
+        note=note,
+    )
+    session.add(found)
+    await session.flush()
+    return found
+
+
 async def refusals(
     session, cand, body, *, now=NOW, repush_of=None
 ) -> list[tuple[int, str]]:
@@ -125,6 +141,27 @@ async def test_1_a_repush_of_its_own_id_reads_pushed(session, erp_ready):
     # Another candidate's row is never this one's re-push.
     other = await candidate(session, await firm(session), state="pushed", score=72)
     assert (12, "external_id") in await refusals(session, other, body, repush_of=sent)
+
+
+async def test_1_a_repush_is_refused_for_another_candidate_of_the_company(
+    session, erp_ready
+):
+    """The row's candidate is checked, not only its company: an older
+    candidate's push of this month is no re-push of the new one."""
+    owner, lead, cand, body = await pushable(session)
+    old = await candidate(
+        session, owner, state="rejected", score=72, rejected_at=NOW - timedelta(days=200)
+    )
+    sent = await push(
+        session,
+        old,
+        sent_at=NOW - timedelta(days=3),
+        phone_tail=tail(61),
+        external_id=body["external_id"],
+        payload_sha256=push_gate.canonical_sha256(body),
+        superseded_at=NOW,
+    )
+    assert await refusals(session, cand, body, repush_of=sent) == [(12, "external_id")]
 
 
 # --- 2 --------------------------------------------------------------------------------
@@ -276,6 +313,79 @@ async def test_4_a_shared_phone_the_owner_approved(session, erp_ready):
     assert await refusals(session, cand, body) == []
 
 
+async def test_4_the_newest_owner_approval_decides_the_shared_phone(session, erp_ready):
+    """The owner's newest approval carries the word; an older ``shared_ok``
+    is not the answer to the card the owner tapped since."""
+    _, _, cand, body = await pushable(session, lead_fields={"shared_phone": True})
+    await tapped(session, cand, note=push_gate.SHARED_OK, minutes=60)
+    await tapped(session, cand, note=None, minutes=5)
+    assert await refusals(session, cand, body) == [(4, "shared_phone")]
+    await tapped(session, cand, note=push_gate.SHARED_OK, minutes=1)
+    assert await refusals(session, cand, body) == []
+
+
+@pytest.mark.parametrize("state", ["declined", "pending"])
+async def test_4_shared_ok_on_a_row_that_is_no_approval(session, erp_ready, state):
+    _, _, cand, body = await pushable(session, lead_fields={"shared_phone": True})
+    await tapped(session, cand, note=push_gate.SHARED_OK, state=state)
+    assert await refusals(session, cand, body) == [(4, "shared_phone")]
+
+
+@pytest.mark.parametrize(
+    "transient",
+    ["crm_push_enabled", "stale", "breaker"],
+)
+async def test_4_shared_ok_survives_a_transient_refusal(
+    session, erp_ready, monkeypatch, transient
+):
+    """The review's probe: a refusal that keeps the candidate approved is
+    written after the owner's word, never over it — or the next claim would
+    refuse ``shared_phone`` and send the owner's approval back to a card."""
+    _, _, cand, body = await pushable(session, lead_fields={"shared_phone": True})
+    approval = await tapped(session, cand, note=push_gate.SHARED_OK)
+    if transient == "crm_push_enabled":
+        monkeypatch.setattr(settings, "crm_push_enabled", False)
+        code = "disabled"
+    elif transient == "stale":
+        await set_config(session, "suppression", fresh_config(NOW - timedelta(days=3)))
+        code = "stale"
+    else:
+        await session.execute(
+            sa.update(Source)
+            .where(Source.key == erp_feeds.ERP_SOURCE)
+            .values(breaker_until=NOW + timedelta(hours=1), breaker_reason="push_404")
+        )
+        code = "breaker"
+    first = await push_gate.claim(
+        session, cand.id, now=NOW, payload=body, endpoint=ENDPOINT
+    )
+    assert [(r.check, r.code) for r in first.refusals] == [(2, code)]
+    await session.refresh(approval)
+    assert approval.note == "shared_ok · " + push_gate.REFUSAL_UZ[code]
+    assert push_gate.owner_word(approval.note) == push_gate.SHARED_OK
+    monkeypatch.setattr(settings, "crm_push_enabled", True)
+    await set_config(session, "suppression", fresh_config())
+    await session.execute(
+        sa.update(Source)
+        .where(Source.key == erp_feeds.ERP_SOURCE)
+        .values(breaker_until=None, breaker_reason=None)
+    )
+    second = await push_gate.claim(
+        session, cand.id, now=NOW, payload=body, endpoint=ENDPOINT
+    )
+    assert second.claimed, second.refusals
+    assert (await session.get(LeadCandidate, cand.id)).state == "approved"
+
+
+def test_4_the_owner_s_word_is_kept_within_the_column():
+    long = "x" * 600
+    assert push_gate.noted(push_gate.SHARED_OK, long) == ("shared_ok · " + long)[:500]
+    assert push_gate.noted("eski izoh", "yangi") == "yangi"
+    assert push_gate.noted(None, long) == long[:500]
+    assert push_gate.owner_word("shared_ok · Ball tushdi") == "shared_ok"
+    assert push_gate.owner_word(None) is None
+
+
 async def test_4_the_usable_phone_is_preferred(session, erp_ready):
     """No contact named on the candidate: the lineage's usable mobile wins
     over a shared one and a landline."""
@@ -286,6 +396,41 @@ async def test_4_the_usable_phone_is_preferred(session, erp_ready):
     cand = await candidate(session, owner, state="approved", score=72)
     picked = await push_gate.lead_contact(session, cand)
     assert picked is not None and picked.id == mobile.id
+
+
+async def test_4_a_mobile_beats_an_older_landline(session, erp_ready):
+    owner = await firm(session)
+    landline = await contact(
+        session, owner, "+998712000064", created_at=NOW - timedelta(days=30)
+    )
+    mobile = await contact(session, owner, phone(64), created_at=NOW)
+    cand = await candidate(session, owner, state="approved", score=72)
+    picked = await push_gate.lead_contact(session, cand)
+    assert picked is not None and picked.id == mobile.id
+    # Without a mobile the oldest usable phone is the one.
+    await session.delete(mobile)
+    await session.flush()
+    picked = await push_gate.lead_contact(session, cand)
+    assert picked is not None and picked.id == landline.id
+
+
+async def test_4_among_unusable_phones_a_live_contact_beats_an_anonymised_one(
+    session, erp_ready
+):
+    """Neither is pushable; the refusal names the live one's reason (shared)
+    rather than the stripped one's, whatever their age."""
+    owner = await firm(session)
+    await contact(
+        session,
+        owner,
+        "+998712000065",
+        anonymised_at=NOW - timedelta(days=1),
+        created_at=NOW - timedelta(days=30),
+    )
+    shared = await contact(session, owner, phone(65), shared_phone=True, created_at=NOW)
+    cand = await candidate(session, owner, state="approved", score=72)
+    picked = await push_gate.lead_contact(session, cand)
+    assert picked is not None and picked.id == shared.id
 
 
 # --- 5 --------------------------------------------------------------------------------
@@ -359,6 +504,11 @@ async def test_6_the_next_attempt_waits_and_carries_the_same_body(session, erp_r
     assert [(r.check, r.code, r.until) for r in found] == [
         (6, "attempt_wait", failed + push_gate.ATTEMPT_DELAYS[2])
     ]
+    # Waiting for the next attempt is the job's own clock: no note.
+    approval = await tapped(session, cand)
+    await push_gate.claim(session, cand.id, now=NOW, payload=body, endpoint=ENDPOINT)
+    await session.refresh(approval)
+    assert approval.note is None
     later = NOW + timedelta(minutes=5)
     plan = await push_gate.evaluate(session, cand, now=later, payload=body)
     assert (plan.refusals, plan.attempt) == ([], 2)
@@ -383,6 +533,7 @@ async def test_6_three_attempts_then_none(session, erp_ready):
             payload_sha256=sha,
         )
     assert await refusals(session, cand, body) == [(6, "attempts_spent")]
+    assert push_gate.REFUSAL_UZ["attempts_spent"].startswith("CRM javob bermadi")
     assert push_gate.MAX_ATTEMPTS == 3
     assert dict(push_gate.ATTEMPT_DELAYS) == {
         2: timedelta(minutes=5),
@@ -492,6 +643,64 @@ async def test_9_the_erp_s_rolling_source_cap(session, erp_ready):
     )
 
 
+async def test_9_the_source_cap_counts_the_door_pushed_to(session, erp_ready):
+    """05 §A.2: the ERP caps per source — 200 «Boshqa» arrivals do not fill
+    the agent door's cap."""
+    _, _, cand, body = await pushable(session)
+    other = await firm(session)
+    stranger = await candidate(session, other, state="pushed", score=72)
+    await session.execute(
+        sa.text(
+            "INSERT INTO push_log (external_id, attempt, candidate_id, company_id,"
+            " phone_tail, endpoint, source_key_sent, payload_sha256, status, http_status,"
+            " sent_at)"
+            " SELECT 'cs' || chr(58) || gen_random_uuid() || :month, 1, :cand, :company,"
+            " lpad((920000000 + i)::text, 9, '0'), :endpoint, 'other', repeat('0', 64),"
+            " 'sent', 200, :at FROM generate_series(1, :n) AS i"
+        ),
+        {
+            "cand": stranger.id,
+            "company": other.id,
+            "endpoint": "/api/leads/in/other",
+            "at": NOW - timedelta(hours=22),
+            "n": push_gate.SOURCE_CAP,
+            "month": ":202610",
+        },
+    )
+    assert await refusals(session, cand, body) == []
+
+
+async def test_9_and_7_a_push_in_flight_counts(session, erp_ready, monkeypatch):
+    """The review's probe: a committed ``sending`` row whose POST has not
+    answered is a push for the day's cap and the phone's 24 hours (it may
+    land, 02 §2.10 rule 5 (a))."""
+    monkeypatch.setattr(settings, "push_daily_cap", 1)
+    a = await firm(session)
+    la = await contact(session, a, phone(67))
+    ca = await candidate(session, a, state="approved", lead=la, score=72)
+    b = await firm(session)
+    lb = await contact(session, b, phone(67), shared_phone=True)
+    cb = await candidate(session, b, state="approved", lead=lb, score=72)
+    await tapped(session, cb, note=push_gate.SHARED_OK)
+
+    def body(owner, lead):
+        return {
+            "external_id": push_gate.external_id_for(owner.id, NOW),
+            "name": owner.display_name,
+            "phone": lead.phone,
+            "note": "NEGA TOPILDI: x",
+        }
+
+    first = await push_gate.claim(
+        session, ca.id, now=NOW, payload=body(a, la), endpoint=ENDPOINT
+    )
+    assert first.claimed
+    await session.commit()
+    found = await push_gate.check(session, cb, now=NOW, payload=body(b, lb))
+    assert [(r.check, r.code) for r in found] == [(7, "phone_recent"), (9, "cap")]
+    assert found[0].until == NOW + timedelta(hours=24)
+
+
 # --- 10 -------------------------------------------------------------------------------
 
 
@@ -556,6 +765,7 @@ def test_the_window_is_tashkent_time(now, opens):
         ({"note": None}, "missing:note"),
         ({"kub": "2"}, "kub"),  # no stated volume
         ({"note": "Qoʻngʻiroq: <PHONE_1>"}, "pseudonym:note"),
+        ({"note": "Pasport: <ID>"}, "pseudonym:note"),
         ({"firma": "Namuna\x00 MChJ"}, "ill_formed:firma"),
         ({"evidence": "bad \ud83d half"}, "ill_formed:evidence"),
         ({"score": 72}, "type:score"),
@@ -573,6 +783,14 @@ async def test_11_a_note_of_700_units_and_the_stated_kub_pass(session, erp_ready
     good = {**body, "note": "😀" * 350, "kub": "2"}
     assert await refusals(session, cand, good) == []
     assert await refusals(session, cand, {**good, "kub": "3"}) == [(11, "payload")]
+
+
+async def test_11_kub_is_a_stated_volume_never_another_signal_s_value(session, erp_ready):
+    """14 ads in a category are a velocity, not 14 kub (05 §A.2: a mapped
+    ``kub`` becomes the lead's quoted volume)."""
+    owner, _, cand, body = await pushable(session)
+    await signal(session, owner, "vol_marketplace_velocity", value=Decimal("14"))
+    assert await refusals(session, cand, {**body, "kub": "14"}) == [(11, "payload")]
 
 
 async def test_11_no_payload(session, erp_ready):
@@ -711,6 +929,7 @@ async def test_14_a_refusal_reaches_the_note_and_the_candidate_stays(
     session, erp_ready, monkeypatch
 ):
     _, _, cand, body = await pushable(session)
+    await tapped(session, cand)
     monkeypatch.setattr(settings, "crm_push_enabled", False)
     result = await push_gate.claim(
         session, cand.id, now=NOW, payload=body, endpoint=ENDPOINT
@@ -722,6 +941,23 @@ async def test_14_a_refusal_reaches_the_note_and_the_candidate_stays(
     ]
     assert (await session.get(LeadCandidate, cand.id)).state == "approved"
     assert await session.scalar(sa.select(sa.func.count(PushLog.id))) == 0
+
+
+async def test_14_an_auto_approved_candidate_gets_no_invented_owner_answer(
+    session, erp_ready, monkeypatch
+):
+    """No card was ever tapped: a row would read as the owner's decision in
+    /lidlar and the reports. The refusal is the log's, the candidate stays."""
+    _, _, cand, body = await pushable(session)
+    cand.approved_by = "auto:olx_business"
+    await session.flush()
+    monkeypatch.setattr(settings, "crm_push_enabled", False)
+    result = await push_gate.claim(
+        session, cand.id, now=NOW, payload=body, endpoint=ENDPOINT
+    )
+    assert [(r.check, r.code) for r in result.refusals] == [(2, "disabled")]
+    assert await session.scalar(sa.select(sa.func.count(LeadReview.id))) == 0
+    assert (await session.get(LeadCandidate, cand.id)).state == "approved"
 
 
 async def test_14_the_owner_s_approval_row_carries_the_note(session, erp_ready):
@@ -806,12 +1042,31 @@ async def test_14_what_only_the_owner_can_resolve_goes_back_to_review(
 
 async def test_14_a_dnc_after_the_approval_suppresses(session, erp_ready):
     owner, _, cand, body = await pushable(session)
+    await tapped(session, cand)
     dnc = await row(session, "dnc", "phone_tail", tail(61))
     await push_gate.claim(session, cand.id, now=NOW, payload=body, endpoint=ENDPOINT)
     got = await session.get(LeadCandidate, cand.id, populate_existing=True)
     assert got is not None and (got.state, got.suppressed_by) == ("suppressed", dnc.id)
     [note] = (await session.scalars(sa.select(LeadReview.note))).all()
     assert note == "🚫 Bu raqam endi bostirilgan"
+
+
+async def test_14_a_client_hit_at_push_time_makes_the_company_a_client(
+    session, erp_ready
+):
+    """Gate 4 runs inside the push transaction too (04 §6): a client hit
+    suppresses the candidate and writes ``companies.state='client'``."""
+    owner, _, cand, body = await pushable(session)
+    client = await row(session, "client", "phone_tail", tail(61), source="outcomes")
+    await push_gate.claim(session, cand.id, now=NOW, payload=body, endpoint=ENDPOINT)
+    got = await session.get(LeadCandidate, cand.id, populate_existing=True)
+    state = await session.scalar(
+        sa.select(Company.state)
+        .where(Company.id == owner.id)
+        .execution_options(populate_existing=True)
+    )
+    assert got is not None and (got.state, got.suppressed_by) == ("suppressed", client.id)
+    assert state == "client"
 
 
 def test_every_refusal_word_is_owner_text():

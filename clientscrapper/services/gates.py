@@ -28,7 +28,15 @@ order:
 own words — its names, and the observations it wrote about itself
 (``signals.SELF_DESCRIPTION_KINDS``: a profile, a channel's own post, a
 listing, a site, a directory card …) — never a buyer's question: «kim kargo
-qiladi?» is a buyer (``intent_post``).
+qiladi?» is a buyer (``intent_post``). Gate 2 reads a name with
+``COMPETITOR_NAME_RE`` (the cargo core and the logistics words) and a
+self-description with ``COMPETITOR_SELF_RE`` (the cargo core only): every
+importer writes «Доставка по Ташкенту» or «yetkazib beramiz». Gate 7 reads a
+name with ``STATE_BODY_NAME_RE``, a state body by its shape («… hokimligi»,
+«Davlat … qoʻmitasi», «5-maktab»), never by a stem a founder's name or an
+equipment trader carries («Davlatbek», «Maktab Mebel Import»). Gate 3's UZ
+address is one ``normalise.canonical_city`` reads an Uzbek city or Tashkent
+place in.
 
 The DB half (``inputs_for``/``evaluate``) reads all of it over the company's
 lineage; ``apply_effects`` writes what the deciding gate implies of the
@@ -52,11 +60,14 @@ from clientscrapper.collectors.keywords import (
     B2B_RE,
     B2C_RE,
     CJK_RE,
-    COMPETITOR_RE,
+    CN_COUNTRY_NAMES,
+    COMPETITOR_NAME_RE,
+    COMPETITOR_SELF_RE,
     LEGAL_FORM_RE,
-    STATE_BODY_RE,
+    STATE_BODY_NAME_RE,
     SUPPLIER_NAME_RE,
 )
+from clientscrapper.config import settings
 from clientscrapper.db import enums as e
 from clientscrapper.db.models import (
     ChatMonitor,
@@ -71,7 +82,7 @@ from clientscrapper.db.models import (
     PushLog,
     Signal,
 )
-from clientscrapper.services import companies, signals, suppression
+from clientscrapper.services import companies, normalise, signals, suppression
 from clientscrapper.services.suppression import Hit
 
 Decision = Literal["pass", "hold", "excluded", "suppressed"]
@@ -105,13 +116,20 @@ REPEAT_POSTS_MIN: Final = 3
 # Gate 6 and the push gate's checks 7/8 (02 §2.10 rule 2): one home.
 OPEN_PUSH_WINDOW: Final = timedelta(days=90)
 PHONE_PUSH_WINDOW: Final = timedelta(hours=24)
+# What counts as a push for those windows and the push gate's caps: a
+# delivered row (``sent|unknown``, 02 §2.10 rule 2) and one in flight — a
+# committed ``sending`` row whose POST has not answered may land (rule 5 (a)
+# turns it ``unknown`` after 10 minutes), so a second push beside it would
+# be one more for the same phone, company or day (T-19 review).
+PUSH_COUNTED_STATUSES: Final = (*e.PUSH_DELIVERED_STATUSES, "sending")
 # The model's job kind whose result is an ImportSignal (04 §4.3).
 CLASSIFY_KIND: Final = "classify"
 CLASSIFY_DONE: Final = ("applied", "fallback")
 # The site enrichment fetches (04 §3 E2): its title is the «website title».
 SITE_SOURCE: Final = "enrich_site"
 SUPPLIER_HOSTS: Final = ("1688.com", "alibaba.com")
-CN_COUNTRIES: Final = frozenset({"CN", "CHN", "CHINA", "XITOY"})
+# An exhibitor row's country, upper-cased (the spellings are keywords.py's).
+CN_COUNTRIES: Final = CN_COUNTRY_NAMES
 LIQUIDATED_KEY: Final = "neg_liquidated"
 COMPETITOR_FLAG: Final = "flag_competitor"
 SUPPLIER_FLAG: Final = "flag_supplier_cn"
@@ -260,9 +278,14 @@ class _Verdict:
 
 
 def _own_texts(company: GateCompany) -> list[str]:
-    """Names and self-descriptions — what the competitor/B2C/B2B words are
-    read on."""
+    """Names and self-descriptions — what the B2C/B2B words are read on."""
     return [*company.all_names(), *(o.text for o in company.own if o.text)]
+
+
+def _names_and_titles(company: GateCompany) -> list[str]:
+    """What the company is called: its names over the lineage and the names
+    its own pages carry (a profile's name, a site's title)."""
+    return [*company.all_names(), *(o.title for o in company.own if o.title)]
 
 
 def _search(pattern: Any, texts: Iterable[str]) -> str | None:
@@ -341,7 +364,13 @@ def gate_competitor(
     why: str | None = None
     if company.is_competitor:
         why = "flag"
-    elif _search(COMPETITOR_RE, _own_texts(company)) is not None:
+    elif (
+        _search(COMPETITOR_NAME_RE, _names_and_titles(company)) is not None
+        or _search(COMPETITOR_SELF_RE, [o.text for o in company.own if o.text])
+        is not None
+    ):
+        # A name read for logistics too, a self-description only for the
+        # cargo core (keywords.COMPETITOR_SELF_RE: every importer delivers).
         why = "words"
     elif verdict is not None and verdict.get("is_competitor") is True:
         why = "verdict"
@@ -374,7 +403,13 @@ def gate_supplier(
     uz_form = company.legal_form is not None or (
         _search(LEGAL_FORM_RE, company.all_names()) is not None
     )
-    uz_address = bool(company.address or company.city)
+    # A UZ address names an Uzbek city or Tashkent place (normalise's one
+    # reading of an address); a Chinese exporter's card carries an address
+    # too.
+    uz_address = (
+        normalise.canonical_city(company.city) is not None
+        or normalise.canonical_city(company.address) is not None
+    )
     why: str | None = None
     if company.is_supplier_cn:
         why = "flag"
@@ -457,7 +492,7 @@ def gate_recent(hit: Hit | None, recent: Recent, now: datetime) -> _Verdict:
     why, until = min(windows, key=lambda w: w[1])
     return _Verdict(
         f"fail:{why}",
-        f"kutish: {until.strftime('%d.%m.%Y')} gacha",
+        f"kutish: {until.astimezone(settings.tz).strftime('%d.%m.%Y')} gacha",
         Failure("not_recent", "hold", why, until=until, hit=hit),
     )
 
@@ -470,7 +505,7 @@ def gate_active(company: GateCompany, signals_: Sequence[GateSignal]) -> _Verdic
             "reestr: tugatilgan ✗",
             Failure("active_entity", "excluded", "liquidated"),
         )
-    if _search(STATE_BODY_RE, company.all_names()) is not None:
+    if _search(STATE_BODY_NAME_RE, company.all_names()) is not None:
         return _Verdict(
             "fail:state_body",
             "davlat tashkiloti ✗",
@@ -581,12 +616,13 @@ async def recent_pushes(
     exclude_external_id: str | None = None,
 ) -> Recent:
     """Gate 6's windows and the push gate's checks 7/8 (02 §2.10 rule 2):
-    pushes counted only while ``sent|unknown`` and not superseded, and —
-    for a re-push — never the push's own ``external_id``."""
+    pushes counted only while ``PUSH_COUNTED_STATUSES`` (delivered or in
+    flight) and not superseded, and — for a re-push — never the push's own
+    ``external_id``."""
     from clientscrapper.services import candidates  # it imports this module
 
     delivered = sa.and_(
-        PushLog.status.in_(e.PUSH_DELIVERED_STATUSES),
+        PushLog.status.in_(PUSH_COUNTED_STATUSES),
         PushLog.superseded_at.is_(None),
     )
     if exclude_external_id is not None:
@@ -826,6 +862,7 @@ __all__ = [
     "GATES",
     "OPEN_PUSH_WINDOW",
     "PHONE_PUSH_WINDOW",
+    "PUSH_COUNTED_STATUSES",
     "Failure",
     "GateCompany",
     "GateContact",

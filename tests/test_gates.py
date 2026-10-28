@@ -209,6 +209,14 @@ def test_the_gate_words_are_owner_text(result):
             "volume",
             "hajm",
         ),
+        # «within 90 d» holds the 90th day itself
+        (
+            GateCompany(id=ID, display_name="Namuna"),
+            (vol(1), vol(2, days=90)),
+            None,
+            "volume",
+            "hajm",
+        ),
         (
             GateCompany(id=ID, display_name="Namuna", repeat_count_60d=3),
             (),
@@ -333,6 +341,69 @@ def test_a_buyer_asking_kim_kargo_qiladi_passes():
     assert result.failures == ()
 
 
+# The T-19 review: an importer's own words about delivery are no cargo.
+@pytest.mark.parametrize(
+    ("name", "kind", "text"),
+    [
+        (
+            "Namuna Maishiy Texnika MChJ",
+            "listing",
+            "Стиральные машины оптом со склада. Доставка по Ташкенту бесплатно.",
+        ),
+        (
+            "Namuna Mebel MChJ",
+            "listing",
+            "Oshxona mebeli optom. Toshkent boʻylab yetkazib beramiz!",
+        ),
+        ("Namuna Mebel MChJ", "seller", "Bepul dostavka, optom narxlar"),
+        ("Mebel Express MChJ", "profile", "Yumshoq mebel optom"),
+        (
+            "Namuna Santexnika MChJ",
+            "profile",
+            "Сантехника из Китая оптом, своя логистика и склад",
+        ),
+        ("Namuna Avto MChJ", "listing", "Barcha tovarlar rastamojka qilingan"),
+        ("Namuna Avto MChJ", "listing", "Растаможенные запчасти в наличии"),
+    ],
+)
+def test_an_importer_that_delivers_is_no_competitor(name, kind, text):
+    company = GateCompany(
+        id=ID,
+        display_name=name,
+        legal_form="MChJ",
+        own=(OwnText(text, kind, title=name),),
+    )
+    result = judge(company)
+    assert result.marks["not_competitor"] == "pass"
+    assert result.failures == ()
+
+
+@pytest.mark.parametrize(
+    ("company", "found"),
+    [
+        # a name read for logistics, a page's own title too
+        (replace(PASSING, display_name="Namuna Logistika MChJ"), True),
+        (
+            replace(
+                PASSING,
+                own=(OwnText("Yuk tashish", "profile", title="Namuna Logistics"),),
+            ),
+            True,
+        ),
+        # logistics in a self-description is no cargo …
+        (replace(PASSING, own=(OwnText("Ombor va logistika", "profile"),)), False),
+        # … unless offered as a service
+        (
+            replace(PASSING, own=(OwnText("Logistika xizmatlari, Xitoydan", "profile"),)),
+            True,
+        ),
+        (replace(PASSING, own=(OwnText("Доставка грузов из Китая", "site"),)), True),
+    ],
+)
+def test_a_name_reads_the_logistics_words_a_text_reads_the_cargo_core(company, found):
+    assert (judge(company).marks["not_competitor"] == "fail:words") is found
+
+
 # --- gate 3: not_supplier -------------------------------------------------------------
 
 
@@ -412,6 +483,53 @@ def test_an_anonymised_chinese_phone_is_no_evidence():
     assert (
         judge(contacts=(GateContact("+8613800000001", anonymised=True),)).failures == ()
     )
+
+
+@pytest.mark.parametrize(
+    ("name", "address", "city"),
+    [
+        # a Chinese exporter's card carries an address too (T-19 review)
+        (
+            "Yiwu Namuna Trading Co., Ltd.",
+            "No. 5 Futian Road, Yiwu, Zhejiang, China",
+            None,
+        ),
+        ("Guangzhou Namuna Import & Export Co., Ltd", "Baiyun District, Guangzhou", None),
+        ("义乌市纳木纳贸易有限公司", "浙江省义乌市", None),
+        ("Yiwu Namuna Co., Limited", None, "Yiwu"),
+    ],
+)
+def test_a_supplier_name_with_a_chinese_address_is_a_supplier(name, address, city):
+    company = GateCompany(id=ID, display_name=name, address=address, city=city)
+    assert judge(company).marks["not_supplier"] == "fail:name"
+
+
+@pytest.mark.parametrize(
+    ("address", "city"),
+    [
+        ("Toshkent sh., Chilonzor tumani, Bunyodkor koʻchasi 1", None),
+        ("г. Ташкент, ул. Намуна, 5", None),
+        ("Chorsu bozori, 3-qator", None),
+        (None, "Samarqand"),
+    ],
+)
+def test_a_supplier_name_with_a_uz_address_is_no_supplier(address, city):
+    company = GateCompany(
+        id=ID,
+        display_name="Namuna Import & Export Co., Ltd",
+        address=address,
+        city=city,
+    )
+    assert judge(company).marks["not_supplier"] == "pass"
+
+
+@pytest.mark.parametrize(
+    "country",
+    ["CN", "CHN", "PRC", "CHINA", "CHINA (MAINLAND)", "XITOY", "ХИТОЙ", "КИТАЙ", "КНР"],
+)
+def test_every_chinese_country_spelling_is_an_exhibitor_from_china(country):
+    company = replace(PASSING, exhibitor_countries=frozenset({country}))
+    assert judge(company).marks["not_supplier"] == "fail:exhibitor"
 
 
 # --- gates 4 and 5: the suppression hit -----------------------------------------------
@@ -497,6 +615,16 @@ def test_the_hold_ends_with_the_earliest_window():
     assert judge(recent=over).failures == ()
 
 
+def test_the_hold_line_prints_the_tashkent_date():
+    """A hold ending at 01:00 on 2 Nov in Tashkent is the 2nd, whatever zone
+    the database handed the moment back in (T-19 review)."""
+    from datetime import UTC, datetime
+
+    until = datetime(2026, 11, 1, 20, 0, tzinfo=UTC)
+    result = judge(recent=Recent(company_push_until=until))
+    assert result.lines[5] == "kutish: 02.11.2026 gacha"
+
+
 # --- gate 7: active_entity ------------------------------------------------------------
 
 
@@ -535,6 +663,47 @@ def test_a_state_word_in_the_text_only_excludes_nothing():
     assert judge(company).failures == ()
     alias = replace(PASSING, names=("Toshkent shahar hokimligi",))
     assert only_failure(judge(alias)).reason == "state_body"
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "Davlatbek Mebel MChJ",
+        "Davlat Mebel Plus",
+        "IP Davlatov",
+        "Davlatov Savdo",
+        "Maktab Mebel Import",
+        "Maktab Jihozlari Savdo",
+        "Shifoxona Jihozlari Savdo",
+        "Namuna Reklama Agentligi",
+    ],
+)
+def test_a_founder_s_name_or_an_equipment_trader_is_no_state_body(name):
+    """T-19 review: a state body by its shape, never by a stem a given
+    name or a school/hospital supplier carries."""
+    company = GateCompany(id=ID, display_name=name, legal_form="MChJ")
+    assert judge(company).marks["active_entity"] == "unknown"
+    assert judge(company).failures == ()
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "Davlat soliq qoʻmitasi",
+        "Toshkent shahar 3-son shifoxonasi",
+        "12-son umumtaʼlim maktabi",
+        "Sogʻliqni saqlash vazirligi",
+        "ГУП «Намуна»",
+        "Государственный налоговый комитет",
+    ],
+)
+def test_a_state_body_shape_in_the_name_excludes(name):
+    failure = only_failure(judge(GateCompany(id=ID, display_name=name, stir="200000011")))
+    assert (failure.gate, failure.decision, failure.reason) == (
+        "active_entity",
+        "excluded",
+        "state_body",
+    )
 
 
 def test_an_inactive_registry_entry_is_held():
@@ -918,3 +1087,255 @@ async def test_a_held_candidate_keeps_the_later_hold(session, held_days, kept_da
     await signal(session, owner)
     got = await scored(session, cand)
     assert (got.state, got.hold_until) == ("hold", NOW + timedelta(days=kept_days))
+
+
+# --- the T-19 review: the loader's filters and the lineage, pinned --------------------
+
+
+async def test_a_wholesale_importer_that_delivers_is_scored_not_excluded(session):
+    """The review's probe, end to end: an OLX wholesaler whose listing says
+    «Доставка по Ташкенту бесплатно» is no cargo competitor — no exclusion,
+    no company flag, no company-wide competitor row."""
+    owner = await firm(session, "Namuna Maishiy Texnika MChJ")
+    lead = await contact(session, owner, phone(71))
+    cand = await candidate(session, owner, state="scored", lead=lead, last_scored_at=None)
+    await signal(session, owner, "vol_wholesale_bulky")
+    await observe(
+        session,
+        owner,
+        kind="listing",
+        source="olx_business",
+        url="https://www.olx.uz/d/obyavlenie/namuna-1.html",
+        excerpt="Стиральные машины оптом со склада, из Китая. "
+        "Доставка по Ташкенту бесплатно.",
+    )
+    got = await scored(session, cand)
+    flag = await session.scalar(
+        sa.select(Company.is_competitor)
+        .where(Company.id == owner.id)
+        .execution_options(populate_existing=True)
+    )
+    rows = await session.scalar(sa.select(sa.func.count(Suppression.id)))
+    assert got.state != "excluded" and got.exclude_reason is None
+    assert (flag, rows) == (False, 0)
+    assert got.score_breakdown is not None
+    assert got.score_breakdown["gates"]["not_competitor"] == "pass"
+
+
+@pytest.mark.parametrize(
+    ("status", "read"),
+    [("applied", True), ("fallback", True), ("failed", False), ("pending", False)],
+)
+async def test_only_a_finished_classify_job_is_read(session, status, read):
+    owner = await firm(session, "Namuna", legal_form=None)
+    session.add(
+        ModelJob(
+            kind="classify",
+            lane="instant",
+            model="test",
+            custom_id=f"cs-{seq()}",
+            status=status,
+            company_id=owner.id,
+            result={"speaker_role": "buyer", "b2b": True, "confidence": 0.9},
+        )
+    )
+    await session.flush()
+    got = await gates.inputs_for(session, owner.id, now=NOW)
+    assert bool(got.company.import_signals) is read
+
+
+@pytest.mark.parametrize("status", ["new", "rejected", "needs_review"])
+async def test_an_unresolved_observation_is_no_self_description(session, status):
+    owner = await firm(session)
+    obs = await observe(session, owner, kind="profile", excerpt="Xitoydan kargo xizmati")
+    obs.status = status
+    await session.flush()
+    got = await gates.inputs_for(session, owner.id, now=NOW)
+    assert got.company.own == ()
+
+
+async def test_a_competitor_channel_matches_whatever_case_it_was_seeded_in(session):
+    owner = await firm(session, telegram_channel="namuna_kanal")
+    session.add(
+        ChatMonitor(
+            tg_chat_id=-1001000000098,
+            chat_type="channel",
+            username="Namuna_Kanal",
+            role="competitor",
+        )
+    )
+    await session.flush()
+    got = await gates.inputs_for(session, owner.id, now=NOW)
+    assert got.company.competitor_channel is True
+
+
+@pytest.mark.parametrize(("days", "held"), [(89, True), (91, False)])
+async def test_an_open_push_holds_for_ninety_days_and_no_longer(session, days, held):
+    owner = await firm(session)
+    eid = f"cs:{owner.id}:202607"
+    old = await candidate(session, owner, state="pushed", external_id=eid)
+    sent = NOW - timedelta(days=days)
+    await push(session, old, sent_at=sent, phone_tail=tail(72), external_id=eid)
+    got = await gates.inputs_for(session, owner.id, now=NOW)
+    assert got.recent.company_push_until == (
+        sent + gates.OPEN_PUSH_WINDOW if held else None
+    )
+
+
+async def test_a_push_in_flight_counts_for_the_windows(session):
+    """A committed ``sending`` row whose POST has not answered may land
+    (02 §2.10 rule 5 (a)): it holds the phone and the company like a sent
+    one (T-19 review)."""
+    owner = await firm(session)
+    eid = f"cs:{owner.id}:202610"
+    old = await candidate(session, owner, state="approved")
+    sent = NOW - timedelta(minutes=1)
+    await push(
+        session,
+        old,
+        sent_at=sent,
+        phone_tail=tail(73),
+        external_id=eid,
+        status="sending",
+        http_status=None,
+    )
+    got = await gates.recent_pushes(
+        session, lineage=[owner.id], tails=[tail(73)], now=NOW
+    )
+    assert got.phone_push_until == sent + gates.PHONE_PUSH_WINDOW
+    assert got.company_push_until == sent + gates.OPEN_PUSH_WINDOW
+    assert gates.PUSH_COUNTED_STATUSES == ("sent", "unknown", "sending")
+
+
+async def test_only_a_rejected_candidate_opens_the_rejection_window(session):
+    owner = await firm(session)
+    at = NOW - timedelta(days=10)
+    await candidate(
+        session,
+        owner,
+        state="excluded",
+        exclude_reason="owner",
+        score=40,
+        rejected_at=at,
+    )
+    got = await gates.inputs_for(session, owner.id, now=NOW)
+    assert got.recent.rejected_until is None
+    await candidate(session, owner, state="rejected", score=40, rejected_at=at)
+    got = await gates.inputs_for(session, owner.id, now=NOW)
+    assert got.recent.rejected_until == at + candidates.REOPEN_AFTER_REJECT
+
+
+@pytest.mark.parametrize("state", ["merged", "purged"])
+async def test_a_client_hit_leaves_a_merged_or_purged_company_as_it_is(session, state):
+    owner = await firm(session)
+    target = await firm(session)
+    values: dict[str, Any] = {"state": state}
+    if state == "merged":
+        values["merged_into"] = target.id
+    await session.execute(
+        sa.update(Company).where(Company.id == owner.id).values(**values)
+    )
+    client = gates.Failure("not_client", "suppressed", "client", hit=hit("client"))
+    await gates.apply_effects(session, owner.id, client)
+    stored = await session.scalar(
+        sa.select(Company.state)
+        .where(Company.id == owner.id)
+        .execution_options(populate_existing=True)
+    )
+    assert stored == state
+    await gates.apply_effects(session, target.id, client)
+    assert (
+        await session.scalar(
+            sa.select(Company.state)
+            .where(Company.id == target.id)
+            .execution_options(populate_existing=True)
+        )
+        == "client"
+    )
+
+
+async def test_a_merged_source_s_flag_and_name_reach_the_root(session):
+    """The lineage (04 §2.5): a merged source's competitor flag and its own
+    display name are the root's to answer for."""
+    from clientscrapper.services import companies
+
+    root = await firm(session, "Namuna Savdo MChJ")
+    flagged = await firm(session, "Namuna Bir", is_competitor=True)
+    named = await firm(session, "Namuna Kargo Servis")
+    await companies.merge_into(session, flagged, root, by="owner:111111111", now=NOW)
+    got = await gates.inputs_for(session, root.id, now=NOW)
+    assert got.company.is_competitor is True
+    other = await firm(session, "Namuna Ikki MChJ")
+    await companies.merge_into(session, named, other, by="owner:111111111", now=NOW)
+    got = await gates.inputs_for(session, other.id, now=NOW)
+    assert got.company.is_competitor is False
+    assert "Namuna Kargo Servis" in got.company.names
+    result = run_gates(
+        got.company, got.contacts, got.signals, got.verdict, got.hit, got.recent, NOW
+    )
+    assert result.marks["not_competitor"] == "fail:words"
+
+
+def test_a_review_card_is_card_bound_whatever_its_walk():
+    """A candidate sitting in a card is judged by gate 1 even when its walk
+    takes it back to ``hold`` (06 §1.3: a review card lost its phone)."""
+    assert candidates.card_bound("review", ("hold",)) is True
+    assert candidates.card_bound("review", ()) is True
+    assert candidates.card_bound("scored", ("enriching",)) is False
+    assert candidates.card_bound("scored", ("review",)) is True
+    assert candidates.card_bound("hold", ("scored", "approved")) is True
+
+
+async def test_a_found_candidate_a_gate_holds_passes_through_scored(session):
+    """02 §2.9 has no ``found → hold``: the gate's hold walks
+    ``found → scored → hold`` with the gate's window."""
+    owner = await firm(session)
+    lead = await contact(session, owner, phone(74))
+    other = await firm(session)
+    stranger = await candidate(
+        session, other, state="pushed", external_id=f"cs:{other.id}:202610"
+    )
+    sent = NOW - timedelta(hours=2)
+    await push(
+        session,
+        stranger,
+        sent_at=sent,
+        phone_tail=tail(74),
+        external_id=f"cs:{other.id}:202610",
+    )
+    cand = await candidate(
+        session, owner, state="found", lead=lead, score=None, last_scored_at=None
+    )
+    await signal(session, owner)
+    got = await scored(session, cand)
+    assert (got.state, got.hold_until) == ("hold", sent + gates.PHONE_PUSH_WINDOW)
+
+
+async def test_the_gate_marks_keep_the_phone_less_handoff_mark(session):
+    """The marks are merged into ``score_breakdown.gates``, never written
+    over it: the handoff's ``no_phone`` survives a re-score, or the next one
+    would send the phone-less card back to ``hold``."""
+    owner = await firm(session)
+    await contact(session, owner, None, tier="person", telegram_username="namuna_bir")
+    cand = await candidate(
+        session,
+        owner,
+        state="review",
+        score=65,
+        last_scored_at=None,
+        score_breakdown={"gates": {"no_phone": True}},
+    )
+    await signal(session, owner)
+    await signal(session, owner, "cn_origin")
+    got = await scored(session, cand)
+    assert got.state == "review"
+    assert got.score_breakdown is not None
+    assert got.score_breakdown["gates"]["no_phone"] is True
+    assert got.score_breakdown["gates"]["not_competitor"] == "pass"
+    await session.execute(
+        sa.update(LeadCandidate)
+        .where(LeadCandidate.id == cand.id)
+        .values(last_scored_at=None)
+    )
+    again = await scored(session, cand)
+    assert again.state == "review"

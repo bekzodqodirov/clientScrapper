@@ -27,13 +27,21 @@ is one refusal:
    source cap of ``SOURCE_CAP`` (05 §A.2) — counting, as 7 and 8 do, only
    rows nobody superseded and never the push's own ``external_id``;
 10. Mon–Sat 09:30–17:30 Tashkent (``PUSH_WINDOW``/``PUSH_DAYS``);
-11. the payload's invariants (``payload_problems``; the body itself is
-    ``crm_push.build_payload``'s, T-28);
+11. the payload's invariants (``payload_problems``): the identity fields,
+    ``name``, ``phone``, ``note`` ≤ ``NOTE_MAX``, the stated ``kub``, no
+    pseudonym token, no NUL or lone surrogate. The body is
+    ``crm_push.build_payload``'s (T-28), and so are the invariants only its
+    builder can state: the landed note ≤ 1,000 (``landed_note``), the first
+    159 code points standing alone, the NEGA TOPILDI … BALL blocks, every
+    quote verified and no second person's name (05 §B.1's
+    ``test_payload_sections_and_limits``);
 12. ``external_id = cs:<root company id>:<yyyymm>`` (Tashkent month at claim
     time) — a merged company is no root;
 13. score ≥ 60;
 14. every refusal the owner should see is written to ``lead_reviews.note``
-    (``record_refusals``); ``cap``/``window`` and the claim's own mechanics
+    (``record_refusals``) — on the owner's own answer row, after the
+    owner's word when the note holds one (``shared_ok · …``), never as a row
+    the owner did not tap; ``cap``/``window`` and the claim's own mechanics
     (in flight, delivered, waiting for an attempt) are silent.
 
 ``claim`` locks the candidate, checks, and either records the refusals —
@@ -48,6 +56,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 import uuid
 from collections.abc import Mapping, Sequence
@@ -79,7 +88,9 @@ from clientscrapper.services import (
     gates,
     scoring,
 )
-from clientscrapper.services.suppression import Hit
+from clientscrapper.services.suppression import CLIENT_KINDS, Hit
+
+log = logging.getLogger(__name__)
 
 MIN_SCORE: Final = scoring.HOT_MIN
 MAX_ATTEMPTS: Final = 3
@@ -95,12 +106,16 @@ SOURCE_CAP_WINDOW: Final = timedelta(hours=24)
 # 05 §B.1 NOTE_MAX: the note's own budget, in UTF-16 units (text_len).
 NOTE_MAX: Final = 700
 SHARED_OK: Final = "shared_ok"
+# A refusal written on the owner's approval row keeps the owner's own word
+# first (``shared_ok``, 04 §7 item 4): «shared_ok · <refusal>».
+OWNER_WORD_SEP: Final = " · "
 UZ_MOBILE_OR_LANDLINE: Final = scoring.USABLE_PHONE_KINDS
 # E.164 (02 §2.4's ck_contacts_phone); that it is an Uzbek number is item 4's.
 _E164: Final = re.compile(r"^\+[1-9][0-9]{6,14}$")
 _KUB: Final = re.compile(r"^[1-9][0-9]*(?:\.[0-9]+)?$")
-# 04 §7 item 11: no pseudonym token left (<PHONE_n>, <TG_n>, <NAME_n> …).
-_PSEUDONYM: Final = re.compile(r"<(?:PHONE|TG|IG|NAME|EMAIL)_")
+# 04 §7 item 11: no pseudonym token left (<PHONE_n>, <TG_n>, <NAME_n> …, and
+# 04 §4.2's unnumbered <ID> for a 14-digit run).
+_PSEUDONYM: Final = re.compile(r"<(?:PHONE|TG|IG|NAME|EMAIL)_|<ID>")
 _ILL_FORMED: Final = re.compile("[\x00\ud800-\udfff]")
 PAYLOAD_IDENTITY: Final = ("external_id", "name", "phone", "note")
 STATED_KEYS: Final = frozenset({scoring.STATED_3PLUS, scoring.STATED_1_3})
@@ -130,7 +145,9 @@ REFUSAL_UZ: Final[Mapping[str, str]] = {
     "delivered": "Bu oy allaqachon yuborilgan",
     "in_flight": "Yuborilmoqda",
     "payload_changed": "Lid matni oldingi urinishdan farq qiladi",
-    "attempts_spent": "Uch urinish tugadi",
+    # 02 §2.10 rule 4: «CRM javob bermadi». The id is the month's: a
+    # re-approval this month meets the same three spent attempts.
+    "attempts_spent": "CRM javob bermadi — bu oyning uch urinishi tugadi",
     "attempt_wait": "Keyingi urinishni kutmoqda",
     "phone_recent": "Bu raqamga 24 soat ichida yuborilgan",
     "company_recent": "Bu kompaniyaga 90 kun ichida yuborilgan",
@@ -366,8 +383,24 @@ def _view(c: Contact) -> scoring.ContactView:
     )
 
 
+def owner_word(note: str | None) -> str | None:
+    """The owner's own word on a review row: the note before a refusal the
+    push gate wrote after it (``OWNER_WORD_SEP``)."""
+    if note is None:
+        return None
+    return note.split(OWNER_WORD_SEP, 1)[0]
+
+
+def noted(previous: str | None, text: str) -> str:
+    """The note a refusal leaves on an owner row: the refusal, after the
+    owner's ``shared_ok`` when the row carries it, within the column."""
+    if owner_word(previous) == SHARED_OK:
+        return (SHARED_OK + OWNER_WORD_SEP + text)[:REVIEW_NOTE_MAX]
+    return text[:REVIEW_NOTE_MAX]
+
+
 async def _shared_ok(session: AsyncSession, candidate: LeadCandidate) -> bool:
-    """The owner approved a shared phone with the note ``shared_ok``."""
+    """The owner's newest approval carries ``shared_ok`` (04 §7 item 4)."""
     note = await session.scalar(
         sa.select(LeadReview.note)
         .where(
@@ -378,7 +411,7 @@ async def _shared_ok(session: AsyncSession, candidate: LeadCandidate) -> bool:
         .order_by(LeadReview.answered_at.desc().nulls_last(), LeadReview.id.desc())
         .limit(1)
     )
-    return note == SHARED_OK
+    return owner_word(note) == SHARED_OK
 
 
 def _contact_refusals(contact: Contact | None, *, shared_ok: bool) -> list[Refusal]:
@@ -450,7 +483,7 @@ async def _caps(
     session: AsyncSession, external_id: str, now: datetime, plan: Plan
 ) -> None:
     counted = sa.and_(
-        PushLog.status.in_(e.PUSH_DELIVERED_STATUSES),
+        PushLog.status.in_(gates.PUSH_COUNTED_STATUSES),
         PushLog.superseded_at.is_(None),
         PushLog.external_id != external_id,
     )
@@ -618,10 +651,11 @@ async def lock_candidate(
     return found
 
 
-async def _note_row(session: AsyncSession, candidate: LeadCandidate) -> LeadReview:
+async def _note_row(session: AsyncSession, candidate: LeadCandidate) -> LeadReview | None:
     """The owner review row a refusal is written on: the live card, else the
-    newest answered one, else a record of the approval (an auto-pushed
-    candidate never had a card)."""
+    newest answered one. An auto-approved candidate never had a card, and no
+    row is made for it — a row with no tap would read as the owner's
+    decision (``/lidlar``, the reports); its refusals go to the log."""
     row: LeadReview | None = await session.scalar(
         sa.select(LeadReview)
         .where(LeadReview.candidate_id == candidate.id, LeadReview.kind == "owner")
@@ -632,20 +666,22 @@ async def _note_row(session: AsyncSession, candidate: LeadCandidate) -> LeadRevi
         )
         .limit(1)
     )
-    if row is None:
-        row = LeadReview(
-            candidate_id=candidate.id,
-            kind="owner",
-            state="approved",
-            answer="push",
-            answered_at=candidate.approved_at,
-        )
-        session.add(row)
     return row
 
 
 def _joined(refusals: Sequence[Refusal]) -> str:
     return "; ".join(dict.fromkeys(r.text for r in refusals))[:REVIEW_NOTE_MAX]
+
+
+async def _write_note(session: AsyncSession, candidate: LeadCandidate, note: str) -> None:
+    row = await _note_row(session, candidate)
+    if row is None:
+        log.info(
+            "push refused",
+            extra={"candidate_id": str(candidate.id), "refusal": note[:80]},
+        )
+        return
+    row.note = noted(row.note, note)
 
 
 async def record_refusals(
@@ -657,17 +693,23 @@ async def record_refusals(
 ) -> None:
     """Item 14: the owner-visible refusals as ``lead_reviews.note``, and what
     they mean for an ``approved`` candidate — a permanent suppression makes
-    it ``suppressed``; a refusal only the owner can resolve sends it back to
-    ``review`` with the note on its new card («Ball tushdi», 04 §7 item 13).
-    Everything else leaves it approved for the job's next run."""
+    it ``suppressed`` (a ``client`` hit also writes gate 4's
+    ``companies.state='client'``); a refusal only the owner can resolve sends
+    it back to ``review`` with the note on its new card («Ball tushdi», 04 §7
+    item 13). Everything else leaves it approved for the job's next run."""
     visible = [r for r in refusals if not r.silent]
     if not visible:
         return
     note = _joined(visible)
     suppressed = next((r for r in visible if r.code == "suppressed" and r.hit), None)
     if candidate.state == "approved" and suppressed is not None and suppressed.hit:
-        row = await _note_row(session, candidate)
-        row.note = note
+        await _write_note(session, candidate, note)
+        if suppressed.hit.kind in CLIENT_KINDS:
+            await gates.apply_effects(
+                session,
+                candidate.company_id,
+                gates.Failure("not_client", "suppressed", "client", hit=suppressed.hit),
+            )
         await candidates.transition(
             session, candidate, "suppressed", now=now, suppressed_by=suppressed.hit.id
         )
@@ -687,8 +729,7 @@ async def record_refusals(
         live.note = note
         await session.flush()
         return
-    row = await _note_row(session, candidate)
-    row.note = note
+    await _write_note(session, candidate, note)
     await session.flush()
 
 
@@ -759,6 +800,8 @@ __all__ = [
     "external_id_for",
     "lead_contact",
     "lock_candidate",
+    "noted",
+    "owner_word",
     "payload_problems",
     "record_refusals",
     "text_len",
