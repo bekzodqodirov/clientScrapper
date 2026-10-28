@@ -13,11 +13,12 @@ The Telethon half of 06's fence lives in
 (07 §1.2 gives it that home); one rule, one test.
 
 T-15 extends the file (07 §4.1: not a new one) with the masking half of 06
-§5.2: the four personal-data patterns have one home, ``collectors/keywords.py``
-— ``services/pseudonyms.py`` imports ``PHONE_RE``, ``TG_RE``, ``IG_RE`` and
-``EMAIL_RE`` from there, and no module of the package binds one of those
-names or compiles one of those patterns anew — and a model lane that imports
-the SDK checks every request with ``pseudonyms.assert_masked``.
+§5.2: the personal-data patterns have one home, ``collectors/keywords.py``
+— ``services/pseudonyms.py`` imports ``PHONE_RE``, ``TG_RE``, ``IG_RE``,
+``EMAIL_RE`` and the 14-digit ``PINFL_RE`` from there, and no module of the
+package binds one of those names or compiles one of those patterns anew —
+and a model lane that imports the SDK checks every request with
+``pseudonyms.assert_masked``.
 """
 
 from __future__ import annotations
@@ -87,7 +88,8 @@ def test_the_fence_catches_each_shape():
 
 KEYWORDS = "clientscrapper.collectors.keywords"
 KEYWORDS_HOME = "collectors/keywords.py"
-PII_PATTERNS = ("PHONE_RE", "TG_RE", "IG_RE", "EMAIL_RE")
+# 06 §5.2's four, and the PINFL run beside them (keywords.PINFL_RE).
+PII_PATTERNS = ("PHONE_RE", "TG_RE", "IG_RE", "EMAIL_RE", "PINFL_RE")
 PSEUDONYMS = "services/pseudonyms.py"
 # The SDK's homes that send requests (costs.py only prices them).
 MASKING_LANES = ANTHROPIC_HOMES - {"services/costs.py"}

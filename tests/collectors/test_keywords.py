@@ -385,12 +385,21 @@ CASES: dict[str, tuple[re.Pattern[str], Extract, Cases]] = {
                     ("Kanalimiz: t.me/namuna_optom", "namuna_optom"),
                     ("Admin @namuna_admin ga yozing", "namuna_admin"),
                     ("https://t.me/namuna_tekstil_uz", "namuna_tekstil_uz"),
+                    # A phone keyboard capitalises a sentence's first letter.
+                    ("T.me/namuna_tekstil ga yozing", "namuna_tekstil"),
+                    ("Kanal: T.ME/namuna_tekstil", "namuna_tekstil"),
+                    ("Https://T.me/namuna_optom", "namuna_optom"),
+                    # Telegram's two other link hosts.
+                    ("telegram.me/namuna_tekstil", "namuna_tekstil"),
+                    ("https://telegram.dog/namuna_optom", "namuna_optom"),
                 ],
                 [
                     "Pochta: info@namuna.example.uz",
                     "t.me/joinchat/AAAAAE",
                     "@abc qisqa",
                     "t.me/+AbCdEf",
+                    "T.ME/JOINCHAT/AAAAAE",
+                    "T.me/S/namuna_optom",
                 ],
             ),
             "uz-Cyrl": (
@@ -412,6 +421,41 @@ CASES: dict[str, tuple[re.Pattern[str], Extract, Cases]] = {
                     "@12345abc",
                     "Подписка t.me/joinchat/AAA",
                 ],
+            ),
+        },
+    ),
+    "PINFL_RE": (
+        kw.PINFL_RE,
+        _whole,
+        {
+            "uz-Latn": (
+                [
+                    ("JSHSHIR 31234567890123", "31234567890123"),
+                    ("pasport, JShShIR:31234567890124.", "31234567890124"),
+                    ("31234567890125 raqamli", "31234567890125"),
+                ],
+                [
+                    # a 2GIS firm id is 17 digits; a 13- or 15-digit run is none
+                    "2GIS: 70000001012345678",
+                    "hisob 3123456789012",
+                    "kod 312345678901234",
+                ],
+            ),
+            "uz-Cyrl": (
+                [
+                    ("ЖШШИР 31234567890126", "31234567890126"),
+                    ("ЖШШИР: 31234567890127, паспорт", "31234567890127"),
+                    ("(31234567890128)", "31234567890128"),
+                ],
+                ["СТИР 301234567", "тел 998900000001", "рақам 1234-5678-9012-34"],
+            ),
+            "ru": (
+                [
+                    ("ПИНФЛ 31234567890129", "31234567890129"),
+                    ("ПИНФЛ:31234567890130 паспорт", "31234567890130"),
+                    ("номер 31234567890131.", "31234567890131"),
+                ],
+                ["ИНН 301234567", "счёт 20208000123456789012", "ID 70000001012345678"],
             ),
         },
     ),

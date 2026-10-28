@@ -34,7 +34,7 @@ import anthropic
 import httpx
 
 from clientscrapper.collectors.base import Budget
-from clientscrapper.collectors.keywords import EMAIL_RE, IG_RE, PHONE_RE, TG_RE
+from clientscrapper.collectors.keywords import EMAIL_RE, IG_RE, PHONE_RE, PINFL_RE, TG_RE
 from clientscrapper.config import settings
 from clientscrapper.services.http import Fetcher, HostState
 
@@ -157,7 +157,7 @@ PII_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("TG_RE", TG_RE),
     ("IG_RE", IG_RE),
     ("EMAIL_RE", EMAIL_RE),
-    ("14 digits", re.compile(r"(?<!\d)\d{14}(?!\d)")),
+    ("14 digits", PINFL_RE),
 )
 GRAMMAR_MESSAGE = "Grammar compilation timed out for the provided schema"
 

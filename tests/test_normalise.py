@@ -40,14 +40,17 @@ from clientscrapper.services.normalise import (
     canonical_city,
     find_legal_form,
     find_stir,
+    given_name_shaped,
     instagram_handles,
     is_person_shaped,
     legal_form_code,
     legal_form_in_name,
     make_phone,
     parse_phones,
+    person_names,
     telegram_handles,
     telegram_key,
+    trade_word,
     website_key,
 )
 
@@ -890,3 +893,62 @@ def test_the_olx_seller_of_the_worked_example_is_a_person() -> None:
     # 04 §9.2: user.name «Sardor» is person-shaped and never a company name.
     assert is_person_shaped(name_key("Sardor"))
     assert not is_person_shaped(name_key("Namuna Tekstil Savdo MChJ"))
+
+
+# --- Person names in free text (04 §4.2) -------------------------------------------
+
+
+def test_a_given_name_keeps_its_jon_and_bek() -> None:
+    assert given_name_shaped("akmaljon") and given_name_shaped("sardorbek")
+    assert given_name_shaped("sardor") and not given_name_shaped("jon")
+    assert not given_name_shaped("namunajon")  # «namuna» is no given name
+    assert is_person_shaped("dilshodjon")
+
+
+@pytest.mark.parametrize(
+    ("text", "names"),
+    [
+        ("Menejer: Dilshod Karimov", ["Dilshod", "Karimov"]),
+        ("Oʻtkir Gʻaniyev, Chilonzor", ["Oʻtkir", "Gʻaniyev"]),
+        ("Каримов Рустам Алиевич", ["Каримов", "Рустам", "Алиевич"]),
+        ("Ivanov Sergey, Moskva", ["Ivanov", "Sergey"]),
+        ("Malika Karimova, Samarqand", ["Malika", "Karimova"]),
+        ("Murojaat: Akmal aka", ["Akmal"]),
+        ("Shahzod aka, 3 kub", ["Shahzod"]),  # «aka» marks a name nobody listed
+        ("Рустам", ["Рустам"]),
+        ("Sardor Savdo MChJ direktori Akmal Karimov", ["Akmal", "Karimov"]),
+        # A company's name stays (company-tier, 04 §4.2) — a given name
+        # before a business word is the firm's, not a person's.
+        ("Namuna Tekstil Savdo MChJ direktori", []),
+        ("Sardor Savdo MChJ", []),
+        # A given name that is also a place counts only beside a surname.
+        ("Malika bozori, Toshkent", []),
+        # A Russian plural is no surname: only a capitalised word is.
+        ("Продажа 20 кубов товаров", []),
+        ("Director of Namuna Group", []),
+        ("", []),
+        (None, []),
+    ],
+)
+def test_the_people_a_text_names(text, names) -> None:
+    assert person_names(text) == names
+
+
+@pytest.mark.parametrize(
+    ("word", "trade"),
+    [
+        ("Optom", True),
+        ("Xitoy", True),
+        ("Xitoydan", True),
+        ("Kafel", True),
+        ("Mato", True),
+        ("MChJ", True),
+        ("Chorsu", True),
+        ("Uz", True),
+        ("Mollari", False),
+        ("Rustam", False),
+        ("Namuna", False),
+    ],
+)
+def test_a_trade_word(word, trade) -> None:
+    assert trade_word(word) is trade

@@ -21,6 +21,10 @@ forced a change — each is named in a comment beside it:
   needs a word start and a separator, else «big shop» read as the handle
   «shop» and «Instagramda» as «da»;
 * STIR_RE's label needs a word start («Martin 301234567» is not a STIR);
+* TG_RE's link is read in any case and on telegram.me / telegram.dog too
+  («T.me/namuna_optom» opens a sentence on a phone keyboard);
+* PINFL_RE (a 14-digit run) is new: the normaliser, the pseudonymiser and
+  the output hygiene ask the one pattern;
 * LEGAL_FORM_RE gained МЧЖ, ХЧК and СП, the Cyrillic forms of MChJ, XChK, SP.
 
 The word lists are matched through ``terms_re``: whole words, case-blind,
@@ -585,10 +589,21 @@ PHONE_RE = re.compile(
     r"(?<!\d)(?:\+?998[\s\-]?)?\(?(\d{2})\)?[\s\-]?(\d{3})[\s\-]?(\d{2})[\s\-]?(\d{2})(?!\d)"
 )
 # Names ending in "bot" and reserved t.me paths are rejected by
-# services/normalise.telegram_key, not here.
+# services/normalise.telegram_key, not here. The link is matched in any case —
+# a phone keyboard writes «T.me/…» at a sentence start, and a pasted link may
+# be «TELEGRAM.ME/…» — and on Telegram's two other link hosts, telegram.me and
+# telegram.dog; the pseudonymiser masks with this pattern (04 §4.2), so a
+# spelling it does not read reaches the model.
 TG_RE = re.compile(
-    r"(?:(?:https?://)?t\.me/(?!joinchat|\+|s/)|(?<![\w@])@)([A-Za-z][A-Za-z0-9_]{4,31})"
+    r"(?:(?i:(?:https?://)?(?:www\.)?(?:t|telegram)\.(?:me|dog)/(?!joinchat|\+|s/))"
+    r"|(?<![\w@])@)([A-Za-z][A-Za-z0-9_]{4,31})"
 )
+# A PINFL (the personal identification number of a passport) is 14 digits: a
+# maximal run of exactly 14, so a 17-digit 2GIS firm id or Graph user id holds
+# none (02 §2.5). Never stored, never sent (06 §5.2): the normaliser drops a
+# field carrying one, the pseudonymiser masks it as ``<ID>`` and the output
+# hygiene of 04 §4.7 drops a model field that carries one.
+PINFL_RE = re.compile(r"(?<!\d)\d{14}(?!\d)")
 # The label branch needs a word start («big shop» is not the handle «shop») and
 # a separator: a colon or dash, an «@», or at least one space — «Instagram
 # namuna_shop» is a handle and the pseudonymiser must mask it (04 §4.2), while

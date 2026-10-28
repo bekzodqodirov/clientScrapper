@@ -43,7 +43,6 @@ import functools
 import hashlib
 import json
 import logging
-import math
 import re
 import uuid
 from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -105,9 +104,15 @@ MODEL_CLIENT_TIMEOUT_S: Final = 60.0
 FAILING_MIN: Final = 5
 FAILING_WINDOW: Final = timedelta(hours=1)
 PII_LEAK_HOLD: Final = timedelta(hours=24)
-# A characters-per-token ratio no Uzbek, Russian or English text goes below:
-# the claim is never under what the call can cost (04 §8, costs.ask).
-CHARS_PER_TOKEN: Final = 2
+# The claim is never under what the call can cost (04 §8, costs.ask). The
+# tokenizer works on bytes and no token is shorter than one, so the UTF-8
+# length of what is sent bounds its token count from above in any script — a
+# Cyrillic letter is two bytes, an emoji four (a characters-per-token ratio
+# is not a bound: «ў», «қ» and an emoji each cost more than a Latin letter).
+# The overhead covers the framing of roles and blocks and what structured
+# outputs add around a schema. UNVERIFIED against real usage: the day-1
+# recordings (07 §5.5) compare ``usage.input_tokens`` with this bound.
+REQUEST_OVERHEAD_TOKENS: Final = 512
 # model_jobs.attempts' CHECK (02 §2.6): at most three paid requests are made
 # (a grammar refusal, the prompted turn, one retry).
 ATTEMPTS_MAX: Final = 3
@@ -286,12 +291,25 @@ def text_of(response: Any) -> str:
     )
 
 
-def estimate_usd(model: str, *, chars: int, max_tokens: int) -> Decimal | None:
-    """A claim no answer can exceed: every prompt character uncached at
-    ``CHARS_PER_TOKEN``, the output at ``max_tokens``. None = unpriced."""
+def request_bytes(params: Mapping[str, Any]) -> int:
+    """The UTF-8 length of what a request asks the model to read: its system
+    block, messages, output format and tools, as JSON."""
+    sent = {
+        k: params[k]
+        for k in ("system", "messages", "output_config", "tools")
+        if k in params
+    }
+    text = json.dumps(sent, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return len(text.encode("utf-8"))
+
+
+def estimate_usd(model: str, *, prompt_bytes: int, max_tokens: int) -> Decimal | None:
+    """A claim no answer can exceed: a token per byte of the prompt, uncached,
+    plus ``REQUEST_OVERHEAD_TOKENS``, and the output at ``max_tokens``. None =
+    unpriced."""
     return anthropic_cost_usd(
         model,
-        input_tokens=math.ceil(chars / CHARS_PER_TOKEN),
+        input_tokens=prompt_bytes + REQUEST_OVERHEAD_TOKENS,
         output_tokens=max_tokens,
     )
 
@@ -379,8 +397,9 @@ async def _request(
     }
     if state.tools:
         params["tools"] = [dict(t) for t in state.tools]
-    chars = len(system[0]["text"]) + sum(len(str(m["content"])) for m in messages)
-    est = estimate_usd(state.model, chars=chars, max_tokens=max_tokens)
+    est = estimate_usd(
+        state.model, prompt_bytes=request_bytes(params), max_tokens=max_tokens
+    )
 
     def price(response: Any) -> Priced:
         priced = priced_anthropic(
@@ -440,11 +459,22 @@ async def _turn(
     return await _request(session, state, client, messages, max_tokens, structured=False)
 
 
+def _sha(text: str) -> str:
+    return hashlib.sha256(text.encode()).hexdigest()[:16]
+
+
+def schema_sha256(schema: type[BaseModel]) -> str:
+    """The identity of the schema a request sends: its fields, their types and
+    bounds, and the descriptions the model reads."""
+    return _sha(json.dumps(json_schema(schema), sort_keys=True, ensure_ascii=False))
+
+
 def _request_record(
     op: Operation,
     *,
     model: str,
     system: str,
+    schema: type[BaseModel],
     user: Pseudonymised,
     max_tokens: int,
     effort: Effort,
@@ -452,13 +482,14 @@ def _request_record(
     tools: Sequence[Mapping[str, Any]] | None,
 ) -> dict[str, Any]:
     """``model_jobs.request``: the masked user text and what it was asked
-    with — the frozen system block by version and hash, not copied into
-    every row."""
+    with — the frozen system block by version and hash, and the schema by
+    hash (a field's description is prompt too), not copied into every row."""
     return {
         "op": op,
         "model": model,
         "prompt_version": prompt_version,
-        "system_sha256": hashlib.sha256(system.encode()).hexdigest()[:16],
+        "system_sha256": _sha(system),
+        "schema_sha256": schema_sha256(schema),
         "max_tokens": max_tokens,
         "effort": effort,
         "user": user.text,
@@ -518,6 +549,7 @@ async def call[S: BaseModel](
             op,
             model=model,
             system=system,
+            schema=schema,
             user=user,
             max_tokens=tokens,
             effort=effort,
@@ -718,7 +750,9 @@ __all__ = [
     "note_grammar_failure",
     "output_config",
     "parse_answer",
+    "request_bytes",
     "reset_grammar_memory",
+    "schema_sha256",
     "set_client",
     "structured_output_available",
     "system_block",

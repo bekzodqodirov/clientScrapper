@@ -101,6 +101,49 @@ GOLDEN = [
         "STIR 301234567, Namuna Tekstil Savdo MChJ, Toshkent, 25 kub",
         {},
     ),
+    # A name is matched whatever apostrophe the text types for oʻ/gʻ/ʼ, in
+    # both directions; the token stands for the text's own spelling.
+    (
+        "Oʻtkir aka keldi, Gʻayratga ayting",
+        ("O'tkir", "G’ayrat"),
+        "<NAME_1> aka keldi, <NAME_2>ga ayting",
+        {"<NAME_1>": "Oʻtkir", "<NAME_2>": "Gʻayrat"},
+    ),
+    (
+        "O’tkir va G‘ayrat, Toʻlqinning ombori, Maʼrufdan",
+        ("Oʻtkir", "Gʻayrat", "Toʻlqin", "Maʼruf"),
+        "<NAME_1> va <NAME_2>, <NAME_3>ning ombori, <NAME_4>dan",
+        {
+            "<NAME_1>": "O’tkir",
+            "<NAME_2>": "G‘ayrat",
+            "<NAME_3>": "Toʻlqin",
+            "<NAME_4>": "Maʼruf",
+        },
+    ),
+    (
+        # Russian endings on a Cyrillic spelling; the vowel a Russian ending
+        # replaces is outside the token too («Дилноз-ы»).
+        "Звоните Рустаму или Ивановой, у Дилнозы склад, с Рустамом",
+        ("Rustam", "Ivanova", "Dilnoza"),
+        "Звоните <NAME_1>у или <NAME_2>ой, у <NAME_3>ы склад, с <NAME_1>ом",
+        {"<NAME_1>": "Рустам", "<NAME_2>": "Иванов", "<NAME_3>": "Дилноз"},
+    ),
+    (
+        # The affectionate «-jon» is the same person.
+        "Rustamjon aka, Ёқубжонга айтинг",
+        ("Rustam", "Yoqubjon"),
+        "<NAME_1>jon aka, <NAME_2>жонга айтинг",
+        {"<NAME_1>": "Rustam", "<NAME_2>": "Ёқуб"},
+    ),
+    (
+        # A phone keyboard capitalises «T.me» at a sentence start; Telegram's
+        # other link hosts.
+        "T.me/namuna_tekstil ga yozing. Kanal: TELEGRAM.ME/namuna_optom, "
+        "telegram.dog/namuna_savdo",
+        (),
+        "T.me/<TG_1> ga yozing. Kanal: TELEGRAM.ME/<TG_2>, telegram.dog/<TG_3>",
+        {"<TG_1>": "namuna_tekstil", "<TG_2>": "namuna_optom", "<TG_3>": "namuna_savdo"},
+    ),
 ]
 
 
@@ -115,7 +158,7 @@ def test_golden_masks(text, names, masked, reverse):
 @pytest.mark.parametrize(("text", "names", "masked", "reverse"), GOLDEN)
 def test_the_round_trip_restores_exactly(text, names, masked, reverse):
     result = pseudonymise(text, names=names)
-    expected = re.sub(r"(?<!\d)\d{14}(?!\d)", "<ID>", text)  # never reversible
+    expected = keywords.PINFL_RE.sub("<ID>", text)  # never reversible
     assert restore(result.text, result.reverse) == expected
 
 
@@ -160,11 +203,33 @@ def test_numbering_is_stable_across_a_bundle():
 
 
 def test_a_name_is_masked_in_both_scripts_with_its_ending_kept():
+    """Any form of a name word is masked: a «Bekzodjon» who is another
+    person is a person's name too; a longer word is not one («Bekzodova» is
+    a surname of its own, «Alisher» a name of its own)."""
     result = pseudonymise(
-        "Bekzodga ayting, Бекзоднинг ombori; Bekzodjon boshqa odam", names=["Bekzod"]
+        "Bekzodga ayting, Бекзоднинг ombori; Bekzodjon boshqa odam, Bekzodova, Alisher",
+        names=["Bekzod", "Ali"],
     )
-    assert result.text == "<NAME_1>ga ayting, <NAME_1>нинг ombori; Bekzodjon boshqa odam"
+    assert result.text == (
+        "<NAME_1>ga ayting, <NAME_1>нинг ombori; <NAME_1>jon boshqa odam, "
+        "Bekzodova, Alisher"
+    )
     assert result.reverse == {"<NAME_1>": "Bekzod"}
+
+
+def test_a_name_without_its_apostrophe_is_the_same_name():
+    result = pseudonymise("Otkir keldi, Oʻtkirdan so'rang", names=["Oʻtkir"])
+    assert result.text == "<NAME_1> keldi, <NAME_1>dan so'rang"
+    assert result.reverse == {"<NAME_1>": "Otkir"}
+
+
+def test_a_declined_name_keeps_its_token_across_a_bundle():
+    first = pseudonymise("Дилнозе скажите, Сергея нет", names=["Dilnoza", "Сергей"])
+    assert first.text == "<NAME_1>е скажите, <NAME_2>я нет"
+    # No names passed: the stems the first block left mask the later forms.
+    second = pseudonymise("Дилноза, Дилнозага, Сергеем", prior=first)
+    assert second.text == "<NAME_1>а, <NAME_1>ага, <NAME_2>ем"
+    assert restore(second.text, second.reverse) == "Дилноза, Дилнозага, Сергеем"
 
 
 def test_initials_and_empty_names_mask_nothing():
@@ -186,6 +251,9 @@ def test_company_tier_facts_stay():
         ("https://t.me/namuna_optom", "TG_RE"),
         ("Instagram: namuna_shop", "IG_RE"),
         ("info@namuna.example.uz", "EMAIL_RE"),
+        ("T.me/namuna_optom", "TG_RE"),
+        ("telegram.me/namuna_optom", "TG_RE"),
+        ("JSHSHIR 31234567890123", "PINFL_RE"),
     ],
 )
 def test_assert_masked_refuses_raw_personal_data(text, pattern):
@@ -212,9 +280,11 @@ def test_the_patterns_are_the_keywords_own():
         "TG_RE": keywords.TG_RE,
         "IG_RE": keywords.IG_RE,
         "EMAIL_RE": keywords.EMAIL_RE,
+        "PINFL_RE": keywords.PINFL_RE,
     }
     assert p.PHONE_RE is keywords.PHONE_RE and p.TG_RE is keywords.TG_RE
     assert p.IG_RE is keywords.IG_RE and p.EMAIL_RE is keywords.EMAIL_RE
+    assert p.PINFL_RE is keywords.PINFL_RE
 
 
 def test_the_names_04_and_06_give_are_the_only_ones():

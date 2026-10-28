@@ -129,3 +129,81 @@ def test_the_fence_sees_a_leak():
     ]
     fake(httpx.Request("POST", "https://api.anthropic.test/v1/messages", json=masked))
     assert fake.unexpected == 1
+
+
+async def test_names_reach_the_model_in_no_spelling(
+    session, enabled, offline, tmp_path, model_api
+):
+    """04 §4.2's names: the sender's display name, in any apostrophe and with
+    any ending, and the people a bio names (``normalise.person_names``)."""
+    await chat(session)
+    await store(
+        session,
+        "Men O’tkir, Guangzhoudan 2 kub mato kerak, kim olib keladi? Otkirga yozing",
+        message_id=31,
+        sender_id=5100000031,
+        username=None,
+        name="Oʻtkir Gʻaniyev",
+        bio="Oʻtkir Gʻaniyev, Chilonzor",
+    )
+    await store(
+        session,
+        "Guangzhoudan 3 kub mato kerak, kim olib keladi? Murojaat: Dilshodga",
+        message_id=32,
+        sender_id=5100000032,
+        username=None,
+        name="Sardor",
+        bio="Menejer: Dilshod Karimov",
+    )
+    await store(
+        session,
+        "Нужно привезти 3 куба ткани из Китая, звоните Рустаму или Ивановой",
+        message_id=33,
+        sender_id=5100000033,
+        username=None,
+        name="Рустам Иванов",
+        bio=None,
+    )
+    await link(offline, tmp_path)
+    model_api.queue(message(BUYER), message(BUYER), message(BUYER))
+    assert (await classify.classify_batch(now=NOW)).applied == 3
+    first, second, third = (r["messages"][0]["content"] for r in model_api.requests)
+    assert first.splitlines()[2:] == [
+        "SENDER_BIO: <NAME_1> <NAME_2>, Chilonzor",
+        # One person, one token, however the text spells the name.
+        "TEXT: Men <NAME_1>, Guangzhoudan 2 kub mato kerak, kim olib keladi? "
+        "<NAME_1>ga yozing",
+    ]
+    assert second.splitlines()[2:] == [
+        "SENDER_BIO: Menejer: <NAME_1> <NAME_2>",
+        "TEXT: Guangzhoudan 3 kub mato kerak, kim olib keladi? Murojaat: <NAME_1>ga",
+    ]
+    assert third.splitlines()[3] == (
+        "TEXT: Нужно привезти 3 куба ткани из Китая, звоните <NAME_1>у или <NAME_2>ой"
+    )
+    seen = " ".join((first, second, third)).casefold()
+    for value in ("tkir", "aniyev", "dilshod", "karimov", "sardor", "рустам", "иванов"):
+        assert value not in seen, value
+    jobs = await model_jobs(session)
+    assert jobs[1].pseudonyms == {"<NAME_1>": "Dilshod", "<NAME_2>": "Karimov"}
+
+
+async def test_a_capitalised_telegram_link_is_masked(
+    session, enabled, offline, tmp_path, model_api
+):
+    await chat(session)
+    await store(
+        session,
+        "Guangzhoudan 2 kub mato kerak. T.me/namuna_tekstil ga yozing, "
+        "kanal TELEGRAM.ME/namuna_optom",
+        message_id=41,
+    )
+    await link(offline, tmp_path)
+    model_api.queue(message(BUYER))
+    assert (await classify.classify_batch(now=NOW)).applied == 1
+    [body] = model_api.requests
+    assert pii_in(body) == []
+    assert body["messages"][0]["content"].splitlines()[3] == (
+        "TEXT: Guangzhoudan 2 kub mato kerak. T.me/<TG_1> ga yozing, "
+        "kanal TELEGRAM.ME/<TG_2>"
+    )

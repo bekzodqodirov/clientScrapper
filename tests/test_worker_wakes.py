@@ -84,6 +84,29 @@ def test_only_built_slots_wake_and_by_their_channel():
     assert worker.waking()["cs_interaction"] == ("telegram_monitor", "classify")
 
 
+async def test_an_announcement_wakes_only_the_stages_after_it():
+    """04 §0: each stage wakes the next. ``classify:<id>`` is a result for
+    the scorer — the collector upstream of it has nothing to read — while the
+    reader's bare id and an unknown slot's payload wake every stage."""
+    ran: list[str] = []
+    slots = (_slot("collect", ran), _slot("classify", ran), _slot("score", ran))
+    scheduler = worker.build_scheduler(slots)
+    scheduler.start()
+    ids = ("collect", "classify", "score")
+    try:
+        assert worker.wake(scheduler, ids, payload="classify:12") == ["score"]
+        assert worker.wake(scheduler, ids, payload="collect:12") == ["classify", "score"]
+        assert worker.wake(scheduler, ids, payload="score:12") == []
+        assert worker.wake(scheduler, ids, payload="12") == list(ids)
+        assert worker.wake(scheduler, ids, payload="resolve:12") == list(ids)
+        await _until(lambda: set(ids) <= set(ran))
+        await asyncio.sleep(0.2)  # the moved runs end before the scheduler does
+    finally:
+        scheduler.shutdown(wait=False)
+    # The table lists the channel's slots upstream first.
+    assert worker.waking()["cs_interaction"] == ("telegram_monitor", "classify")
+
+
 async def test_a_wake_during_a_run_runs_the_job_once_more_after_it():
     """max_instances=1 refuses the scheduler's second instance; the wake is
     kept and the job runs again when it ends — never twice at once."""

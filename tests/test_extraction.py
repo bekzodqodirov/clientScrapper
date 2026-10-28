@@ -33,6 +33,7 @@ from clientscrapper.services.pseudonyms import (
     pseudonymise,
 )
 from clientscrapper.services.schemas import ImportSignal
+from clientscrapper.services.usage import anthropic_cost_usd
 from clientscrapper.services.validators import Validated
 from tests.fakes import (
     api_error,
@@ -382,9 +383,10 @@ async def test_an_api_failure_is_a_transient_failure(session, model_api):
     [row] = await ledger(session)
     # The claim keeps its estimate: the cap never undercounts.
     assert row.model == "failed:InternalServerError"
+    [body] = model_api.requests
     assert row.cost_usd == extraction.estimate_usd(
         settings.extract_model,
-        chars=len(CLASSIFY_SYSTEM) + len(USER.text),
+        prompt_bytes=extraction.request_bytes(body),
         max_tokens=400,
     )
 
@@ -513,3 +515,60 @@ async def test_a_validator_bug_is_a_final_failure(session, model_api):
     assert (result.status, result.error, result.final) == ("failed", "validator", True)
     [job] = await jobs(session)
     assert (job.status, job.error, job.result) == ("failed", "validator", None)
+
+
+async def test_a_tool_definition_is_held_to_the_mask_too(session, model_api):
+    tools = [
+        {"name": "lookup", "description": "call +998 90 000 00 01", "input_schema": {}}
+    ]
+    with pytest.raises(UnmaskedPayload) as refused:
+        await classify(session, tools=tools)
+    assert refused.value.pattern == "PHONE_RE"
+    assert model_api.requests == [] and await jobs(session) == []
+
+
+def test_the_claim_is_never_under_what_the_call_can_cost():
+    """04 §8: the claim bounds the bill. A Cyrillic-heavy request priced at
+    a token per byte of what it sends (no token is shorter than a byte) and
+    the output at max_tokens never exceeds the claim."""
+    text = "Ассалому алайкум, Хитойдан 5 куб ўйинчоқ ва қўғирчоқ керак 😀 " * 8
+    user = pseudonymise(f"TEXT: {text}")
+    params = {
+        "system": extraction.system_block(
+            CLASSIFY_SYSTEM, ImportSignal, with_schema=False
+        ),
+        "messages": [{"role": "user", "content": user.text}],
+        "output_config": extraction.output_config(
+            ImportSignal, effort="low", structured=True
+        ),
+    }
+    sent = extraction.request_bytes(params)
+    claim = extraction.estimate_usd(
+        settings.extract_model, prompt_bytes=sent, max_tokens=400
+    )
+    worst = anthropic_cost_usd(
+        settings.extract_model, input_tokens=sent, output_tokens=400
+    )
+    assert claim is not None and worst is not None
+    assert claim >= worst
+    # A byte bound, not a character ratio: the Cyrillic and the emoji count
+    # more than once.
+    assert sent > len(json.dumps(params, ensure_ascii=False))
+
+
+async def test_the_schema_a_request_sends_is_recorded_by_its_hash(session, model_api):
+    """A field's description is prompt too: the job records the schema it
+    was asked with beside the system prompt's hash."""
+
+    class Narrower(ImportSignal):
+        """Another description the model would read."""
+
+    model_api.queue(message(BUYER))
+    await classify(session)
+    [job] = await jobs(session)
+    assert job.request["schema_sha256"] == extraction.schema_sha256(ImportSignal)
+    assert extraction.schema_sha256(Narrower) != extraction.schema_sha256(ImportSignal)
+    assert len(job.request["system_sha256"]) == len(job.request["schema_sha256"]) == 16
+    # The schema's description is written for the model.
+    description = extraction.json_schema(ImportSignal)["description"]
+    assert "§" not in description and "``" not in description

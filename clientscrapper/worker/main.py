@@ -39,8 +39,11 @@ nobody listened — and on every (re)connect the listener wakes them all once,
 for what was said while it was away. A wake that lands while the job runs is
 not dropped by ``max_instances=1``: the job runs once more when it ends
 (``wakeable``). A payload ``<slot id>:<…>`` is that job's own announcement
-(``telegram_monitor`` linking a message for the classifier) and wakes every
-other job on the channel, never the one that said it.
+(``telegram_monitor`` linking a message for the classifier, ``classify`` a
+result for the scorer) and wakes the jobs **after** it on the channel — the
+table lists a channel's slots upstream first, and each stage wakes the next
+(04 §0) — never the one that said it nor a stage before it: an applied
+classification has nothing for the collector to read.
 
 Every job's outcome is also recorded as a ``job:<id>`` heartbeat by an
 APScheduler listener (04 §0: «every job … beats job:<id>»). Crons are
@@ -468,10 +471,12 @@ def wake(
     payload: str = "",
     now: datetime | None = None,
 ) -> list[str]:
-    """Run each of ``slot_ids`` now, except the one ``payload`` comes from;
-    the ids woken."""
+    """Run each of ``slot_ids`` now — when ``payload`` names the slot it
+    comes from, only the slots listed after it (downstream); the ids woken."""
     now = now or datetime.now(settings.tz)
     origin = origin_of(payload)
+    if origin in slot_ids:
+        slot_ids = slot_ids[slot_ids.index(origin) + 1 :]
     woken: list[str] = []
     for slot_id in slot_ids:
         if slot_id == origin:

@@ -15,8 +15,17 @@ A schema-valid answer is still only a claim. Before anything is stored:
   one (``vol_stated_*``, ``vol_container``) are not written, and a volume
   without a verified quote counts as ``inferred``;
 * **volume sanity** (``sane_volume``): (0, 200] m³; a container 28–70, a
-  truck 40–95; a stated volume must agree with ``VOLUME_RE`` on its quote
-  within ±10 %, else the regex wins;
+  truck 40–95 — each times the count its quote states («2 ta 40 fut
+  konteyner» is 56–140, «3 fura» 120–285: 04 §4.7's bounds are one unit's,
+  the volume is a shipment's); a stated volume must agree with ``VOLUME_RE``
+  on its quote within ±10 %, else the regex wins. A volume over 200 with a
+  verified quote is **capped** at 200, not dropped: the text says it, and
+  every signal reads ≥ 3 the same (a 250 m³ ask must not score below a 5 m³
+  one); an estimate over 200 (``inferred``, or a quote that failed) is no
+  volume. The basis follows the volume: a ``stated`` or ``inferred`` basis
+  left with no volume is ``none`` (with no quote); a quoted container,
+  truck or weight keeps its basis and quote with no number — the unit is
+  what the text says;
 * **role consistency** (``role_consistent``): a weak ``tout`` with no
   ``COMPETITOR_RE`` in the text is ``unknown`` — the collector's tout filter
   already caught the plain ones, and a doubtful model flag must not exclude a
@@ -34,18 +43,26 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Final
 
-from clientscrapper.collectors.keywords import COMPETITOR_RE, EMAIL_RE, PHONE_RE, TG_RE
+from clientscrapper.collectors.keywords import (
+    COMPETITOR_RE,
+    CONTAINER_RE,
+    EMAIL_RE,
+    PHONE_RE,
+    PINFL_RE,
+    TG_RE,
+)
 from clientscrapper.collectors.telegram_monitor import stated_volume
 from clientscrapper.services.pseudonyms import restore
 from clientscrapper.services.schemas import GOODS_MAX, ImportSignal, SpeakerRole
-from clientscrapper.services.text import fold_apostrophes
+from clientscrapper.services.text import APOSTROPHE_CLASS, fold_apostrophes
 
 # 04 §4.7 output hygiene: what a model output field may never carry — 04's
-# three shapes, and what the request fence itself refuses (a phone written
-# with spaces is a phone too; IG_RE is left out: its label branch reads an
-# ordinary word after «Instagram», and dropping a field is not free).
-LEAK_RE: Final = re.compile(r"\+998\d{9}|@\w{5,}|(?<!\d)\d{14}(?!\d)")
-LEAK_PATTERNS: Final = (LEAK_RE, PHONE_RE, TG_RE, EMAIL_RE)
+# three shapes (the 14-digit run is keywords' PINFL_RE), and what the request
+# fence itself refuses (a phone written with spaces is a phone too; IG_RE is
+# left out: its label branch reads an ordinary word after «Instagram», and
+# dropping a field is not free).
+LEAK_RE: Final = re.compile(r"\+998\d{9}|@\w{5,}")
+LEAK_PATTERNS: Final = (LEAK_RE, PINFL_RE, PHONE_RE, TG_RE, EMAIL_RE)
 PII_LEAK: Final = "pii_leak"
 QUOTE_MIN: Final = 3
 QUOTE_MAX: Final = 200
@@ -59,6 +76,20 @@ GOODS_CHARS_MAX: Final = 30
 # A basis that claims the text says the volume: without a verified quote it
 # is only an estimate.
 QUOTED_BASES: Final = frozenset({"stated", "container", "truck", "weight"})
+# A quoted unit that stands with no number (the signal writer reads the unit,
+# or the quoted tonnes, from the quote itself).
+UNIT_BASES: Final = frozenset({"container", "truck", "weight"})
+# How many containers or trucks a quote names: a count of 1–19 right before
+# the unit, a «ta»/«x»/«шт» after it and a container size between («2 ta 40
+# fut konteyner», «3 фуры»). A size alone («40ft konteyner») is one unit.
+COUNT_MAX: Final = 19
+_COUNT_RE: Final = re.compile(
+    r"(?<![\d.,])(1[0-9]|[1-9])\s*(?:ta|та|x|х|шт\.?)?\s*"
+    rf"(?:(?:20|40|45)\s*(?:ft|fut|фут\w*|{APOSTROPHE_CLASS})\s*)?\Z",
+    re.I,
+)
+# CONTAINER_RE's words that are no container or truck.
+_NOT_UNITS: Final = ("tonn", "тонн", "parti", "парти")
 _SCRIPTS: Final = ("LATIN", "CYRILLIC")
 _JOINERS: Final = frozenset("'ʻʼ-")
 
@@ -135,8 +166,22 @@ def _number(value: Any) -> float | None:
     return number if math.isfinite(number) else None
 
 
+def unit_count(quote: str | None) -> int:
+    """How many containers or trucks ``quote`` names (1 when it says no
+    count)."""
+    count = 1
+    for match in CONTAINER_RE.finditer(quote or ""):
+        if match.group(0).lower().startswith(_NOT_UNITS):
+            continue
+        said = _COUNT_RE.search((quote or "")[: match.start()])
+        if said is not None:
+            count = max(count, min(int(said.group(1)), COUNT_MAX))
+    return count
+
+
 def sane_volume(value: Any, basis: str, quote: str | None) -> float | None:
-    """The volume that survives 04 §4.7's sanity rules, or None."""
+    """The volume that survives 04 §4.7's sanity rules (the module
+    docstring), or None. ``quote`` is the verified quote or None."""
     volume = _number(value)
     if basis == "stated" and quote is not None:
         reading = stated_volume(quote)
@@ -144,11 +189,16 @@ def sane_volume(value: Any, basis: str, quote: str | None) -> float | None:
             said = reading[0]
             if volume is None or abs(volume - said) > STATED_TOLERANCE * said:
                 volume = said  # the regex wins
-    if volume is None or not 0 < volume <= VOLUME_MAX:
+    if volume is None or volume <= 0:
         return None
     bounds = {"container": CONTAINER_M3, "truck": TRUCK_M3}.get(basis)
-    if bounds is not None and not bounds[0] <= volume <= bounds[1]:
-        return None
+    if bounds is not None:
+        units = unit_count(quote)
+        if not bounds[0] * units <= volume <= bounds[1] * units:
+            return None
+    if volume > VOLUME_MAX:
+        quoted = quote is not None and basis in QUOTED_BASES
+        return VOLUME_MAX if quoted else None
     return volume
 
 
@@ -224,8 +274,9 @@ def import_signal(
     if quote is None and basis in QUOTED_BASES:
         basis = "inferred"
     volume = sane_volume(signal.volume_m3_est, basis, quote)
-    if basis == "inferred" and volume is None:
-        basis = "none"
+    if volume is None and basis not in UNIT_BASES:
+        # A basis that is a number («stated», «inferred») with no number left.
+        basis, quote = "none", None
     result = signal.model_dump(mode="json")
     result.update(
         speaker_role=role_consistent(
@@ -256,5 +307,6 @@ __all__ = [
     "leaks",
     "role_consistent",
     "sane_volume",
+    "unit_count",
     "verify_quote",
 ]
