@@ -325,8 +325,11 @@ async def test_5_the_feed_s_hash_of_the_lead_tail(session, erp_ready):
     ("status", "code"),
     [("sent", "delivered"), ("unknown", "delivered"), ("sending", "in_flight")],
 )
-async def test_6_the_id_s_own_rows(session, erp_ready, status, code):
+async def test_6_the_id_s_own_rows(session, erp_ready, monkeypatch, status, code):
+    """The id's own row is item 6's fact alone: the windows (7, 8) and the
+    caps (9) never count it, so a cap of one is not reached by it."""
     _, _, cand, body = await pushable(session)
+    monkeypatch.setattr(settings, "push_daily_cap", 1)
     await push(
         session,
         cand,
