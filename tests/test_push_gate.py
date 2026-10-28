@@ -420,10 +420,12 @@ async def test_4_among_unusable_phones_a_live_contact_beats_an_anonymised_one(
     """Neither is pushable; the refusal names the live one's reason (shared)
     rather than the stripped one's, whatever their age."""
     owner = await firm(session)
+    # Both mobiles on company-tier contacts (an anonymised one keeps its
+    # number, contacts.anonymise); the stripped one is the older.
     await contact(
         session,
         owner,
-        "+998712000065",
+        phone(66),
         anonymised_at=NOW - timedelta(days=1),
         created_at=NOW - timedelta(days=30),
     )
@@ -514,6 +516,51 @@ async def test_6_the_next_attempt_waits_and_carries_the_same_body(session, erp_r
     assert (plan.refusals, plan.attempt) == ([], 2)
     changed = {**body, "note": body["note"] + " (yangi)"}
     assert await refusals(session, cand, changed, now=later) == [(6, "payload_changed")]
+
+
+async def test_6_the_wait_runs_from_the_attempt_s_end(session, erp_ready):
+    """ATTEMPT_DELAYS count from when the failed attempt finished (its
+    retries inside the attempt took time); a superseded failed row is no
+    attempt to wait for."""
+    _, _, cand, body = await pushable(session)
+    sha = push_gate.canonical_sha256(body)
+    finished = NOW - timedelta(minutes=1)
+    failed = await push(
+        session,
+        cand,
+        sent_at=NOW - timedelta(minutes=10),
+        finished_at=finished,
+        phone_tail=tail(61),
+        external_id=body["external_id"],
+        status="failed",
+        payload_sha256=sha,
+    )
+    found = await push_gate.check(session, cand, now=NOW, payload=body)
+    assert [(r.code, r.until) for r in found] == [
+        ("attempt_wait", finished + push_gate.ATTEMPT_DELAYS[2])
+    ]
+    failed.superseded_at = NOW - timedelta(seconds=30)
+    await session.flush()
+    plan = await push_gate.evaluate(session, cand, now=NOW, payload=body)
+    assert (plan.refusals, plan.attempt) == ([], 2)
+
+
+async def test_6_every_earlier_attempt_carries_the_same_body(session, erp_ready):
+    _, _, cand, body = await pushable(session)
+    for attempt, sha in ((1, "1" * 64), (2, push_gate.canonical_sha256(body))):
+        at = NOW - timedelta(hours=3 - attempt)
+        await push(
+            session,
+            cand,
+            sent_at=at,
+            finished_at=at,
+            attempt=attempt,
+            phone_tail=tail(61),
+            external_id=body["external_id"],
+            status="failed",
+            payload_sha256=sha,
+        )
+    assert await refusals(session, cand, body) == [(6, "payload_changed")]
 
 
 async def test_6_three_attempts_then_none(session, erp_ready):
@@ -612,6 +659,28 @@ async def test_9_the_daily_cap(session, erp_ready, monkeypatch):
         sa.update(PushLog).values(sent_at=datetime(2026, 10, 26, 23, 59, tzinfo=TZ))
     )
     assert await refusals(session, cand, body) == []
+
+
+async def test_9_a_push_later_today_is_not_counted_yet(session, erp_ready, monkeypatch):
+    """The day's count is up to ``now``: re-checking at 11:00 does not count
+    the push of 12:00 (a later moment, a replayed clock)."""
+    _, _, cand, body = await pushable(session)
+    monkeypatch.setattr(settings, "push_daily_cap", 1)
+    other = await firm(session)
+    stranger = await candidate(
+        session, other, state="pushed", score=72, external_id=f"cs:{other.id}:202610"
+    )
+    await push(
+        session,
+        stranger,
+        sent_at=NOW + timedelta(hours=1),
+        phone_tail=tail(68),
+        external_id=f"cs:{other.id}:202610",
+    )
+    assert await refusals(session, cand, body) == []
+    assert await refusals(session, cand, body, now=NOW + timedelta(hours=2)) == [
+        (9, "cap")
+    ]
 
 
 async def test_9_the_erp_s_rolling_source_cap(session, erp_ready):
@@ -1049,6 +1118,47 @@ async def test_14_a_dnc_after_the_approval_suppresses(session, erp_ready):
     assert got is not None and (got.state, got.suppressed_by) == ("suppressed", dnc.id)
     [note] = (await session.scalars(sa.select(LeadReview.note))).all()
     assert note == "🚫 Bu raqam endi bostirilgan"
+
+
+async def test_14_a_repush_meeting_a_dnc_leaves_the_pushed_candidate(session, erp_ready):
+    """A rule-5 re-push reads ``pushed``, a terminal state: the refusal is
+    noted, the candidate keeps its state (no ``pushed → suppressed``)."""
+    owner, lead, cand, body = await pushable(session)
+    eid = body["external_id"]
+    cand.state, cand.external_id, cand.pushed_at = "pushed", eid, NOW - timedelta(days=3)
+    sent = await push(
+        session,
+        cand,
+        sent_at=NOW - timedelta(days=3),
+        phone_tail=tail(61),
+        external_id=eid,
+        payload_sha256=push_gate.canonical_sha256(body),
+        superseded_at=NOW,
+    )
+    approval = await tapped(session, cand)
+    await row(session, "dnc", "phone_tail", tail(61))
+    result = await push_gate.claim(
+        session, cand.id, now=NOW, payload=body, endpoint=ENDPOINT, repush_of=sent.id
+    )
+    assert [(r.check, r.code) for r in result.refusals] == [(5, "suppressed")]
+    got = await session.get(LeadCandidate, cand.id, populate_existing=True)
+    assert got is not None and got.state == "pushed"
+    await session.refresh(approval)
+    assert approval.note == "🚫 Bu raqam endi bostirilgan"
+
+
+async def test_14_a_live_card_carries_the_note_once(session, erp_ready):
+    """Back to review onto a live owner card if one is there — one live
+    card per candidate (ux_lead_reviews_live)."""
+    _, _, cand, body = await pushable(session)
+    await tapped(session, cand, state="pending")
+    cand.score = 55
+    await session.flush()
+    await push_gate.claim(session, cand.id, now=NOW, payload=body, endpoint=ENDPOINT)
+    got = await session.get(LeadCandidate, cand.id, populate_existing=True)
+    live = (await session.scalars(sa.select(LeadReview))).all()
+    assert got is not None and got.state == "review"
+    assert [(r.state, r.note) for r in live] == [("pending", "Ball tushdi")]
 
 
 async def test_14_a_client_hit_at_push_time_makes_the_company_a_client(

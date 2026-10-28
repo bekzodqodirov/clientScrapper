@@ -569,15 +569,15 @@ async def test_the_owner_s_dnc_reads_the_candidate_as_stored(session):
     owner = await firm(session)
     lead = await contact(session, owner, phone(34))
     cand = await candidate(session, owner, state="approved", lead=lead, score=70)
+    # Another session's push: the row moves, the caller's object does not.
     await session.execute(
-        sa.update(LeadCandidate)
-        .where(LeadCandidate.id == cand.id)
-        .values(
-            state="pushed",
-            external_id=f"cs:{owner.id}:202610",
-            pushed_at=NOW,
-        )
+        sa.text(
+            "UPDATE lead_candidates SET state = 'pushed', external_id = :eid,"
+            " pushed_at = :at WHERE id = :id"
+        ),
+        {"eid": f"cs:{owner.id}:202610", "at": NOW, "id": cand.id},
     )
+    assert cand.state == "approved"
     first = await suppression.dnc_for_candidate(session, cand, now=NOW)
     got = await session.get(LeadCandidate, cand.id)
     assert got is not None and (got.state, got.suppressed_by) == ("pushed", None)
@@ -682,6 +682,25 @@ async def test_a_dnc_command_suppresses_the_open_candidates_its_key_names(sessio
             assert got.suppressed_by == done.row_id
     by_handle = await suppression.dnc_command(session, "@namuna_kanal", now=NOW)
     assert by_handle.suppressed == (channel_one.id,)
+
+
+async def test_a_dnc_command_on_a_merged_source_s_own_key_reaches_the_root(session):
+    """A key only the merged source still holds — its decision maker, kept
+    on the source because the root has one (one person per company, 04
+    §2.5) — names the source; its lineage's open candidate, the root's, is
+    the one to end."""
+    root = await firm(session)
+    source = await firm(session)
+    await contact(session, root, None, tier="person", telegram_username="namuna_bosh")
+    await contact(session, source, None, tier="person", telegram_username="namuna_eski")
+    root_one = await candidate(session, root, state="review", score=70)
+    await companies.merge_into(session, source, root, by="owner:111111111", now=NOW)
+    held = await suppression.holders(
+        session, suppression.Entry("dnc", "tg_username", "namuna_eski")
+    )
+    assert held == [source.id]
+    done = await suppression.dnc_command(session, "@namuna_eski", now=NOW)
+    assert done.suppressed == (root_one.id,)
 
 
 @pytest.mark.parametrize("arg", ["hello", "1234", "@ab", "t.me/joinchat/xyz", ""])

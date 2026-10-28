@@ -386,7 +386,7 @@ def test_an_importer_that_delivers_is_no_competitor(name, kind, text):
         (
             replace(
                 PASSING,
-                own=(OwnText("Yuk tashish", "profile", title="Namuna Logistics"),),
+                own=(OwnText("Xitoydan tovarlar", "profile", title="Namuna Logistics"),),
             ),
             True,
         ),
@@ -1339,3 +1339,44 @@ async def test_the_gate_marks_keep_the_phone_less_handoff_mark(session):
     )
     again = await scored(session, cand)
     assert again.state == "review"
+
+
+async def test_an_anonymised_contact_s_tail_holds_no_phone_window(session):
+    owner = await firm(session)
+    await contact(session, owner, phone(75), anonymised_at=NOW - timedelta(days=1))
+    other = await firm(session)
+    stranger = await candidate(
+        session, other, state="pushed", external_id=f"cs:{other.id}:202610"
+    )
+    await push(
+        session,
+        stranger,
+        sent_at=NOW - timedelta(hours=2),
+        phone_tail=tail(75),
+        external_id=f"cs:{other.id}:202610",
+    )
+    got = await gates.inputs_for(session, owner.id, now=NOW)
+    assert (got.tails, got.recent.phone_push_until) == ([], None)
+
+
+async def test_the_tail_about_to_be_pushed_is_read_like_a_contact_s(session):
+    """``inputs_for(tails=…)``: a phone no live contact carries yet is
+    looked up and windowed too."""
+    owner = await firm(session)
+    other = await firm(session)
+    stranger = await candidate(
+        session, other, state="pushed", external_id=f"cs:{other.id}:202610"
+    )
+    sent = NOW - timedelta(hours=2)
+    await push(
+        session,
+        stranger,
+        sent_at=sent,
+        phone_tail=tail(76),
+        external_id=f"cs:{other.id}:202610",
+    )
+    dnc = await row(session, "dnc", "phone_tail", tail(76))
+    got = await gates.inputs_for(session, owner.id, now=NOW, tails=[tail(76)])
+    assert got.tails == [tail(76)]
+    assert got.recent.phone_push_until == sent + gates.PHONE_PUSH_WINDOW
+    assert got.hit is not None and got.hit.id == dnc.id
