@@ -1094,6 +1094,47 @@ async def test_a_stuck_batch_step_that_raises_does_not_stop_the_nights_submit(
     assert model_api.cancelled == []
 
 
+async def test_a_failing_stuck_sweep_does_not_stop_the_nights_submit(
+    session, model_api, monkeypatch
+):
+    fresh = await enqueue(session)
+
+    async def down(*args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("synthetic: the sweep's read failed")
+
+    monkeypatch.setattr(health, "stuck_batches", down)
+    model_api.accept_batches()
+    with pytest.raises(RuntimeError, match="sweep"):
+        await model_jobs.model_batch_submit_job(now=NIGHT)
+    row = await job(session, fresh)
+    assert (row.status, row.batch_id) == ("submitted", "msgbatch_namuna01")
+
+
+async def test_one_stuck_batch_that_raises_does_not_keep_the_next_from_its_give_up(
+    session, model_api, monkeypatch
+):
+    first = await enqueue(session, "Namuna Bir: optom")
+    model_api.accept_batches()
+    await model_jobs.submit_batch(now=NIGHT)
+    second = await enqueue(session, "Namuna Ikki: optom", at=NIGHT + timedelta(hours=1))
+    model_api.accept_batches()
+    await model_jobs.submit_batch(now=NIGHT + timedelta(hours=1))
+    collect_batch = model_jobs.collect_batch
+
+    async def broken(factory: Any, client: Any, batch_id: str, **kwargs: Any) -> Any:
+        if batch_id == "msgbatch_namuna01":
+            raise RuntimeError("synthetic bug")
+        return await collect_batch(factory, client, batch_id, **kwargs)
+
+    monkeypatch.setattr(model_jobs, "collect_batch", broken)
+    report = await model_jobs.give_up_stuck(now=NIGHT + timedelta(days=2))
+    assert (report.errors, report.stuck, report.retried) == (1, 1, 1)
+    one, two = await jobs(session)
+    assert (one.id, one.status, one.batch_id) == (first, "submitted", "msgbatch_namuna01")
+    assert (two.id, two.status, two.error) == (second, "pending", "stuck")
+    assert model_api.cancelled == ["msgbatch_namuna02"]
+
+
 async def test_a_stuck_batch_that_could_not_be_read_once_is_not_given_up(
     session, model_api
 ):
