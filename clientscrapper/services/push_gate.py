@@ -21,11 +21,13 @@ is one refusal:
 6. the ``external_id``'s own rows: nothing delivered or in flight, at most
    ``MAX_ATTEMPTS``, the next attempt only after ``ATTEMPT_DELAYS`` and with
    the identical body (rule 6);
-7. no delivered push of the lead tail in 24 h;
+7. no push of the lead tail in 24 h;
 8. no open push of the company's lineage in 90 d (02 §2.10 rule 2);
-9. ``PUSH_DAILY_CAP`` for the Tashkent day and the ERP's rolling 24-hour
-   source cap of ``SOURCE_CAP`` (05 §A.2) — counting, as 7 and 8 do, only
-   rows nobody superseded and never the push's own ``external_id``;
+9. ``PUSH_DAILY_CAP`` for the Tashkent day (up to ``now``) and the ERP's
+   rolling 24-hour source cap of ``SOURCE_CAP`` (05 §A.2) on the door pushed
+   to — counting, as 7 and 8 do, a delivered row and one in flight
+   (``gates.PUSH_COUNTED_STATUSES``), only rows nobody superseded and never
+   the push's own ``external_id``;
 10. Mon–Sat 09:30–17:30 Tashkent (``PUSH_WINDOW``/``PUSH_DAYS``);
 11. the payload's invariants (``payload_problems``): the identity fields,
     ``name``, ``phone``, ``note`` ≤ ``NOTE_MAX``, the stated ``kub``, no
