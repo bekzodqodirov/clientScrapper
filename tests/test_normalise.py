@@ -507,6 +507,13 @@ def test_a_reserved_instagram_path_names_nobody(path: str) -> None:
     assert instagram_key(path) is None
 
 
+def test_a_link_is_read_in_any_case_and_on_every_telegram_host() -> None:
+    """TG_RE reads «T.me/…» and telegram.me / telegram.dog; the key follows."""
+    text = "T.me/namuna_optom, TELEGRAM.ME/namuna_savdo, https://telegram.dog/namuna_uz"
+    assert telegram_handles(text) == ["namuna_optom", "namuna_savdo", "namuna_uz"]
+    assert telegram_key("https://telegram.dog/joinchat/AAAA") is None
+
+
 def test_telegram_handles_in_text() -> None:
     text = (
         "Kanal: t.me/namuna_optom, admin @namuna_admin, t.me/share/url, "
