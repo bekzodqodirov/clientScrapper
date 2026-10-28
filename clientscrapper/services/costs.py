@@ -468,6 +468,43 @@ async def serp_overflow(session: AsyncSession) -> bool:
     return bool(value)
 
 
+async def fits(
+    session: AsyncSession,
+    *,
+    operation: Operation,
+    estimates: Sequence[Decimal | None],
+    now: datetime,
+) -> int:
+    """How many of ``estimates``, taken in order, one ``ask`` for their sum
+    would let through at ``now`` — ``decide``'s rungs over the ledger as it
+    stands. A hint for sizing a batch (04 §4.8: one ask for the night's
+    batch), read without the ledger lock: ``ask`` still decides, and refuses
+    what a concurrent claim took meanwhile. The Anthropic switch is ``ask``'s
+    to apply; an unpriced estimate stops the count."""
+    ledger = await read_ledger(session, now)
+    overflow = FAMILY[operation] == "serp" and await serp_overflow(session)
+    local = _local(now, None).time()
+    total = D0
+    fitting = 0
+    for est in estimates:
+        if est is None:
+            break
+        total += est
+        code = decide(
+            operation,
+            total,
+            ledger,
+            local_time=local,
+            daily_cap=settings.daily_cost_cap_usd,
+            monthly_cap=settings.monthly_cost_cap_usd,
+            serp_overflow=overflow,
+        )
+        if code is not None:
+            break
+        fitting += 1
+    return fitting
+
+
 # --- process memory and hooks ---------------------------------------------------
 
 # op → (until, code): a refused op is not asked again before the next hour —
@@ -1488,6 +1525,7 @@ __all__ = [
     "day_start",
     "decide",
     "fire_spend_alerts",
+    "fits",
     "is_cap",
     "mark_alerted",
     "month_end",

@@ -89,6 +89,8 @@ files = [
     "clientscrapper/services/validators.py",
     "clientscrapper/services/extraction.py",
     "clientscrapper/services/classify.py",
+    # T-16
+    "clientscrapper/services/model_jobs.py",
 ]
 
 # APScheduler 3 ships no type information.

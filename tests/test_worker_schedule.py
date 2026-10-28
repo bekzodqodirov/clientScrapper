@@ -25,7 +25,14 @@ from clientscrapper.collectors.runner import run_collector
 from clientscrapper.collectors.telegram_monitor import TelegramMonitor
 from clientscrapper.config import settings
 from clientscrapper.db import models as m
-from clientscrapper.services import companies, costs, crontab, erp_feeds, health
+from clientscrapper.services import (
+    companies,
+    costs,
+    crontab,
+    erp_feeds,
+    health,
+    model_jobs,
+)
 from clientscrapper.worker import main as worker
 
 TZ = ZoneInfo("Asia/Tashkent")
@@ -91,6 +98,9 @@ BUILT = {
     "telegram_monitor",
     # T-15: the classifier, woken by the collector's NOTIFY.
     "classify",
+    # T-16: the batch lane (services/model_jobs).
+    "model_batch_submit",
+    "model_batch_collect",
 }
 # The ERP slots and the ErpSync variant each runs (03 §3, 05 §B.2).
 ERP_VARIANTS = {
@@ -189,6 +199,23 @@ def test_the_resolver_is_the_resolve_slot_s_job():
     job = scheduler.get_job("resolve")
     assert job is not None and job.func is companies.resolve_job
     assert (job.max_instances, job.coalesce) == (1, True)
+
+
+def test_the_batch_lane_slots_run_model_jobs():
+    """04 §0: model_batch_submit 23:30, model_batch_collect every 30 min
+    00:30–08:00 — the two jobs of services/model_jobs (T-16)."""
+    table = {s.id: s for s in worker.job_table()}
+    assert table["model_batch_submit"].job is model_jobs.model_batch_submit_job
+    assert table["model_batch_collect"].job is model_jobs.model_batch_collect_job
+    scheduler = worker.build_scheduler()
+    for slot_id, func in (
+        ("model_batch_submit", model_jobs.model_batch_submit_job),
+        ("model_batch_collect", model_jobs.model_batch_collect_job),
+    ):
+        job = scheduler.get_job(slot_id)
+        assert job is not None and job.func is func
+    [submit] = _next("model_batch_submit", NOW, 1)
+    assert submit == datetime(2026, 10, 24, 23, 30, tzinfo=TZ)
 
 
 def test_wire_registers_the_suppression_probe():

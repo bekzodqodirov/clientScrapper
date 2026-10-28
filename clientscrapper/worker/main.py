@@ -27,9 +27,11 @@ Built by later tasks and registered here: the five ERP feed cadences, read
 from ``collectors/erp_sync.JOBS`` (T-09's suppression delta/full, T-10's
 outcomes/quarter/year walks), each ``run_collector(ErpSync, variant=…)``;
 ``resolve`` (T-17, ``services/companies.resolve_job``, every 2 minutes);
-``telegram_monitor`` (T-14, ``run_collector(TelegramMonitor)``); and
+``telegram_monitor`` (T-14, ``run_collector(TelegramMonitor)``);
 ``classify`` (T-15, ``services/classify.classify_job``, woken by
-``cs_interaction``).
+``cs_interaction``); and the batch lane (T-16, ``services/model_jobs``):
+``model_batch_submit`` at 23:30 and ``model_batch_collect`` every 30 minutes
+00:30–08:00.
 
 **The event-driven path** (04 §0, 01 N-06). A slot with ``wakes_on`` also
 runs when its ``NOTIFY`` channel speaks: :func:`listen_for_wakes` holds a
@@ -99,6 +101,7 @@ from clientscrapper.services import (
     crontab,
     erp_feeds,
     health,
+    model_jobs,
     restore_drill,
 )
 from clientscrapper.services import http as http_layer
@@ -277,11 +280,17 @@ def job_table() -> tuple[JobSlot, ...]:
             classify.classify_job,
             wakes_on=chats.INTERACTION_CHANNEL,
         ),
-        JobSlot("model_batch_submit", ("30 23 * * *",), "T-16"),
+        JobSlot(
+            "model_batch_submit",
+            ("30 23 * * *",),
+            "T-16",
+            model_jobs.model_batch_submit_job,
+        ),
         JobSlot(
             "model_batch_collect",
             ("30 0 * * *", "0,30 1-7 * * *", "0 8 * * *"),
             "T-16",
+            model_jobs.model_batch_collect_job,
             note="every 30 min 00:30–08:00",
         ),
         JobSlot("resolve", ("every 2m",), "T-17", companies.resolve_job),

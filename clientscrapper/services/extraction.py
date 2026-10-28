@@ -303,15 +303,53 @@ def request_bytes(params: Mapping[str, Any]) -> int:
     return len(text.encode("utf-8"))
 
 
-def estimate_usd(model: str, *, prompt_bytes: int, max_tokens: int) -> Decimal | None:
+def estimate_usd(
+    model: str, *, prompt_bytes: int, max_tokens: int, batch: bool = False
+) -> Decimal | None:
     """A claim no answer can exceed: a token per byte of the prompt, uncached,
-    plus ``REQUEST_OVERHEAD_TOKENS``, and the output at ``max_tokens``. None =
+    plus ``REQUEST_OVERHEAD_TOKENS``, and the output at ``max_tokens`` — at the
+    Message Batches price when ``batch`` (half, ``usage.token_cost``). None =
     unpriced."""
     return anthropic_cost_usd(
         model,
         input_tokens=prompt_bytes + REQUEST_OVERHEAD_TOKENS,
         output_tokens=max_tokens,
+        batch=batch,
     )
+
+
+def new_custom_id() -> str:
+    """``model_jobs.custom_id``: ``'cs-' || uuid4``, minted in Python before
+    the insert (02 §2.6) — the key a batch result comes back under."""
+    return f"cs-{uuid.uuid4()}"
+
+
+def build_params(
+    *,
+    model: str,
+    system: str,
+    schema: type[BaseModel],
+    messages: Sequence[Mapping[str, Any]],
+    max_tokens: int,
+    effort: Effort,
+    structured: bool,
+    tools: Sequence[Mapping[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """The Messages API parameters of one request: the instant lane's
+    ``messages.create`` and a batch request's ``params`` alike — one builder,
+    so the two lanes' answers are comparable (04 §4.4). ``structured``: the
+    schema goes as ``output_config.format`` (else as text in the system block,
+    the prompted path)."""
+    params: dict[str, Any] = {
+        "model": model,
+        "max_tokens": max_tokens,
+        "system": system_block(system, schema, with_schema=not structured),
+        "messages": [dict(m) for m in messages],
+        "output_config": output_config(schema, effort=effort, structured=structured),
+    }
+    if tools:
+        params["tools"] = [dict(t) for t in tools]
+    return params
 
 
 # --- one call ------------------------------------------------------------------
@@ -385,18 +423,16 @@ async def _request(
     structured: bool,
 ) -> _Answer:
     """One paid request, claimed and priced by ``costs.ask``."""
-    system = system_block(state.system, state.schema, with_schema=not structured)
-    params: dict[str, Any] = {
-        "model": state.model,
-        "max_tokens": max_tokens,
-        "system": system,
-        "messages": messages,
-        "output_config": output_config(
-            state.schema, effort=state.effort, structured=structured
-        ),
-    }
-    if state.tools:
-        params["tools"] = [dict(t) for t in state.tools]
+    params = build_params(
+        model=state.model,
+        system=state.system,
+        schema=state.schema,
+        messages=messages,
+        max_tokens=max_tokens,
+        effort=state.effort,
+        structured=structured,
+        tools=state.tools,
+    )
     est = estimate_usd(
         state.model, prompt_bytes=request_bytes(params), max_tokens=max_tokens
     )
@@ -469,7 +505,7 @@ def schema_sha256(schema: type[BaseModel]) -> str:
     return _sha(json.dumps(json_schema(schema), sort_keys=True, ensure_ascii=False))
 
 
-def _request_record(
+def request_record(
     op: Operation,
     *,
     model: str,
@@ -480,11 +516,15 @@ def _request_record(
     effort: Effort,
     prompt_version: int | None,
     tools: Sequence[Mapping[str, Any]] | None,
+    extra: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """``model_jobs.request``: the masked user text and what it was asked
     with — the frozen system block by version and hash, and the schema by
-    hash (a field's description is prompt too), not copied into every row."""
+    hash (a field's description is prompt too), not copied into every row.
+    ``extra``: what the job answers for (the batch job a fallback takes,
+    ``model_jobs``), kept beside it."""
     return {
+        **(extra or {}),
         "op": op,
         "model": model,
         "prompt_version": prompt_version,
@@ -513,11 +553,13 @@ async def call[S: BaseModel](
     evidence_ids: Iterable[int] = (),
     prompt_version: int | None = None,
     validate: Callable[[S], Validated] | None = None,
+    extra: Mapping[str, Any] | None = None,
 ) -> ModelResult[S]:
     """One instant-lane model call (04 §4.1), recorded as a ``model_jobs`` row
     in the caller's transaction. ``user`` is masked text (``pseudonymise``);
     ``validate`` turns a schema-valid answer into what is stored
-    (``validators``). Never raises for the model's sake: a refusal, a budget
+    (``validators``); ``extra`` joins the stored request (``request_record``).
+    Never raises for the model's sake: a refusal, a budget
     refusal or an API failure comes back as ``error``. Raises
     ``UnmaskedPayload`` — before anything is written or sent — when the
     request still carries a phone, a handle or an e-mail."""
@@ -540,12 +582,12 @@ async def call[S: BaseModel](
         kind=route.kind,
         lane="instant",
         model=model,
-        custom_id=f"cs-{uuid.uuid4()}",
+        custom_id=new_custom_id(),
         status="pending",
         attempts=0,
         company_id=company_id,
         evidence_ids=list(evidence_ids),
-        request=_request_record(
+        request=request_record(
             op,
             model=model,
             system=system,
@@ -555,6 +597,7 @@ async def call[S: BaseModel](
             effort=effort,
             prompt_version=prompt_version,
             tools=tools,
+            extra=extra,
         ),
         pseudonyms=dict(user.reverse) or None,
         created_at=now,
@@ -647,7 +690,13 @@ async def _finish[S: BaseModel](
         job.error = error
     await session.flush()
     if applied and validated is not None and validated.leaks:
-        await _note_pii_leak(session, state, validated.leaks)
+        await note_pii_leak(
+            session,
+            now=state.now,
+            op=state.op,
+            model_job_id=state.job_id,
+            fields=validated.leaks,
+        )
     log.info(
         "model job",
         extra={
@@ -706,30 +755,36 @@ async def _note_api_failure(session: AsyncSession, now: datetime, code: str) -> 
         )
 
 
-async def _note_pii_leak(
-    session: AsyncSession, state: _Call, fields: Sequence[str]
+async def note_pii_leak(
+    session: AsyncSession,
+    *,
+    now: datetime,
+    op: Operation,
+    model_job_id: int | None,
+    fields: Sequence[str],
+    by: str = "extraction",
 ) -> None:
     """``pii_leak``: the jobs of the last day a validator flagged, this one
-    included (the field was dropped; 04 §4.7)."""
+    included (the field was dropped; 04 §4.7) — said by either lane."""
     count = await session.scalar(
         sa.select(sa.func.count())
         .select_from(ModelJob)
         .where(
             ModelJob.error == PII_LEAK,
-            ModelJob.created_at > state.now - PII_LEAK_HOLD,
+            ModelJob.created_at > now - PII_LEAK_HOLD,
         )
     )
     log.error(
         "a model answer carried personal data; the field was dropped",
-        extra={"op": state.op, "model_job_id": state.job_id, "fields": list(fields)},
+        extra={"op": op, "model_job_id": model_job_id, "fields": list(fields)},
     )
     await health.raise_problem(
         session,
         PII_LEAK,
-        now=state.now,
-        by="extraction",
-        detail={"n": int(count or 0), "op": state.op},
-        until=state.now + PII_LEAK_HOLD,
+        now=now,
+        by=by,
+        detail={"n": int(count or 0), "op": op},
+        until=now + PII_LEAK_HOLD,
     )
 
 
@@ -741,16 +796,20 @@ __all__ = [
     "ModelResult",
     "Route",
     "available",
+    "build_params",
     "call",
     "estimate_usd",
     "get_client",
     "is_grammar_failure",
     "json_payload",
     "model_for",
+    "new_custom_id",
     "note_grammar_failure",
+    "note_pii_leak",
     "output_config",
     "parse_answer",
     "request_bytes",
+    "request_record",
     "reset_grammar_memory",
     "schema_sha256",
     "set_client",
