@@ -765,13 +765,17 @@ async def note_pii_leak(
     by: str = "extraction",
 ) -> None:
     """``pii_leak``: the jobs of the last day a validator flagged, this one
-    included (the field was dropped; 04 §4.7) — said by either lane."""
+    included (the field was dropped; 04 §4.7) — said by either lane. A job
+    counts from the moment its answer was flagged (``applied_at``), not from
+    when it was asked: a batch job enqueued days before its answer landed is
+    one of today's leaks."""
     count = await session.scalar(
         sa.select(sa.func.count())
         .select_from(ModelJob)
         .where(
             ModelJob.error == PII_LEAK,
-            ModelJob.created_at > now - PII_LEAK_HOLD,
+            sa.func.coalesce(ModelJob.applied_at, ModelJob.created_at)
+            > now - PII_LEAK_HOLD,
         )
     )
     log.error(

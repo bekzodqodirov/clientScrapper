@@ -22,6 +22,7 @@ from decimal import Decimal
 from typing import Any, Literal
 from zoneinfo import ZoneInfo
 
+import httpx
 import pytest
 import sqlalchemy as sa
 from pydantic import BaseModel, ConfigDict
@@ -31,6 +32,7 @@ from clientscrapper.config import settings
 from clientscrapper.db import models as m
 from clientscrapper.services import costs, extraction, health, model_jobs, validators
 from clientscrapper.services.model_jobs import BatchKind, Landed
+from clientscrapper.services.prompts import JSON_NUDGE
 from clientscrapper.services.pseudonyms import (
     Pseudonymised,
     UnmaskedPayload,
@@ -38,6 +40,7 @@ from clientscrapper.services.pseudonyms import (
 )
 from clientscrapper.services.validators import Validated
 from tests.fakes import (
+    GRAMMAR_MESSAGE,
     api_error,
     batch_pii_in,
     canceled,
@@ -370,10 +373,13 @@ async def test_a_refusal_is_failed_never_retried_and_its_tokens_are_priced(
     [usage] = await ledger(session)
     assert (usage.input_tokens, usage.cost_usd) == (4000, SETTLED)
     # Never asked again, by either lane.
-    assert (await model_jobs.take_fallbacks(now=COLLECT)).claimed == 0
+    again = await model_jobs.take_fallbacks(now=COLLECT)
+    assert (again.taken, again.given_up, again.waiting) == (0, 0, 0)
     model_api.accept_batches()
     assert (await model_jobs.submit_batch(now=NIGHT + timedelta(days=1))).claimed == 0
     assert model_api.requests == []
+    assert len(model_api.batch_bodies) == 1
+    model_api.batch_answers.clear()  # the accepted create nobody made
 
 
 async def test_a_validator_s_bug_is_a_final_failure(session, model_api, kind):
@@ -520,7 +526,9 @@ async def test_errored_expired_canceled_back_to_pending_then_the_instant_lane(
         INSTANT,
     )
     # Taken once: never handed over again.
-    assert (await model_jobs.take_fallbacks(now=taken_at)).claimed == 0
+    again = await model_jobs.take_fallbacks(now=taken_at)
+    assert (again.taken, again.given_up, again.waiting) == (0, 0, 0)
+    assert len(model_api.requests) == 1
 
 
 @pytest.mark.parametrize(
@@ -660,7 +668,9 @@ async def test_a_fallback_the_api_keeps_failing_is_given_up_after_three(
         assert (await job(session, first)).applied_at == expected
     assert [j.error for j in await jobs(session)][1:] == ["api:OverloadedError"] * 3
     # Given up: the run claims it no more.
-    assert (await model_jobs.take_fallbacks(now=at + timedelta(hours=3))).claimed == 0
+    again = await model_jobs.take_fallbacks(now=at + timedelta(hours=3))
+    assert (again.taken, again.given_up, again.retried) == (0, 0, 0)
+    assert len(model_api.requests) == 3
 
 
 # --- the submit ---------------------------------------------------------------
@@ -875,3 +885,646 @@ async def test_nothing_is_submitted_for_an_operation_nobody_registered(
         await model_jobs.enqueue(session, user=pseudonymise("Namuna"), now=NIGHT)
     report = await model_jobs.submit_batch(now=NIGHT)
     assert report.claimed == 0 and model_api.batch_bodies == []
+
+
+# --- review fixes: what one bad batch or job may not do to the rest -------------
+
+
+async def to_fallback(session: AsyncSession, fake: Any, ids: list[int]) -> None:
+    """Three nights of expired results: every job of ``ids`` ends ``fallback``."""
+    rows = [await job(session, i) for i in ids]
+    for day in range(3):
+        await night(
+            session,
+            fake,
+            at=NIGHT + timedelta(days=day),
+            results={row.custom_id: expired() for row in rows},
+        )
+    assert [(await job(session, i)).status for i in ids] == ["fallback"] * len(ids)
+
+
+async def test_a_fallback_whose_checker_cannot_be_built_is_taken_and_the_next_runs(
+    session, model_api, kind
+):
+    first = await enqueue(session, "Namuna Bir: optom")
+    second = await enqueue(session, "Namuna Ikki: optom")
+    await to_fallback(session, model_api, [first, second])
+
+    async def factory(session: AsyncSession, row: m.ModelJob) -> Any:
+        if row.id == first:
+            raise LookupError("synthetic: the evidence it reads was purged")
+        return await kind.checker(session, row)
+
+    model_jobs.KINDS["company_verdict"] = BatchKind(
+        schema=Verdict, system=SYSTEM, checker=factory, apply=kind.apply
+    )
+    model_api.queue(message(CONFIRMED, model=VERDICT))
+    at = NIGHT + timedelta(days=3, hours=1)
+    report = await model_jobs.take_fallbacks(now=at)
+    assert (report.taken, report.applied, report.failed, report.errors) == (1, 1, 1, 0)
+    # Nothing was sent for the first: the one request is the second's.
+    [body] = model_api.requests
+    assert body["messages"][0]["content"] == "Namuna Ikki: optom"
+    bad, good, instant = await jobs(session)
+    assert (bad.status, bad.error, bad.applied_at) == ("fallback", "validator", at)
+    assert (good.status, good.applied_at) == ("fallback", at)
+    assert (instant.status, instant.request["fallback_of"]) == ("applied", second)
+    # Taken: never asked again.
+    again = await model_jobs.take_fallbacks(now=at + timedelta(minutes=30))
+    assert (again.taken, again.failed, len(model_api.requests)) == (0, 0, 1)
+
+
+async def test_a_validator_factory_that_raises_in_the_batch_lane_is_final(
+    session, model_api, kind
+):
+    async def factory(session: AsyncSession, row: m.ModelJob) -> Any:
+        await session.execute(sa.text("SELECT 1/0"))  # a failed statement
+        raise AssertionError("unreachable")
+
+    model_jobs.KINDS["company_verdict"] = BatchKind(
+        schema=Verdict, system=SYSTEM, checker=factory, apply=kind.apply
+    )
+    first = await enqueue(session)
+    custom = (await job(session, first)).custom_id
+    await night(
+        session,
+        model_api,
+        at=NIGHT,
+        results={custom: succeeded(CONFIRMED, input_tokens=4000, output_tokens=600)},
+    )
+    row = await job(session, first)
+    # The savepoint kept the job's transaction usable: failed, and the
+    # answer's real price settled in the same commit.
+    assert (row.status, row.error, row.cost_usd) == ("failed", "validator", SETTLED)
+    [usage] = await ledger(session)
+    assert (usage.input_tokens, usage.cost_usd) == (4000, SETTLED)
+    assert kind.landed == []
+
+
+async def test_a_fallback_that_raises_is_passed_over_and_the_run_fails_after(
+    session, model_api, monkeypatch
+):
+    first = await enqueue(session, "Namuna Bir: optom")
+    second = await enqueue(session, "Namuna Ikki: optom")
+    await to_fallback(session, model_api, [first, second])
+    call = extraction.call
+
+    async def flaky(session: AsyncSession, **kwargs: Any) -> Any:
+        if kwargs["extra"][model_jobs.FALLBACK_OF] == first:
+            raise RuntimeError("synthetic bug")
+        return await call(session, **kwargs)
+
+    monkeypatch.setattr(extraction, "call", flaky)
+    model_api.queue(message(LIKELY, model=VERDICT))
+    at = NIGHT + timedelta(days=3, hours=1)
+    with pytest.raises(RuntimeError, match="synthetic bug"):
+        await model_jobs.model_batch_collect_job(now=at)
+    bad, good, instant = await jobs(session)
+    assert (bad.status, bad.applied_at) == ("fallback", None)  # the next run asks
+    assert (good.applied_at, instant.status, instant.result) == (at, "applied", LIKELY)
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        httpx.ReadError("synthetic: connection reset"),
+        httpx.RemoteProtocolError("synthetic: peer closed"),
+        None,  # the body just ends: the last line is cut short
+    ],
+    ids=["read_error", "protocol_error", "cut_line"],
+)
+async def test_a_results_stream_that_breaks_off_is_read_again_and_others_collected(
+    session, model_api, error
+):
+    first = await enqueue(session, "Namuna Bir: optom")
+    model_api.accept_batches()
+    await model_jobs.submit_batch(now=NIGHT)
+    second = await enqueue(session, "Namuna Ikki: optom", at=NIGHT + timedelta(hours=20))
+    model_api.accept_batches()
+    await model_jobs.submit_batch(now=NIGHT + timedelta(days=1))
+    one, two = await jobs(session)
+    model_api.end("msgbatch_namuna01", {one.custom_id: succeeded(CONFIRMED)})
+    model_api.end("msgbatch_namuna02", {two.custom_id: succeeded(LIKELY)})
+    model_api.drop_results("msgbatch_namuna01", after=40, error=error)
+    at = NIGHT + timedelta(days=1, hours=1)
+    counts = await model_jobs.model_batch_collect_job(now=at)
+    assert (counts["unreadable"], counts["batches"], counts["applied"]) == (1, 1, 1)
+    assert counts["errors"] == 0  # a broken stream is read again, not a bug
+    one, two = await jobs(session)
+    assert (one.status, one.batch_id, two.status) == (
+        "submitted",
+        "msgbatch_namuna01",
+        "applied",
+    )
+    # The next poll reads the whole stream: the answer paid for is kept.
+    later = await model_jobs.collect(now=at + timedelta(minutes=30))
+    assert (later.applied, later.unreadable) == (1, 0)
+    one = await job(session, first)
+    assert (one.status, one.result, one.attempts) == ("applied", CONFIRMED, 1)
+    assert second == two.id
+
+
+async def test_a_batch_whose_collect_raises_does_not_stop_the_younger_ones(
+    session, model_api, monkeypatch
+):
+    await enqueue(session, "Namuna Bir: optom")
+    model_api.accept_batches()
+    await model_jobs.submit_batch(now=NIGHT)
+    await enqueue(session, "Namuna Ikki: optom", at=NIGHT + timedelta(hours=20))
+    model_api.accept_batches()
+    await model_jobs.submit_batch(now=NIGHT + timedelta(days=1))
+    one, two = await jobs(session)
+    model_api.end("msgbatch_namuna01", {one.custom_id: succeeded(CONFIRMED)})
+    model_api.end("msgbatch_namuna02", {two.custom_id: succeeded(LIKELY)})
+    waiting = model_jobs._waiting
+
+    async def broken(factory: Any, batch_id: str) -> list[str]:
+        if batch_id == "msgbatch_namuna01":
+            raise RuntimeError("synthetic bug")
+        return await waiting(factory, batch_id)
+
+    monkeypatch.setattr(model_jobs, "_waiting", broken)
+    report = await model_jobs.collect(now=NIGHT + timedelta(days=1, hours=1))
+    assert (report.errors, report.applied, type(report.error)) == (1, 1, RuntimeError)
+    one, two = await jobs(session)
+    assert (one.status, two.status) == ("submitted", "applied")
+
+
+async def test_one_job_that_raises_does_not_stop_its_batch_mates(
+    session, model_api, monkeypatch
+):
+    ids = [await enqueue(session, f"Namuna {n}: optom") for n in ("Bir", "Ikki", "Uch")]
+    model_api.accept_batches()
+    await model_jobs.submit_batch(now=NIGHT)
+    rows = await jobs(session)
+    model_api.end("msgbatch_namuna01", {r.custom_id: succeeded(CONFIRMED) for r in rows})
+    settle = model_jobs._settle_one
+
+    async def broken(session: AsyncSession, row: m.ModelJob, *a: Any, **k: Any) -> None:
+        if row.id == ids[0]:
+            raise RuntimeError("synthetic bug")
+        await settle(session, row, *a, **k)
+
+    monkeypatch.setattr(model_jobs, "_settle_one", broken)
+    report = await model_jobs.collect(now=COLLECT)
+    assert (report.errors, report.applied, report.batches) == (1, 2, 1)
+    assert [j.status for j in await jobs(session)] == ["submitted", "applied", "applied"]
+    monkeypatch.setattr(model_jobs, "_settle_one", settle)
+    assert (await model_jobs.collect(now=COLLECT + timedelta(minutes=30))).applied == 1
+
+
+async def test_a_stuck_batch_step_that_raises_does_not_stop_the_nights_submit(
+    session, model_api, monkeypatch
+):
+    stuck = await enqueue(session, "Namuna Bir: optom")
+    model_api.accept_batches()
+    await model_jobs.submit_batch(now=NIGHT)
+    fresh = await enqueue(session, "Namuna Ikki: optom", at=NIGHT + timedelta(days=2))
+
+    async def broken(*args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("synthetic bug")
+
+    monkeypatch.setattr(model_jobs, "collect_batch", broken)
+    model_api.accept_batches()
+    with pytest.raises(RuntimeError, match="synthetic bug"):
+        await model_jobs.model_batch_submit_job(now=NIGHT + timedelta(days=2, hours=1))
+    assert (await job(session, stuck)).batch_id == "msgbatch_namuna01"
+    row = await job(session, fresh)
+    assert (row.status, row.batch_id) == ("submitted", "msgbatch_namuna02")
+    assert model_api.cancelled == []
+
+
+async def test_a_stuck_batch_that_could_not_be_read_once_is_not_given_up(
+    session, model_api
+):
+    first = await enqueue(session)
+    model_api.accept_batches()
+    await model_jobs.submit_batch(now=NIGHT)
+    custom = (await job(session, first)).custom_id
+    model_api.end("msgbatch_namuna01", {custom: succeeded(CONFIRMED)})
+    model_api.retrieve_failures["msgbatch_namuna01"] = [overloaded()]
+    counts = await model_jobs.model_batch_submit_job(now=NIGHT + timedelta(days=2))
+    assert (counts["unreadable"], counts["stuck"], counts["retried"]) == (1, 0, 0)
+    assert model_api.cancelled == [] and len(model_api.batch_bodies) == 1
+    row = await job(session, first)
+    assert (row.status, row.batch_id, row.attempts) == (
+        "submitted",
+        "msgbatch_namuna01",
+        1,
+    )
+    # Read at the next poll: the answer paid for lands, nothing paid twice.
+    collected = await model_jobs.collect(now=NIGHT + timedelta(days=3, minutes=-60))
+    assert collected.applied == 1
+    [usage] = await ledger(session)
+    assert (usage.model_job_id, usage.input_tokens) == (first, 300)
+
+
+async def test_a_stuck_batch_that_never_reads_is_given_up_after_its_grace(
+    session, model_api
+):
+    first = await enqueue(session)
+    model_api.accept_batches()
+    await model_jobs.submit_batch(now=NIGHT)
+    custom = (await job(session, first)).custom_id
+    model_api.end("msgbatch_namuna01", {custom: succeeded(CONFIRMED)})
+    model_api.retrieve_failures["msgbatch_namuna01"] = [overloaded()] * 3
+    assert timedelta(hours=74) == model_jobs.UNREADABLE_GIVE_UP
+    # 48 h and 73 h 59 min after the submit: unreadable, kept.
+    for age in (timedelta(hours=48), timedelta(hours=74, minutes=-1)):
+        report = await model_jobs.give_up_stuck(now=NIGHT + age)
+        assert (report.unreadable, report.stuck) == (1, 0)
+        assert (await job(session, first)).status == "submitted"
+    # 74 h: given up — one failed attempt on the ladder, the batch cancelled.
+    report = await model_jobs.give_up_stuck(now=NIGHT + timedelta(hours=74))
+    assert (report.unreadable, report.stuck, report.retried) == (1, 1, 1)
+    row = await job(session, first)
+    assert (row.status, row.attempts, row.error, row.batch_id) == (
+        "pending",
+        1,
+        "unreadable",
+        None,
+    )
+    assert model_api.cancelled == ["msgbatch_namuna01"]
+
+
+# --- review fixes: the rules no test held ---------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("answers", "error"),
+    [
+        ([message("I can't help with that.", stop_reason="refusal")], "refusal"),
+        ([message("not json"), message("still not json")], "invalid"),
+        (
+            [message(CONFIRMED, stop_reason="max_tokens")] * 2,
+            "max_tokens",
+        ),
+    ],
+    ids=["refusal", "invalid", "max_tokens"],
+)
+async def test_a_fallback_the_instant_model_answers_finally_is_taken_once(
+    session, model_api, kind, answers, error
+):
+    first = await enqueue(session)
+    await to_fallback(session, model_api, [first])
+    model_api.queue(*answers)
+    at = NIGHT + timedelta(days=3, hours=1)
+    report = await model_jobs.take_fallbacks(now=at)
+    assert (report.taken, report.failed, report.applied, report.waiting) == (1, 1, 0, 0)
+    assert len(model_api.requests) == len(answers)
+    fallback, instant = await jobs(session)
+    assert (fallback.status, fallback.applied_at) == ("fallback", at)
+    assert (instant.status, instant.error) == ("failed", error)
+    assert kind.landed == []
+    # Never asked again — the model's own answer would not change.
+    later = await model_jobs.take_fallbacks(now=at + timedelta(minutes=30))
+    assert (later.taken, len(model_api.requests)) == (0, len(answers))
+
+
+async def test_a_fallback_whose_effects_raise_fails_the_instant_job(
+    session, model_api, kind
+):
+    firm = await company(session)
+    first = await enqueue(session, company_id=firm)
+    await to_fallback(session, model_api, [first])
+    kind.fail_apply = True
+    model_api.queue(message(CONFIRMED, model=VERDICT))
+    at = NIGHT + timedelta(days=3, hours=1)
+    report = await model_jobs.take_fallbacks(now=at)
+    assert (report.taken, report.applied, report.failed) == (1, 0, 1)
+    fallback, instant = await jobs(session)
+    assert fallback.applied_at == at
+    assert (instant.status, instant.error, instant.result) == (
+        "failed",
+        "apply",
+        CONFIRMED,
+    )
+    firm_row = await session.get(m.Company, firm, populate_existing=True)
+    assert firm_row is not None and firm_row.verdict is None
+
+
+async def test_a_fallback_whose_stored_request_is_not_masked_is_never_sent(
+    session, model_api
+):
+    first = await enqueue(session)
+    await to_fallback(session, model_api, [first])
+    row = await job(session, first)
+    row.request = {**(row.request or {}), "user": "Tel +998 90 000 00 05"}
+    await session.commit()
+    at = NIGHT + timedelta(days=3, hours=1)
+    report = await model_jobs.take_fallbacks(now=at)
+    assert (report.unmasked, report.taken, report.errors) == (1, 0, 0)
+    assert model_api.requests == []
+    [row] = await jobs(session)  # no instant job was written
+    assert (row.status, row.error, row.applied_at) == ("fallback", "unmasked", at)
+
+
+async def test_a_grammar_error_in_a_batch_result_sends_the_next_night_prompted(
+    session, model_api
+):
+    first = await enqueue(session)
+    custom = (await job(session, first)).custom_id
+    await night(
+        session,
+        model_api,
+        at=NIGHT,
+        results={custom: errored("invalid_request_error", GRAMMAR_MESSAGE)},
+    )
+    row = await job(session, first)
+    assert (row.status, row.error) == ("pending", "errored:invalid_request_error")
+    model_api.accept_batches()
+    await model_jobs.submit_batch(now=NIGHT + timedelta(days=1))
+    structured, prompted = (b["requests"][0]["params"] for b in model_api.batch_bodies)
+    assert structured["output_config"]["format"]["type"] == "json_schema"
+    assert prompted["output_config"] == {"effort": "low"}
+    assert prompted["system"][0]["text"].startswith(SYSTEM + "\n\nReturn a JSON object")
+
+
+async def test_an_errored_result_that_names_no_grammar_keeps_the_structured_path(
+    session, model_api
+):
+    first = await enqueue(session)
+    custom = (await job(session, first)).custom_id
+    await night(
+        session, model_api, at=NIGHT, results={custom: errored("api_error", "boom")}
+    )
+    model_api.accept_batches()
+    await model_jobs.submit_batch(now=NIGHT + timedelta(days=1))
+    params = model_api.batch_bodies[-1]["requests"][0]["params"]
+    assert params["output_config"]["format"]["type"] == "json_schema"
+
+
+async def test_a_laddered_job_s_answer_settles_the_newest_provisional_row(
+    session, model_api
+):
+    first = await enqueue(session)
+    custom = (await job(session, first)).custom_id
+    await night(session, model_api, at=NIGHT, results={custom: expired()})
+    later = NIGHT + timedelta(days=1)
+    await night(
+        session,
+        model_api,
+        at=later,
+        results={custom: succeeded(CONFIRMED, input_tokens=4000, output_tokens=600)},
+    )
+    claims = [estimate(b["requests"][0]["params"]) for b in model_api.batch_bodies]
+    rows = await ledger(session)
+    assert [(r.created_at, r.input_tokens, r.cost_usd) for r in rows] == [
+        (NIGHT, None, claims[0]),  # night 1's claim: no answer came for it
+        (later, 4000, SETTLED),  # night 2's: the answer's real price
+    ]
+    assert (await job(session, first)).cost_usd == claims[0] + SETTLED
+
+
+@pytest.mark.parametrize(
+    ("status", "costs_an_attempt"),
+    [(400, True), (413, True), (422, True), (429, False), (500, False), (529, False)],
+)
+async def test_which_refused_creates_cost_an_attempt(
+    session, model_api, status, costs_an_attempt
+):
+    first = await enqueue(session)
+    model_api.refuse_batch(api_error(status, "synthetic_error", "synthetic"))
+    report = await model_jobs.submit_batch(now=NIGHT)
+    row = await job(session, first)
+    if costs_an_attempt:
+        assert (report.retried, report.not_sent) == (1, 0)
+        assert (row.status, row.attempts, row.error) == ("pending", 1, f"submit:{status}")
+    else:
+        assert (report.retried, report.not_sent) == (0, 1)
+        assert (row.status, row.attempts, row.error) == ("pending", 0, None)
+
+
+async def test_an_answer_for_a_kind_nobody_registers_any_more_is_failed(
+    session, model_api, monkeypatch
+):
+    answered = await enqueue(session, "Namuna Bir: optom")
+    lost = await enqueue(session, "Namuna Ikki: optom")
+    model_api.accept_batches()
+    await model_jobs.submit_batch(now=NIGHT)
+    one, two = await jobs(session)
+    model_api.end(
+        "msgbatch_namuna01",
+        {one.custom_id: succeeded(CONFIRMED), two.custom_id: expired()},
+    )
+    monkeypatch.delitem(model_jobs.KINDS, "company_verdict")
+    report = await model_jobs.collect(now=COLLECT)
+    assert (report.failed, report.retried, report.applied) == (1, 1, 0)
+    one, two = await jobs(session)
+    assert (one.id, one.status, one.error) == (answered, "failed", "unregistered")
+    # No answer came for the other: it waits for the next night as ever.
+    assert (two.id, two.status, two.error) == (lost, "pending", "expired")
+
+
+async def test_a_fallback_that_waits_is_claimed_once_per_run(
+    session, model_api, monkeypatch
+):
+    ids = [await enqueue(session, f"Namuna {n}: optom") for n in ("Bir", "Ikki")]
+    await to_fallback(session, model_api, ids)
+    monkeypatch.delitem(model_jobs.KINDS, "company_verdict")
+    report = await model_jobs.take_fallbacks(now=NIGHT + timedelta(days=3), limit=10)
+    assert (report.waiting, report.taken) == (2, 0)
+    assert model_api.requests == []
+
+
+async def test_a_result_another_collect_applied_meanwhile_is_not_applied_twice(
+    session, model_api, monkeypatch
+):
+    first = await enqueue(session)
+    model_api.accept_batches()
+    await model_jobs.submit_batch(now=NIGHT)
+    custom = (await job(session, first)).custom_id
+    model_api.end("msgbatch_namuna01", {custom: succeeded(CONFIRMED)})
+    assert (await model_jobs.collect(now=COLLECT)).applied == 1
+
+    # A second collect read the waiting list before the first committed: by
+    # its claim the job is not ``submitted`` any more.
+    async def stale(factory: Any, batch_id: str) -> list[str]:
+        return [custom]
+
+    monkeypatch.setattr(model_jobs, "_waiting", stale)
+    read = await model_jobs.collect_batch(
+        model_jobs.SessionLocal,
+        extraction.get_client(),
+        "msgbatch_namuna01",
+        now=COLLECT + timedelta(minutes=30),
+        report=model_jobs.LaneReport(),
+    )
+    assert read == "collected"
+    [usage] = await ledger(session)
+    assert usage.input_tokens == 300  # settled once, no second row
+    row = await job(session, first)
+    assert (row.status, row.applied_at) == ("applied", COLLECT)
+
+
+async def test_a_fallback_the_api_failed_three_times_is_given_up_without_a_request(
+    session, model_api
+):
+    first = await enqueue(session)
+    await to_fallback(session, model_api, [first])
+    # Three instant jobs the API failed, naming it, and the fallback not yet
+    # marked (a run killed before its commit): the next run gives it up.
+    for n in range(3):
+        session.add(
+            m.ModelJob(
+                kind="verdict",
+                lane="instant",
+                model=VERDICT,
+                custom_id=f"cs-namuna-failed-{n}",
+                status="failed",
+                attempts=1,
+                error="api:OverloadedError",
+                request={"fallback_of": first, "user": "Namuna"},
+                created_at=NIGHT + timedelta(days=3),
+            )
+        )
+    await session.commit()
+    at = NIGHT + timedelta(days=3, hours=1)
+    report = await model_jobs.take_fallbacks(now=at)
+    assert (report.given_up, report.taken) == (1, 0)
+    assert model_api.requests == []
+    assert (await job(session, first)).applied_at == at
+
+
+# --- review fixes: the nits -------------------------------------------------------
+
+
+async def test_a_leak_on_a_later_night_counts_its_job(session, model_api):
+    first = await enqueue(session)
+    custom = (await job(session, first)).custom_id
+    await night(session, model_api, at=NIGHT, results={custom: expired()})
+    await night(
+        session,
+        model_api,
+        at=NIGHT + timedelta(days=1),
+        results={custom: succeeded(LEAK)},
+    )
+    assert (await job(session, first)).error == "pii_leak"
+    problems = await health.reported_problems(session, NIGHT + timedelta(days=1, hours=2))
+    assert problems["pii_leak"].detail == {"n": 1, "op": "company_verdict"}
+
+
+async def test_a_cut_answer_is_asked_once_more_for_twice_the_output_then_final(
+    session, model_api
+):
+    first = await enqueue(session)
+    custom = (await job(session, first)).custom_id
+    cut = succeeded(CONFIRMED, stop_reason="max_tokens", output_tokens=1500)
+    await night(session, model_api, at=NIGHT, results={custom: cut})
+    row = await job(session, first)
+    assert row.request is not None
+    assert (row.status, row.error, row.request["doubled"]) == (
+        "pending",
+        "max_tokens",
+        True,
+    )
+    await night(session, model_api, at=NIGHT + timedelta(days=1), results={custom: cut})
+    sent = [b["requests"][0]["params"] for b in model_api.batch_bodies]
+    assert [p["max_tokens"] for p in sent] == [1500, 3000]
+    claims = [r.created_at for r in await ledger(session)]
+    assert claims == [NIGHT, NIGHT + timedelta(days=1)]
+    assert estimate(sent[1]) > estimate(sent[0])  # the claim covers the output
+    row = await job(session, first)
+    assert (row.status, row.error, row.attempts) == ("failed", "max_tokens", 2)
+    assert row.request["max_tokens"] == 3000
+    model_api.accept_batches()
+    assert (await model_jobs.submit_batch(now=NIGHT + timedelta(days=2))).claimed == 0
+    model_api.batch_answers.clear()  # the accepted create nobody made
+
+
+async def test_an_invalid_answer_is_asked_once_more_with_the_nudge_then_final(
+    session, model_api
+):
+    first = await enqueue(session)
+    custom = (await job(session, first)).custom_id
+    bad = succeeded("this is not json")
+    await night(session, model_api, at=NIGHT, results={custom: bad})
+    await night(session, model_api, at=NIGHT + timedelta(days=1), results={custom: bad})
+    first_ask, second_ask = (
+        b["requests"][0]["params"]["messages"] for b in model_api.batch_bodies
+    )
+    assert first_ask == [
+        {"role": "user", "content": "Namuna Savdo MChJ: Yiwudan konteyner keldi"}
+    ]
+    assert second_ask == [*first_ask, {"role": "user", "content": JSON_NUDGE}]
+    row = await job(session, first)
+    assert (row.status, row.error, row.attempts) == ("failed", "invalid", 2)
+
+
+async def test_a_nudged_answer_that_lands_is_applied(session, model_api):
+    first = await enqueue(session)
+    custom = (await job(session, first)).custom_id
+    await night(session, model_api, at=NIGHT, results={custom: succeeded("nope")})
+    later = NIGHT + timedelta(days=1)
+    await night(session, model_api, at=later, results={custom: succeeded(CONFIRMED)})
+    row = await job(session, first)
+    assert (row.status, row.result, row.attempts) == ("applied", CONFIRMED, 2)
+
+
+async def test_the_batch_stuck_text_says_what_the_lane_will_do(session, model_api):
+    await enqueue(session)
+    model_api.accept_batches()
+    await model_jobs.submit_batch(now=NIGHT)
+    status = await health.gather(
+        session, now=NIGHT + timedelta(hours=27), disk=(10**12, 10**12)
+    )
+    [stuck] = [p for p in health.problems(status) if p.key == "batch_stuck"]
+    assert stuck.text == (
+        "⚠️ Tungi batch 1 kun tugamadi (msgbatch_namuna01) — <code>make worker</code> "
+        "loglari; ishlar keyingi tunda qayta yuboriladi, 3-urinishdan keyin tezkor "
+        "yoʻl oʻzi oladi"
+    )
+
+
+# --- review fixes: the suspected items ---------------------------------------------
+
+
+async def test_a_company_waits_with_one_question_at_a_time(session, model_api):
+    firm = await company(session)
+    first = await model_jobs.enqueue(
+        session,
+        user=pseudonymise("Namuna Savdo: optom"),
+        now=NIGHT - timedelta(days=1),
+        company_id=firm,
+        evidence_ids=[1, 2],
+    )
+    await session.commit()
+    again = await model_jobs.enqueue(
+        session,
+        user=pseudonymise("Namuna Savdo: Yiwudan 2 konteyner"),
+        now=NIGHT - timedelta(hours=1),
+        company_id=firm,
+        evidence_ids=[1, 2, 3],
+    )
+    await session.commit()
+    assert again.id == first.id
+    [row] = await jobs(session)
+    assert row.request is not None
+    assert (row.request["user"], row.evidence_ids, row.created_at) == (
+        "Namuna Savdo: Yiwudan 2 konteyner",
+        [1, 2, 3],
+        NIGHT - timedelta(days=1),  # its place in the queue kept
+    )
+    # Once it is sent, a new bundle is a new question.
+    model_api.accept_batches()
+    await model_jobs.submit_batch(now=NIGHT)
+    third = await model_jobs.enqueue(
+        session, user=pseudonymise("Namuna Savdo: sklad"), now=NIGHT, company_id=firm
+    )
+    await session.commit()
+    assert [(j.id, j.status) for j in await jobs(session)] == [
+        (first.id, "submitted"),
+        (third.id, "pending"),
+    ]
+
+
+async def test_an_answer_that_came_with_no_usage_keeps_its_estimate(session, model_api):
+    first = await enqueue(session)
+    custom = (await job(session, first)).custom_id
+    bare = succeeded(CONFIRMED)
+    del bare["message"]["usage"]
+    await night(session, model_api, at=NIGHT, results={custom: bare})
+    [params] = [b["requests"][0]["params"] for b in model_api.batch_bodies]
+    [usage] = await ledger(session)
+    assert (usage.input_tokens, usage.cost_usd) == (None, estimate(params))
+    assert (await job(session, first)).status == "applied"

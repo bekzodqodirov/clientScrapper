@@ -17,7 +17,9 @@ Batches API at half price, for the operations ``extraction.ROUTES`` sends
 there (``company_verdict``) — is this module:
 
 1. ``enqueue`` — a ``pending`` job: the masked user text and its reverse map
-   (T-30's nightly selection calls it);
+   (T-30's nightly selection calls it); a company with a job still pending
+   has that job asked the newest text instead (one question waits per
+   company);
 2. ``submit_batch`` (``model_batch_submit``, 23:30) — the oldest pending jobs
    of a batch operation, at most ``BATCH_MAX``, as many as the operation's
    budget holds (``costs.fits``, a hint); one ``costs.ask`` for the whole
@@ -36,13 +38,18 @@ there (``company_verdict``) — is this module:
    (``costs.settle_provisional``) and goes through the kind's validators —
    ``applied``, with its effects; the model's refusal is ``failed`` /
    ``refusal`` (no retry, no other model: cost stays predictable, 04 §4.1);
-   a validator's bug ``failed`` / ``validator``; the rest takes the ladder;
+   a validator's bug ``failed`` / ``validator``; the rest takes the ladder.
+   A batch the API failed to read, or whose stream broke off, stays as it is
+   for the next poll (the results are paid for); a batch or a job whose
+   handling raised is passed over and the rest are collected;
 4. **the ladder** — an ``errored``, ``expired`` or ``canceled`` result, a
    request the stream left out, an answer that does not validate or ran out
    of tokens, a batch the API refused to take, a batch given up as stuck:
    fewer than ``ATTEMPTS_MAX`` submissions so far → ``pending`` for the next
    night; ``ATTEMPTS_MAX`` → ``fallback``, the batch lane's last word, and the
-   instant lane takes the job;
+   instant lane takes the job. As the instant lane (04 §4.1), an answer cut
+   at ``max_tokens`` is sent again for twice the output and one that did not
+   validate with the JSON nudge; failed so a second time it is final;
 5. ``take_fallbacks`` — each fallback job not yet taken goes through
    ``extraction.call`` on the instant operation of ``FALLBACK_OP`` (the
    verdict model, within its own cap), its request naming the batch job
@@ -51,20 +58,28 @@ there (``company_verdict``) — is this module:
    the run; the job is given up after ``FALLBACK_TRIES`` of them. A final
    answer — applied with its effects, or a final failure — marks the
    fallback job taken: its ``applied_at``, the moment it was done with
-   (retention reads it, 02 §4 R6);
+   (retention reads it, 02 §4 R6); so does a checker that cannot be built
+   for it (nothing is sent). A job whose handing raised is passed over for
+   the run, so it cannot hold the fallbacks behind it;
 6. a batch whose jobs still wait ``submitted`` ``health.BATCH_STUCK_AFTER``
    (26 h) after it was sent is ``batch_stuck`` (06 §4.2 — the health sweep
    says it from the table, ``health.stuck_batches``). The next night's submit
-   reads such a batch once more and collects it if it has ended; otherwise
-   it gives it up: each job one failed attempt (``stuck``) on the ladder, and
-   the batch cancelled (best effort; a cancel costs nothing).
+   reads such a batch once more and collects it if it has ended; if the API
+   says it still runs it gives it up: each job one failed attempt (``stuck``)
+   on the ladder, and the batch cancelled (best effort; a cancel costs
+   nothing). One the API would not let us read is read again the next
+   nights and given up (``unreadable``) only at ``UNREADABLE_GIVE_UP``.
+
+A scheduled run goes on past what one batch or job raised and raises the
+first of them at its end, so the scheduler still says the job is failing.
 
 **Money.** The provisional rows count the estimate until a result settles
 them; ``costs.ask`` never undercounts (04 §8). A result other than
 ``succeeded`` carries no usage, so its row keeps the estimate — UNVERIFIED
 whether Anthropic bills such a request at all (a day-1 check, 07 §5.5);
-keeping it overcounts, the safe direction. A job's ``cost_usd`` is what its
-rows hold, over every attempt.
+keeping it overcounts, the safe direction — as does an answer that came with
+no usage object (``usage.priced_anthropic``). A job's ``cost_usd`` is what
+its rows hold, over every attempt.
 
 **Kinds.** A batch operation is asked and applied by what its task
 registers (``register``): the schema, the frozen system prompt, the checker
@@ -81,16 +96,18 @@ transaction attributes each row while the batch's jobs are held.
 
 from __future__ import annotations
 
+import contextlib
 import functools
 import logging
 import uuid
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Coroutine, Mapping, Sequence
 from dataclasses import dataclass, field, fields
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any, Final, Literal, cast
 
 import anthropic
+import httpx
 import sqlalchemy as sa
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -99,6 +116,7 @@ from clientscrapper.config import settings
 from clientscrapper.db.models import ModelJob, UsageLog
 from clientscrapper.db.session import SessionLocal
 from clientscrapper.services import costs, extraction, health
+from clientscrapper.services.prompts import JSON_NUDGE
 from clientscrapper.services.pseudonyms import (
     Pseudonymised,
     UnmaskedPayload,
@@ -131,6 +149,30 @@ FALLBACK_MAX: Final = BATCH_MAX
 ENDED: Final = "ended"
 # The key of an instant job's request that names the batch job it took.
 FALLBACK_OF: Final = "fallback_of"
+# The keys of a batch job's request that say how its next submission asks
+# (04 §4.1, as the instant lane): after a ``max_tokens`` stop for twice the
+# output, after an answer that did not validate with the JSON nudge. Asked so
+# and failed the same way again, the answer is final.
+DOUBLED: Final = "doubled"
+NUDGED: Final = "nudged"
+
+# What ``collect_batch`` found: the batch read and its jobs settled, still
+# running, or not readable now (the API failed the read or the results
+# stream broke off — the results are paid for and kept 29 days, so it is read
+# again, never sent again).
+Read = Literal["collected", "running", "unreadable"]
+COLLECTED: Final = "collected"
+RUNNING: Final = "running"
+UNREADABLE: Final = "unreadable"
+# A stuck batch that cannot be read is given up only once it is this old: two
+# more nights of reads past ``health.BATCH_STUCK_AFTER`` (and the collect
+# polls between them), then its jobs take the ladder — a stream that never
+# reads cannot hold its jobs for good (MIYA counts stream failures against
+# the ladder).
+UNREADABLE_GIVE_UP: Final = health.BATCH_STUCK_AFTER + timedelta(days=2)
+# The SDK streams the results JSONL raw: a dropped connection reaches us as
+# the transport's own error, a line cut short as a JSON error.
+STREAM_FAILURES: Final = (anthropic.APIError, httpx.HTTPError, ValueError)
 
 # model_jobs.error of the batch lane (the instant lane's are extraction's).
 ERRORED: Final = "errored"  # + ":<the API's error type>"
@@ -140,6 +182,7 @@ MISSING: Final = "missing"  # the stream had no line for the custom_id
 UNAVAILABLE: Final = "unavailable"  # the batch ended and has no results
 STUCK: Final = "stuck"
 SUBMIT_PREFIX: Final = "submit:"  # + the status the create was refused with
+# UNREADABLE (above): a stuck batch given up because it could not be read.
 UNMASKED: Final = "unmasked"
 UNREGISTERED: Final = "unregistered"
 APPLY: Final = "apply"
@@ -212,10 +255,25 @@ def _default_checker(output: BaseModel) -> Validated:
     return Validated(result=output.model_dump(mode="json"))
 
 
-async def _checker(session: AsyncSession, job: ModelJob, kind: BatchKind) -> Checker:
+async def _make_checker(
+    session: AsyncSession, job: ModelJob, kind: BatchKind
+) -> Checker | None:
+    """The kind's checker for this job, built in a savepoint of the job's
+    transaction. None when building it raised — the evidence it reads is gone
+    (a purge, retention), a bug: built again it would raise again, so both
+    lanes take it as a final ``validator`` failure, and a failed statement
+    leaves the job's transaction usable."""
     if kind.checker is None:
         return _default_checker
-    return await kind.checker(session, job)
+    try:
+        async with session.begin_nested():
+            return await kind.checker(session, job)
+    except Exception as exc:
+        log.error(
+            "validator not built",
+            extra={"model_job_id": job.id, "error": type(exc).__name__},
+        )
+        return None
 
 
 def _user(job: ModelJob) -> Pseudonymised:
@@ -224,20 +282,36 @@ def _user(job: ModelJob) -> Pseudonymised:
     return Pseudonymised(str(request.get("user") or ""), dict(job.pseudonyms or {}))
 
 
+def _flag(job: ModelJob, key: str) -> bool:
+    return (job.request or {}).get(key) is True
+
+
+def _max_tokens(op: Operation, *, doubled: bool) -> int:
+    return BATCH_ROUTES[op].max_tokens * (2 if doubled else 1)
+
+
 def _record(
-    op: Operation, kind: BatchKind, *, model: str, user: Pseudonymised
+    op: Operation,
+    kind: BatchKind,
+    *,
+    model: str,
+    user: Pseudonymised,
+    doubled: bool = False,
+    nudged: bool = False,
 ) -> dict[str, Any]:
     route = BATCH_ROUTES[op]
+    extra = {key: True for key, on in ((DOUBLED, doubled), (NUDGED, nudged)) if on}
     return extraction.request_record(
         op,
         model=model,
         system=kind.system,
         schema=kind.schema,
         user=user,
-        max_tokens=route.max_tokens,
+        max_tokens=_max_tokens(op, doubled=doubled),
         effort=route.effort,
         prompt_version=kind.prompt_version,
         tools=None,
+        extra=extra or None,
     )
 
 
@@ -254,6 +328,28 @@ async def _spent(session: AsyncSession, job_id: int) -> Decimal:
 # --- 1. enqueue ------------------------------------------------------------------
 
 
+async def _pending_for(
+    session: AsyncSession, op: Operation, company_id: uuid.UUID
+) -> ModelJob | None:
+    """The company's job of ``op`` still waiting for a night, locked. A
+    submit holding it is waited for, and once it took the job the row no
+    longer matches (the lock re-reads it)."""
+    job: ModelJob | None = await session.scalar(
+        sa.select(ModelJob)
+        .where(
+            ModelJob.lane == "batch",
+            ModelJob.kind == BATCH_ROUTES[op].kind,
+            ModelJob.company_id == company_id,
+            ModelJob.status == "pending",
+        )
+        .order_by(ModelJob.created_at, ModelJob.id)
+        .limit(1)
+        .with_for_update(key_share=True)
+        .execution_options(populate_existing=True)
+    )
+    return job
+
+
 async def enqueue(
     session: AsyncSession,
     *,
@@ -266,7 +362,15 @@ async def enqueue(
     """A batch-lane job, ``pending`` until the night's submit, in the
     caller's transaction. ``user`` is masked text (``pseudonymise``): raises
     ``UnmaskedPayload`` before anything is written, as the instant lane does,
-    and ``ValueError`` for an operation nobody registered."""
+    and ``ValueError`` for an operation nobody registered.
+
+    One question per company waits: when the company already has a
+    ``pending`` job of ``op``, that job is asked this text instead — its
+    request, reverse map and evidence replaced by the newest bundle, its place
+    in the queue and its attempts kept — so a company selected again while
+    the nights are full does not queue a second paid question (the backlog
+    is bounded by the companies, not by the nights). A job already sent is
+    left alone: this text is a new job."""
     if not isinstance(user, Pseudonymised):
         raise TypeError("user must be a Pseudonymised text (06 §5.2)")
     kind = KINDS.get(op)
@@ -275,6 +379,14 @@ async def enqueue(
     assert_masked(kind.system)
     assert_masked(user.text)
     model = extraction.model_for(op)
+    waiting = None if company_id is None else await _pending_for(session, op, company_id)
+    if waiting is not None:
+        waiting.model = model
+        waiting.request = _record(op, kind, model=model, user=user)
+        waiting.pseudonyms = dict(user.reverse) or None
+        waiting.evidence_ids = list(evidence_ids)
+        await session.flush()
+        return waiting
     job = ModelJob(
         kind=BATCH_ROUTES[op].kind,
         lane="batch",
@@ -298,7 +410,12 @@ async def enqueue(
 
 @dataclass(slots=True)
 class LaneReport:
-    """Counts of one run of the lane (logged; no text, no ids)."""
+    """Counts of one run of the lane (logged; no text, no ids). ``errors``:
+    the batches and jobs a step could not handle because something raised —
+    logged, passed over so the rest of the run goes on (MIYA: «one
+    unreadable batch must not cost the batches already applied in this
+    sweep»); ``error`` the first of them, which the scheduled job raises once
+    every step has run (06 §4.2 job_failing)."""
 
     claimed: int = 0
     submitted: int = 0
@@ -317,12 +434,24 @@ class LaneReport:
     taken: int = 0
     given_up: int = 0
     waiting: int = 0
+    errors: int = 0
     batch_ids: list[str] = field(default_factory=list)
+    error: Exception | None = field(default=None, repr=False)
 
     def as_dict(self) -> dict[str, int]:
         return {
-            f.name: getattr(self, f.name) for f in fields(self) if f.name != "batch_ids"
+            f.name: getattr(self, f.name)
+            for f in fields(self)
+            if f.name not in ("batch_ids", "error")
         }
+
+    def noted(self, exc: Exception, what: str, **ids: Any) -> None:
+        """One failure passed over: logged by its class (a message may carry
+        what a row said), counted, the first kept."""
+        log.error(what, extra={**ids, "error": type(exc).__name__})
+        self.errors += 1
+        if self.error is None:
+            self.error = exc
 
 
 async def _ladder(
@@ -415,6 +544,8 @@ class _Planned:
     params: dict[str, Any]
     user: Pseudonymised
     est: Decimal | None
+    doubled: bool
+    nudged: bool
 
 
 async def _submit_op(
@@ -453,22 +584,27 @@ async def _submit_op(
             await session.flush()
             report.unmasked += 1
             continue
+        doubled, nudged = _flag(job, DOUBLED), _flag(job, NUDGED)
+        tokens = _max_tokens(op, doubled=doubled)
+        messages = [{"role": "user", "content": user.text}]
+        if nudged:
+            messages.append({"role": "user", "content": JSON_NUDGE})
         params = extraction.build_params(
             model=model,
             system=kind.system,
             schema=kind.schema,
-            messages=[{"role": "user", "content": user.text}],
-            max_tokens=route.max_tokens,
+            messages=messages,
+            max_tokens=tokens,
             effort=route.effort,
             structured=structured,
         )
         est = extraction.estimate_usd(
             model,
             prompt_bytes=extraction.request_bytes(params),
-            max_tokens=route.max_tokens,
+            max_tokens=tokens,
             batch=True,
         )
-        planned.append(_Planned(job, params, user, est))
+        planned.append(_Planned(job, params, user, est, doubled, nudged))
     if not planned:
         return
     fitting = await costs.fits(
@@ -532,7 +668,9 @@ async def _submit_op(
     for p in chosen:
         job = p.job
         job.model = model
-        job.request = _record(op, kind, model=model, user=p.user)
+        job.request = _record(
+            op, kind, model=model, user=p.user, doubled=p.doubled, nudged=p.nudged
+        )
         job.batch_id = batch_id
         job.status = "submitted"
         job.submitted_at = now
@@ -654,13 +792,24 @@ async def _apply_batch_answer(
         return
     parsed = extraction.parse_answer(kind.schema, extraction.text_of(message))
     if stop == extraction.MAX_TOKENS or parsed is None:
-        reason = (
-            extraction.MAX_TOKENS if stop == extraction.MAX_TOKENS else extraction.INVALID
+        # 04 §4.1, as the instant lane: asked once more for twice the output,
+        # or with the JSON nudge; failed so again, the answer is final.
+        cut = stop == extraction.MAX_TOKENS
+        reason, key = (
+            (extraction.MAX_TOKENS, DOUBLED) if cut else (extraction.INVALID, NUDGED)
         )
+        if _flag(job, key):
+            await _fail(session, job, reason, report)
+            return
+        job.request = {**(job.request or {}), key: True}
         await _ladder(session, job, reason, report)
         return
+    check = await _make_checker(session, job, kind)
+    if check is None:
+        await _fail(session, job, extraction.VALIDATOR, report)
+        return
     try:
-        checked = (await _checker(session, job, kind))(parsed)
+        checked = check(parsed)
     except Exception as exc:
         # A validator's bug: asked again, the same answer would fail the same
         # way — a final failure, as in the instant lane.
@@ -739,6 +888,30 @@ async def _settle_one(
     await _apply_batch_answer(session, job, kind, result.message, now=now, report=report)
 
 
+async def _drain(client: anthropic.AsyncAnthropic, batch_id: str) -> list[Any] | None:
+    """An ended batch's result lines, read to the end before the database is
+    touched (MIYA: nothing is held while the network dribbles the stream
+    in). None when the batch has no results to read (archived, cancelled: it
+    never recovers). Raises ``STREAM_FAILURES`` when the read broke off."""
+    stream: Any = None
+    try:
+        stream = await client.messages.batches.results(batch_id)
+        return [entry async for entry in stream]
+    except STREAM_FAILURES:
+        raise
+    except anthropic.AnthropicError as exc:
+        # Raised bare when an ended batch has no results_url.
+        log.warning(
+            "batch results unavailable",
+            extra={"batch_id": batch_id, "error": type(exc).__name__},
+        )
+        return None
+    finally:
+        if stream is not None:
+            with contextlib.suppress(Exception):
+                await stream.close()
+
+
 async def collect_batch(
     session_factory: SessionFactory,
     client: anthropic.AsyncAnthropic,
@@ -746,10 +919,14 @@ async def collect_batch(
     *,
     now: datetime,
     report: LaneReport,
-) -> bool:
-    """Collect one batch (step 3). False when it has not ended or could not
-    be read — its jobs stay submitted, and a later poll reads it again (the
-    results are paid for)."""
+) -> Read:
+    """Collect one batch (step 3): ``collected`` once it has ended and its
+    jobs were settled; ``running`` while the API says it has not ended;
+    ``unreadable`` when the API failed the read or the results stream broke
+    off — its jobs stay submitted and a later poll reads it again (the
+    results are paid for). Each job in a transaction of its own: one that
+    raises is passed over (``report.noted``) and waits for the next poll,
+    and the rest of the batch is settled."""
     try:
         batch = await client.messages.batches.retrieve(batch_id)
     except extraction.API_FAILURES as exc:
@@ -758,47 +935,40 @@ async def collect_batch(
             extra={"batch_id": batch_id, "error": type(exc).__name__},
         )
         report.unreadable += 1
-        return False
+        return UNREADABLE
     if batch.processing_status != ENDED:
         report.running += 1
-        return False
-    entries: list[Any] | None
+        return RUNNING
     try:
-        # Drained before the database is touched (MIYA): nothing is held
-        # while the network dribbles the stream in.
-        stream = await client.messages.batches.results(batch_id)
-        entries = [entry async for entry in stream]
-    except anthropic.APIError as exc:
+        entries = await _drain(client, batch_id)
+    except STREAM_FAILURES as exc:
         log.warning(
             "batch results not read",
             extra={"batch_id": batch_id, "error": type(exc).__name__},
         )
         report.unreadable += 1
-        return False
-    except anthropic.AnthropicError as exc:
-        # Raised bare when an ended batch has no results_url (archived,
-        # cancelled): it never recovers, so every job takes the ladder.
-        log.warning(
-            "batch results unavailable",
-            extra={"batch_id": batch_id, "error": type(exc).__name__},
-        )
-        entries = None
+        return UNREADABLE
     report.batches += 1
     results: dict[str, Any] = {}
     for entry in entries or ():
-        results.setdefault(str(entry.custom_id), entry.result)
+        custom_id = getattr(entry, "custom_id", None)
+        if custom_id is not None:
+            results.setdefault(str(custom_id), getattr(entry, "result", None))
     for custom_id in await _waiting(session_factory, batch_id):
-        async with session_factory() as session, session.begin():
-            job = await _claim_submitted(session, batch_id, custom_id)
-            if job is None:
-                continue
-            if entries is None:
-                await _ladder(session, job, UNAVAILABLE, report)
-                continue
-            await _settle_one(
-                session, job, results.get(custom_id), now=now, report=report
-            )
-    return True
+        try:
+            async with session_factory() as session, session.begin():
+                job = await _claim_submitted(session, batch_id, custom_id)
+                if job is None:
+                    continue
+                if entries is None:
+                    await _ladder(session, job, UNAVAILABLE, report)
+                    continue
+                await _settle_one(
+                    session, job, results.get(custom_id), now=now, report=report
+                )
+        except Exception as exc:
+            report.noted(exc, "batch result not settled", batch_id=batch_id)
+    return COLLECTED
 
 
 async def collect(
@@ -807,17 +977,56 @@ async def collect(
     now: datetime,
     report: LaneReport | None = None,
 ) -> LaneReport:
-    """Every batch holding submitted jobs, the oldest first (step 3)."""
+    """Every batch holding submitted jobs, the oldest first (step 3). A batch
+    whose collect raised is passed over (``report.noted``): the younger
+    batches are still collected."""
     report = report or LaneReport()
     if not extraction.available():
         return report
     client = extraction.get_client()
     for batch_id in await _open_batches(session_factory):
-        await collect_batch(session_factory, client, batch_id, now=now, report=report)
+        try:
+            await collect_batch(session_factory, client, batch_id, now=now, report=report)
+        except Exception as exc:
+            report.noted(exc, "batch not collected", batch_id=batch_id)
     return report
 
 
 # --- 6. stuck batches -------------------------------------------------------------
+
+
+async def _give_up(
+    session_factory: SessionFactory,
+    client: anthropic.AsyncAnthropic,
+    batch_id: str,
+    submitted_at: datetime,
+    *,
+    now: datetime,
+    report: LaneReport,
+) -> None:
+    read = await collect_batch(session_factory, client, batch_id, now=now, report=report)
+    if read == COLLECTED:
+        return
+    if read == UNREADABLE and now - submitted_at < UNREADABLE_GIVE_UP:
+        # Not read is not «not ended»: an ended batch holds paid answers, and
+        # giving it up would send and pay for every job again.
+        log.warning("stuck batch not read; read again", extra={"batch_id": batch_id})
+        return
+    reason = STUCK if read == RUNNING else UNREADABLE
+    for custom_id in await _waiting(session_factory, batch_id):
+        async with session_factory() as session, session.begin():
+            job = await _claim_submitted(session, batch_id, custom_id)
+            if job is not None:
+                await _ladder(session, job, reason, report)
+    report.stuck += 1
+    try:
+        await client.messages.batches.cancel(batch_id)
+    except extraction.API_FAILURES as exc:
+        log.warning(
+            "stuck batch not cancelled",
+            extra={"batch_id": batch_id, "error": type(exc).__name__},
+        )
+    log.warning("stuck batch given up", extra={"batch_id": batch_id, "reason": reason})
 
 
 async def give_up_stuck(
@@ -826,32 +1035,26 @@ async def give_up_stuck(
     now: datetime,
     report: LaneReport | None = None,
 ) -> LaneReport:
-    """Each batch ``health.stuck_batches`` names: read once more and
-    collected if it ended, else given up — each job one failed attempt
-    (``stuck``) on the ladder, the batch cancelled (best effort)."""
+    """Each batch ``health.stuck_batches`` names, read once more: collected
+    if it has ended; given up if the API says it still runs — each job one
+    failed attempt (``stuck``) on the ladder, the batch cancelled (best
+    effort; a cancel costs nothing). A batch the API would not let us read
+    is read again on the next nights and given up (``unreadable``) only once
+    it is ``UNREADABLE_GIVE_UP`` old. A batch whose handling raised is
+    passed over (``report.noted``)."""
     report = report or LaneReport()
     if not extraction.available():
         return report
     async with session_factory() as session:
         stuck = await health.stuck_batches(session, now)
     client = extraction.get_client()
-    for batch_id, _ in stuck:
-        if await collect_batch(session_factory, client, batch_id, now=now, report=report):
-            continue
-        for custom_id in await _waiting(session_factory, batch_id):
-            async with session_factory() as session, session.begin():
-                job = await _claim_submitted(session, batch_id, custom_id)
-                if job is not None:
-                    await _ladder(session, job, STUCK, report)
-        report.stuck += 1
+    for batch_id, submitted_at in stuck:
         try:
-            await client.messages.batches.cancel(batch_id)
-        except extraction.API_FAILURES as exc:
-            log.warning(
-                "stuck batch not cancelled",
-                extra={"batch_id": batch_id, "error": type(exc).__name__},
+            await _give_up(
+                session_factory, client, batch_id, submitted_at, now=now, report=report
             )
-        log.warning("stuck batch given up", extra={"batch_id": batch_id})
+        except Exception as exc:
+            report.noted(exc, "stuck batch not handled", batch_id=batch_id)
     return report
 
 
@@ -928,6 +1131,15 @@ async def _take(
         await session.flush()
         report.given_up += 1
         return "done"
+    validate = await _make_checker(session, job, kind)
+    if validate is None:
+        # As in the batch lane: built again it would raise again — taken,
+        # never asked (nothing was sent).
+        job.error = extraction.VALIDATOR
+        job.applied_at = now
+        await session.flush()
+        report.failed += 1
+        return "done"
     try:
         result = await extraction.call(
             session,
@@ -939,7 +1151,7 @@ async def _take(
             company_id=job.company_id,
             evidence_ids=job.evidence_ids or (),
             prompt_version=kind.prompt_version,
-            validate=await _checker(session, job, kind),
+            validate=validate,
             extra={FALLBACK_OF: job.id},
         )
     except UnmaskedPayload as exc:
@@ -1003,18 +1215,22 @@ async def take_fallbacks(
 ) -> LaneReport:
     """Hand the fallback jobs to the instant lane (step 5), one transaction
     each, the oldest first, each at ``clock()`` (default ``now``). The run
-    stops at a budget refusal or an API failure."""
+    stops at a budget refusal or an API failure. A job whose handing raised
+    is passed over for this run (``report.noted``), so it cannot hold the
+    fallbacks behind it."""
     report = report or LaneReport()
     if not extraction.available():
         return report
     skip: set[int] = set()
     for _ in range(limit):
         at = max(clock(), now) if clock is not None else now
+        claimed: int | None = None
         try:
             async with session_factory() as session, session.begin():
                 job = await _claim_fallback(session, skip)
                 if job is None:
                     break
+                claimed = job.id
                 outcome = await _take(session, job, now=at, report=report)
                 if outcome != "done":
                     skip.add(job.id)
@@ -1022,6 +1238,12 @@ async def take_fallbacks(
             report.refused += 1
             log.info("fallbacks stopped: refused", extra={"code": str(refused)})
             break
+        except Exception as exc:
+            report.noted(exc, "fallback not taken", model_job_id=claimed)
+            if claimed is None:
+                break  # the claim itself failed: so would the next one
+            skip.add(claimed)
+            continue
         if outcome == "stop":
             log.warning("fallbacks stopped: the API failed")
             break
@@ -1037,18 +1259,41 @@ def _wall() -> datetime:
     return datetime.now(settings.tz)
 
 
+async def _step(
+    run: Coroutine[Any, Any, LaneReport], report: LaneReport, name: str
+) -> None:
+    """One step of a scheduled run: a step that raises does not stop the
+    ones after it (a stuck batch that cannot be handled must not cost the
+    night's submit)."""
+    try:
+        await run
+    except Exception as exc:
+        report.noted(exc, "batch lane step failed", step=name)
+
+
+def _finish(report: LaneReport) -> dict[str, int]:
+    """The run's counts; what a step passed over is raised now that every
+    step has run, so the scheduler records the job as failing (06 §4.2)."""
+    if report.error is not None:
+        raise report.error
+    return report.as_dict()
+
+
 async def model_batch_submit_job(*, now: datetime | None = None) -> dict[str, int]:
     """The worker's ``model_batch_submit`` slot (23:30, 04 §0): the stuck
     batches given up, the night's batch sent, then the fallbacks handed to
     the instant lane. Counts only are logged (06 §4.5)."""
     start = now or _wall()
     report = LaneReport()
-    await give_up_stuck(now=start, report=report)
-    await submit_batch(now=start, report=report)
-    await take_fallbacks(now=start, clock=None if now else _wall, report=report)
-    counts = report.as_dict()
-    log.info("model_batch_submit", extra={"counts": counts})
-    return counts
+    await _step(give_up_stuck(now=start, report=report), report, "give_up_stuck")
+    await _step(submit_batch(now=start, report=report), report, "submit_batch")
+    await _step(
+        take_fallbacks(now=start, clock=None if now else _wall, report=report),
+        report,
+        "take_fallbacks",
+    )
+    log.info("model_batch_submit", extra={"counts": report.as_dict()})
+    return _finish(report)
 
 
 async def model_batch_collect_job(*, now: datetime | None = None) -> dict[str, int]:
@@ -1057,12 +1302,21 @@ async def model_batch_collect_job(*, now: datetime | None = None) -> dict[str, i
     handed to the instant lane."""
     start = now or _wall()
     report = LaneReport()
-    await collect(now=start, report=report)
-    await take_fallbacks(now=start, clock=None if now else _wall, report=report)
-    counts = report.as_dict()
-    if report.batches or report.taken or report.refused or report.unreadable:
-        log.info("model_batch_collect", extra={"counts": counts})
-    return counts
+    await _step(collect(now=start, report=report), report, "collect")
+    await _step(
+        take_fallbacks(now=start, clock=None if now else _wall, report=report),
+        report,
+        "take_fallbacks",
+    )
+    if (
+        report.batches
+        or report.taken
+        or report.refused
+        or report.unreadable
+        or report.errors
+    ):
+        log.info("model_batch_collect", extra={"counts": report.as_dict()})
+    return _finish(report)
 
 
 __all__ = [
@@ -1073,6 +1327,7 @@ __all__ = [
     "FALLBACK_OP",
     "FALLBACK_TRIES",
     "KINDS",
+    "UNREADABLE_GIVE_UP",
     "BatchKind",
     "Landed",
     "LaneReport",

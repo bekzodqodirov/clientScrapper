@@ -21,9 +21,11 @@ when the test allowed it (``accept_batches``, or a scripted refusal with
 ``refuse_batch``) — an unplanned submit is an unscripted request like any
 other — ``retrieve`` reads a batch as the test left it (``in_progress`` until
 ``end``), ``results`` streams the JSONL the test wrote (``succeeded`` /
-``errored`` / ``expired`` / ``canceled`` lines, in whatever order it gave), and
-``cancel`` is noted. Every request inside a batch passes the same PII fence
-(``batch_pii_in``: what the model reads, not the lane's own ``custom_id``).
+``errored`` / ``expired`` / ``canceled`` lines, in whatever order it gave) —
+or breaks off part way when the test said so (``drop_results``: the
+connection dropped, or the line cut short) — and ``cancel`` is noted. Every
+request inside a batch passes the same PII fence (``batch_pii_in``: what the
+model reads, not the lane's own ``custom_id``).
 """
 
 from __future__ import annotations
@@ -306,6 +308,20 @@ def canceled() -> dict[str, Any]:
     return {"type": "canceled"}
 
 
+class _BrokenStream(httpx.AsyncByteStream):
+    """A results body that stops after ``head`` bytes: with ``error`` raised
+    there, as a dropped connection does mid-download, or (None) simply ended,
+    the last line cut short."""
+
+    def __init__(self, head: bytes, error: Exception | None) -> None:
+        self.head, self.error = head, error
+
+    async def __aiter__(self) -> Any:
+        yield self.head
+        if self.error is not None:
+            raise self.error
+
+
 @dataclass(slots=True)
 class FakeBatch:
     """One Message Batch as the fake API holds it."""
@@ -361,6 +377,9 @@ class FakeAnthropic:
         # Scripted failures of retrieve / results, per batch id, used first.
         self.retrieve_failures: dict[str, list[httpx.Response]] = {}
         self.results_failures: dict[str, list[httpx.Response]] = {}
+        # Scripted breaks of a results stream, per batch id, used first:
+        # (bytes sent before the break, the error raised there or None).
+        self.results_drops: dict[str, list[tuple[int, Exception | None]]] = {}
         self.retrieved: list[str] = []
         self.cancelled: list[str] = []
 
@@ -374,6 +393,15 @@ class FakeAnthropic:
 
     def refuse_batch(self, response: httpx.Response) -> FakeAnthropic:
         self.batch_answers.append(response)
+        return self
+
+    def drop_results(
+        self, batch_id: str, *, after: int, error: Exception | None
+    ) -> FakeAnthropic:
+        """The next results download of ``batch_id`` breaks off after
+        ``after`` bytes (``error`` raised there, or None: the body just
+        ends)."""
+        self.results_drops.setdefault(batch_id, []).append((after, error))
         return self
 
     def batch(self, index: int = -1) -> FakeBatch:
@@ -438,9 +466,12 @@ class FakeAnthropic:
                 json.dumps({"custom_id": custom_id, "result": result})
                 for custom_id, result in found_batch.results or ()
             ]
-            return httpx.Response(
-                200, content=("\n".join(lines) + "\n").encode() if lines else b""
-            )
+            body = ("\n".join(lines) + "\n").encode() if lines else b""
+            drops = self.results_drops.get(batch_id)
+            if drops:
+                after, error = drops.pop(0)
+                return httpx.Response(200, stream=_BrokenStream(body[:after], error))
+            return httpx.Response(200, content=body)
         self.retrieved.append(batch_id)
         return httpx.Response(200, json=found_batch.json())
 

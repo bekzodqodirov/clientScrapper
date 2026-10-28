@@ -1586,8 +1586,9 @@ def problems(status: Status) -> list[Problem]:
         add(
             "batch_stuck",
             f"⚠️ Tungi batch {age_label(status.now - submitted_at)} tugamadi "
-            f"({escape(batch_id)}{extra}) — <code>make worker</code> loglari; ertaga "
-            "Sonnet oʻzi oladi",
+            f"({escape(batch_id)}{extra}) — <code>make worker</code> loglari; "
+            "ishlar keyingi tunda qayta yuboriladi, 3-urinishdan keyin tezkor yoʻl "
+            "oʻzi oladi",
         )
     if "pii_leak" in rep:
         add(
