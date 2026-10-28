@@ -10,6 +10,20 @@ computed here from the signals' ages and the contacts, and never read from a
 ``signals`` row (02 §2.7: they are not stored; a row that names one is
 ignored).
 
+Three conditions of 04 §5.1/§5.3 are about the company's whole set of
+signals, so they are decided here and not when a signal is written — a rule
+sees one evidence, and the order two observations arrive in must not change a
+score:
+
+* ``neg_b2c_words`` counts only while no volume signal stands («and no volume
+  signal ≥ 1 m³»);
+* ``neg_non_cn_origin`` counts only while no ``cn_origin`` stands («and no
+  China word»);
+* one stated amount per evidence (rule 1: «the largest number wins per
+  evidence»): a ``vol_stated_1_3`` on an evidence that also carries
+  ``vol_stated_3plus`` is not counted, whichever writers stored the two (the
+  rules and the model can read one text differently).
+
 The DB half is small and at the bottom: ``load_weights`` (the active version
 = the newest approved), ``views_for`` (a company's signals and contacts as the
 score function's inputs) and ``activate_version`` (approval after
@@ -64,6 +78,14 @@ CORROBORATION_FAMILIES: Final = 2
 # contact that is not anonymised and not shared.
 UZ_PREFIX: Final = "+998"
 USABLE_PHONE_KINDS: Final = frozenset({"mobile", "landline"})
+# The observed keys the score function reads by name (services/signals uses
+# the same constants): the two stated amounts of rule 1 and the two negatives
+# whose condition is about the company's other signals (04 §5.1).
+STATED_3PLUS: Final = "vol_stated_3plus"
+STATED_1_3: Final = "vol_stated_1_3"
+CN_ORIGIN: Final = RECENCY_ORIGIN_KEY
+NEG_B2C: Final = "neg_b2c_words"
+NEG_NON_CN: Final = "neg_non_cn_origin"
 # 02 §2.7 versioning: each weight within ±30 % of the previous version unless
 # proposed by the owner.
 MAX_JUMP: Final = Decimal("0.30")
@@ -233,6 +255,29 @@ def _group(cap: int, entries: list[dict[str, Any]], raw: Decimal) -> dict[str, A
     return {"cap": cap, "raw": _num(raw), "used": _num(used), "signals": entries}
 
 
+def counted_signals(
+    signals: Sequence[SignalView], weights: WeightSet
+) -> list[SignalView]:
+    """The signals ``score`` reads: keys of ``weights`` that are observed (a
+    row naming a derived key is ignored), less the three the company's other
+    signals overrule (module docstring): a B2C negative beside a volume
+    signal, a non-China origin beside ``cn_origin``, and a 1–3 m³ amount on an
+    evidence that states ≥ 3 m³."""
+    observed = [
+        s for s in signals if s.key in weights.rows and s.key not in e.DERIVED_KEYS
+    ]
+    volume = any(weights.rows[s.key].group == "volume" for s in observed)
+    china = any(s.key == CN_ORIGIN for s in observed)
+    large = {s.evidence_id for s in observed if s.key == STATED_3PLUS}
+    return [
+        s
+        for s in observed
+        if not (s.key == NEG_B2C and volume)
+        and not (s.key == NEG_NON_CN and china)
+        and not (s.key == STATED_1_3 and s.evidence_id in large)
+    ]
+
+
 def score(
     signals: Sequence[SignalView],
     contacts: Sequence[ContactView],
@@ -245,10 +290,9 @@ def score(
     once. Group total = min(cap, Σ keys). total = clamp(0, 100, Σ positive
     groups + Σ negatives). Decay: observed_at + decay_days < now → points ×
     decayed_factor; negatives decay the same way. Derived keys are computed
-    here from contacts and signal ages, never read from ``signals``."""
-    observed = [
-        s for s in signals if s.key in weights.rows and s.key not in e.DERIVED_KEYS
-    ]
+    here from contacts and signal ages, never read from ``signals``. The
+    signals read are ``counted_signals``'s."""
+    observed = counted_signals(signals, weights)
     best: dict[str, _Counted] = {}
     for s in observed:
         weight = weights.rows[s.key]

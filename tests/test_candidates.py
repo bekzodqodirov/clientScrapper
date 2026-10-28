@@ -11,6 +11,7 @@ stored, through the hook this module registers. Synthetic data only.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import itertools
 import json
@@ -38,6 +39,7 @@ from clientscrapper.db.models import (
     Source,
     Suppression,
 )
+from clientscrapper.db.session import SessionLocal
 from clientscrapper.services import candidates, companies, scoring, signals
 from clientscrapper.services.candidates import (
     IllegalTransition,
@@ -325,7 +327,8 @@ async def phoneless(session, **fields) -> LeadCandidate:
     values: dict[str, Any] = {
         "enrich_attempts": 3,
         "score": 65,
-        "tier": "warm",
+        # not yet 'warm': phone_less_review sets the tier itself (02 §2.9)
+        "tier": None,
         "score_breakdown": {"total": 65, "gates": {"is_b2b": "pass"}, "enrichment": [1]},
     }
     values.update(fields)
@@ -447,7 +450,9 @@ async def test_hold_to_scored_to_approved_by_the_manager_s_phone(session):
     # volume 40 + origin 10 + recency 10 + contact (mobile 6 + dm 2)
     assert (result.total, row.score, row.tier) == (68, 68, "hot")
     assert row.hold_until is None
-    assert row.score_breakdown["gates"]["no_phone"] is True  # the handoff stays recorded
+    # A usable phone ends the phone-less handoff's mark; the approval itself
+    # records the manager (approved_by), 06 §1.7.
+    assert row.score_breakdown["gates"] == {"is_b2b": "pass"}
     SCHEMA.validate(row.score_breakdown)
 
 
@@ -501,6 +506,9 @@ NO_FACTS = RouteFacts()
         ("hold", "cold", NO_FACTS, ()),
         ("review", "hot", NO_FACTS, ()),
         ("review", "cold", NO_FACTS, ()),
+        # a review row that lost its phone and is not the handoff steps back
+        ("review", "warm", RouteFacts(usable_phone=False), ("hold",)),
+        ("review", "warm", RouteFacts(usable_phone=False, no_phone=True), ()),
     ],
 )
 def test_route(state, tier, facts, walk):
@@ -527,6 +535,27 @@ LONG_AGO = NOW - timedelta(days=200)
             False,
         ),
         (LastCandidate("pushed", pushed_at=LONG_AGO), ReopenFacts(LONG_AGO, True), False),
+        # exactly 90 days is enough (≥)
+        (
+            LastCandidate("pushed", pushed_at=NOW - timedelta(days=90)),
+            ReopenFacts(NOW, None),
+            True,
+        ),
+        # 2026-09-30 19:30 UTC is 1 October in Tashkent: the month of NOW
+        (
+            LastCandidate(
+                "pushed", pushed_at=datetime(2026, 9, 30, 19, 30, tzinfo=ZoneInfo("UTC"))
+            ),
+            ReopenFacts(NOW, True),
+            False,
+        ),
+        (
+            LastCandidate(
+                "pushed", pushed_at=datetime(2026, 9, 30, 18, 30, tzinfo=ZoneInfo("UTC"))
+            ),
+            ReopenFacts(NOW, True),
+            True,  # 23:30 on 30 September in Tashkent
+        ),
         (
             LastCandidate("pushed", pushed_at=NOW - timedelta(days=5)),
             ReopenFacts(NOW, True),
@@ -540,6 +569,11 @@ LONG_AGO = NOW - timedelta(days=200)
             False,
         ),
         (LastCandidate("rejected", rejected_at=LONG_AGO), ReopenFacts(LONG_AGO), False),
+        (
+            LastCandidate("rejected", rejected_at=NOW - timedelta(days=180)),
+            ReopenFacts(NOW),
+            True,  # exactly 180 days (≥)
+        ),
         # after suppressed: only when the row is gone
         (LastCandidate("suppressed", suppressed_by=7), ReopenFacts(NOW), False),
         (LastCandidate("suppressed", suppressed_by=None), ReopenFacts(NOW), True),
@@ -887,7 +921,7 @@ async def test_a_hold_that_has_not_run_out_is_rescored_in_place(session):
 
 
 async def test_a_review_card_is_rescored_but_stays_the_owner_s(session):
-    firm = await make_firm(session, phone=None)
+    firm = await make_firm(session)
     await _signal(session, firm, "cn_origin")
     cand = await candidate_in(
         session,
@@ -899,7 +933,8 @@ async def test_a_review_card_is_rescored_but_stays_the_owner_s(session):
     await session.commit()
     await candidates.score_batch(now=NOW)
     row = await reload(session, cand)
-    assert (row.state, row.score, row.tier) == ("review", 30, "cold")
+    # origin 20 + recency 10 + a mobile 6
+    assert (row.state, row.score, row.tier) == ("review", 36, "cold")
     assert row.score_breakdown["gates"] == {"not_dnc": "pass"}
     assert row.score_breakdown["enrichment"] == [{"step": "E2"}]
 
@@ -942,3 +977,371 @@ async def test_score_job_returns_the_counts(session):
     counts = await candidates.score_job(now=NOW)
     # 40 + recency 10 = 50: warm
     assert counts == {"claimed": 1, "scored": 1, "failed": 0, "to_enriching": 1}
+
+
+# --- review findings (T-18 review): one candidate's failure, lock order -------------
+
+
+async def test_a_failure_after_the_score_is_written_costs_only_itself(
+    session, monkeypatch, caplog
+):
+    """A failure after ``rescore`` flushed (the savepoint is rolled back and
+    the row expired): the batch goes on, and the log names the candidate."""
+    broken = await make_firm(session)
+    fine = await make_firm(session)
+    ids = {}
+    for firm in (broken, fine):
+        await _signal(session, firm, "vol_container")
+        ids[firm.id] = (
+            await candidate_in(session, "scored", firm, last_scored_at=None)
+        ).id
+    await session.commit()
+    real = candidates.apply_score
+
+    async def apply_score(session, candidate, result, **kw):
+        if candidate.company_id == broken.id:
+            assert candidate.score == result.total  # rescore wrote it
+            raise RuntimeError("boom")
+        return await real(session, candidate, result, **kw)
+
+    monkeypatch.setattr(candidates, "apply_score", apply_score)
+    with caplog.at_level("ERROR", logger=candidates.log.name):
+        report = await candidates.score_batch(now=NOW)
+    # the fine one: 40 + recency 10 + a mobile 6 = 56, warm
+    assert report.as_dict() == {
+        "claimed": 2,
+        "scored": 1,
+        "failed": 1,
+        "to_enriching": 1,
+    }
+    [record] = [r for r in caplog.records if r.getMessage() == "scoring failed"]
+    assert (record.candidate_id, record.error) == (str(ids[broken.id]), "RuntimeError")
+    row = await the_candidate(session, broken.id)
+    assert (row.state, row.score, row.last_scored_at) == ("scored", 65, None)
+
+
+async def _lock_waiters(watcher) -> int:
+    """Backends of this database waiting on a lock (pg_stat_activity, read on
+    its own connection and rolled back: its snapshot freezes in a transaction)."""
+    n = await watcher.scalar(
+        sa.text(
+            "SELECT count(*) FROM pg_stat_activity "
+            "WHERE wait_event_type = 'Lock' AND datname = current_database()"
+        )
+    )
+    await watcher.rollback()
+    return int(n or 0)
+
+
+async def _second_post(session) -> None:
+    await store(session, post(POST_91, person_telegram="namuna_tekstil"))
+    await session.commit()
+    await companies.resolve_batch(now=NOW)
+    await store(
+        session, post("Yana 30 kub mato kerak Xitoydan", person_telegram="namuna_tekstil")
+    )
+    await session.commit()
+
+
+async def test_a_resolver_waits_for_a_score_in_progress_and_neither_dies(
+    session, monkeypatch
+):
+    """score_job holds the candidate and its company; the resolver's next
+    post of that poster waits on the company and then lands — no deadlock
+    (02 §2.9's two writers, one lock order)."""
+    await _second_post(session)
+    claimed, go = asyncio.Event(), asyncio.Event()
+    real = scoring.views_for
+    first = True
+
+    async def paused(s, company):
+        nonlocal first
+        if first:
+            first = False
+            claimed.set()
+            await go.wait()
+        return await real(s, company)
+
+    monkeypatch.setattr(scoring, "views_for", paused)
+    scoring_task = asyncio.create_task(candidates.score_batch(now=NOW, limit=1))
+    await asyncio.wait_for(claimed.wait(), 10)
+    later = NOW + timedelta(minutes=5)
+    resolving = asyncio.create_task(companies.resolve_batch(now=later))
+    async with SessionLocal() as watcher:
+        for _ in range(250):
+            if await _lock_waiters(watcher):
+                break
+            await asyncio.sleep(0.02)
+        waited = await _lock_waiters(watcher)
+    go.set()
+    scored, resolved = await asyncio.wait_for(asyncio.gather(scoring_task, resolving), 30)
+    assert waited == 1
+    assert (scored.scored, scored.failed) == (1, 0)
+    assert (resolved.resolved, resolved.deferred, resolved.needs_review) == (1, 0, 0)
+    assert (await the_candidate(session)).last_scored_at is None  # owed again
+    report = await candidates.score_batch(now=later)
+    cand = await the_candidate(session)
+    # the 30 kub post counts: volume 20 + 30, origin 20, recency 10, dm 2
+    assert (report.scored, cand.score) == (1, 72)
+
+
+async def test_a_score_skips_a_company_a_resolver_holds(session, monkeypatch):
+    """The resolver holds the company (emit's update) and has not marked the
+    candidate yet: score_job skips it instead of waiting into a deadlock, and
+    scores it on the next run."""
+    await _second_post(session)
+    held, go = asyncio.Event(), asyncio.Event()
+    real = signals.mark_stale
+    first = True
+
+    async def paused(s, company_id):
+        nonlocal first
+        if first:
+            first = False
+            held.set()
+            await go.wait()
+        return await real(s, company_id)
+
+    monkeypatch.setattr(signals, "mark_stale", paused)
+    later = NOW + timedelta(minutes=5)
+    resolving = asyncio.create_task(companies.resolve_batch(now=later))
+    await asyncio.wait_for(held.wait(), 10)
+    skipped = await asyncio.wait_for(candidates.score_batch(now=later, limit=5), 10)
+    go.set()
+    resolved = await asyncio.wait_for(resolving, 30)
+    assert skipped.as_dict() == {"claimed": 0, "scored": 0, "failed": 0}
+    assert (resolved.resolved, resolved.deferred) == (1, 0)
+    report = await candidates.score_batch(now=later)
+    assert (report.scored, (await the_candidate(session)).score) == (1, 72)
+
+
+# --- review findings: what a re-score must see ----------------------------------------
+
+
+@pytest.mark.parametrize(
+    "texts",
+    [
+        ("Xitoydan bitta telefon kerak, o'zim uchun", POST_91),
+        (POST_91, "Xitoydan bitta telefon kerak, o'zim uchun"),
+    ],
+    ids=["b2c_first", "volume_first"],
+)
+async def test_the_order_two_posts_arrive_in_changes_no_score(session, texts):
+    """04 §5.1: the B2C negative counts only without a volume signal — the
+    same two posts score 52 whichever came first."""
+    for minute, text in enumerate(texts):
+        await store(session, post(text, person_telegram="namuna_tekstil"))
+        await session.commit()
+        await companies.resolve_batch(now=NOW + timedelta(minutes=minute))
+    await candidates.score_batch(now=NOW + timedelta(minutes=5))
+    cand = await the_candidate(session)
+    assert (cand.state, cand.score, cand.tier) == ("enriching", 52, "warm")
+    assert cand.score_breakdown["negatives"] == []
+
+
+async def test_a_phone_ends_the_phone_less_handoff_mark(session):
+    cand = await phoneless(session)
+    await candidates.phone_less_review(session, cand, now=NOW)
+    session.add(
+        Contact(
+            company_id=cand.company_id,
+            tier="company",
+            phone="+998900000015",
+            phone_kind="mobile",
+        )
+    )
+    cand.last_scored_at = None
+    await session.commit()
+    await candidates.score_batch(now=NOW)
+    row = await reload(session, cand)
+    assert row.state == "review"
+    assert row.score_breakdown["usable_phone"] is True
+    assert row.score_breakdown["gates"] == {"is_b2b": "pass"}
+
+
+async def test_the_company_s_own_channel_is_no_username_to_write_to(session):
+    """02 §2.9 reads ``contacts.telegram_username``: a broadcast channel
+    (``companies.telegram_channel``) cannot be answered."""
+    firm = await make_firm(session, phone=None, telegram_channel="namuna_optom_kanal")
+    cand = await candidate_in(
+        session, "enriching", firm, enrich_attempts=3, score=65, tier="warm"
+    )
+    with pytest.raises(IllegalTransition, match="no telegram username"):
+        await candidates.phone_less_review(session, cand, now=NOW)
+    anonymised = await phoneless(session)
+    await session.execute(
+        sa.update(Contact)
+        .where(Contact.company_id == anonymised.company_id)
+        .values(anonymised_at=NOW)
+    )
+    with pytest.raises(IllegalTransition, match="no telegram username"):
+        await candidates.phone_less_review(session, anonymised, now=NOW)
+
+
+async def test_a_review_row_that_loses_its_phone_steps_back_to_hold(session):
+    """06 §1.3 refuses a review card with neither a phone nor the handoff
+    mark: a row whose only phone turned shared goes back to hold."""
+    firm = await make_firm(session)
+    for key in ("vol_stated_3plus", "cn_origin"):
+        await _signal(session, firm, key)
+    cand = await candidate_in(session, "review", firm, last_scored_at=None)
+    await session.execute(
+        sa.update(Contact).where(Contact.company_id == firm.id).values(shared_phone=True)
+    )
+    await session.commit()
+    report = await candidates.score_batch(now=NOW)
+    row = await reload(session, cand)
+    # 30 + 20 + recency 10: ≥ 60 without a usable phone is warm
+    assert (report.as_dict()["to_hold"], row.state, row.tier, row.score) == (
+        1,
+        "hold",
+        "warm",
+        60,
+    )
+
+
+async def test_a_hold_that_runs_out_is_scored_without_a_new_signal(session):
+    """A review that expired or a cooldown (02 §2.9 holds with a
+    ``hold_until``) comes back when the hold runs out, once."""
+    firm = await make_firm(session, last_signal_at=NOW - timedelta(days=3))
+    for key in ("vol_stated_3plus", "cn_origin"):
+        await _signal(session, firm, key)
+    cand = await candidate_in(
+        session,
+        "hold",
+        firm,
+        hold_until=NOW + timedelta(days=7),
+        last_scored_at=NOW - timedelta(days=1),
+    )
+    await session.commit()
+    assert (await candidates.score_batch(now=NOW)).claimed == 0  # still held
+    later = NOW + timedelta(days=8)
+    report = await candidates.score_batch(now=later)
+    row = await reload(session, cand)
+    assert (report.as_dict()["to_review"], row.state, row.hold_until) == (
+        1,
+        "review",
+        None,
+    )
+    # a cold one that runs out stays where it is and is not claimed again
+    cold = await make_firm(session, last_signal_at=NOW - timedelta(days=3))
+    await _signal(session, cold, "cn_sector_prior")
+    held = await candidate_in(
+        session,
+        "hold",
+        cold,
+        hold_until=NOW + timedelta(days=7),
+        last_scored_at=NOW - timedelta(days=1),
+    )
+    await session.commit()
+    assert (await candidates.score_batch(now=later)).scored == 1
+    assert (await reload(session, held)).state == "hold"
+    assert (await candidates.score_batch(now=later + timedelta(hours=1))).claimed == 0
+
+
+async def test_a_candidate_older_than_its_company_s_newest_signal_is_scored(session):
+    """04 §0's sweep: ``last_signal_at > last_scored_at`` is owed a score
+    even when nothing cleared ``last_scored_at``."""
+    firm = await make_firm(session, last_signal_at=NOW)
+    await _signal(session, firm, "vol_container")
+    await candidate_in(
+        session, "enriching", firm, last_scored_at=NOW - timedelta(hours=1)
+    )
+    await session.commit()
+    assert (await candidates.score_batch(now=NOW)).claimed == 1
+    assert (await candidates.score_batch(now=NOW)).claimed == 0
+
+
+async def test_a_warm_hold_keeps_its_enrichment_clock(session):
+    """hold → scored → enriching keeps a ``next_enrich_at`` already set (a
+    past one is due now), and sets one hour only when there is none."""
+    firm = await make_firm(session, phone=None)
+    await _signal(session, firm, "vol_container")
+    due = NOW - timedelta(days=1)
+    cand = await candidate_in(
+        session, "hold", firm, last_scored_at=None, next_enrich_at=due
+    )
+    await session.commit()
+    await candidates.score_batch(now=NOW)
+    row = await reload(session, cand)
+    # 40 + recency 10: warm
+    assert (row.state, row.score, row.next_enrich_at) == ("enriching", 50, due)
+
+
+async def test_the_source_is_the_one_whose_signal_made_the_candidate(session):
+    """02 §2.9 ``primary_source_key``: a directory card that only brought a
+    phone creates the candidate, the Telegram post brings the signals — the
+    candidate is the Telegram source's."""
+    card = post(
+        "",
+        kind="company",
+        source="directories_yellowpages",
+        telegram="namuna_tekstil",
+        phones=["+998 90 000 00 41"],
+    )
+    await store(session, card)
+    await session.commit()
+    await companies.resolve_batch(now=NOW)
+    assert (await the_candidate(session)).primary_source_key is None
+    await store(session, post(POST_91, person_telegram="namuna_tekstil"))
+    await session.commit()
+    await companies.resolve_batch(now=NOW + timedelta(minutes=5))
+    await candidates.score_batch(now=NOW + timedelta(minutes=5))
+    assert (await the_candidate(session)).primary_source_key == "telegram_monitor"
+
+
+async def test_a_merge_rescores_the_target(session):
+    """companies.merge_into moves the source's signals onto the target: the
+    target's open candidate is owed a score on them (and on the source's
+    again after an unmerge)."""
+    target = await make_firm(session)
+    source = await make_firm(session, phone=None, last_signal_at=NOW - timedelta(days=3))
+    await _signal(session, target, "vol_stated_1_3", source="telegram_monitor")
+    await _signal(session, target, "cn_origin", source="telegram_monitor")
+    await _signal(session, source, "vol_container")
+    cand = await candidate_in(session, "found", target, score=None, tier=None)
+    await session.commit()
+    await candidates.score_batch(now=NOW)
+    # 20 + 20 + recency 10 + a mobile 6
+    assert ((await reload(session, cand)).state, (await reload(session, cand)).score) == (
+        "enriching",
+        56,
+    )
+    entry = await companies.merge_into(
+        session,
+        await session.get(Company, source.id),
+        await session.get(Company, target.id),
+        by="owner:1",
+        now=NOW,
+    )
+    await session.commit()
+    assert entry.last_signal_at == NOW - timedelta(days=3)
+    report = await candidates.score_batch(now=NOW + timedelta(minutes=1))
+    row = await reload(session, cand)
+    # volume min(40, 20 + 40) + 20 + recency 10 + a mobile 6 + corroboration 5
+    assert (report.claimed, row.state, row.score) == (1, "review", 81)
+    log_id = await session.scalar(sa.text("SELECT max(id) FROM merge_log"))
+    await companies.unmerge(session, log_id, by="owner:1", now=NOW + timedelta(hours=1))
+    await session.commit()
+    assert (await reload(session, cand)).last_scored_at is None
+
+
+async def test_the_hook_leaves_a_merged_company_alone(session):
+    """The resolver hands a merged company to no hook in practice (it
+    resolves to the root); the hook refuses one all the same."""
+    root = await make_firm(session)
+    firm = await make_firm(session, state="merged", merged_into=root.id)
+    obs = await store(session, post(POST_91))
+    resolution = companies.Resolution(
+        company=firm,
+        how="telegram",
+        score=100,
+        created=False,
+        duplicate_of=None,
+        conflict=None,
+    )
+    await candidates.after_resolve(session, obs, resolution, NOW)
+    assert await session.scalar(sa.select(sa.func.count()).select_from(Signal)) == 0
+    assert (
+        await session.scalar(sa.select(sa.func.count()).select_from(LeadCandidate))
+    ) == 0

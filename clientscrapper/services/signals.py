@@ -5,13 +5,16 @@ rule in code.
 (``observations.parsed``, 02 §2.5) into signal drafts, purely:
 
 1. **Stated volume** — VOLUME_RE over the excerpt and ``volume_text``, and
-   TONNES_RE (1 t ≈ 3 m³, the low end of 04 §4.3's conversion) and «yarim
-   fura / полфуры» (≈ 40 m³, 04 §4.3): the largest number wins per evidence;
-   ≥ 3 → ``vol_stated_3plus``, 1 ≤ n < 3 → ``vol_stated_1_3``, < 1 → no volume
-   signal, and the small amount feeds the B2C negative.
+   TONNES_RE (1 t ≈ 3 m³, the low end of 04 §4.3's conversion; a price per
+   tonne — «цена за 1 тонну» — is no amount) and a half truck («yarim fura»,
+   «ярим фура», «полфуры», «пол фуры»: ≈ 40 m³, 04 §4.3): the largest number
+   wins per evidence; ≥ 3 → ``vol_stated_3plus``, 1 ≤ n < 3 →
+   ``vol_stated_1_3``, < 1 → no volume signal, and the small amount feeds the
+   B2C negative.
 2. **Containers and trucks** — CONTAINER_RE with a container/truck word →
    ``vol_container``; «partiya», «tonna» alone count as nothing here (tonnes
-   are rule 1's), «yarim fura» is rule 1's.
+   are rule 1's), a half truck is rule 1's, and a container sold as a cabin
+   («konteyner uy (bitovka)») is goods, not freight.
 3. **The model** — ``from_model``: an ImportSignal's stated volume with a
    verified quote (the quote validator is T-15's, ``services/validators``;
    this module trusts the quote it is handed and nothing else), a container
@@ -33,20 +36,28 @@ it — «контроль отгрузок контейнеров» is a job, no
 text. ``vol_vacancy_import`` is read from a vacancy's text only.
 
 Besides the volume rules, the 04 §5.1 detections of own text: ``cn_origin``
-(CHINA_RE), ``neg_b2c_words`` (B2C_RE or a sub-1 m³ amount, only while no
-volume signal stands for the company), ``neg_non_cn_origin`` (another origin
-named and no China word) and ``neg_state_body`` (a state word in a
-self-description; never in a buyer's post or a vacancy, and never an
-exclusion — gate 7 reads the name). A quote is the matched fragment of the
-observation's own text (``parsed.text`` / ``company.goods_text``), clipped to
-the column's 300 characters.
+(CHINA_RE), ``neg_b2c_words`` (B2C_RE or a sub-1 m³ amount, unless the same
+evidence carries a volume key), ``neg_non_cn_origin`` (another country named
+as the origin — NON_CN_ORIGIN_RE reads «Turkiyadan», «из Турции», never a
+destination like «Rossiyaga» — and no China word in the evidence) and
+``neg_state_body`` (a state word in a self-description; never in a buyer's
+post or a vacancy, and never an exclusion — gate 7 reads the name). Each
+rule sees one evidence: whether a B2C or a non-China negative counts beside
+the company's other signals is decided when it is scored
+(``scoring.counted_signals``), so the order observations arrive in changes
+nothing. A quote is the matched fragment of the observation's own text,
+clipped to the column's 300 characters, and only a fragment of the excerpt
+(02 §2.7): a match in another field (the goods text, the volume or origin
+fragment) keeps its signal without a quote.
 
 ``emit`` upserts drafts on ``(company_id, key, evidence_id)`` (a later
-writer's value and quote replace the earlier ones where it has them), sets
-``expires_at`` from the active weights' decay, moves
-``companies.last_signal_at``, and marks the company's open candidate for
-re-scoring (``last_scored_at = NULL``, in the same transaction, so a score
-computed concurrently cannot hide the new signal).
+writer's value and quote replace the earlier ones where it has them, also
+between two drafts of one call), sets ``expires_at`` from the active
+weights' decay, moves ``companies.last_signal_at``, and marks the company's
+open candidate for re-scoring (``last_scored_at = NULL``, in the same
+transaction, so a score computed concurrently cannot hide the new signal).
+It takes ``companies`` before ``lead_candidates``, the order every writer
+of the two keeps (``services/candidates`` has the rule).
 """
 
 from __future__ import annotations
@@ -69,7 +80,9 @@ from clientscrapper.collectors.keywords import (
     BULKY_CATEGORIES,
     CHINA_RE,
     CONTAINER_RE,
+    NON_CN_COUNTRY_RE,
     NON_CN_ORIGIN_RE,
+    PRICE_RE,
     STATE_BODY_RE,
     TONNES_RE,
     VACANCY_IMPORT_RE,
@@ -78,12 +91,16 @@ from clientscrapper.collectors.keywords import (
 )
 from clientscrapper.db import enums as e
 from clientscrapper.db.models import Company, LeadCandidate, Signal
-from clientscrapper.services.scoring import WeightSet
+from clientscrapper.services.scoring import (
+    NEG_B2C,
+    NEG_NON_CN,
+    STATED_1_3,
+    STATED_3PLUS,
+    WeightSet,
+)
 
 VOLUME_KEYS: Final = frozenset(w.key for w in e.WEIGHTS_V1 if w.group_key == "volume")
 VACANCY_KEY: Final = "vol_vacancy_import"
-STATED_3PLUS: Final = "vol_stated_3plus"
-STATED_1_3: Final = "vol_stated_1_3"
 # 04 §5.1/§5.3: BULKY is the China-dominant set — the 17 BULKY_CATEGORIES keys
 # but stationery and cosmetics; the same set answers «a bulky category» for
 # rule 4 («food, cosmetics, stationery give nothing») and ``cn_sector_prior``.
@@ -101,8 +118,8 @@ SIGNAL_TYPE_KEYS: Final[Mapping[str, str]] = {
     "marketplace_velocity": "vol_marketplace_velocity",
     "china_origin": "cn_origin",
     "entity_solid": "ent_not_micro",
-    "b2c_marker": "neg_b2c_words",
-    "non_china_origin": "neg_non_cn_origin",
+    "b2c_marker": NEG_B2C,
+    "non_china_origin": NEG_NON_CN,
     "state_body": "neg_state_body",
     "liquidated": "neg_liquidated",
     "competitor": "flag_competitor",
@@ -148,10 +165,29 @@ STATED_3PLUS_MIN: Final = Decimal(3)
 # 04 §4.3's conversions, the low end: 1 t of mixed goods ≈ 3 m³; yarim fura ≈ 40.
 TONNE_M3: Final = Decimal(3)
 HALF_TRUCK_M3: Final = Decimal(40)
-_HALF_TRUCK: Final = re.compile(r"^(?:yarim|пол)", re.I)
+# The half-truck forms of CONTAINER_RE: «yarim fura», «ярим фура», «полфуры»,
+# «пол фуры» (rule 1's ≈ 40 m³, never rule 2's container).
+_HALF_TRUCK: Final = re.compile(r"^(?:yarim|ярим|пол)", re.I)
 # CONTAINER_RE matches that are a container or truck word (rule 2); the rest
-# («partiya», «tonna», «полфуры») are not.
-_CONTAINER_WORD: Final = re.compile(r"^(?:konte|konta|конте|fura|фур|20|40)", re.I)
+# («partiya», «tonna», a half truck) are not.
+_CONTAINER_WORD: Final = re.compile(
+    r"^(?:konte|konta|конте|fura|фур|full|ftl|20|40)", re.I
+)
+# A container that is the goods, not the shipment: «konteyner uy (bitovka)
+# sotiladi», «контейнер дом» — a cabin for sale, no freight in it. Only the
+# bare noun, and never «uy jihozlari» (household goods, which do ship).
+_BARE_CONTAINER: Final = re.compile(r"(?:konteyner|kontayner|контейнер)", re.I)
+_CONTAINER_GOODS: Final = re.compile(
+    r"\s*(?:\(?\s*(?:bitovka|битовка|бытовк\w*)"
+    r"|(?:uy|уй|дом|домик)(?!\w)(?!\s+(?:jihoz|anjom|buyum|жи[ҳх]оз|анжом|буюм)))",
+    re.I,
+)
+# A tonne that prices the goods, not a shipment: «цена за 1 тонну», «1 tonnasi
+# 1 200 000 so'm», «1 tonna narxi» — «за» before the figure, or one tonne with
+# a price (PRICE_RE) or a price word right after it.
+_PRICE_BEFORE: Final = re.compile(r"(?<!\w)за\s*$", re.I)
+_PRICE_WORD_AFTER: Final = re.compile(r"^\s*(?:narxi|нархи|цена|стоимость)(?!\w)", re.I)
+_PRICE_AFTER_CHARS: Final = 25
 # Rule 5 (03 §2.5, §2.11 thresholds).
 OLX_SOURCE: Final = "olx_business"
 UZUM_SOURCE: Final = "uzum_sellers"
@@ -178,11 +214,12 @@ class EvidenceRef:
 @dataclass(frozen=True, slots=True)
 class CompanyFacts:
     """What a rule needs of the company: its sectors (rule 4's «companies.sectors
-    ∩ BULKY») and whether a volume signal already stands for it (the B2C
-    negative is emitted only without one)."""
+    ∩ BULKY»). Nothing about the company's other signals: whether a B2C or a
+    non-China negative counts beside them is the score's question
+    (``scoring.counted_signals``), so a rule's drafts are a function of the
+    one evidence and the order observations arrive in changes nothing."""
 
     sectors: frozenset[str] = frozenset()
-    holds_volume: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -208,14 +245,28 @@ class VolumeReading:
 @dataclass(slots=True)
 class _Drafts:
     """One draft per key: a second rule naming the same key fills what the
-    first left empty (a value, a quote) and changes nothing else."""
+    first left empty (a value, a quote) and changes nothing else.
+
+    A quote is a verbatim fragment of the evidence's excerpt (02 §2.7): a
+    regex match found only in another field of the observation (the goods
+    text, the volume or origin fragment) keeps its signal and carries no
+    quote. ``verified`` marks the model's quote, which T-15's validator has
+    already held against the excerpt."""
 
     base: SignalDraft
+    excerpt: str
     found: dict[str, SignalDraft] = field(default_factory=dict)
 
     def add(
-        self, key: str, *, value: Decimal | None = None, quote: str | None = None
+        self,
+        key: str,
+        *,
+        value: Decimal | None = None,
+        quote: str | None = None,
+        verified: bool = False,
     ) -> None:
+        if quote is not None and not verified and quote not in self.excerpt:
+            quote = None
         clipped = _clip(quote)
         held = self.found.get(key)
         if held is None:
@@ -279,9 +330,19 @@ def _number(raw: str) -> Decimal | None:
         return None
 
 
+def _unit_price(text: str, match: re.Match[str], tonnes: Decimal) -> bool:
+    """A TONNES_RE figure that prices the goods per tonne (``_PRICE_BEFORE``,
+    ``_PRICE_WORD_AFTER``): «цена за 1 тонну» is a price list, not 3 m³."""
+    if _PRICE_BEFORE.search(text[: match.start()]):
+        return True
+    after = text[match.end() : match.end() + _PRICE_AFTER_CHARS]
+    return tonnes == 1 and bool(PRICE_RE.search(after) or _PRICE_WORD_AFTER.match(after))
+
+
 def volume_reading(text: str) -> VolumeReading | None:
     """Rule 1: the largest amount ``text`` states, in m³ — a VOLUME_RE
-    number, a TONNES_RE weight × 3, a half truck as 40 — with its fragment."""
+    number, a TONNES_RE weight × 3 (not a price per tonne), a half truck as
+    40 — with its fragment."""
     readings: list[VolumeReading] = []
     for match in VOLUME_RE.finditer(text):
         n = _number(match.group(1))
@@ -289,7 +350,7 @@ def volume_reading(text: str) -> VolumeReading | None:
             readings.append(VolumeReading(n, match.group(0)))
     for match in TONNES_RE.finditer(text):
         t = _number(match.group(1))
-        if t is not None:
+        if t is not None and not _unit_price(text, match, t):
             readings.append(VolumeReading(t * TONNE_M3, match.group(0)))
     for match in CONTAINER_RE.finditer(text):
         if _HALF_TRUCK.match(match.group(0)):
@@ -308,10 +369,14 @@ def stated_key(m3: Decimal) -> str | None:
 
 
 def container_quote(text: str) -> str | None:
-    """Rule 2: the first CONTAINER_RE match that is a container or truck word."""
+    """Rule 2: the first CONTAINER_RE match that is a container or truck word
+    — not a half truck (rule 1's) and not a container sold as a cabin."""
     for match in CONTAINER_RE.finditer(text):
         word = match.group(0)
-        if _CONTAINER_WORD.match(word) and not _HALF_TRUCK.match(word):
+        cabin = _BARE_CONTAINER.fullmatch(word) and _CONTAINER_GOODS.match(
+            text, match.end()
+        )
+        if _CONTAINER_WORD.match(word) and not _HALF_TRUCK.match(word) and not cabin:
             return word
     return None
 
@@ -452,8 +517,8 @@ def _collector_types(
         "cn_origin": CHINA_RE,
         "vol_wholesale_bulky": B2B_RE,
         "vol_directory_wholesale": B2B_RE,
-        "neg_b2c_words": B2C_RE,
-        "neg_non_cn_origin": NON_CN_ORIGIN_RE,
+        NEG_B2C: B2C_RE,
+        NEG_NON_CN: NON_CN_ORIGIN_RE,
         "neg_state_body": STATE_BODY_RE,
     }
     reading = volume_reading(trading)
@@ -488,24 +553,28 @@ def _finish(
     *,
     own: str,
     kind: str,
-    company: CompanyFacts,
     small: str | None,
     b2c: bool,
+    small_verified: bool = False,
 ) -> list[SignalDraft]:
-    """What every path ends with: the vacancy fence, one stated-volume key per
-    evidence (the largest wins), the B2C negative only without volume, and no
-    non-China origin beside a China word."""
+    """What every path ends with, inside the one evidence: the vacancy fence,
+    one stated-volume key (the largest wins), the B2C negative only without a
+    volume key of its own, and no non-China origin beside a China word. The
+    company's other evidence is the score's to weigh
+    (``scoring.counted_signals``)."""
     if kind == VACANCY_KIND:
         drafts.drop(k for k in VOLUME_KEYS if k != VACANCY_KEY)
     if STATED_3PLUS in drafts.found:
         drafts.drop([STATED_1_3])
     b2c_quote = _first(B2C_RE, own) if kind != VACANCY_KIND else None
-    if (b2c or b2c_quote or small) and not drafts.volume() and not company.holds_volume:
-        drafts.add("neg_b2c_words", quote=b2c_quote or small)
-    elif drafts.volume() or company.holds_volume:
-        drafts.drop(["neg_b2c_words"])
+    if drafts.volume():
+        drafts.drop([NEG_B2C])
+    elif b2c_quote is not None:
+        drafts.add(NEG_B2C, quote=b2c_quote)
+    elif b2c or small:
+        drafts.add(NEG_B2C, quote=small, verified=small_verified)
     if "cn_origin" in drafts.found:
-        drafts.drop(["neg_non_cn_origin"])
+        drafts.drop([NEG_NON_CN])
     return drafts.result()
 
 
@@ -519,7 +588,7 @@ def from_rules(
     trading, own = _texts(parsed)
     excerpt = _str(_section(parsed, "text").get("excerpt"))
     types, attrs, volume = _hints(parsed)
-    drafts = _Drafts(_base(evidence, parsed))
+    drafts = _Drafts(_base(evidence, parsed), excerpt)
     small: str | None = None
 
     if not vacancy:
@@ -544,7 +613,7 @@ def from_rules(
     if (china := _first(CHINA_RE, own)) is not None:
         drafts.add("cn_origin", quote=china)
     elif (other := _first(NON_CN_ORIGIN_RE, own)) is not None:
-        drafts.add("neg_non_cn_origin", quote=other)
+        drafts.add(NEG_NON_CN, quote=other)
     if (
         kind in SELF_DESCRIPTION_KINDS
         and (state := _first(STATE_BODY_RE, own)) is not None
@@ -561,7 +630,7 @@ def from_rules(
         excerpt=excerpt,
         vacancy=vacancy,
     )
-    return _finish(drafts, own=own, kind=kind, company=company, small=small, b2c=False)
+    return _finish(drafts, own=own, kind=kind, small=small, b2c=False)
 
 
 def from_model(
@@ -580,7 +649,10 @@ def from_model(
     carries ``model`` and ``model_job_id``."""
     kind = _str(parsed.get("kind"))
     _, own = _texts(parsed)
-    drafts = _Drafts(_base(evidence, parsed, model=model, model_job_id=model_job_id))
+    excerpt = _str(_section(parsed, "text").get("excerpt"))
+    drafts = _Drafts(
+        _base(evidence, parsed, model=model, model_job_id=model_job_id), excerpt
+    )
     small: str | None = None
     basis = signal.get("volume_basis")
     raw = signal.get("volume_m3_est")
@@ -597,13 +669,13 @@ def from_model(
             reading = volume_reading(quote)
             m3 = reading.m3 if reading is not None else None
         elif basis in ("container", "truck"):
-            drafts.add("vol_container", value=estimate, quote=quote)
+            drafts.add("vol_container", value=estimate, quote=quote, verified=True)
         if m3 is not None:
             key = stated_key(m3)
             if key is None:
                 small = quote
             else:
-                drafts.add(key, value=m3, quote=quote)
+                drafts.add(key, value=m3, quote=quote, verified=True)
     goods = signal.get("goods_category")
     if goods in BULKY:
         drafts.add("cn_sector_prior")
@@ -611,14 +683,15 @@ def from_model(
         if signal.get("b2b") is True and marker is not None:
             drafts.add("vol_wholesale_bulky", quote=marker)
     if signal.get("origin_cn") == "other_origin" and _first(CHINA_RE, own) is None:
-        drafts.add("neg_non_cn_origin", quote=_first(NON_CN_ORIGIN_RE, own))
+        # The model judged the origin; the quote is the country it names.
+        drafts.add(NEG_NON_CN, quote=_first(NON_CN_COUNTRY_RE, own))
     return _finish(
         drafts,
         own=own,
         kind=kind,
-        company=company,
         small=small,
         b2c=signal.get("b2c_markers") is True,
+        small_verified=True,
     )
 
 
@@ -626,18 +699,9 @@ def from_model(
 
 
 async def company_facts(session: AsyncSession, company: Company) -> CompanyFacts:
-    """The rules' view of ``company``: its sectors and whether any volume
-    signal stands for it."""
-    holds = await session.scalar(
-        sa.select(
-            sa.exists().where(
-                Signal.company_id == company.id, Signal.key.in_(VOLUME_KEYS)
-            )
-        )
-    )
-    return CompanyFacts(
-        sectors=frozenset(company.sectors or ()), holds_volume=bool(holds)
-    )
+    """The rules' view of ``company``: its sectors. (Async for its callers:
+    the resolver's hook and enrichment read it inside their transaction.)"""
+    return CompanyFacts(sectors=frozenset(company.sectors or ()))
 
 
 def expires_at(draft: SignalDraft, weights: WeightSet) -> datetime | None:
@@ -650,8 +714,11 @@ def expires_at(draft: SignalDraft, weights: WeightSet) -> datetime | None:
 
 async def mark_stale(session: AsyncSession, company_id: uuid.UUID) -> None:
     """The company's open candidate is to be scored again (score_job picks a
-    NULL ``last_scored_at``). In the writer's transaction: a score_job holding
-    the row waits, and the mark lands after its score."""
+    NULL ``last_scored_at``). In the writer's transaction, after the writer
+    took the company row (``companies`` before ``lead_candidates``): a
+    score_job scoring that candidate holds the company too, so the writer
+    waits and the mark lands after that score; a score_job that comes later
+    skips the company until the writer commits."""
     await session.execute(
         sa.update(LeadCandidate)
         .where(
@@ -660,6 +727,27 @@ async def mark_stale(session: AsyncSession, company_id: uuid.UUID) -> None:
         )
         .values(last_scored_at=None)
     )
+
+
+_LATER_FIELDS: Final = (
+    "value",
+    "quote",
+    "contact_id",
+    "observation_id",
+    "model",
+    "model_job_id",
+)
+
+
+def _later(held: SignalDraft, new: SignalDraft) -> SignalDraft:
+    """``held`` with ``new``'s fields where ``new`` has them — what ON
+    CONFLICT does to a row a later call writes again."""
+    changes = {
+        name: getattr(new, name)
+        for name in _LATER_FIELDS
+        if getattr(new, name) is not None
+    }
+    return replace(held, **changes)
 
 
 async def emit(
@@ -677,6 +765,14 @@ async def emit(
     and mark the open candidate stale. Returns how many drafts were written."""
     if not drafts:
         return 0
+    # One row per (key, evidence) in the statement — ON CONFLICT cannot touch
+    # a row twice — merged as a later call would merge: the later draft's
+    # value, quote and model where it has them, the first one's otherwise.
+    merged: dict[tuple[str, int], SignalDraft] = {}
+    for d in drafts:
+        held = merged.get((d.key, d.evidence_id))
+        merged[(d.key, d.evidence_id)] = d if held is None else _later(held, d)
+    drafts = list(merged.values())
     rows = [
         {
             "company_id": company_id,

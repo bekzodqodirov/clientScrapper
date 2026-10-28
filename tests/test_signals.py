@@ -11,6 +11,7 @@ data only (07 §1.0).
 from __future__ import annotations
 
 import hashlib
+from dataclasses import fields
 from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any
@@ -107,6 +108,10 @@ def test_9_1_two_cubes_of_cloth_from_guangzhou():
         ("0,5 tonna gazlama", "vol_stated_1_3", "1.5", "0,5 tonna"),
         ("yarim fura mebel kerak", "vol_stated_3plus", "40", "yarim fura"),
         ("полфуры мебели из Китая", "vol_stated_3plus", "40", "полфуры"),
+        # the half truck in Uzbek Cyrillic and with a space is still half
+        ("Хитойдан ярим фура мебел керак", "vol_stated_3plus", "40", "ярим фура"),
+        ("Нужно пол фуры мебели из Китая", "vol_stated_3plus", "40", "пол фуры"),
+        ("пол-фуры обоев", "vol_stated_3plus", "40", "пол-фуры"),
     ],
 )
 def test_rule_1_the_largest_amount_wins(text, key, value, quote):
@@ -118,11 +123,64 @@ def test_rule_1_the_largest_amount_wins(text, key, value, quote):
 
 
 def test_rule_1_reads_the_volume_fragment_too():
+    """The volume fragment counts; its quote is kept only when it is in the
+    excerpt (02 §2.7: a quote is a verbatim substring of evidence.excerpt)."""
     found = rules("Mebel kerak, narxi qancha?", volume_text="5 kub")
     assert (found["vol_stated_3plus"].value, found["vol_stated_3plus"].quote) == (
         Decimal("5"),
-        "5 kub",
+        None,
     )
+    inside = rules("5 kub mebel kerak, narxi qancha?", volume_text="5 kub")
+    assert inside["vol_stated_3plus"].quote == "5 kub"
+
+
+def test_a_quote_is_a_fragment_of_the_excerpt():
+    """A rule that fires on the goods text alone keeps its signal and carries
+    no quote: the card cites the excerpt, and «Xitoydan» is not in it."""
+    found = rules(
+        "Namuna Mebel MChJ, Toshkent, Chilonzor",
+        "directory_entry",
+        goods_text="Ofis mebellari optom, Xitoydan",
+    )
+    assert {k: d.quote for k, d in found.items()} == {
+        "cn_origin": None,
+        "vol_wholesale_bulky": None,
+    }
+    named = rules("Ofis mebellari optom, Xitoydan", "directory_entry", goods_text="mebel")
+    assert {k: d.quote for k, d in named.items()} == {
+        "cn_origin": "Xitoydan",
+        "vol_wholesale_bulky": "optom",
+    }
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Sement optom 1 tonnasi 1 200 000 so'm",
+        "Арматура оптом, цена за 1 тонну",
+        "Shakar 1 tonna narxi kelishilgan",
+        "Ун: за 5 тонн скидка",
+    ],
+)
+def test_rule_1_a_price_per_tonne_is_no_amount(text):
+    """A tonne that prices the goods is a price list, not 3 m³."""
+    assert keys(rules(text, "seller")) & {"vol_stated_3plus", "vol_stated_1_3"} == set()
+
+
+def test_rule_1_tonnes_beside_a_price_are_still_an_amount():
+    found = rules("5 tonna mebel kerak, 2000$ gacha")
+    assert (found["vol_stated_3plus"].value, found["vol_stated_3plus"].quote) == (
+        Decimal("15"),
+        "5 tonna",
+    )
+
+
+def test_rule_1_one_stated_key_per_evidence_whichever_rule_named_it():
+    """Rule 1's ≥ 3 and rule 6's «volume_m3_1to3» on one evidence: the
+    largest wins, so only vol_stated_3plus stays."""
+    found = rules("Guangzhoudan 5 kub mebel", signal_types=["volume_m3_1to3"])
+    assert keys(found) == {"vol_stated_3plus", "cn_origin"}
+    assert found["vol_stated_3plus"].value == Decimal("5")
 
 
 def test_rule_1_under_a_cube_is_no_volume_and_feeds_the_b2c_negative():
@@ -146,6 +204,30 @@ def test_rule_1_under_a_cube_is_no_volume_and_feeds_the_b2c_negative():
 def test_rule_2_a_container_or_truck_word(text, quote):
     found = rules(text)
     assert found["vol_container"].quote == quote
+
+
+@pytest.mark.parametrize(
+    ("text", "quote"),
+    [
+        ("full truck kerak Xitoydan", "full truck"),
+        ("FTL Guangzhou — Toshkent", "FTL"),
+        ("konteynerda uy jihozlari olib kelamiz", "konteynerda"),
+    ],
+)
+def test_rule_2_full_truck_and_household_goods_in_a_container(text, quote):
+    assert rules(text)["vol_container"].quote == quote
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Konteyner uy (bitovka) sotiladi",
+        "Продаётся контейнер дом, 6 м",
+        "Kontayner bitovka ijaraga",
+    ],
+)
+def test_rule_2_a_container_sold_as_a_cabin_is_goods(text):
+    assert "vol_container" not in rules(text, "listing")
 
 
 @pytest.mark.parametrize(
@@ -259,6 +341,9 @@ def test_rule_3_goods_origin_and_b2c_from_the_model():
     bulky = model("optom mebel bor", quote=None, goods_category="furniture")
     assert keys(bulky) == {"cn_sector_prior", "vol_wholesale_bulky"}
     assert bulky["vol_wholesale_bulky"].quote == "optom"
+    # the marker alone is not the model's word that the speaker trades
+    retail = model("optom mebel bor", quote=None, goods_category="furniture", b2b=False)
+    assert keys(retail) == {"cn_sector_prior"}
     assert keys(model("optom pomada", quote=None, goods_category="cosmetics")) == set()
     other = model("mato kerak", quote=None, origin_cn="other_origin")
     assert keys(other) == {"neg_non_cn_origin"}
@@ -476,13 +561,21 @@ def test_no_b2c_negative_beside_a_volume_signal():
     assert keys(found) == {"vol_stated_3plus"}
 
 
-def test_no_b2c_negative_while_the_company_holds_volume():
-    facts = CompanyFacts(holds_volume=True)
-    assert keys(rules("o'zim uchun 1 dona kerak", facts=facts)) == set()
-    assert (
-        keys(rules("Namuna", "directory_entry", facts, signal_types=["b2c_marker"]))
-        == set()
-    )
+def test_the_b2c_negative_is_a_fact_of_its_evidence_alone():
+    """Whatever the company holds, a «o'zim uchun» post is drafted as such;
+    the score drops it beside a volume signal (scoring.counted_signals), so
+    the order two posts arrive in changes nothing."""
+    assert "holds_volume" not in {f.name for f in fields(CompanyFacts)}
+    found = rules("o'zim uchun 1 dona kerak", facts=CompanyFacts(frozenset({"textile"})))
+    assert keys(found) == {"neg_b2c_words"}
+    typed = rules("Namuna", "directory_entry", signal_types=["b2c_marker"])
+    assert keys(typed) == {"neg_b2c_words"}
+
+
+def test_a_vacancy_s_retail_duty_is_not_a_b2c_buyer():
+    found = rules("Продавец-консультант, продажи в розницу и оптом", "vacancy")
+    assert "neg_b2c_words" not in found
+    assert "neg_b2c_words" in rules("Продажи в розницу", "profile")
 
 
 def test_another_origin_without_a_china_word():
@@ -491,12 +584,44 @@ def test_another_origin_without_a_china_word():
     assert found["neg_non_cn_origin"].quote == "Turkiyadan"
     both = rules("Turkiyadan va Xitoydan mato", "profile")
     assert keys(both) == {"cn_origin"}
+    russian = rules("Мебель из Турции, производство: Турция", "profile")
+    assert russian["neg_non_cn_origin"].quote == "из Турции"
+
+
+@pytest.mark.parametrize(
+    ("text", "kind"),
+    [
+        ("Optom mebel. Rossiyaga ham yetkazib beramiz", "profile"),
+        ("Оптом мебель, доставка по Узбекистану и России", "profile"),
+        ("Менеджер по продажам, работа с Россией", "vacancy"),
+        ("Turkiyaga eksport qilamiz", "profile"),
+    ],
+)
+def test_a_destination_is_not_an_origin(text, kind):
+    """04 §5.1 «named as origin»: a country we deliver to is no origin."""
+    assert "neg_non_cn_origin" not in rules(text, kind)
 
 
 def test_a_state_word_in_a_self_description_only():
     found = rules("Toshkent shahar hokimligi xo'jalik bo'limi", "profile")
     assert found["neg_state_body"].quote == "hokimligi"
     assert "neg_state_body" not in rules("maktab uchun mebel kerak, 5 kub")
+    # a seller's own listing is a self-description
+    listing = rules("Davlat korxonasi: ofis stollari sotiladi", "listing")
+    assert listing["neg_state_body"].quote == "Davlat"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Davlat ro'yxatidan o'tkazilgan sana: 2019-03-01",
+        "Давлат рўйхатидан ўтказилган: 12.05.2017",
+        "Maktablar uchun mebel optom, Xitoydan",
+        "Shifoxonalar uchun tibbiy uskunalar optom",
+    ],
+)
+def test_state_registration_and_a_state_customer_are_not_a_state_body(text):
+    assert "neg_state_body" not in rules(text, "profile")
 
 
 def test_a_quote_is_clipped_to_the_column():
@@ -605,18 +730,44 @@ async def test_emit_moves_last_signal_at_forward_only_and_marks_the_candidate(se
     assert await signals.emit(session, firm.id, [], weights=scoring.weights_v1()) == 0
 
 
-async def test_company_facts_reads_sectors_and_standing_volume(session):
-    firm, evidence = await _company_and_evidence(session)
+async def test_company_facts_reads_sectors(session):
+    firm, _ = await _company_and_evidence(session)
     firm.sectors = ["furniture"]
     await session.flush()
     assert await signals.company_facts(session, firm) == CompanyFacts(
-        sectors=frozenset({"furniture"}), holds_volume=False
+        sectors=frozenset({"furniture"})
     )
+
+
+async def test_emit_takes_two_drafts_of_one_key_in_one_call(session):
+    """The rules' and the model's drafts of 04 §9.1 in one call: one row per
+    (key, evidence), the later draft's value, quote and model where it has
+    them — as two calls would leave it."""
+    firm, evidence = await _company_and_evidence(session)
     ref = EvidenceRef(id=evidence.id, source_key="telegram_monitor", fetched_at=NOW)
-    await signals.emit(
-        session,
-        firm.id,
-        signals.from_rules(ref, parsed("1 konteyner"), NO_FACTS),
-        weights=scoring.weights_v1(),
+    body = parsed("Guangzhoudan 2 kub mato kerak")
+    rule = signals.from_rules(ref, body, NO_FACTS)
+    learnt = signals.from_model(
+        ref,
+        body,
+        {"volume_basis": "stated", "volume_m3_est": 2, "goods_category": "textile"},
+        quote="2 kub mato",
+        company=NO_FACTS,
+        model="model-x",
     )
-    assert (await signals.company_facts(session, firm)).holds_volume is True
+    written = await signals.emit(
+        session, firm.id, [*rule, *learnt], weights=scoring.weights_v1()
+    )
+    assert written == 3
+    rows = (
+        await session.execute(
+            sa.select(Signal.key, Signal.quote, Signal.model)
+            .where(Signal.company_id == firm.id)
+            .order_by(Signal.key)
+        )
+    ).all()
+    assert [tuple(r) for r in rows] == [
+        ("cn_origin", "Guangzhoudan", None),
+        ("cn_sector_prior", None, "model-x"),
+        ("vol_stated_1_3", "2 kub mato", "model-x"),
+    ]

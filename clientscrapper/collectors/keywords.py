@@ -153,6 +153,9 @@ CHINA_WORDS = (
 # Turkiya|Турция|Koreya|Корея|Yevropa|Европа|Eron|Иран»), plus the Uzbek
 # Cyrillic «Туркия», «Эрон» and the genitive «Ирана», which a four-letter word
 # does not grow by itself (INFLECT_MIN / RU_INFLECT_MIN below). Not 03 §1.4's.
+# These are the country WORDS (NON_CN_COUNTRY_RE, the quote of a model's
+# ``origin_cn='other_origin'``); the rule itself reads only a country named as
+# the origin (NON_CN_ORIGIN_RE below).
 NON_CN_ORIGIN_WORDS = (
     "Rossiya",
     "Россия",
@@ -489,11 +492,17 @@ VOLUME_RE = re.compile(
 )
 # Container / truck / batch words (no number needed), with their Uzbek suffixes
 # («konteynerda», «furaga», «партияси») and Russian case endings («контейнера»,
-# «фуру», «партии»): 03 §1.4's bare words missed the inflected forms.
+# «фуру», «партии»): 03 §1.4's bare words missed the inflected forms. A half
+# truck is written in all three scripts — «yarim fura», «ярим фура», «полфуры»
+# or «пол фуры» — and is matched whole, so its «fura» is never read as a full
+# one (04 §5.3 rule 1 counts it as ≈ 40 m³). «full truck» and «FTL» are 04
+# §5.1's container/truck words (not in 03 §1.4).
 CONTAINER_RE = re.compile(
     rf"(?<!\w)(?:(?:konteyner|kontayner|yarim\s*fura|fura|tonna|partiya){_UZ_LATN}"
-    rf"|(?:контейнер|фура|тонна|партия){_UZ_CYRL}"
-    rf"|(?:контейнер|фур|тонн){_RU_NOUN}|парти(?:ями|ях|ям|ей|я|и|ю|й)|полфуры"
+    rf"|(?:контейнер|ярим\s*фура|фура|тонна|партия){_UZ_CYRL}"
+    rf"|(?:контейнер|фур|тонн){_RU_NOUN}|парти(?:ями|ях|ям|ей|я|и|ю|й)"
+    rf"|пол\s*-?\s*фур(?:ы|у|ой|е)"
+    r"|full\s*truck(?:load)?s?|FTL"
     rf"|20\s*(?:ft|fut|фут|{_A})|40\s*(?:ft|fut|фут|{_A}))(?!\w)",
     re.I,
 )
@@ -579,12 +588,19 @@ VACANCY_IMPORT_RE = re.compile(
 # hokimiyat|hokimligi|agentlig|maktab|shifoxona|поликлиник|МВД|IIB»), the
 # stems with their endings («hokimligi», «Министерство», «поликлиника») and the
 # Uzbek Cyrillic spellings (with ҳ and with х). Gate 7 reads it on the name; a
-# word in the text only is the −20 negative, never an exclusion (04 §6).
+# word in the text only is the −20 negative, never an exclusion (04 §6). Two
+# readings are not a state body: «davlat roʻyxatidan oʻtkazilgan» (state
+# registration — every registry page says it of a private firm) and a state
+# body named as the customer («maktablar uchun», «shifoxonalar uchun»: for
+# schools, for hospitals — a supplier, not the body).
+_NOT_STATE_BODY = (
+    rf"(?!\s+(?:ro{_A}?y?xat\w*|рўйхат\w*|руйхат\w*)|\s+(?:uchun|учун)(?!\w))"
+)
 STATE_BODY_RE = re.compile(
     r"(?<!\w)(?:davlat\w*|давлат\w*|ГУП|ДУК|министер\w*|vazirlig\w*|вазирлиг\w*|"
     r"hokimiyat\w*|hokimlig\w*|[ҳх]окимият\w*|[ҳх]окимлиг\w*|agentlig\w*|"
     r"агентлиг\w*|maktab\w*|мактаб\w*|shifoxona\w*|шифохона\w*|поликлиник\w*|"
-    r"МВД|IIB|ИИБ)(?!\w)",
+    rf"МВД|IIB|ИИБ)(?!\w){_NOT_STATE_BODY}",
     re.I,
 )
 # A price in a message (03 §2.3 tout filter): 03's ``\d{2,}\s*(?:so'm|сум|\$|usd|
@@ -688,7 +704,25 @@ def terms_re(terms: Iterable[str], *, inflect: bool = True) -> re.Pattern[str]:
 
 B2B_RE = terms_re(chain.from_iterable(B2B_MARKERS.values()))
 CHINA_RE = terms_re(CHINA_WORDS)
-NON_CN_ORIGIN_RE = terms_re(NON_CN_ORIGIN_WORDS)
+NON_CN_COUNTRY_RE = terms_re(NON_CN_ORIGIN_WORDS)
+# 04 §5.1 «named as origin»: a country is an origin only in an origin form —
+# the Uzbek ablative («Turkiyadan», «Кореядан»), «X ishlab chiqarish / X
+# mahsuloti» (made in X), the Russian «из …», «производства …» /
+# «производство: …». A destination («Rossiyaga ham yetkazib beramiz», «по
+# России») and a mention («работа с Россией») are not an origin.
+_ORIGIN_LATN = "(?:Rossiya|Turkiya|Koreya|Yevropa|Eron)"
+_ORIGIN_CYRL = "(?:Россия|Туркия|Корея|Европа|Эрон)"
+_ORIGIN_RU_GEN = r"(?:Южной\s+)?(?:России|Турции|Кореи|Европы|Ирана)"
+_ORIGIN_RU_NOM = r"(?:Южная\s+)?(?:Россия|Турция|Корея|Европа|Иран)"
+NON_CN_ORIGIN_RE = re.compile(
+    rf"(?<!\w)(?:{_ORIGIN_LATN}dan{_UZ_LATN}"
+    rf"|{_ORIGIN_LATN}(?:da)?\s+(?:ishlab\s+chiqar\w*|mahsulot\w*)"
+    rf"|{_ORIGIN_CYRL}дан{_UZ_CYRL}"
+    rf"|{_ORIGIN_CYRL}(?:да)?\s+(?:ишлаб\s+чи[қк]ар\w*|ма[ҳх]сулот\w*)"
+    rf"|(?:из|производств[аоу]?|производител[ья])\s+{_ORIGIN_RU_GEN}"
+    rf"|производств[оа]\s*[:\-–—]\s*{_ORIGIN_RU_NOM})(?!\w)",
+    re.I,
+)
 COMPANION_RE = terms_re(COMPANION_WORDS)
 GEO_RE = terms_re(GEO)
 CITY_RES: dict[str, re.Pattern[str]] = {city: terms_re(t) for city, t in GEO_CITY.items()}

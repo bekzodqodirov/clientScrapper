@@ -110,12 +110,16 @@ CASES: dict[str, tuple[re.Pattern[str], Extract, Cases]] = {
                     ("furaga yuk kerak", "furaga"),
                     ("2 ta konteynerlarimiz bor", "konteynerlarimiz"),
                     ("tonnadan sotamiz", "tonnadan"),
+                    # 04 §5.1's truck words beyond 03 §1.4 (T-18 review)
+                    ("full truck kerak", "full truck"),
+                    ("FTL yuk Xitoydan", "FTL"),
                 ],
                 [
                     "kontakt raqam",
                     "furgon xizmati",
                     "tonnel qurilishi",
                     "partiyaviy ish",
+                    "full stack dasturchi",
                 ],
             ),
             "uz-Cyrl": (
@@ -127,6 +131,9 @@ CASES: dict[str, tuple[re.Pattern[str], Extract, Cases]] = {
                     ("контейнерда келади", "контейнерда"),
                     ("фурага юк", "фурага"),
                     ("партияси тайёр", "партияси"),
+                    # the half truck whole, never its «фура» alone (T-18 review)
+                    ("Хитойдан ярим фура мебел", "ярим фура"),
+                    ("ярим фурага юк", "ярим фурага"),
                 ],
                 ["фургон хизмати", "тоннел", "контакт рақам"],
             ),
@@ -142,8 +149,10 @@ CASES: dict[str, tuple[re.Pattern[str], Extract, Cases]] = {
                     ("5 фур в месяц", "фур"),
                     ("10 тонн груза", "тонн"),
                     ("новые партии", "партии"),
+                    ("Нужно пол фуры мебели", "пол фуры"),
+                    ("пол-фуры обоев", "пол-фуры"),
                 ],
-                ["фургон", "тоннель", "партийный билет", "фурнитура"],
+                ["фургон", "тоннель", "партийный билет", "фурнитура", "пол фурнитуры"],
             ),
         },
     ),
@@ -639,29 +648,78 @@ CASES: dict[str, tuple[re.Pattern[str], Extract, Cases]] = {
         kw.NON_CN_ORIGIN_RE,
         _whole,
         {
+            # only a country named as the origin (04 §5.1); a destination or
+            # a mention is not one (T-18 review)
             "uz-Latn": (
                 [
                     ("Turkiyadan mato keldi", "Turkiyadan"),
-                    ("Koreya kosmetikasi", "Koreya"),
-                    ("Yevropa sifati", "Yevropa"),
+                    ("Yevropadan uskunalar", "Yevropadan"),
                     ("Erondan kafel", "Erondan"),
+                    ("Koreya mahsuloti", "Koreya mahsuloti"),
+                    ("Turkiya ishlab chiqarishi", "Turkiya ishlab chiqarishi"),
                 ],
-                ["Xitoydan mato", "evro remont", "turkcha"],
+                [
+                    "Xitoydan mato",
+                    "evro remont",
+                    "turkcha",
+                    "Rossiyaga ham yetkazib beramiz",
+                    "Turkiyada filialimiz bor",
+                ],
             ),
             "uz-Cyrl": (
                 [
                     ("Туркиядан мато", "Туркиядан"),
                     ("Россиядан юк", "Россиядан"),
                     ("Эрондан кафел", "Эрондан"),
+                    ("Корея маҳсулоти", "Корея маҳсулоти"),
+                ],
+                ["Тошкентдан", "евро ремонт", "туркча", "Россияга етказамиз"],
+            ),
+            "ru": (
+                [
+                    ("ткани из Турции", "из Турции"),
+                    ("товары из России", "из России"),
+                    ("плитка из Ирана", "из Ирана"),
+                    ("косметика из Южной Кореи", "из Южной Кореи"),
+                    ("Производство: Турция", "Производство: Турция"),
+                    ("мебель производства Европы", "производства Европы"),
+                ],
+                [
+                    "из Китая",
+                    "евроремонт",
+                    "турецкий",
+                    "доставка по Узбекистану и России",
+                    "работа с Россией",
+                ],
+            ),
+        },
+    ),
+    # The country words alone: the quote of a model's other_origin verdict.
+    "NON_CN_COUNTRY_RE": (
+        kw.NON_CN_COUNTRY_RE,
+        _whole,
+        {
+            "uz-Latn": (
+                [
+                    ("Koreya kosmetikasi", "Koreya"),
+                    ("Rossiyaga yetkazamiz", "Rossiyaga"),
+                    ("Turkiyadan", "Turkiyadan"),
+                ],
+                ["Xitoydan mato", "evro remont", "turkcha"],
+            ),
+            "uz-Cyrl": (
+                [
+                    ("Туркиядан мато", "Туркиядан"),
+                    ("Эрон гиламлари", "Эрон"),
+                    ("Корея", "Корея"),
                 ],
                 ["Тошкентдан", "евро ремонт", "туркча"],
             ),
             "ru": (
                 [
                     ("ткани из Турции", "Турции"),
-                    ("товары из России", "России"),
+                    ("доставка по России", "России"),
                     ("плитка из Ирана", "Ирана"),
-                    ("косметика из Кореи", "Кореи"),
                 ],
                 ["из Китая", "евроремонт", "турецкий"],
             ),
@@ -745,7 +803,15 @@ CASES: dict[str, tuple[re.Pattern[str], Extract, Cases]] = {
                     ("5-maktab", "maktab"),
                     ("Sog'liqni saqlash vazirligi", "vazirligi"),
                 ],
-                ["savdo markazi", "hokim aka", "agent", "davomat"],
+                [
+                    "savdo markazi",
+                    "hokim aka",
+                    "agent",
+                    "davomat",
+                    # state registration, a state body as the customer (T-18 review)
+                    "Davlat ro'yxatidan o'tkazilgan sana",
+                    "Maktablar uchun mebel",
+                ],
             ),
             "uz-Cyrl": (
                 [
@@ -754,7 +820,14 @@ CASES: dict[str, tuple[re.Pattern[str], Extract, Cases]] = {
                     ("12-мактаб", "мактаб"),
                     ("ИИБ ходими", "ИИБ"),
                 ],
-                ["савдо маркази", "агент", "давомат", "дукон"],
+                [
+                    "савдо маркази",
+                    "агент",
+                    "давомат",
+                    "дукон",
+                    "Давлат рўйхатидан ўтказилган",
+                    "Шифохоналар учун ускуналар",
+                ],
             ),
             "ru": (
                 [

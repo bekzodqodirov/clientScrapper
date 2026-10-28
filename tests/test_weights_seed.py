@@ -224,6 +224,15 @@ def test_a_zero_weight_stays_zero_and_signs_stay():
     )
 
 
+@pytest.mark.parametrize(("points", "ok"), [(40, True), (41, False), (0, False)])
+def test_a_positive_key_is_worth_more_than_nothing_and_at_most_its_cap(points, ok):
+    """vol_container's cap is the volume group's 40: 41 could never count in
+    full, and 0 is no positive key."""
+    candidate = _with("vol_container", points=points)
+    problems = scoring.validate_version(candidate, previous=V1, proposed_by="owner:1001")
+    assert problems == ([] if ok else ["points:vol_container"])
+
+
 def test_caps_must_agree_and_sum_to_a_hundred():
     split = _with("vol_container", cap=30)
     problems = scoring.validate_version(split, previous=V1, proposed_by="owner:1001")

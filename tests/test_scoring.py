@@ -282,12 +282,12 @@ def test_negatives_decay_like_positives():
     result = run(
         [
             sig(1, "vol_container"),
-            sig(2, "cn_origin"),
+            sig(2, "cn_sector_prior"),
             sig(3, "neg_non_cn_origin", age=timedelta(days=366)),
         ]
     )
-    # 40 + 20 + recency 10 − 20 × 0.5
-    assert result.total == 60
+    # 40 + 10 + recency 10 − 20 × 0.5 (no cn_origin, so the negative counts)
+    assert result.total == 50
     assert result.breakdown["negatives"][0]["points"] == -10
 
 
@@ -334,9 +334,68 @@ def test_a_key_counts_once_its_best_signal():
 def test_a_negative_key_counts_once_its_heaviest():
     old = sig(1, "neg_b2c_words", age=timedelta(days=200), evidence=1)
     new = sig(2, "neg_b2c_words", evidence=2)
-    result = run([sig(3, "vol_container"), old, new])
+    result = run([sig(3, "cn_origin"), old, new])
     [entry] = result.breakdown["negatives"]
     assert (entry["signal_id"], entry["points"]) == (2, -40)
+
+
+# --- what the company's other signals overrule (04 §5.1, §5.3 rule 1) ----------------
+
+B2C_POST = sig(11, "neg_b2c_words", evidence=1)
+VOLUME_POST = sig(12, "vol_stated_1_3", evidence=2, value="2")
+CHINA = sig(13, "cn_origin", evidence=2)
+
+
+@pytest.mark.parametrize(
+    "order",
+    [(B2C_POST, VOLUME_POST, CHINA), (CHINA, VOLUME_POST, B2C_POST)],
+    ids=["b2c_first", "volume_first"],
+)
+def test_a_b2c_negative_does_not_count_beside_a_volume_signal(order):
+    """«B2C words and no volume signal ≥ 1 m³»: a «bitta, o'zim uchun» post
+    and a «2 kub mato» post of one buyer score the same in either order."""
+    result = run(order, [POSTER])
+    assert (result.total, result.breakdown["negatives"]) == (52, [])
+
+
+def test_a_b2c_negative_counts_without_a_volume_signal():
+    result = run([B2C_POST, CHINA], [POSTER])
+    # origin 20 + recency 10 + contact 2 − 40, clamped
+    assert result.total == 0
+    assert [n["key"] for n in result.breakdown["negatives"]] == ["neg_b2c_words"]
+
+
+def test_a_non_china_origin_does_not_count_beside_a_china_word():
+    """«named as origin and no China word»: another evidence's cn_origin
+    overrules it; without one it costs 20."""
+    other = sig(14, "neg_non_cn_origin", evidence=3)
+    beside = run([sig(15, "vol_stated_3plus", evidence=2), CHINA, other])
+    alone = run([sig(15, "vol_stated_3plus", evidence=2), other])
+    # 30 + 20 + recency 10; then 30 + recency 10 − 20
+    assert (beside.total, beside.breakdown["negatives"]) == (60, [])
+    assert alone.total == 20
+
+
+def test_one_stated_amount_per_evidence_the_larger():
+    """Rule 1 «the largest number wins per evidence», whichever writer stored
+    which: «2-3 kub» read as 3 by the regex and as 2.5 by the model is one
+    amount, ≥ 3 — not 30 + 20."""
+    rule = sig(21, "vol_stated_3plus", evidence=5, value="3")
+    model = sig(22, "vol_stated_1_3", evidence=5, value="2.5")
+    other = sig(23, "vol_stated_1_3", evidence=6, value="2")
+    one = run([rule, model])
+    assert [s["key"] for s in one.breakdown["groups"]["volume"]["signals"]] == [
+        "vol_stated_3plus"
+    ]
+    assert one.breakdown["groups"]["volume"]["raw"] == 30
+    # a 1–3 m³ amount on another evidence is another statement and counts
+    two = run([rule, model, other])
+    assert two.breakdown["groups"]["volume"]["raw"] == 50
+    entries = two.breakdown["groups"]["volume"]["signals"]
+    assert [(s["key"], s["evidence_id"]) for s in entries] == [
+        ("vol_stated_1_3", 6),
+        ("vol_stated_3plus", 5),
+    ]
 
 
 # --- recency --------------------------------------------------------------------------

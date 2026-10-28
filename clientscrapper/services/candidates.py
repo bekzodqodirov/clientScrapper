@@ -14,14 +14,21 @@ Producers built here:
   ``companies.register_after_resolve`` when this module is imported): the
   observation's rule signals (``services/signals``) and, when the company has
   no open candidate and 02 §2.9's re-opening rule allows one, a ``found``
-  candidate attributed to the observation's source;
+  candidate — attributed to the observation's source when the observation
+  brought a volume or origin signal; else ``primary_source_key`` stays NULL
+  until the first score names the source whose signal it scored on
+  (``_attribute``: 02 §2.9 «the source whose signal created the candidate»);
 * ``score_job`` (04 §0: on ``NOTIFY cs_interaction``, sweep every 15 min):
   each open candidate marked stale (``last_scored_at`` NULL — set by every
-  signal written and every resolution — or older than the company's newest
-  signal) is scored and routed by its tier: ``found``/``scored`` → ``review``
-  (hot; ``approved(auto:<source>)`` when the source pushes itself),
-  ``enriching`` (warm, ``next_enrich_at`` in one hour) or ``hold`` (cold). A
-  ``found`` candidate waits for a volume signal (02 §2.9). The gates
+  signal written, every resolution and every merge — or older than the
+  company's newest signal, or a hold whose ``hold_until`` ran out since its
+  last score) is scored and routed by its tier: ``found``/``scored`` →
+  ``review`` (hot; ``approved(auto:<source>)`` when the source pushes
+  itself), ``enriching`` (warm, ``next_enrich_at`` in one hour) or ``hold``
+  (cold). A ``found`` candidate waits for a volume signal (02 §2.9). A
+  ``review`` row stays the owner's — unless it lost its usable phone and is
+  not the phone-less handoff (06 §1.3: such a card is refused), then it steps
+  back to ``hold`` until a phone or a signal re-scores it. The gates
   (``services/gates``, T-19) step in before the routing;
 * ``phone_less_review`` — 02 §2.9's ``enriching → review`` for a candidate
   that kept no phone after the third enrichment attempt but scores ≥ 60 and
@@ -30,6 +37,15 @@ Producers built here:
 * ``manager_phone_rescore`` — a manager's ``/tel`` phone: ``hold → scored →
   approved(approved_by='manager:<tg_id>')`` (06 §1.7; the owner's earlier
   ``handoff`` answer was the owner's approval).
+
+**Lock order: ``companies`` before ``lead_candidates``.** The resolver (its
+updates of the company, then ``signals.emit`` → ``mark_stale``), ``emit`` and
+``companies.merge_into`` all take them in that order. ``score_job`` claims the
+candidate and its company in one ``FOR NO KEY UPDATE … SKIP LOCKED`` (a
+company a writer holds is skipped, and re-marked stale by that writer), so it
+never waits on either; ``rescore`` takes the company before it writes, so a
+caller that has not locked the candidate first (T-24, the bot) keeps the
+order too.
 """
 
 from __future__ import annotations
@@ -51,6 +67,7 @@ from clientscrapper.db import enums as e
 from clientscrapper.db.enums import sql_list
 from clientscrapper.db.models import (
     Company,
+    Contact,
     LeadCandidate,
     Observation,
     Outcome,
@@ -93,6 +110,11 @@ REOPEN_AFTER_REJECT: Final = timedelta(days=180)
 FLAGGED_EXCLUSIONS: Final = frozenset({"competitor", "supplier_cn", "liquidated"})
 SCORE_LIMIT: Final = 200
 RESCORE_STATES: Final = signals.RESCORE_STATES
+# The groups whose signal attributes a candidate to its source (02 §2.9
+# ``primary_source_key``): what makes a lead, not a negative or a solidity row.
+ATTRIBUTING_KEYS: Final = frozenset(
+    w.key for w in e.WEIGHTS_V1 if w.group_key in scoring.CORROBORATION_GROUPS
+)
 
 
 class IllegalTransition(Exception):
@@ -179,6 +201,10 @@ class RouteFacts:
     auto_push: bool = False
     hold_until: datetime | None = None
     enrich_attempts: int = 0
+    # The fresh score's usable phone, and the phone-less handoff flag
+    # (``score_breakdown.gates.no_phone``) the row carries.
+    usable_phone: bool = True
+    no_phone: bool = False
 
 
 def route(state: str, tier: Tier, facts: RouteFacts, *, now: datetime) -> tuple[str, ...]:
@@ -191,7 +217,9 @@ def route(state: str, tier: Tier, facts: RouteFacts, *, now: datetime) -> tuple[
       clock runs on);
     * ``hold``: a hold that has not run out stays (a cooldown, a handoff);
       else hot → review, warm → enriching while attempts are left; cold stays;
-    * ``review``: stays — the owner answers it."""
+    * ``review``: stays — the owner answers it — unless it has no usable phone
+      and is not the phone-less handoff: then ``hold`` (06 §1.3 refuses a
+      review card with neither)."""
     hot_to = "approved" if facts.auto_push else "review"
     if state in ("found", "scored"):
         to = {"hot": hot_to, "warm": "enriching", "cold": "hold"}[tier]
@@ -206,6 +234,8 @@ def route(state: str, tier: Tier, facts: RouteFacts, *, now: datetime) -> tuple[
         if tier == "warm" and facts.enrich_attempts < MAX_ENRICH_ATTEMPTS:
             return ("scored", "enriching")
         return ()
+    if state == "review" and not facts.usable_phone and not facts.no_phone:
+        return ("hold",)
     return ()
 
 
@@ -308,14 +338,15 @@ async def ensure_found(
     session: AsyncSession,
     company: Company,
     *,
-    source_key: str,
+    source_key: str | None,
     contact_id: uuid.UUID | None,
     now: datetime,
 ) -> LeadCandidate | None:
     """The company's open candidate, or a new ``found`` one attributed to
-    ``source_key`` (``primary_source_key``, the precision attribution) when
-    02 §2.9 allows one; None when it does not. A concurrent resolution that
-    made the same candidate first wins (ON CONFLICT on the open index)."""
+    ``source_key`` (``primary_source_key``, the precision attribution; None
+    = not yet known, ``_attribute`` names it at the first score) when 02 §2.9
+    allows one; None when it does not. A concurrent resolution that made the
+    same candidate first wins (ON CONFLICT on the open index)."""
     held = await open_candidate(session, company.id)
     if held is not None:
         return held
@@ -390,8 +421,13 @@ async def after_resolve(
     weights = await scoring.load_weights(session)
     await signals.emit(session, company.id, drafts, weights=weights)
     await session.refresh(company, ["last_signal_at"])
+    attributing = any(d.key in ATTRIBUTING_KEYS for d in drafts)
     await ensure_found(
-        session, company, source_key=obs.source_key, contact_id=contact_id, now=now
+        session,
+        company,
+        source_key=obs.source_key if attributing else None,
+        contact_id=contact_id,
+        now=now,
     )
     await signals.mark_stale(session, company.id)
 
@@ -406,7 +442,11 @@ def _carried(
     previous: Mapping[str, Any] | None, breakdown: dict[str, Any]
 ) -> dict[str, Any]:
     """A re-score keeps what other writers put in the breakdown: the gates'
-    verdicts (T-19, incl. ``gates.no_phone``) and the enrichment trail (T-24)."""
+    verdicts (T-19, incl. ``gates.no_phone``) and the enrichment trail (T-24).
+    ``gates.no_phone`` is the phone-less handoff's mark and holds only while
+    there is no usable phone: a score that finds one drops it (the card is
+    the ordinary one again, 06 §1.3; a manager's approval is recorded by
+    ``approved_by='manager:<tg_id>'``)."""
     merged = dict(breakdown)
     if previous:
         gates = previous.get("gates")
@@ -415,7 +455,44 @@ def _carried(
             merged["gates"] = {**dict(gates), **merged["gates"]}
         if isinstance(enrichment, list):
             merged["enrichment"] = list(enrichment)
+    if merged.get("usable_phone") is True and "no_phone" in merged["gates"]:
+        merged["gates"] = {k: v for k, v in merged["gates"].items() if k != "no_phone"}
     return merged
+
+
+def _handoff(breakdown: Mapping[str, Any] | None) -> bool:
+    """``score_breakdown.gates.no_phone`` is set (the phone-less handoff)."""
+    gates = (breakdown or {}).get("gates")
+    return isinstance(gates, Mapping) and gates.get("no_phone") is True
+
+
+async def _attribute(session: AsyncSession, candidate: LeadCandidate) -> None:
+    """Name the candidate's source when its creation could not (02 §2.9
+    «the source whose signal created the candidate»): the source of the
+    company's first volume or origin signal written since the candidate was
+    made — the signal a ``found`` row is first scored on — or, for a row
+    older than every signal, the first one at all."""
+    if candidate.primary_source_key is not None:
+        return
+    base = (
+        sa.select(Signal.source_key)
+        .where(
+            Signal.company_id == candidate.company_id,
+            Signal.key.in_(ATTRIBUTING_KEYS),
+        )
+        .order_by(Signal.observed_at, Signal.id)
+        .limit(1)
+    )
+    made = (
+        sa.select(LeadCandidate.created_at)
+        .where(LeadCandidate.id == candidate.id)
+        .scalar_subquery()
+    )
+    found = await session.scalar(
+        base.where(Signal.created_at >= made)
+    ) or await session.scalar(base)
+    if found is not None:
+        candidate.primary_source_key = found
 
 
 async def rescore(
@@ -428,8 +505,16 @@ async def rescore(
 ) -> ScoreResult:
     """Score ``candidate``'s company now and write the score (not the state):
     ``score``, ``tier``, ``score_breakdown`` (other writers' keys carried),
-    ``weights_version``, ``last_scored_at``, and ``companies.best_score``."""
-    company = await session.get(Company, candidate.company_id)
+    ``weights_version``, ``last_scored_at``, ``primary_source_key`` when it
+    is not yet known (``_attribute``), and ``companies.best_score``. The
+    company row is locked first (``FOR NO KEY UPDATE``; the module's lock
+    order)."""
+    company = await session.get(
+        Company,
+        candidate.company_id,
+        with_for_update={"key_share": True},
+        populate_existing=True,
+    )
     if company is None:
         raise LookupError(f"company {candidate.company_id} is gone")
     weights = weights or await scoring.load_weights(session)
@@ -444,6 +529,7 @@ async def rescore(
     candidate.score_breakdown = _carried(candidate.score_breakdown, result.breakdown)
     candidate.weights_version = weights.version
     candidate.last_scored_at = now
+    await _attribute(session, candidate)
     company.best_score = max(company.best_score or 0, result.total)
     await session.flush()
     return result
@@ -476,6 +562,8 @@ async def apply_score(
         auto_push=auto_push,
         hold_until=candidate.hold_until,
         enrich_attempts=candidate.enrich_attempts,
+        usable_phone=result.usable_phone,
+        no_phone=_handoff(candidate.score_breakdown),
     )
     walk = route(candidate.state, result.tier, facts, now=now)
     for target in walk:
@@ -510,7 +598,19 @@ async def phone_less_review(
     _, contacts = await scoring.views_for(session, company)
     if any(scoring.usable_phone(c) for c in contacts):
         raise IllegalTransition(source, "review", "has a phone")
-    if not any(c.telegram_username and not c.anonymised for c in contacts):
+    # A contact row's username (02 §2.9 «contacts.telegram_username IS NOT
+    # NULL») — the person a manager writes to; the company's own channel
+    # (``companies.telegram_channel``) is a broadcast nobody can answer.
+    writable = await session.scalar(
+        sa.select(
+            sa.exists().where(
+                Contact.company_id == company.id,
+                Contact.telegram_username.is_not(None),
+                Contact.anonymised_at.is_(None),
+            )
+        )
+    )
+    if not writable:
         raise IllegalTransition(source, "review", "no telegram username")
     breakdown = dict(candidate.score_breakdown or {})
     breakdown["gates"] = {**dict(breakdown.get("gates") or {}), "no_phone": True}
@@ -555,10 +655,12 @@ class ScoreReport:
         return counts
 
 
-def _stale() -> sa.ColumnElement[bool]:
-    """A candidate score_job owes a score: open in a re-scored state, marked
-    stale or older than its company's newest signal, and — for ``found`` — a
-    volume signal to score on (02 §2.9)."""
+def _stale(now: datetime) -> sa.ColumnElement[bool]:
+    """A candidate score_job owes a score: open in a re-scored state, and
+    marked stale, or older than its company's newest signal, or a hold whose
+    ``hold_until`` ran out since its last score (a review that expired, a
+    cooldown — 02 §2.9's timed holds come back without a new signal); and —
+    for ``found`` — a volume signal to score on (02 §2.9)."""
     has_volume = (
         sa.select(Signal.id)
         .where(
@@ -567,11 +669,17 @@ def _stale() -> sa.ColumnElement[bool]:
         )
         .exists()
     )
+    hold_ran_out = sa.and_(
+        LeadCandidate.state == "hold",
+        LeadCandidate.hold_until <= now,
+        LeadCandidate.last_scored_at < LeadCandidate.hold_until,
+    )
     return sa.and_(
         LeadCandidate.state.in_(RESCORE_STATES),
         sa.or_(
             LeadCandidate.last_scored_at.is_(None),
             Company.last_signal_at > LeadCandidate.last_scored_at,
+            hold_ran_out,
         ),
         sa.or_(LeadCandidate.state != "found", has_volume),
     )
@@ -586,25 +694,35 @@ async def _score_one(
     families: Mapping[str, str],
     report: ScoreReport,
 ) -> bool:
-    """Claim the oldest stale candidate (FOR UPDATE SKIP LOCKED) and score it
-    in its own transaction. False when nothing is owed."""
+    """Claim the oldest stale candidate with its company (``FOR NO KEY UPDATE
+    OF lead_candidates, companies SKIP LOCKED``: the module's lock order, and
+    a company a writer holds is skipped — that writer marks it stale again)
+    and score it in its own transaction. False when nothing is owed."""
     async with session_factory() as session, session.begin():
         stmt = (
             sa.select(LeadCandidate)
             .join(Company, Company.id == LeadCandidate.company_id)
-            .where(_stale())
+            .where(_stale(now))
         )
         if done:
             stmt = stmt.where(LeadCandidate.id.not_in(done))
         candidate = await session.scalar(
             stmt.order_by(LeadCandidate.created_at, LeadCandidate.id)
             .limit(1)
-            .with_for_update(of=LeadCandidate, skip_locked=True)
+            .with_for_update(
+                # A column names its table: OF lead_candidates, companies.
+                of=[LeadCandidate.id, Company.id],
+                skip_locked=True,
+                key_share=True,
+            )
         )
         if candidate is None:
             return False
         report.claimed += 1
-        done.add(candidate.id)
+        # Read before the savepoint: its rollback expires the row, and an
+        # expired attribute cannot be loaded in the handler.
+        candidate_id = candidate.id
+        done.add(candidate_id)
         try:
             async with session.begin_nested():
                 result = await rescore(
@@ -622,7 +740,7 @@ async def _score_one(
             # class only (a message may carry a row's values, 06 §4.5).
             log.error(
                 "scoring failed",
-                extra={"candidate_id": str(candidate.id), "error": type(exc).__name__},
+                extra={"candidate_id": str(candidate_id), "error": type(exc).__name__},
             )
             report.failed += 1
             return True
