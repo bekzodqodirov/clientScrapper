@@ -942,6 +942,8 @@ class TelegramMonitor(Collector):
             done = taken.done or "observation_id" not in values
             if done:
                 values["processed_at"] = now
+            # ``evidence_id IS NULL``: a belt only — the run holds the row
+            # since pending_posts read it, so nothing else can have linked it.
             result = await session.execute(
                 sa.update(Interaction)
                 .where(
