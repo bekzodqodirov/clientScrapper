@@ -133,7 +133,9 @@ class Budget:
 @dataclass(frozen=True, slots=True)
 class Supplied:
     """Bytes a collector read without the Fetcher, for the runner to keep as
-    the evidence of the observations that carry ``raw_sha256 == sha256``: a
+    the evidence of the observations that carry ``url`` and ``raw_sha256 ==
+    sha256`` — both, because two messages can say the same words at two
+    links, and each is cited where it was said: a
     message the Telegram reader stored (``body`` its text), or an evidence
     row another process already wrote (``body`` None or its bytes) — the
     reader's weekly channel about (03 §2.3). Such a row, stored outside any
@@ -173,8 +175,9 @@ class Collector(ABC):
     the collector cannot run now whatever its ``sources`` row says (an ERP
     feed that is not configured, 05 §B.3): the runner skips the run with it,
     as it skips a disabled row. ``supplied`` holds the bytes ``supply`` was
-    given; ``evidence_root`` is where the run keeps evidence files (the
-    runner sets it), for a collector that reads stored ones back."""
+    given, by ``(url, sha256)``; ``evidence_root`` is where the run keeps
+    evidence files (the runner sets it), for a collector that reads stored
+    ones back."""
 
     key: ClassVar[str]
     family: ClassVar[str]
@@ -209,7 +212,7 @@ class Collector(ABC):
         # The run's ``now`` (the runner sets it before ``collect``): the clock
         # of a collector whose work is not a fetch (the ERP feeds' ``now``).
         self.started_at: datetime | None = None
-        self.supplied: dict[str, Supplied] = {}
+        self.supplied: dict[tuple[str, str], Supplied] = {}
         self.evidence_root: Path | None = None
 
     @classmethod
@@ -232,8 +235,9 @@ class Collector(ABC):
         meta: dict[str, Any] | None = None,
     ) -> str:
         """Hand the runner bytes this run did not fetch; the sha256 its
-        observations carry as ``raw_sha256``. Without ``body`` the bytes are
-        an evidence row already, named by ``sha256``."""
+        observations carry as ``raw_sha256`` (with ``url`` as their ``url``).
+        Without ``body`` the bytes are an evidence row already, named by
+        ``sha256``."""
         if body is not None:
             sha = hashlib.sha256(body).hexdigest()
             if sha256 is not None and sha256 != sha:
@@ -242,7 +246,7 @@ class Collector(ABC):
             raise ValueError("supply needs the body or the stored row's sha256")
         else:
             sha = sha256
-        self.supplied[sha] = Supplied(
+        self.supplied[(url, sha)] = Supplied(
             url, sha, body, content_type, fetched_at, dict(meta or {})
         )
         return sha

@@ -384,6 +384,23 @@ async def test_the_tenth_edit_still_counts(session):
     assert await ingest.handle_edit(session, tenth, now=NOW, edits=edits) == "stored"
 
 
+async def _proof(session, message_id: int) -> m.Evidence:
+    """The evidence row the telegram_monitor collector keeps of a message."""
+    proof = m.Evidence(
+        source_key="telegram_monitor",
+        url=f"https://t.me/namuna_optom/{message_id}",
+        fetched_at=NOW,
+        sha256="0" * 64,
+        content_type="text/plain",
+        bytes=len(HIT.encode()),
+        excerpt=HIT,
+        expires_at=NOW + timedelta(days=180),
+    )
+    session.add(proof)
+    await session.flush()
+    return proof
+
+
 async def test_an_edit_updates_an_unprocessed_hit_and_leaves_a_processed_one(session):
     await _monitor(session, GROUP)
     await session.commit()
@@ -392,10 +409,14 @@ async def test_an_edit_updates_an_unprocessed_hit_and_leaves_a_processed_one(ses
         msg = message(GROUP, n, HIT, date=NOW, sender=POSTER)
         assert await ingest.handle_message(session, msg, now=NOW) == "stored"
     await session.commit()
+    # 91 is handled: the collector linked its evidence, the classifier read it
+    # (a handled row always carries its evidence; one without is only counted,
+    # see test_an_edit_reopens_a_price_list_the_collector_only_counted).
+    proof = await _proof(session, 91)
     await session.execute(
         sa.update(m.Interaction)
         .where(m.Interaction.tg_message_id == 91)
-        .values(processed_at=NOW)
+        .values(processed_at=NOW, evidence_id=proof.id)
     )
     await session.commit()
     newer = "Хитойдан 5 куб товар керак, ким олиб келади?"
@@ -422,18 +443,7 @@ async def test_an_edit_leaves_a_hit_the_collector_already_observed(session):
     msg = message(GROUP, 92, HIT, date=NOW, sender=POSTER)
     assert await ingest.handle_message(session, msg, now=NOW) == "stored"
     await session.commit()
-    proof = m.Evidence(
-        source_key="telegram_monitor",
-        url="https://t.me/namuna_optom/92",
-        fetched_at=NOW,
-        sha256="0" * 64,
-        content_type="text/plain",
-        bytes=len(HIT.encode()),
-        excerpt=HIT,
-        expires_at=NOW + timedelta(days=180),
-    )
-    session.add(proof)
-    await session.flush()
+    proof = await _proof(session, 92)
     await session.execute(
         sa.update(m.Interaction)
         .where(m.Interaction.tg_message_id == 92)
@@ -449,6 +459,38 @@ async def test_an_edit_leaves_a_hit_the_collector_already_observed(session):
     await session.commit()
     [row] = [r for r in await _rows(session) if r.tg_message_id == 92]
     assert row.text == HIT
+
+
+async def test_an_edit_reopens_a_price_list_the_collector_only_counted(session):
+    """The collector counts a person's price list with no buyer trigger and
+    keeps nothing of it (no evidence, no observation): an edit that makes it
+    an ask is read again, and announced as a new message is (T-14)."""
+    await _monitor(session, GROUP)
+    await session.commit()
+    narxlar = "Narxlar: stul 250000 so'm, stol 900000 so'm, shkaf 1500000 so'm"
+    msg = message(GROUP, 93, narxlar, date=NOW, sender=POSTER)
+    assert await ingest.handle_message(session, msg, now=NOW) == "stored"
+    await session.commit()
+    await session.execute(
+        sa.update(m.Interaction)
+        .where(m.Interaction.tg_message_id == 93)
+        .values(processed_at=NOW)  # what the collector does with it
+    )
+    await session.commit()
+    [counted] = [r for r in await _rows(session) if r.tg_message_id == 93]
+    asked = narxlar + ". Xitoydan 3 kub mebel kerak, kim olib keladi?"
+    edit = message(GROUP, 93, asked, date=NOW, sender=POSTER)
+    async with Listener() as listener:
+        assert (
+            await ingest.handle_edit(session, edit, now=NOW, edits=ingest.EditCounter())
+            == "updated"
+        )
+        await session.commit()
+        heard = await listener.heard(expect=1)
+    [row] = [r for r in await _rows(session) if r.tg_message_id == 93]
+    assert (row.text, row.processed_at) == (asked, None)
+    assert row.prefilter_hit == ["volume_kub", "china", "intent", "pricelist"]
+    assert heard == [str(counted.id)]
 
 
 def test_the_edit_memory_forgets_the_oldest_message():

@@ -521,6 +521,29 @@ COMPETITOR_RE = re.compile(
     r"экспресс|1688\s*(?:kargo|cargo|карго|zakupka))(?!\w)",
     re.I,
 )
+# The same said by a Telegram username glued into one word («halolcargo»,
+# «chinacargouz», «mkexpress»), which COMPETITOR_RE's word bounds cannot see:
+# a username is Latin letters, digits and «_» only, so these are its Latin
+# stems, looked for inside the name (``competitor_handle``).
+COMPETITOR_HANDLE_STEMS = (
+    "cargo",
+    "kargo",
+    "express",
+    "logist",
+    "ekspeditor",
+    "dostavka",
+    "broker",
+    "rastamoj",
+    "vikup",
+)
+
+
+def competitor_handle(username: str | None) -> bool:
+    """A username that names a forwarder inside itself (COMPETITOR_HANDLE_STEMS)."""
+    name = (username or "").lower()
+    return any(stem in name for stem in COMPETITOR_HANDLE_STEMS)
+
+
 # B2C / personal use.
 B2C_RE = re.compile(
     rf"(?<!\w)(?:o{_A}?zim\s+uchun|ўзим\s+учун|для\s+себя|1\s*(?:dona|шт\.?|штук[аи]?)|"

@@ -231,11 +231,17 @@ async def handle_edit(
     * not stored, now a hit → stored and notified, as a new message would be;
     * stored, not yet processed nor observed, still a hit → its text and hits
       follow the edit (neither the collector nor the classifier has read it);
+    * stored and only counted by the collector (``chats.counted_only``: a
+      price list with no buyer trigger, no evidence of it was kept), still a
+      hit → its text follows the edit and it is read again, announced as a
+      new message is — the edit may have made it an ask;
     * anything else stays as it was: a processed row — or one the
       telegram_monitor collector already turned into evidence and an
       observation (``evidence_id``), which quote the text as it was — is
       evidence of what was said, and an edit that is no hit is not kept (no
-      full chat logs).
+      full chat logs). The collector holds the rows it reads (``FOR UPDATE``)
+      until its run commits, so an edit waits for it and then finds
+      ``evidence_id`` set.
     An edit is not a new message: ``seen_count`` does not move."""
     item = incoming_of(message)
     if item is None:
@@ -262,9 +268,10 @@ async def handle_edit(
             return "unchanged"
         await chats.note_hit(session, item.tg_chat_id)
         return "stored"
+    counted = chats.counted_only(stored)
     if (
         not hits
-        or stored.processed_at is not None
+        or (stored.processed_at is not None and not counted)
         or stored.evidence_id is not None
         or stored.text_purged_at is not None
     ):
@@ -273,5 +280,12 @@ async def handle_edit(
         return "unchanged"
     stored.text = item.text
     stored.prefilter_hit = list(hits)
+    if counted:
+        stored.processed_at = None
     await session.flush()
+    if counted:
+        # Delivered when this transaction commits (04 §0): the collector reads
+        # the row again at once instead of at the next sweep.
+        notify = sa.func.pg_notify(NOTIFY_CHANNEL, str(stored.id))
+        await session.execute(sa.select(notify))
     return "updated"

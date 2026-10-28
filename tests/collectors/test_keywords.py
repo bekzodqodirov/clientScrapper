@@ -903,3 +903,31 @@ def test_short_words_do_not_inflect() -> None:
     assert kw.terms_re(["опт"]).search("оптика") is None
     assert kw.terms_re(["Иу"]).search("Иуда") is None
     assert kw.terms_re(["Иу"]).search("Иу бозори") is not None
+
+
+def test_a_price_list_is_three_prices_or_more_than_1500_characters() -> None:
+    # 03 §2.3: «≥ 3 prices … or > 1,500 chars» — the tout rule's count (T-14).
+    assert kw.PRICELIST_MIN_CHARS == 1500
+    assert kw.pricelist_shaped("x" * 1501) is True
+    assert kw.pricelist_shaped("x" * 1500) is False
+    assert kw.pricelist_shaped("stul 250000 so'm, stol 900000 so'm") is False
+    assert kw.pricelist_shaped("stul 250000 so'm, stol 900000 so'm, 30$") is True
+
+
+@pytest.mark.parametrize(
+    ("username", "competitor"),
+    [
+        ("halolcargo", True),
+        ("chinacargouz", True),
+        ("mkexpress", True),
+        ("xitoy_logistika", True),
+        ("namuna_dostavka24", True),
+        ("Namuna_Kargo", True),
+        ("namuna_tekstil", False),
+        ("optom_bozor", False),
+        (None, False),
+    ],
+)
+def test_a_glued_username_names_a_forwarder(username, competitor) -> None:
+    # COMPETITOR_RE's word bounds cannot see inside «halolcargo» (T-14).
+    assert kw.competitor_handle(username) is competitor

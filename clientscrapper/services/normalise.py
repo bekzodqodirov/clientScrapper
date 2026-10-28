@@ -776,7 +776,11 @@ def to_observation_json(
     # HR person's above all (03 §2.7).
     if kind == "intent_post" and handles["telegram"] is None and obs.person_telegram:
         handles["telegram"] = telegram_key(obs.person_telegram)
-    handles["tg_user_id"] = attrs.get("tg_user_id") if person_ok else None
+    # A poster's Telegram id is person-tier (06 §5.1): its one place in
+    # ``parsed`` is ``handles.tg_user_id``, which retention R3 strips at 30 d
+    # (02 §4). Left in the ``hints.collector.attrs`` copy, it would outlive R3.
+    tg_user_id = attrs.pop("tg_user_id", None)
+    handles["tg_user_id"] = tg_user_id if person_ok else None
     handles["instagram"] = instagram_key(obs.instagram) if obs.instagram else None
 
     if kind == "intent_post":

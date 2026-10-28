@@ -8,19 +8,30 @@ the ``*/15`` sweep as the fallback (03 §3).
 
 A run takes, oldest first, at most ``BATCH`` stored messages no run has
 handled yet (``evidence_id`` and ``processed_at`` NULL, the text not purged,
-the chat still readable — ``chats.readable_ids``) and makes of each:
+the chat still readable — ``chats.readable_ids``) and holds them (``FOR
+UPDATE SKIP LOCKED``, 04 §0) until it commits, so a reader's edit waits and
+then finds the row handled (``ingest.handle_edit``). Of each:
 
 * **the tout filter**, before any model call (03 §2.3): ``COMPETITOR_RE`` on
-  the speaker's username (its words: ``fx_express`` is «fx express»), name and
-  bio (``interactions.sender_bio``, which only ``userbot/about.py`` fills) or
-  on the message; for a person posting in a group also ``TOUT_PRICELISTS``
-  price-list-shaped messages (``keywords.pricelist_shaped``) of the sender in
-  the ``TOUT_WINDOW`` up to and including this one, or a forward from a
-  channel that is not the sender; for a chat speaking for itself also a
-  ``chat_monitors`` row of role ``competitor`` (the seeds' cargo channels).
-  A tout is emitted with ``competitor`` alone — excluded as a lead, kept for
-  the weekly competitor-offer diff — and without the poster's person data
-  (06 §5.1: a competitor's person has no lead purpose);
+  the speaker's username (its words: ``fx_express`` is «fx express»; a glued
+  one by ``keywords.competitor_handle``: «halolcargo»), name (camel case
+  split: «HalolCargo») and bio, or on the message. The bio is
+  ``interactions.sender_bio``, which only ``userbot/about.py`` fills — some
+  hours after the message, for a poster seen for the first time — so a row
+  that has none yet takes the sender's newest bio from any of their rows
+  (``chats.known_bios``, the reader's own 30-day cache). For a person posting
+  in a group also ``TOUT_PRICELISTS`` price-list-shaped messages
+  (``keywords.pricelist_shaped``) of the sender in the ``TOUT_WINDOW`` up to
+  and including this one, or a forward from a channel that is not the
+  sender; for a chat speaking for itself also a ``chat_monitors`` row of role
+  ``competitor`` (the seeds' cargo channels). A tout is emitted with
+  ``competitor`` alone — excluded as a lead, kept for the weekly
+  competitor-offer diff. A person's or a poster's tout carries no person
+  data and no identity (06 §5.1: a competitor's person has no lead purpose):
+  the resolver rejects it as ``competitor`` (``companies.tout_refusal``), so
+  no company or contact is made of it and retention R2a takes the row at
+  30 d. A chat's tout keeps the chat (company-tier: the competitor's
+  channel, which the gate excludes);
 * **the observation**: a group message by a person → ``kind="post"``
   (``parsed.kind='intent_post'``): the poster's username, first + last name
   and, from the bio, the firm a legal form anchors («Namuna Tekstil Savdo
@@ -33,9 +44,17 @@ the chat still readable — ``chats.readable_ids``) and makes of each:
   ``attrs.chat_type='channel'`` (``parsed.kind='profile'``) for that chat:
   its username, title, the contacts the post names, ``wholesale_bulky``
   (B2B or supply words with a bulky category), ``container_truck``,
-  ``china_origin`` and the volume;
+  ``china_origin`` and the volume. What a ``buyers``-role chat publishes as
+  itself — a classifieds feed such as @Optom_bozor (``chats.BUYERS_ROLE``) —
+  is a poster's ad, never the chat speaking (03 §2.3: «the lead is the
+  poster, not the channel»): ``attrs.chat_type='classifieds'``
+  (``parsed.kind='intent_post'``, so its phones and handle stay person-tier
+  and R3 scrubs them), the firm, phones, Telegram handle, site, Instagram and
+  STIR the ad itself names, and the signals of an ask and of an offer;
 * **the evidence**: the message text (``text/plain``) at its t.me URL,
-  supplied to the runner (``Collector.supply``), which stores it.
+  supplied to the runner (``Collector.supply``), which stores it — one row
+  per message, so two messages with the same words are each cited where they
+  were said.
 
 A person's message that carries no buyer trigger — kept by the prefilter only
 because it names prices, so the tout rule can count it (02 §2.12) — becomes
@@ -43,15 +62,21 @@ no observation: it is marked processed and goes at 30 days like every
 unconverted row (02 §4 R2a).
 
 Then every channel about the reader stored (``evidence.meta.kind =
-chats.ABOUT_EVIDENCE_KIND``) that no observation cites yet: ``kind="company"``
+chats.ABOUT_EVIDENCE_KIND``) that no observation cites yet, of a chat whose
+about the reader would read now (``chats.about_readable``: not one the owner
+switched off) and that is not a classifieds feed: ``kind="company"``
 (``parsed.kind='profile'``, 02 §2.5) with the phones, website, Instagram,
 address, city and STIR its description names; the runner adopts the reader's
 row as its evidence. An about is never an ``interactions`` row.
 
 Once the runner has written the run (``after_write``, inside its
-transaction): each message row is linked to its evidence and observation; a
-tout's and a counted-only row are marked processed — nothing more is due for
-them — and a standing row stays ``processed_at IS NULL``, the classifier's
+transaction): each message row is linked to its evidence and observation
+(one an earlier run wrote for the same message and bytes, when this run's
+was a repeat); a tout's and a counted-only row are marked processed —
+nothing more is due for them — and so is a row whose observation the
+database refused (its evidence is linked; no later run could write the
+observation on that evidence, so trying again would only hold the queue). A
+standing row stays ``processed_at IS NULL``, the classifier's
 queue (04 §4.1, T-15), announced with ``NOTIFY cs_interaction,
 'telegram_monitor:<id>'`` so classify and score wake at once (04 §0); the
 worker does not wake this collector on its own notification.
@@ -81,6 +106,7 @@ from clientscrapper.collectors.keywords import (
     SUPPLY_RE,
     VOLUME_RE,
     bulky_categories,
+    competitor_handle,
     pricelist_shaped,
 )
 from clientscrapper.config import settings
@@ -94,6 +120,7 @@ from clientscrapper.services.normalise import (
     find_stir,
     instagram_handles,
     parse_phones,
+    telegram_handles,
     website_key,
 )
 
@@ -132,6 +159,8 @@ Tout = Literal[
 # A post's words, read once per message (``signals_of``).
 _SEPARATORS = re.compile(r"[|,;:!?\n•·/\\()\[\]{}<>]+|\s[-–—]\s")
 _HANDLE_JOINERS = re.compile(r"[_.\d]+")
+# «HalolCargo» → «Halol Cargo»: a display name glued in camel case.
+_CAMEL = re.compile(r"(?<=[a-zа-яё])(?=[A-ZА-ЯЁ])")
 _ADDRESS_RE = re.compile(
     r"(?:📍|(?<!\w)(?:manzil(?:imiz)?|манзил(?:имиз)?|адрес|address)\s*[:\-–—]?)"
     r"[ \t]*(?P<address>[^\n]{3,})",
@@ -190,12 +219,17 @@ class Post:
     competitor_sender: bool = False
 
 
+SpeakerKind = Literal["person", "chat", "poster"]
+
+
 @dataclass(frozen=True, slots=True)
 class Speaker:
-    """Who a message speaks for: a person (a user in a group), or a chat — a
-    channel's own post, or a channel or group posting in a group as itself."""
+    """Who a message speaks for: a person (a user in a group), a chat — a
+    channel's own post, or a channel or group posting in a group as itself —
+    or a poster the text alone names: an ad a ``buyers``-role chat (a
+    classifieds feed, ``chats.BUYERS_ROLE``) publishes as itself."""
 
-    kind: Literal["person", "chat"]
+    kind: SpeakerKind
     tg_id: int | None
     username: str | None
     name: str | None
@@ -205,6 +239,8 @@ def speaker_of(post: Post) -> Speaker:
     chat = post.chat
     sender = post.sender_id
     if chat.chat_type == "channel" or sender == chat.tg_chat_id:
+        if chat.role == chats.BUYERS_ROLE:
+            return Speaker("poster", None, None, None)
         return Speaker("chat", chat.tg_chat_id, chat.username, chat.title)
     if sender is not None and sender < 0:
         return Speaker("chat", sender, post.sender_username, post.sender_name)
@@ -220,6 +256,11 @@ def handle_words(username: str | None) -> str:
     return " ".join(_HANDLE_JOINERS.sub(" ", username or "").split())
 
 
+def name_words(name: str | None) -> str:
+    """A display name with its camel case split: «HalolCargo» → «Halol Cargo»."""
+    return _CAMEL.sub(" ", name or "")
+
+
 def is_channel_forward(post: Post) -> bool:
     """A forward from a channel other than the sender's own (03 §2.3)."""
     peer = post.fwd_from_peer_id
@@ -230,15 +271,21 @@ def tout_reasons(post: Post) -> tuple[Tout, ...]:
     """Why ``post`` is a competitor's (03 §2.3), in a fixed order; () when it
     is not. The price-list and forward rules are about posters: a chat posting
     as itself (a wholesaler channel's posts copied into its discussion group)
-    is judged by its words and its role alone."""
+    is judged by its words and its role alone; a classifieds ad's poster has
+    no id to count price lists by, and is judged by its words and its
+    forward."""
     speaker = speaker_of(post)
     reasons: list[Tout] = []
     said_by = " \n ".join(
         part
-        for part in (handle_words(speaker.username), speaker.name, post.sender_bio)
+        for part in (
+            handle_words(speaker.username),
+            name_words(speaker.name),
+            post.sender_bio,
+        )
         if part
     )
-    if said_by and COMPETITOR_RE.search(said_by):
+    if (said_by and COMPETITOR_RE.search(said_by)) or competitor_handle(speaker.username):
         reasons.append("competitor_sender")
     if COMPETITOR_RE.search(post.text):
         reasons.append("competitor_text")
@@ -248,7 +295,7 @@ def tout_reasons(post: Post) -> tuple[Tout, ...]:
         ):
             reasons.append("competitor_chat")
         return tuple(reasons)
-    if post.pricelists_7d >= TOUT_PRICELISTS:
+    if speaker.kind == "person" and post.pricelists_7d >= TOUT_PRICELISTS:
         reasons.append("pricelists_7d")
     if is_channel_forward(post):
         reasons.append("forwarded_channel")
@@ -286,18 +333,20 @@ class Reading:
     origin_text: str | None = None
 
 
-def read_text(text: str, *, speaker: Literal["person", "chat"]) -> Reading:
+def read_text(text: str, *, speaker: SpeakerKind) -> Reading:
     """The signal types of a standing (non-tout) text (03 §1.2, §2.3): a
     person's ask carries ``intent_ask`` and may carry ``b2c_marker``; a
     chat's post carries ``wholesale_bulky`` when B2B or supply words name a
-    bulky category; both carry the volume, ``container_truck`` and
-    ``china_origin``."""
+    bulky category; a classifieds poster's ad either (a buyer's ask or a
+    seller's offer), ``b2c_marker`` only beside an ask; all carry the volume,
+    ``container_truck`` and ``china_origin``."""
     reading = Reading()
     signals: list[str] = []
-    if speaker == "person" and INTENT_RE.search(text):
+    asks = speaker != "chat" and INTENT_RE.search(text) is not None
+    if asks:
         signals.append("intent_ask")
     if (
-        speaker == "chat"
+        speaker != "person"
         and (B2B_RE.search(text) or SUPPLY_RE.search(text))
         and bulky_categories(text)
     ):
@@ -320,7 +369,7 @@ def read_text(text: str, *, speaker: Literal["person", "chat"]) -> Reading:
     if china is not None:
         signals.append("china_origin")
         reading.origin_text = china.group(0)
-    if speaker == "person" and B2C_RE.search(text):
+    if (speaker == "person" or asks) and B2C_RE.search(text):
         signals.append("b2c_marker")
     reading.signal_types = signals
     return reading
@@ -479,22 +528,18 @@ def parse_post(post: Post) -> Observation | None:
         published_at=post.occurred_at,
         attrs=attrs,
     )
+    attrs["chat_type"] = _CHAT_TYPES[speaker.kind]
     if speaker.kind == "chat":
-        attrs["chat_type"] = "channel"
+        # The chat speaks for itself (company-tier), a tout's too: a
+        # competitor's channel is a company the gate excludes.
         obs.company_name_raw = speaker.name
         obs.telegram = speaker.username
         obs.phones = phones_in(post.text)
-        sites = websites_in(post.text)
-        obs.website = sites[0] if sites else None
-        handles = instagram_handles(post.text)
-        obs.instagram = handles[0] if handles else None
-        obs.stir = find_stir(post.text)
+        _company_contacts(obs, post.text)
         if speaker.tg_id is not None:
             obs.external_ids = {"tg_chat_id": str(speaker.tg_id)}
-    else:
-        attrs["chat_type"] = "group"
-        obs.person_telegram = speaker.username
     if reasons:
+        # A person's or a poster's tout: the offer, and nobody (06 §5.1).
         attrs["tout"] = list(reasons)
         obs.signal_types = ["competitor"]
         return obs
@@ -508,6 +553,7 @@ def parse_post(post: Post) -> Observation | None:
         obs.company_name_raw = firm.name if firm else None
         obs.person_name = speaker.name
         obs.person_role = firm.role if firm else None
+        obs.person_telegram = speaker.username
         obs.phones = phones_in(post.text, post.sender_bio)
         repeat = post.intents_60d >= REPEAT_MIN
         attrs.update(
@@ -516,7 +562,35 @@ def parse_post(post: Post) -> Observation | None:
         )
         if speaker.tg_id is not None:
             attrs["tg_user_id"] = speaker.tg_id
+    elif speaker.kind == "poster":
+        # A classifieds ad: the poster the text names, never the feed. Its
+        # phones and handle are the poster's (an intent post: person-tier,
+        # scrubbed by R3); the firm a legal form anchors is the ad's.
+        firm = firm_in(post.text)
+        obs.company_name_raw = firm.name if firm else None
+        obs.phones = phones_in(post.text)
+        handles = [h for h in telegram_handles(post.text) if h != post.chat.username]
+        obs.person_telegram = handles[0] if handles else None
+        _company_contacts(obs, post.text)
     return obs
+
+
+# ``attrs.chat_type`` by who speaks: 02 §2.5 maps 'channel' to a profile and
+# anything else to an intent post.
+_CHAT_TYPES: Final[Mapping[SpeakerKind, str]] = {
+    "person": "group",
+    "chat": "channel",
+    "poster": "classifieds",
+}
+
+
+def _company_contacts(obs: Observation, text: str) -> None:
+    """The site, Instagram account and STIR a post names (company-tier)."""
+    sites = websites_in(text)
+    obs.website = sites[0] if sites else None
+    handles = instagram_handles(text)
+    obs.instagram = handles[0] if handles else None
+    obs.stir = find_stir(text)
 
 
 def parse_about(
@@ -563,9 +637,9 @@ def parse_about(
     obs.website = sites[0] if sites else None
     handles = instagram_handles(text)
     obs.instagram = handles[0] if handles else None
-    said_by = " \n ".join(p for p in (handle_words(username), title) if p)
+    said_by = " \n ".join(p for p in (handle_words(username), name_words(title)) if p)
     reasons: list[Tout] = []
-    if said_by and COMPETITOR_RE.search(said_by):
+    if (said_by and COMPETITOR_RE.search(said_by)) or competitor_handle(username):
         reasons.append("competitor_sender")
     if COMPETITOR_RE.search(text):
         reasons.append("competitor_text")
@@ -640,8 +714,12 @@ def _post_of(
     monitor: ChatMonitor,
     history: Sequence[History],
     competitor_chats: frozenset[int],
+    bios: Mapping[int, str],
 ) -> Post:
     at = row.occurred_at
+    bio = row.sender_bio
+    if bio is None and row.sender_id is not None:
+        bio = bios.get(row.sender_id)
     return Post(
         interaction_id=row.id,
         chat=Chat(
@@ -658,7 +736,7 @@ def _post_of(
         sender_id=row.sender_id,
         sender_username=row.sender_username,
         sender_name=row.sender_name,
-        sender_bio=row.sender_bio,
+        sender_bio=bio,
         fwd_from_peer_id=row.fwd_from_peer_id,
         pricelists_7d=window_count(
             (h.occurred_at for h in history if h.pricelist), at=at, window=TOUT_WINDOW
@@ -670,10 +748,16 @@ def _post_of(
     )
 
 
-async def pending_posts(session: AsyncSession, *, limit: int = BATCH) -> list[Post]:
+async def pending_posts(
+    session: AsyncSession, *, now: datetime, limit: int = BATCH
+) -> list[Post]:
     """The stored messages no run has handled yet, oldest first, from chats
     the reader may read (``chats.readable_ids`` — never the calibration chat,
-    never one the owner switched off)."""
+    never one the owner switched off). The rows are held (``FOR UPDATE SKIP
+    LOCKED``, 04 §0) until the caller's transaction ends: a reader's edit
+    that lands meanwhile waits, then finds them handled, and never makes a
+    row say what its evidence does not. A row with no bio yet takes the
+    sender's newest one from any of their rows (``chats.known_bios``)."""
     readable = await chats.readable_ids(session)
     if not readable:
         return []
@@ -689,18 +773,26 @@ async def pending_posts(session: AsyncSession, *, limit: int = BATCH) -> list[Po
         )
         .order_by(Interaction.created_at, Interaction.id)
         .limit(limit)
+        .with_for_update(of=Interaction, skip_locked=True)
     )
     pairs = [(row, monitor) for row, monitor in result.tuples().all()]
     if not pairs:
         return []
     histories = await _histories(session, [row for row, _ in pairs])
+    bios = await chats.known_bios(
+        session,
+        (r.sender_id for r, _ in pairs if r.sender_bio is None and r.sender_id),
+        now=now,
+    )
     competitor_chats = frozenset(
         await session.scalars(
             sa.select(ChatMonitor.tg_chat_id).where(ChatMonitor.role == "competitor")
         )
     )
     return [
-        _post_of(row, monitor, histories.get(row.sender_id or 0, ()), competitor_chats)
+        _post_of(
+            row, monitor, histories.get(row.sender_id or 0, ()), competitor_chats, bios
+        )
         for row, monitor in pairs
     ]
 
@@ -709,8 +801,11 @@ async def pending_abouts(
     session: AsyncSession, *, limit: int = ABOUT_BATCH
 ) -> list[tuple[Evidence, ChatMonitor]]:
     """Channel abouts the reader stored outside any run that no observation
-    cites yet, oldest first. A group's about names a community, not a firm:
-    the reader keeps it for the companion groups it names, nothing more."""
+    cites yet, oldest first, of chats whose about the reader would read now
+    (``chats.about_readable``: one the owner switched off waits until it is
+    switched on again). A group's about names a community, not a firm, and a
+    classifieds feed's (``chats.BUYERS_ROLE``) names the board, not a lead:
+    the reader keeps them for the companion groups they name, nothing more."""
     cited = sa.exists().where(ObservationRow.evidence_id == Evidence.id)
     result = await session.execute(
         sa.select(Evidence, ChatMonitor)
@@ -723,7 +818,8 @@ async def pending_abouts(
             Evidence.meta["kind"].astext == chats.ABOUT_EVIDENCE_KIND,
             Evidence.collector_run_id.is_(None),
             ChatMonitor.chat_type == "channel",
-            ChatMonitor.role != "calibration",
+            chats.about_readable(),
+            ChatMonitor.role != chats.BUYERS_ROLE,
             ~cited,
         )
         .order_by(Evidence.fetched_at, Evidence.id)
@@ -768,7 +864,8 @@ class TelegramMonitor(Collector):
         self._counted: list[int] = []
 
     async def collect(self, session: AsyncSession, budget: Budget) -> list[Observation]:
-        posts = await pending_posts(session)
+        now = self.started_at or datetime.now(settings.tz)
+        posts = await pending_posts(session, now=now)
         touts = 0
         for post in posts:
             obs = self.parse_post(post)
@@ -822,24 +919,28 @@ class TelegramMonitor(Collector):
 
     async def after_write(self, session: AsyncSession, placed: list[Placed]) -> None:
         """Link each message row to where its observation landed; mark the
-        touts and the counted-only rows processed; NOTIFY for each standing
-        row, so the classifier and the scorer wake now (04 §0)."""
+        touts, the counted-only rows and the rows whose observation the
+        database refused processed; NOTIFY for each standing row, so the
+        classifier and the scorer wake now (04 §0)."""
         now = self.started_at or datetime.now(settings.tz)
-        linked = 0
+        linked = unobserved = 0
         for item in placed:
             taken = self._taken.get(item.observation.source_ref)
             if taken is None:
                 continue
-            observation_id = item.observation_id or await _observation_of(
-                session, item.evidence_id, item.observation.source_ref
-            )
-            if observation_id is None:
-                continue
-            values: dict[str, Any] = {
-                "evidence_id": item.evidence_id,
-                "observation_id": observation_id,
-            }
-            if taken.done:
+            values: dict[str, Any] = {"evidence_id": item.evidence_id}
+            if item.observation_id is not None:
+                values["observation_id"] = item.observation_id
+            else:
+                earlier = await _observation_of(
+                    session, item.observation.source_ref, item.observation.raw_sha256
+                )
+                if earlier is not None:
+                    # A repeat of a message an earlier run observed: the row
+                    # cites that observation and its own evidence.
+                    values["observation_id"], values["evidence_id"] = earlier
+            done = taken.done or "observation_id" not in values
+            if done:
                 values["processed_at"] = now
             result = await session.execute(
                 sa.update(Interaction)
@@ -852,7 +953,12 @@ class TelegramMonitor(Collector):
             if not getattr(result, "rowcount", 0):
                 continue
             linked += 1
-            if not taken.done:
+            if "observation_id" not in values:
+                # The database refused its observation (``bad_observation``):
+                # the runner never writes one on evidence it already holds,
+                # so the row is done, with its evidence (R2a takes it at 30 d).
+                unobserved += 1
+            elif not done:
                 await session.execute(
                     sa.select(
                         sa.func.pg_notify(
@@ -871,21 +977,34 @@ class TelegramMonitor(Collector):
                 )
                 .values(processed_at=now)
             )
-        self.run_meta.setdefault("telegram", {})["linked"] = linked
+        report = self.run_meta.setdefault("telegram", {})
+        report["linked"] = linked
+        if unobserved:
+            report["unobserved"] = unobserved
+        # Rows whose evidence the database refused (``bad_evidence``, the run
+        # is partial) have nothing to link to: they are read again next run.
+        unplaced = len(self._taken.keys() - {i.observation.source_ref for i in placed})
+        if unplaced:
+            report["unplaced"] = unplaced
 
 
 async def _observation_of(
-    session: AsyncSession, evidence_id: int, ref: str
-) -> int | None:
-    """The observation an earlier run wrote for ``ref`` on this evidence row
-    (the runner found the bytes stored already, or the row seen in 24 h)."""
-    found: int | None = await session.scalar(
-        sa.select(ObservationRow.id)
-        .where(
-            ObservationRow.evidence_id == evidence_id,
-            ObservationRow.parsed["source_ref"].astext == ref,
+    session: AsyncSession, ref: str, sha256: str
+) -> tuple[int, int] | None:
+    """The observation (and its evidence) an earlier run wrote for message
+    ``ref`` with these bytes: the runner found them stored already, or saw the
+    message in the last 24 h under another link (its chat changed username)."""
+    found = (
+        await session.execute(
+            sa.select(ObservationRow.id, ObservationRow.evidence_id)
+            .join(Evidence, Evidence.id == ObservationRow.evidence_id)
+            .where(
+                ObservationRow.source_key == SOURCE_KEY,
+                ObservationRow.parsed["source_ref"].astext == ref,
+                Evidence.sha256 == sha256,
+            )
+            .order_by(ObservationRow.id.desc())
+            .limit(1)
         )
-        .order_by(ObservationRow.id.desc())
-        .limit(1)
-    )
-    return found
+    ).first()
+    return (int(found[0]), int(found[1])) if found is not None else None

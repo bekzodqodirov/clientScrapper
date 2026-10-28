@@ -488,12 +488,14 @@ async def write_observations(
     collector_version: str,
     now: datetime,
     root: Path | None,
-    supplied: Mapping[str, Supplied] | None = None,
+    supplied: Mapping[tuple[str, str], Supplied] | None = None,
 ) -> _Written:
     """Evidence + observation rows for one run's findings (no commit). Each
     evidence group is one savepoint: a group the database refuses is dropped
     and counted, never the whole run. ``supplied`` are the bytes the collector
-    read without the Fetcher (``Collector.supply``)."""
+    read without the Fetcher (``Collector.supply``), by ``(url, sha256)``: an
+    observation finds its own bytes at its own URL, so two messages with the
+    same words are two evidence rows, each at its own link."""
     written = _Written()
     known = set(await session.scalars(sa.select(Source.key)))
     groups: dict[tuple[str, str], _Group] = {}
@@ -504,7 +506,9 @@ async def write_observations(
         if obs.source not in known:
             written.dropped["unknown_source"] += 1
             continue
-        given = (supplied or {}).get(obs.raw_sha256) if obs.raw_sha256 else None
+        given = (
+            (supplied or {}).get((obs.url, obs.raw_sha256)) if obs.raw_sha256 else None
+        )
         if given is not None and obs.raw_sha256 not in ledger.bodies:
             url, sha, body = strip_secrets(given.url), given.sha256, given.body or b""
             content_type = given.content_type or "text/plain"

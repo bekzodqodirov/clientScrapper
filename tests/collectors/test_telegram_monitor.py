@@ -12,6 +12,7 @@ it and puts back what it found.
 
 from __future__ import annotations
 
+import asyncio
 import gzip
 import hashlib
 from datetime import datetime, timedelta
@@ -21,6 +22,7 @@ import psycopg
 import pytest
 import sqlalchemy as sa
 
+from clientscrapper.collectors import runner as runner_mod
 from clientscrapper.collectors import telegram_monitor as tm
 from clientscrapper.collectors.base import Observation
 from clientscrapper.collectors.runner import run_collector
@@ -30,6 +32,9 @@ from clientscrapper.db.session import SessionLocal
 from clientscrapper.services import chats, companies
 from clientscrapper.services.normalise import to_observation_json
 from clientscrapper.userbot import about, ingest, prefilter
+from tests.fake_telegram import channel as tg_channel
+from tests.fake_telegram import message as tg_message
+from tests.fake_telegram import user as tg_user
 from tests.fakes import FakeClock, Site, fetcher_for
 
 TZ = ZoneInfo("Asia/Tashkent")
@@ -150,6 +155,24 @@ def test_the_specs_worked_example_becomes_an_intent_post():
             "none",
             None,
             "Xitoydan",
+        ),
+        # The binding threshold is ≥ 1 m³ (00): exactly 1 is in, and exactly
+        # 3 is the 3-plus step.
+        (
+            "Xitoydan 1 kub mato kerak",
+            ["intent_ask", "volume_m3_1to3", "china_origin"],
+            1.0,
+            "stated",
+            "1 kub",
+            "Xitoydan",
+        ),
+        (
+            "3 kub mato kerak",
+            ["intent_ask", "volume_m3_3plus"],
+            3.0,
+            "stated",
+            "3 kub",
+            None,
         ),
         # Under 1 m³ the number is kept and no volume signal is given (the
         # ≥ 1 m³ threshold is the scorer's, 04 §5.3).
@@ -279,6 +302,9 @@ def test_a_chat_with_no_username_is_cited_by_its_t_me_c_link():
         ({"sender_username": "fx_express"}, ("competitor_sender",)),
         ({"sender_username": "halol_cargo777"}, ("competitor_sender",)),
         ({"sender_name": "Halol Kargo"}, ("competitor_sender",)),
+        # Glued: the word bounds cannot see inside them.
+        ({"sender_username": "chinacargouz"}, ("competitor_sender",)),
+        ({"sender_name": "HalolCargo"}, ("competitor_sender",)),
         ({"sender_bio": "Xitoydan yuk tashish xizmati"}, ("competitor_sender",)),
         ({"sender_bio": "Карго Хитой – Тошкент"}, ("competitor_sender",)),
         (
@@ -295,12 +321,20 @@ def test_each_tout_rule_excludes_the_poster_and_keeps_the_offer(fields, reasons)
     assert obs is not None
     assert obs.attrs["tout"] == list(reasons)
     assert obs.signal_types == ["competitor"]
-    # The offer is kept for the weekly diff; the competitor's person is not.
+    # The offer is kept for the weekly diff; the competitor's person is not
+    # (06 §5.1), nor any identity a company could be made of.
     assert obs.excerpt == text
-    assert (obs.person_name, obs.person_role, obs.phones) == (None, None, [])
+    assert (obs.person_name, obs.person_role, obs.person_telegram) == (None, None, None)
+    assert (obs.phones, obs.company_name_raw, obs.telegram) == ([], None, None)
     assert "tg_user_id" not in obs.attrs
-    assert obs.person_telegram == fields.get("sender_username", "namuna_tekstil")
-    assert to_observation_json(obs)["hints"]["competitor_words"] is True
+    parsed = to_observation_json(obs)
+    assert parsed["hints"]["competitor_words"] is True
+    assert (parsed["kind"], parsed["handles"]["telegram"], parsed["person"]) == (
+        "intent_post",
+        None,
+        None,
+    )
+    assert companies.tout_refusal(parsed) == "competitor"
 
 
 @pytest.mark.parametrize(
@@ -939,3 +973,647 @@ async def test_a_failed_link_keeps_the_rows_and_the_next_run_links_them(
     assert healed.counters["new_observations"] == 0
     row = await interaction(session, row_id)
     assert row.observation_id == obs.id and row.evidence_id == obs.evidence_id
+
+
+# --- review round: the poster's contacts, classifieds, the bio (pure) ---------------
+
+
+def test_a_phone_in_the_bio_is_the_posters_after_the_texts():
+    bio = "Namuna Savdo MChJ, tel +998 90 000 00 07"
+    obs = tm.parse_post(post(ASK + " +998 90 000 00 01", sender_bio=bio))
+    assert obs is not None
+    assert obs.phones == ["+998 90 000 00 01", "+998 90 000 00 07"]
+    assert [p["owner"] for p in to_observation_json(obs)["phones"]] == ["person"] * 2
+
+
+FEED_ID = -1001000000044
+FEED = tm.Chat(FEED_ID, "channel", "OPTOM BOZOR | Rasmiy", "optom_bozor", "buyers")
+
+
+def _ad(text: str, **fields) -> tm.Post:
+    speaking = {
+        "chat": FEED,
+        "sender_id": FEED_ID,
+        "sender_username": "optom_bozor",
+        "sender_name": "OPTOM BOZOR | Rasmiy",
+        "sender_bio": None,
+    }
+    speaking.update(fields)
+    return post(text, **speaking)
+
+
+def test_the_classifieds_feed_is_seeded_as_a_buyers_chat():
+    """03 §2.3: «@Optom_bozor (classifieds feed: the lead is the poster, not
+    the channel)»."""
+    assert chats.Seed("optom_bozor", chats.BUYERS_ROLE) in chats.SEEDS
+    assert chats.BUYERS_ROLE == "buyers"
+
+
+def test_a_classifieds_ad_speaks_for_its_poster_never_for_the_feed():
+    text = (
+        "Namuna Mebel MChJ: optom mebel Xitoydan, yangi partiya keldi. "
+        "Tel +998 90 000 00 11, @namuna_mebelchi, @optom_bozor"
+    )
+    obs = tm.parse_post(_ad(text, tg_message_id=100))
+    assert obs is not None
+    assert (obs.url, obs.source_ref) == (
+        "https://t.me/optom_bozor/100",
+        f"tg:{FEED_ID}:100",
+    )
+    # Nothing of the feed: its title, handle and id name the board, not a lead.
+    assert (obs.company_name_raw, obs.telegram, obs.external_ids) == (
+        "Namuna Mebel MChJ",
+        None,
+        {},
+    )
+    assert (obs.person_telegram, obs.phones) == ("namuna_mebelchi", ["+998 90 000 00 11"])
+    assert obs.signal_types == ["wholesale_bulky", "container_truck", "china_origin"]
+    assert obs.attrs["chat_type"] == "classifieds"
+    parsed = to_observation_json(obs)
+    assert parsed["kind"] == "intent_post"  # the poster's: person-tier, R3 scrubs it
+    assert parsed["handles"]["telegram"] == "namuna_mebelchi"
+    assert "tg_chat" not in parsed["handles"]
+    assert [(p["e164"], p["owner"]) for p in parsed["phones"]] == [
+        ("+998900000011", "person")
+    ]
+
+
+def test_a_classifieds_ask_carries_the_askers_signals():
+    obs = tm.parse_post(_ad("Kerak: Xitoydan 5 kub mato, optom"))
+    assert obs is not None
+    assert obs.signal_types == [
+        "intent_ask",
+        "wholesale_bulky",
+        "volume_m3_3plus",
+        "china_origin",
+    ]
+    # B2C words count only beside an ask; a seller's «1 dona» is a price.
+    seller = tm.parse_post(_ad("Optom mebel, yangi partiya keldi: 1 dona 900000 so'm"))
+    assert seller is not None and "b2c_marker" not in seller.signal_types
+
+
+def test_a_classifieds_tout_is_nobodys():
+    obs = tm.parse_post(_ad("Kargo Xitoy-Toshkent: 1 kub 250$. Tel +998 90 000 00 12"))
+    assert obs is not None
+    assert (obs.signal_types, obs.attrs["tout"]) == (["competitor"], ["competitor_text"])
+    assert (obs.phones, obs.person_telegram, obs.company_name_raw) == ([], None, None)
+    assert companies.tout_refusal(to_observation_json(obs)) == "competitor"
+    # A post the feed forwards from another channel is that channel's offer.
+    relay = tm.parse_post(_ad("Optom mebel keldi", fwd_from_peer_id=OTHER_CHANNEL))
+    assert relay is not None and relay.attrs["tout"] == ["forwarded_channel"]
+
+
+def test_a_person_in_a_buyers_group_still_speaks_for_themself():
+    companion = tm.Chat(
+        GROUP_ID, "group", "Namuna Xaridorlar", "namuna_xaridorlar", "buyers"
+    )
+    obs = tm.parse_post(post(chat=companion))
+    assert obs is not None
+    assert (obs.attrs["chat_type"], obs.person_telegram) == ("group", "namuna_tekstil")
+
+
+# --- review round: the runs (Postgres) -----------------------------------------------
+
+
+async def _evidence_of(session, row_id: int) -> m.Evidence:
+    row = await interaction(session, row_id)
+    proof = await session.get(m.Evidence, row.evidence_id, populate_existing=True)
+    assert proof is not None
+    return proof
+
+
+async def test_two_messages_with_the_same_words_are_each_cited_where_said(
+    session, enabled, offline, tmp_path
+):
+    """The same ask cross-posted to two groups by two people: two evidence
+    rows, each at its own link, each message linked to its own (02 §8: the
+    card and the push cite evidence.url)."""
+    await chat(session)
+    await chat(session, GROUP_ID - 1, username="namuna_ikki_guruh")
+    first = await store(session, ASK, message_id=11, username="namuna_bir", name="Bir")
+    second = await store(
+        session,
+        ASK,
+        message_id=22,
+        chat_id=GROUP_ID - 1,
+        sender_id=5100000077,
+        username="namuna_boshqa",
+        name="Boshqa",
+        at=T0 + timedelta(hours=3),
+    )
+    report = await run(offline, tmp_path)
+    assert (report.counters["new_evidence"], report.counters["new_observations"]) == (
+        2,
+        2,
+    )
+    for row_id, url, ref, at in (
+        (first, "https://t.me/namuna_optom/11", f"tg:{GROUP_ID}:11", T0),
+        (
+            second,
+            "https://t.me/namuna_ikki_guruh/22",
+            f"tg:{GROUP_ID - 1}:22",
+            T0 + timedelta(hours=3),
+        ),
+    ):
+        proof = await _evidence_of(session, row_id)
+        assert (proof.url, proof.source_ref, proof.published_at, proof.sha256) == (
+            url,
+            ref,
+            at,
+            sha(ASK),
+        )
+        row = await interaction(session, row_id)
+        obs = await session.get(m.Observation, row.observation_id)
+        assert obs is not None
+        assert (obs.evidence_id, obs.parsed["url"]) == (proof.id, url)
+
+
+async def test_a_bio_the_sender_already_has_is_read_for_their_next_message(
+    session, enabled, offline, tmp_path
+):
+    """The real order (03 §2.3): the collector wakes on the reader's NOTIFY
+    within seconds, the bio comes hours later from the about pass. The bio
+    then sits on the sender's earlier rows, and the next message, stored with
+    none (``store_hit`` never writes one), is judged with it."""
+    await chat(session)
+    await store(session, ASK, message_id=1, at=T0 - timedelta(days=3))
+    await run(offline, tmp_path, now=T0 - timedelta(days=3) + timedelta(minutes=1))
+    await about.fill_bio(session, POSTER, BIO, now=T0 - timedelta(days=2))
+    await session.commit()
+    later = await store(session, "Toshkentga 3 kub mato yuk kerak", message_id=2)
+    assert (await interaction(session, later)).sender_bio is None
+    await run(offline, tmp_path)
+    obs = await session.get(
+        m.Observation, (await interaction(session, later)).observation_id
+    )
+    assert obs is not None
+    assert (obs.parsed["company"]["name_raw"], obs.parsed["person"]) == (
+        "Namuna Tekstil Savdo MChJ",
+        {"name": "Rustam", "role": "direktori"},
+    )
+
+
+async def test_a_tout_bio_on_an_earlier_row_makes_the_next_message_a_touts(
+    session, enabled, offline, tmp_path
+):
+    await chat(session)
+    await store(
+        session,
+        "Toshkentga 2 kub yuk kerak",
+        message_id=1,
+        at=T0 - timedelta(days=3),
+        bio="Xitoydan yuk tashish xizmati",
+    )
+    await run(offline, tmp_path, now=T0 - timedelta(days=3) + timedelta(minutes=1))
+    later = await store(session, "Toshkentga 3 kub yuk kerak", message_id=2)
+    await run(offline, tmp_path)
+    row = await interaction(session, later)
+    obs = await session.get(m.Observation, row.observation_id)
+    assert obs is not None
+    assert obs.parsed["hints"]["collector"]["attrs"]["tout"] == ["competitor_sender"]
+    assert row.processed_at == NOW
+
+
+async def test_the_bio_cache_is_the_newest_bio_of_30_days(session):
+    """``chats.known_bios``, the one home of the reader's 30-day cache: the
+    newest bio any row of the sender holds, '' (read, and empty) included."""
+    await chat(session)
+    rows = [
+        (POSTER, 31, "Xitoydan yuk tashish xizmati"),  # past the cache
+        (POSTER, 29, "Eski bio"),
+        (POSTER, 10, BIO),
+        (POSTER, 1, None),  # not read yet
+        (5100000004, 31, "Juda eski"),
+        (5100000006, 5, ""),
+    ]
+    for n, (sender, days, bio) in enumerate(rows):
+        await store(
+            session,
+            ASK,
+            message_id=n + 1,
+            sender_id=sender,
+            at=NOW - timedelta(days=days),
+            bio=bio,
+        )
+    known = await chats.known_bios(
+        session, [POSTER, 5100000004, 5100000005, 5100000006], now=NOW
+    )
+    assert known == {POSTER: BIO, 5100000006: ""}
+    assert await about.cached_bio(session, POSTER, now=NOW) == BIO
+    assert await about.cached_bio(session, 5100000004, now=NOW) is None
+
+
+GROUP_ENTITY = tg_channel(
+    1000000001, title="Namuna Optom", username="namuna_optom", megagroup=True
+)
+POSTER_ENTITY = tg_user(POSTER, first_name="Rustam", username="namuna_tekstil")
+
+
+class _EditMeanwhile(tm.TelegramMonitor):
+    """The reader's edit of a message the run is handling arrives mid-run,
+    from the reader's own session, through its own handler."""
+
+    edit: asyncio.Task[str] | None = None
+    waiting: bool | None = None
+
+    async def collect(self, session, budget):
+        found = await super().collect(session, budget)
+
+        async def edit() -> str:
+            async with SessionLocal() as reader:
+                newer = tg_message(
+                    GROUP_ENTITY,
+                    9,
+                    "Guangzhoudan 1 dona sumka kerak, o'zim uchun",
+                    date=T0,
+                    sender=POSTER_ENTITY,
+                )
+                outcome = await ingest.handle_edit(
+                    reader, newer, now=NOW, edits=ingest.EditCounter()
+                )
+                await reader.commit()
+                return outcome
+
+        type(self).edit = asyncio.ensure_future(edit())
+        await asyncio.sleep(0.5)
+        type(self).waiting = not type(self).edit.done()
+        return found
+
+
+async def test_an_edit_during_a_run_waits_and_never_splits_row_from_evidence(
+    session, enabled, offline, tmp_path
+):
+    """04 §0: a job holds the rows it claims (FOR UPDATE SKIP LOCKED). The
+    edit waits for the run's commit, then finds the row handled and keeps it
+    as its evidence quotes it."""
+    await chat(session)
+    row_id = await store(session, ASK, message_id=9)
+    await run(offline, tmp_path, collector=_EditMeanwhile)
+    assert _EditMeanwhile.edit is not None
+    assert _EditMeanwhile.waiting is True
+    assert await asyncio.wait_for(_EditMeanwhile.edit, timeout=5) == "unchanged"
+    proof = await _evidence_of(session, row_id)
+    stored = gzip.decompress((tmp_path / proof.raw_path).read_bytes()).decode()
+    row = await interaction(session, row_id)
+    assert row.text == stored == ASK
+
+
+async def test_a_touts_message_names_nobody_and_is_rejected_as_a_competitor(
+    session, enabled, offline, tmp_path
+):
+    """06 §5.1: a competitor's person has no lead purpose — no company, no
+    contact; the observation is rejected 'competitor', so R2a takes the
+    message row at 30 d and only the evidence stays for the weekly diff."""
+    await chat(session)
+    forwarded = await store(
+        session,
+        ASK,
+        message_id=7,
+        fwd=OTHER_CHANNEL,
+        username="namuna_tout",
+        name="Namuna Odam",
+    )
+    worded = await store(
+        session,
+        "Kargo Xitoy-Toshkent: 1 kub 250$, 3 kub kerakmi? +998 90 000 00 55",
+        message_id=8,
+        sender_id=5100000055,
+        username="namuna_tout2",
+        name="Ikki",
+    )
+    await run(offline, tmp_path)
+    report = await companies.resolve_batch(now=NOW)
+    assert report.rejected == 2
+    for row_id in (forwarded, worded):
+        row = await interaction(session, row_id)
+        obs = await session.get(m.Observation, row.observation_id, populate_existing=True)
+        assert obs is not None
+        assert (obs.status, obs.reject_reason, obs.company_id) == (
+            "rejected",
+            "competitor",
+            None,
+        )
+        assert (obs.parsed["handles"]["telegram"], obs.parsed["phones"]) == (None, [])
+    assert (await count(session, m.Company), await count(session, m.Contact)) == (0, 0)
+
+
+R3_SCRUB = (
+    # 02 §4 R3, verbatim (T-31 builds the retention job).
+    "UPDATE observations SET parsed = (parsed - 'phones' - 'person') || CASE WHEN "
+    "parsed->>'kind' = 'intent_post' THEN jsonb_build_object('handles', "
+    "(parsed->'handles') - 'tg_user_id' - 'telegram') ELSE '{}'::jsonb END || "
+    "jsonb_build_object('scrubbed', true), scrubbed_at = now() WHERE scrubbed_at IS NULL "
+    "AND coalesce(resolved_at, created_at) < now() - interval '30 days'"
+)
+
+
+def _leaves(tree) -> list:
+    if isinstance(tree, dict):
+        return [x for k, v in tree.items() for x in [k, *_leaves(v)]]
+    if isinstance(tree, list):
+        return [x for v in tree for x in _leaves(v)]
+    return [tree]
+
+
+async def test_r3_leaves_no_trace_of_the_poster_in_an_intent_post(
+    session, enabled, offline, tmp_path
+):
+    await chat(session)
+    await store(session, ASK + " +998 90 000 00 01", message_id=31, bio=BIO)
+    await run(offline, tmp_path)
+    [obs] = await observations(session)
+    assert POSTER in _leaves(obs.parsed)  # handles.tg_user_id, before R3
+    await session.execute(
+        sa.update(m.Observation).values(created_at=sa.func.now() - timedelta(days=31))
+    )
+    await session.execute(sa.text(R3_SCRUB))
+    await session.commit()
+    [scrubbed] = await observations(session)
+    leaves = _leaves(scrubbed.parsed)
+    assert scrubbed.parsed["scrubbed"] is True
+    for trace in (POSTER, "tg_user_id", "namuna_tekstil", "Rustam", "+998900000001"):
+        assert trace not in leaves, trace
+    # The firm is company-tier and stays.
+    assert scrubbed.parsed["company"]["name_raw"] == "Namuna Tekstil Savdo MChJ"
+
+
+async def test_classifieds_ads_become_their_posters_not_the_feed(
+    session, enabled, offline, tmp_path, evidence_dir
+):
+    monitor = await chat(
+        session,
+        FEED_ID,
+        "channel",
+        title="OPTOM BOZOR | Rasmiy",
+        username="optom_bozor",
+        role=chats.BUYERS_ROLE,
+    )
+    ads = [
+        "Optom mebel Xitoydan, yangi partiya keldi. "
+        "Tel +998 90 000 00 11, @namuna_mebelchi",
+        "Optom poyabzal, zavod narxida, yangi partiya. "
+        "Tel +998 90 000 00 12, @namuna_oyoq",
+    ]
+    for n, text in enumerate(ads):
+        await store(
+            session,
+            text,
+            message_id=100 + n,
+            chat_id=FEED_ID,
+            chat_type="channel",
+            sender_id=FEED_ID,
+            username="optom_bozor",
+            name="OPTOM BOZOR | Rasmiy",
+        )
+    # The feed's own about names the board and its admin, not a lead.
+    await _about_row(session, monitor, "E'lon berish uchun: +998 90 000 00 19")
+    report = await run(offline, evidence_dir)
+    assert report.meta["telegram"]["abouts"] == 0
+    found = await observations(session)
+    assert [o.parsed["kind"] for o in found] == ["intent_post", "intent_post"]
+    await companies.resolve_batch(now=NOW)
+    firms = list(
+        await session.scalars(sa.select(m.Company).order_by(m.Company.first_seen_at))
+    )
+    assert len(firms) == 2
+    assert all("OPTOM BOZOR" not in (f.display_name or "") for f in firms)
+    people = {
+        c.phone: (c.tier, c.telegram_username, c.company_id)
+        for c in await session.scalars(sa.select(m.Contact))
+    }
+    assert {phone: v[:2] for phone, v in people.items()} == {
+        "+998900000011": ("person", "namuna_mebelchi"),
+        "+998900000012": ("person", "namuna_oyoq"),
+    }
+    assert len({v[2] for v in people.values()}) == 2  # one seller, one company
+
+
+async def test_a_repeat_poster_is_counted_over_60_days_of_stored_asks(
+    session, enabled, offline, tmp_path
+):
+    """03 §2.3: ≥ 3 intent posts in 60 days. The earlier asks were handled by
+    earlier runs, so the count comes from the stored history, not the batch;
+    a price list is no intent post, and an ask 61 days back is out."""
+    await chat(session)
+    for n, days in enumerate((61, 59, 30, 10)):
+        await store(session, ASK, message_id=10 + n, at=T0 - timedelta(days=days))
+    narxlar = "Narxlar: stul 250000 so'm, stol 900000 so'm, shkaf 1500000 so'm"
+    await store(session, narxlar, message_id=20, at=T0 - timedelta(days=5))
+    await run(offline, tmp_path, now=T0 - timedelta(days=1))
+    newest = await store(session, ASK, message_id=30)
+    report = await run(offline, tmp_path)
+    assert report.meta["telegram"]["messages"] == 1
+    row = await interaction(session, newest)
+    obs = await session.get(m.Observation, row.observation_id)
+    assert obs is not None
+    attrs = obs.parsed["hints"]["collector"]["attrs"]
+    assert (attrs["repeat_count_60d"], attrs["frequency"]) == (4, "repeat")
+
+
+COMPETITOR_CHANNEL = -1001000000066
+
+
+async def test_a_competitor_role_channel_is_a_tout_in_a_group_and_in_its_about(
+    session, enabled, offline, evidence_dir
+):
+    """The seeds' cargo channels (03 §2.3, role 'competitor'): their posts in
+    a group as themselves, and their weekly about, are a competitor's even
+    when no word says so. A chat's tout keeps the chat (company-tier)."""
+    await chat(session)
+    seeded = await chat(
+        session,
+        COMPETITOR_CHANNEL,
+        "channel",
+        title="Namuna Kanal",
+        username="namuna_kanal",
+        role="competitor",
+    )
+    in_group = await store(
+        session,
+        "Yangi partiya keldi, optom narxlarda mebel",
+        message_id=5,
+        sender_id=COMPETITOR_CHANNEL,
+        username="namuna_kanal",
+        name="Namuna Kanal",
+    )
+    await _about_row(session, seeded, "Mebel optom Xitoydan. Tel +998 90 000 00 66")
+    report = await run(offline, evidence_dir)
+    assert (report.meta["telegram"]["touts"], report.meta["telegram"]["abouts"]) == (1, 1)
+    tout = {
+        o.parsed["source_ref"]: o.parsed["hints"]["collector"]["attrs"].get("tout")
+        for o in await observations(session)
+    }
+    assert tout == {
+        f"tg:{GROUP_ID}:5": ["competitor_chat"],
+        f"tg:{COMPETITOR_CHANNEL}": ["competitor_chat"],
+    }
+    row = await interaction(session, in_group)
+    assert row.processed_at == NOW
+    obs = await session.get(m.Observation, row.observation_id)
+    assert obs is not None
+    assert (obs.parsed["kind"], obs.parsed["handles"]["telegram"]) == (
+        "profile",
+        "namuna_kanal",
+    )
+
+
+async def test_an_about_whose_file_does_not_match_its_row_is_read_from_the_row(
+    session, enabled, offline, evidence_dir
+):
+    """The file is the row's bytes only while it hashes to the row's sha256;
+    another file at that path (a restore gone wrong) is not read."""
+    monitor = await chat(
+        session,
+        CHANNEL_ID,
+        "channel",
+        title="Namuna Mebel Optom",
+        username="namuna_mebel",
+    )
+    proof = await _about_row(session, monitor)
+    other = about.about_body(
+        monitor, about.About(text="Tel +998 90 000 00 09"), read_at=T0
+    )
+    (evidence_dir / proof.raw_path).write_bytes(gzip.compress(other))
+    await run(offline, evidence_dir)
+    [obs] = await observations(session)
+    assert [p["e164"] for p in obs.parsed["phones"]] == ["+998900000003", "+998712000004"]
+
+
+async def test_an_about_observation_quotes_its_evidence_rows_excerpt(
+    session, enabled, offline, evidence_dir
+):
+    """02 §2.3: the excerpt is what the card quotes — the row's, as stored,
+    whatever the parser would cut from the file."""
+    monitor = await chat(
+        session,
+        CHANNEL_ID,
+        "channel",
+        title="Namuna Mebel Optom",
+        username="namuna_mebel",
+    )
+    proof = await _about_row(session, monitor)
+    quoted = "Optom mebel va furnitura Xitoydan"
+    await session.execute(
+        sa.update(m.Evidence).where(m.Evidence.id == proof.id).values(excerpt=quoted)
+    )
+    await session.commit()
+    await run(offline, evidence_dir)
+    [obs] = await observations(session)
+    assert obs.parsed["text"]["excerpt"] == quoted
+
+
+async def test_the_about_of_a_switched_off_channel_waits(
+    session, enabled, offline, evidence_dir
+):
+    monitor = await chat(
+        session,
+        CHANNEL_ID,
+        "channel",
+        title="Namuna Mebel Optom",
+        username="namuna_mebel",
+    )
+    await _about_row(session, monitor)
+    monitor.monitor_enabled = False  # the owner's /chats
+    await session.commit()
+    off = await run(offline, evidence_dir)
+    assert (off.meta["telegram"]["abouts"], await count(session, m.Observation)) == (0, 0)
+    monitor.monitor_enabled = True
+    await session.commit()
+    on = await run(offline, evidence_dir, now=NOW + timedelta(minutes=15))
+    assert (on.meta["telegram"]["abouts"], await count(session, m.Observation)) == (1, 1)
+
+
+async def test_a_message_whose_observation_was_refused_is_done_with_its_evidence(
+    session, enabled, offline, tmp_path, monkeypatch
+):
+    """The database refused the observation (``bad_observation``): the
+    evidence stays, and no later run writes an observation on evidence it
+    already holds — so the row is linked to it and done, not read again every
+    run at the head of the queue. The runner adopts only a row stored outside
+    any run (the reader's about), never one an earlier run wrote."""
+    await chat(session)
+    row_id = await store(session, ASK, message_id=1)
+    real = runner_mod.to_observation_json
+
+    def refusing(obs, **kwargs):
+        if obs.source_ref == f"tg:{GROUP_ID}:1":
+            raise ValueError("refused")
+        return real(obs, **kwargs)
+
+    monkeypatch.setattr(runner_mod, "to_observation_json", refusing)
+    first = await run(offline, tmp_path)
+    assert (first.status, first.meta["dropped"]) == ("partial", {"bad_observation": 1})
+    assert (await interaction(session, row_id)).evidence_id is None
+    monkeypatch.setattr(runner_mod, "to_observation_json", real)
+    later = NOW + timedelta(minutes=15)
+    second = await run(offline, tmp_path, now=later)
+    assert second.status == "ok"
+    assert (
+        second.meta["telegram"]["unobserved"],
+        second.counters["new_observations"],
+    ) == (
+        1,
+        0,
+    )
+    [proof] = list(await session.scalars(sa.select(m.Evidence)))
+    row = await interaction(session, row_id)
+    assert (row.evidence_id, row.observation_id, row.processed_at) == (
+        proof.id,
+        None,
+        later,
+    )
+    third = await run(offline, tmp_path, now=later + timedelta(minutes=15))
+    assert third.meta["telegram"]["messages"] == 0
+
+
+async def test_a_message_seen_again_under_a_new_link_cites_the_first_observation(
+    session, enabled, offline, tmp_path
+):
+    """The link step failed and the chat took a new username before the next
+    run: the message is a repeat of the last 24 h at another URL (the runner's
+    duplicate), and the row is linked to the observation already written."""
+    monitor = await chat(session)
+    row_id = await store(session, ASK, message_id=1)
+    failed = await run(offline, tmp_path, collector=_Failing)
+    assert failed.meta["dropped"] == {"after_write": 1}
+    [first] = await observations(session)
+    monitor.username = "namuna_yangi"
+    await session.commit()
+    async with Listener() as listener:
+        healed = await run(offline, tmp_path, now=NOW + timedelta(minutes=15))
+        heard = await listener.heard()
+    assert healed.counters["new_observations"] == 0
+    row = await interaction(session, row_id)
+    assert (row.observation_id, row.evidence_id, row.processed_at) == (
+        first.id,
+        first.evidence_id,
+        None,
+    )
+    assert heard == [f"telegram_monitor:{row_id}"]
+
+
+async def test_a_message_whose_evidence_was_refused_is_read_again(
+    session, enabled, offline, tmp_path, monkeypatch
+):
+    """No evidence row, nothing to link: the row stays in the queue, counted
+    (``unplaced``), and the next run stores it."""
+    await chat(session)
+    row_id = await store(session, ASK, message_id=1)
+    real = runner_mod.evidence_store.store
+
+    async def refusing(session, **kwargs):
+        if kwargs["url"] == "https://t.me/namuna_optom/1":
+            raise ValueError("refused")
+        return await real(session, **kwargs)
+
+    monkeypatch.setattr(runner_mod.evidence_store, "store", refusing)
+    first = await run(offline, tmp_path)
+    assert (first.status, first.meta["dropped"]) == ("partial", {"bad_evidence": 1})
+    assert first.meta["telegram"]["unplaced"] == 1
+    row = await interaction(session, row_id)
+    assert (row.evidence_id, row.processed_at) == (None, None)
+    monkeypatch.setattr(runner_mod.evidence_store, "store", real)
+    second = await run(offline, tmp_path, now=NOW + timedelta(minutes=15))
+    assert (second.status, second.counters["new_observations"]) == ("ok", 1)
+    assert "unplaced" not in second.meta["telegram"]
+    assert (await interaction(session, row_id)).observation_id is not None

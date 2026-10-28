@@ -153,9 +153,10 @@ _ID_VALUE_MAX: Final = 200
 
 
 class ObservationRejected(Exception):
-    """The observation names nothing the agent may keep: GSR itself
-    (``competitor``), nobody at all (``no_company``), or a company that was
-    purged on request (``purged`` — its data is not collected again)."""
+    """The observation names nothing the agent may keep: GSR itself or a
+    Telegram tout's message (``competitor``), nobody at all (``no_company``),
+    or a company that was purged on request (``purged`` — its data is not
+    collected again)."""
 
     def __init__(self, reason: str) -> None:
         super().__init__(reason)
@@ -365,6 +366,19 @@ def self_refusal(keys: IdentityKeys) -> str | None:
     if keys.site_key in SELF_DOMAINS or keys.tg_username in SELF_CHANNELS:
         return "competitor"
     return None
+
+
+def tout_refusal(parsed: Mapping[str, Any]) -> str | None:
+    """'competitor' for a Telegram message the collector found a tout's (03
+    §2.3: an ``intent_post`` whose ``hints.competitor_words`` is set): a
+    cargo competitor is never a lead (00 binding decisions), and its poster's
+    person-tier data is not kept (06 §5.1) — the message stays only as the
+    evidence the weekly competitor-offer diff reads. A competitor's own
+    channel (``profile``) still resolves: it is company-tier, and the gate
+    excludes it (04 §6 gate 2)."""
+    hints = _mapping(parsed.get("hints"))
+    tout = hints.get("competitor_words") is True
+    return "competitor" if tout and _text(parsed.get("kind")) == "intent_post" else None
 
 
 # --- Names (pure) -----------------------------------------------------------------
@@ -835,7 +849,7 @@ async def resolve_company(
     raises ``ObservationRejected`` for GSR itself, a nameless keyless
     observation, or a purged company."""
     keys = identity_keys(obs.parsed)
-    if (reason := self_refusal(keys)) is not None:
+    if (reason := self_refusal(keys) or tout_refusal(obs.parsed)) is not None:
         raise ObservationRejected(reason)
     if not keys.any_exact() and keys.name_key is None and keys.display_name is None:
         raise ObservationRejected("no_company")
