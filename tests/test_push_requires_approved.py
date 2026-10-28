@@ -238,7 +238,13 @@ async def _lead(session, state: str, nn: int) -> LeadCandidate:
             source_key="telegram_monitor",
         )
     )
-    fields: dict[str, Any] = {}
+    # As though approved once: nothing clears approved_by when a 4xx or the
+    # 48-hour rule sends an approved candidate back to review, so the state
+    # alone must refuse.
+    fields: dict[str, Any] = {
+        "approved_by": "owner:1",
+        "approved_at": NOW - timedelta(minutes=5),
+    }
     if state == "suppressed":
         hit = await gate_fixtures.row(session, "dnc", "phone_tail", "900000099")
         fields["suppressed_by"] = hit.id

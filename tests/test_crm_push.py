@@ -617,6 +617,18 @@ async def test_push_200_marks_pushed(world):
     [(source, headers, body)] = world.fake.posted
     assert source == "agent"
     assert body == row.payload
+    # exclude_none: a key with nothing to say is absent, never a null.
+    assert list(body) == [
+        "external_id",
+        "name",
+        "phone",
+        "note",
+        "utm_source",
+        "kub",
+        "firma",
+        "score",
+        "evidence",
+    ]
     assert row.payload_sha256 == push_gate.canonical_sha256(body)
     assert headers["x-gsr-key"] == KEY and headers["x-erp-key"] == KEY
     # The ERP made one created lead with the landed note.
@@ -1491,3 +1503,29 @@ def test_push_test_report_lines_and_exit_codes():
         ],
         1,
     )
+
+
+async def test_the_claim_is_committed_before_the_post_leaves(world):
+    """02 §2.10 rule 3: while the request is in flight, another connection
+    already reads the push_log row ``sending`` and the candidate still
+    ``approved`` — a crash here leaves a row reconcile settles."""
+    cand = await world.lead()
+    seen: list[tuple[str, int, str]] = []
+    inner = world.fake.transport()
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        async with SessionLocal() as other:
+            row = await other.scalar(
+                sa.select(PushLog).where(PushLog.candidate_id == cand.id)
+            )
+            state = await other.scalar(
+                sa.select(LeadCandidate.state).where(LeadCandidate.id == cand.id)
+            )
+            assert row is not None and state is not None
+            seen.append((row.status, row.attempt, state))
+        return await inner.handle_async_request(request)
+
+    erp = ErpClient(BASE, KEY, transport=httpx.MockTransport(handler), sleep=no_sleep)
+    result = await world.push(cand, erp=erp)
+    assert result.status == "sent"
+    assert seen == [("sending", 1, "approved")]
