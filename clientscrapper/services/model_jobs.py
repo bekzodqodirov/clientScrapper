@@ -115,8 +115,8 @@ Lane = Literal["instant", "batch"]
 BATCH_ROUTES: Final[Mapping[Operation, extraction.Route]] = {
     op: route for op, route in extraction.ROUTES.items() if route.lane == "batch"
 }
-# 04 §4.8: «the instant lane (Sonnet) takes it within its own cap» — the
-# verdict operation, whose model is VERDICT_MODEL and whose cap is its own.
+# 04 §4.8: the instant lane takes a fallback within its own cap — the
+# verdict operation (VERDICT_MODEL's role, its own allocation).
 FALLBACK_OP: Final[Mapping[Operation, Operation]] = {"company_verdict": "verdict"}
 # 04 §4.1 / §4.8: ≤ 100 company verdicts a night.
 BATCH_MAX: Final = 100
