@@ -638,7 +638,6 @@ async def inputs_for(
     *,
     now: datetime,
     tails: Iterable[str] = (),
-    exclude_external_id: str | None = None,
 ) -> Inputs:
     """Load what the gates read of ``company_id`` over its lineage."""
     company = await session.get(Company, company_id, populate_existing=True)
@@ -775,7 +774,6 @@ async def inputs_for(
             lineage=lineage,
             tails=all_tails,
             now=now,
-            exclude_external_id=exclude_external_id,
         ),
         lineage=lineage,
         tails=all_tails,

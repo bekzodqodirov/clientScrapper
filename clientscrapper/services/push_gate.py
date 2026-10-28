@@ -529,9 +529,7 @@ async def evaluate(
     plan.tail = tail
     tails = [tail] if tail else []
     # 3 and 5. the gates on live data; the suppression hit is item 5's.
-    got = await gates.inputs_for(
-        session, company.id, now=now, tails=tails, exclude_external_id=external_id
-    )
+    got = await gates.inputs_for(session, company.id, now=now, tails=tails)
     judged = gates.run_gates(
         got.company,
         got.contacts,
