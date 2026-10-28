@@ -80,6 +80,7 @@ __all__ = [
     "parsed_kind",
     "phone_e164",
     "phone_kind",
+    "phone_matches",
     "phone_tail",
     "telegram_handles",
     "telegram_key",
@@ -113,17 +114,26 @@ def make_phone(raw: str, *, city: str | None = None) -> Phone | None:
     return Phone(e164=e164, tail=tail, kind=phone_kind(e164), country=country, raw=raw)
 
 
+def phone_matches(text: str) -> list[re.Match[str]]:
+    """``PHONE_RE``'s matches in ``text``, valid or not, in order — except a
+    number inside a labelled STIR («ИНН 301234567»), which is the company's
+    tax id, not a phone (the pseudonymiser masks exactly these, 04 §4.2)."""
+    stir_spans = [m.span(1) for m in STIR_RE.finditer(text)]
+    return [
+        match
+        for match in PHONE_RE.finditer(text)
+        if not any(s < match.end() and match.start() < e for s, e in stir_spans)
+    ]
+
+
 def parse_phones(text: str, *, limit: int = 5) -> list[Phone]:
     """``PHONE_RE`` over ``text``: valid numbers, deduplicated by tail, in order of
     appearance, at most ``limit``. A number inside a labelled STIR («ИНН
-    301234567») is the company's tax id, not a phone, and is skipped."""
-    stir_spans = [m.span(1) for m in STIR_RE.finditer(text)]
+    301234567») is the company's tax id, not a phone, and is skipped
+    (``phone_matches``)."""
     phones: list[Phone] = []
     seen: set[str] = set()
-    for match in PHONE_RE.finditer(text):
-        start, end = match.span()
-        if any(s < end and start < e for s, e in stir_spans):
-            continue
+    for match in phone_matches(text):
         phone = make_phone(match.group(0))
         if phone is None or phone.tail in seen:
             continue

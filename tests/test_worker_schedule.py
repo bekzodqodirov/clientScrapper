@@ -89,6 +89,8 @@ BUILT = {
     "resolve",
     # T-14: the Telegram collector, woken by NOTIFY cs_interaction too.
     "telegram_monitor",
+    # T-15: the classifier, woken by the collector's NOTIFY.
+    "classify",
 }
 # The ERP slots and the ErpSync variant each runs (03 §3, 05 §B.2).
 ERP_VARIANTS = {

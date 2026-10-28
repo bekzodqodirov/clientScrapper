@@ -6,21 +6,36 @@ sleeping advances time instantly and is recorded. ``Site`` is an
 answers from a queue of responses or a callable, every request is kept with
 the fake time it arrived at, and an unknown URL is a 404 — so no test can
 reach the network. ``fetcher_for`` builds a ``Fetcher`` over both.
+
+``FakeAnthropic`` is the Messages API as an ``httpx.MockTransport`` (06 §5.2,
+T-15): it answers from a queue of scripted responses — hand-written and
+SYNTHETIC (``tests/fixtures/model/README.md``; real recordings are a day-1
+task on the VPS, 07 §5.5) — keeps every request body, and notes any request
+whose strings still match ``PHONE_RE``/``TG_RE``/``IG_RE``/``EMAIL_RE`` or
+carry a 14-digit run, and any request nobody scripted an answer for.
+``tests/conftest.py`` installs one on ``services/extraction`` for every test
+and fails the test that leaked or called unscripted.
 """
 
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
+import json
+import re
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal
+from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
+import anthropic
 import httpx
 
 from clientscrapper.collectors.base import Budget
+from clientscrapper.collectors.keywords import EMAIL_RE, IG_RE, PHONE_RE, TG_RE
+from clientscrapper.config import settings
 from clientscrapper.services.http import Fetcher, HostState
 
 TASHKENT = ZoneInfo("Asia/Tashkent")
@@ -132,3 +147,139 @@ def budget(
 
 
 ALLOW_ALL = httpx.Response(200, text="User-agent: *\nDisallow:\n")
+
+
+# --- the Messages API (T-15) -----------------------------------------------------
+
+MODEL_FIXTURES = Path(__file__).parent / "fixtures" / "model"
+PII_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("PHONE_RE", PHONE_RE),
+    ("TG_RE", TG_RE),
+    ("IG_RE", IG_RE),
+    ("EMAIL_RE", EMAIL_RE),
+    ("14 digits", re.compile(r"(?<!\d)\d{14}(?!\d)")),
+)
+GRAMMAR_MESSAGE = "Grammar compilation timed out for the provided schema"
+
+
+def strings_of(value: Any) -> Iterator[str]:
+    """Every string inside a decoded JSON body, keys included."""
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for key, item in value.items():
+            yield str(key)
+            yield from strings_of(item)
+    elif isinstance(value, list):
+        for item in value:
+            yield from strings_of(item)
+
+
+def pii_in(body: Any) -> list[str]:
+    """The patterns a request body still matches — the pattern's name, never
+    the value (a failing test must not print what it protects)."""
+    return sorted(
+        {
+            name
+            for text in strings_of(body)
+            for name, pattern in PII_PATTERNS
+            if pattern.search(text)
+        }
+    )
+
+
+def model_fixture(name: str) -> Any:
+    """A SYNTHETIC structured answer from tests/fixtures/model/."""
+    return json.loads((MODEL_FIXTURES / name).read_text(encoding="utf-8"))
+
+
+def message(
+    answer: Any = None,
+    *,
+    stop_reason: str = "end_turn",
+    input_tokens: int = 300,
+    output_tokens: int = 150,
+    cache_read: int = 900,
+    cache_write: int = 0,
+    model: str | None = None,
+) -> httpx.Response:
+    """A Messages API 200: ``answer`` as the text block (a dict or list is
+    written as JSON, a str as it is, None = no content at all)."""
+    if answer is None:
+        content: list[dict[str, Any]] = []
+    else:
+        text = answer if isinstance(answer, str) else json.dumps(answer)
+        content = [{"type": "text", "text": text}]
+    body = {
+        "id": "msg_synthetic",
+        "type": "message",
+        "role": "assistant",
+        "model": model or settings.extract_model,
+        "content": content,
+        "stop_reason": stop_reason,
+        "stop_sequence": None,
+        "usage": {
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "cache_read_input_tokens": cache_read,
+            "cache_creation_input_tokens": cache_write,
+        },
+    }
+    return httpx.Response(200, json=body)
+
+
+def api_error(status: int, kind: str, text: str) -> httpx.Response:
+    return httpx.Response(
+        status, json={"type": "error", "error": {"type": kind, "message": text}}
+    )
+
+
+def grammar_failure() -> httpx.Response:
+    """The 400 a schema too big for the grammar compiler gets (MIYA)."""
+    return api_error(400, "invalid_request_error", GRAMMAR_MESSAGE)
+
+
+def overloaded() -> httpx.Response:
+    return api_error(529, "overloaded_error", "Overloaded")
+
+
+ModelAnswer = httpx.Response | Callable[[httpx.Request], httpx.Response]
+
+
+class FakeAnthropic:
+    """The Messages API: scripted answers in order, every request kept."""
+
+    def __init__(self) -> None:
+        self.answers: list[ModelAnswer] = []
+        self.requests: list[dict[str, Any]] = []
+        self.leaks: list[list[str]] = []
+        self.unexpected = 0
+
+    def queue(self, *answers: ModelAnswer) -> FakeAnthropic:
+        self.answers.extend(answers)
+        return self
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content or b"{}")
+        self.requests.append(body)
+        found = pii_in(body)
+        if found:
+            self.leaks.append(found)
+        if not self.answers:
+            self.unexpected += 1
+            return api_error(500, "api_error", "no scripted answer")
+        answer = self.answers.pop(0)
+        if callable(answer) and not isinstance(answer, httpx.Response):
+            return answer(request)
+        return httpx.Response(
+            answer.status_code, headers=answer.headers, content=answer.content
+        )
+
+    def client(self) -> anthropic.AsyncAnthropic:
+        """An SDK client over this transport. No retries of the SDK's own: a
+        scripted 5xx is one request, so a test counts what it planted."""
+        return anthropic.AsyncAnthropic(
+            api_key="test-key-not-a-credential",
+            max_retries=0,
+            http_client=httpx.AsyncClient(transport=httpx.MockTransport(self)),
+        )

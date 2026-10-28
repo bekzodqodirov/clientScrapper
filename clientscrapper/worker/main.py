@@ -26,8 +26,10 @@ Built here (T-08):
 Built by later tasks and registered here: the five ERP feed cadences, read
 from ``collectors/erp_sync.JOBS`` (T-09's suppression delta/full, T-10's
 outcomes/quarter/year walks), each ``run_collector(ErpSync, variant=…)``;
-``resolve`` (T-17, ``services/companies.resolve_job``, every 2 minutes); and
-``telegram_monitor`` (T-14, ``run_collector(TelegramMonitor)``).
+``resolve`` (T-17, ``services/companies.resolve_job``, every 2 minutes);
+``telegram_monitor`` (T-14, ``run_collector(TelegramMonitor)``); and
+``classify`` (T-15, ``services/classify.classify_job``, woken by
+``cs_interaction``).
 
 **The event-driven path** (04 §0, 01 N-06). A slot with ``wakes_on`` also
 runs when its ``NOTIFY`` channel speaks: :func:`listen_for_wakes` holds a
@@ -88,6 +90,7 @@ from clientscrapper.logs import setup_logging
 from clientscrapper.services import (
     backup,
     chats,
+    classify,
     companies,
     costs,
     crontab,
@@ -264,7 +267,13 @@ def job_table() -> tuple[JobSlot, ...]:
         _collector("uzum_shops", "0 4 15 * *", "T-37", "uzum_sellers", "shops"),
         _collector("tenders", "0 4 * * 6", "T-38", None, note="phase 2; no sources row"),
         # --- 04 §0: the pipeline -----------------------------------------------
-        JobSlot("classify", ("every 15m",), "T-15", wakes_on=chats.INTERACTION_CHANNEL),
+        JobSlot(
+            "classify",
+            ("every 15m",),
+            "T-15",
+            classify.classify_job,
+            wakes_on=chats.INTERACTION_CHANNEL,
+        ),
         JobSlot("model_batch_submit", ("30 23 * * *",), "T-16"),
         JobSlot(
             "model_batch_collect",

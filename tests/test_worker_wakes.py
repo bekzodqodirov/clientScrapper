@@ -79,9 +79,9 @@ def test_only_built_slots_wake_and_by_their_channel():
         _slot("d", ran, wakes_on=None),
     )
     assert worker.waking(slots) == {"cs_interaction": ("a",), "other_channel": ("b",)}
-    # The table: the reader's channel wakes the collector (classify and score
-    # join it once T-15 and T-18 build them).
-    assert worker.waking()["cs_interaction"] == ("telegram_monitor",)
+    # The table: the reader's channel wakes the collector and the classifier
+    # (score joins them once T-18 builds it).
+    assert worker.waking()["cs_interaction"] == ("telegram_monitor", "classify")
 
 
 async def test_a_wake_during_a_run_runs_the_job_once_more_after_it():

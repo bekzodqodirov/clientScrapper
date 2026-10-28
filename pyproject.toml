@@ -82,6 +82,13 @@ files = [
     "clientscrapper/services/outcomes.py",
     # T-14
     "clientscrapper/collectors/telegram_monitor.py",
+    # T-15
+    "clientscrapper/services/pseudonyms.py",
+    "clientscrapper/services/schemas.py",
+    "clientscrapper/services/prompts.py",
+    "clientscrapper/services/validators.py",
+    "clientscrapper/services/extraction.py",
+    "clientscrapper/services/classify.py",
 ]
 
 # APScheduler 3 ships no type information.
