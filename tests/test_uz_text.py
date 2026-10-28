@@ -70,6 +70,10 @@ OWNER_TEXT_MODULES = (
     # by /import.
     "services/client_import.py",
     "tools/import_clients.py",
+    # 04 §6/§7 (T-19): the card's gate words and the push gate's refusal
+    # notes (lead_reviews.note, shown in /lidlar).
+    "services/gates.py",
+    "services/push_gate.py",
 )
 # Modules whose raise messages reach the owner (see the docstring).
 OWNER_RAISE_MODULES = frozenset({"config.py"})

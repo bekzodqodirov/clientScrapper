@@ -29,7 +29,12 @@ Producers built here:
   ``review`` row stays the owner's — unless it lost its usable phone and is
   not the phone-less handoff (06 §1.3: such a card is refused), then it steps
   back to ``hold`` until a phone or a signal re-scores it. The gates
-  (``services/gates``, T-19) step in before the routing;
+  (``services/gates``, 04 §6) step in before the routing: the first failing
+  gate decides — ``excluded``/``suppressed`` at once, a ``hold`` (with the
+  gate's ``hold_until``) instead of the route — except gate 1's «not yet
+  B2B», which waits until the candidate is bound for a card (``review``,
+  ``approved``) or sits in one, because enrichment is what may make it B2B
+  (``gated_walk``). Every gate's mark lands in ``score_breakdown.gates``;
 * ``phone_less_review`` — 02 §2.9's ``enriching → review`` for a candidate
   that kept no phone after the third enrichment attempt but scores ≥ 60 and
   has a Telegram username (``tier='warm'``, ``gates.no_phone=true``; T-24's
@@ -75,7 +80,7 @@ from clientscrapper.db.models import (
     Source,
 )
 from clientscrapper.db.session import SessionLocal
-from clientscrapper.services import companies, scoring, signals
+from clientscrapper.services import companies, gates, scoring, signals
 from clientscrapper.services.scoring import ScoreResult, Tier
 
 log = logging.getLogger(__name__)
@@ -115,6 +120,8 @@ RESCORE_STATES: Final = signals.RESCORE_STATES
 ATTRIBUTING_KEYS: Final = frozenset(
     w.key for w in e.WEIGHTS_V1 if w.group_key in scoring.CORROBORATION_GROUPS
 )
+# Where a card or a push is next (04 §6: the gates run «before a card»).
+CARD_BOUND_STATES: Final = frozenset({"review", "approved"})
 
 
 class IllegalTransition(Exception):
@@ -237,6 +244,32 @@ def route(state: str, tier: Tier, facts: RouteFacts, *, now: datetime) -> tuple[
     if state == "review" and not facts.usable_phone and not facts.no_phone:
         return ("hold",)
     return ()
+
+
+def card_bound(state: str, walk: tuple[str, ...]) -> bool:
+    """The candidate sits in a card or the walk takes it to a card or a
+    push: gate 1's hold is judged (``GateResult.decide(card=…)``)."""
+    target = walk[-1] if walk else state
+    return state == "review" or target in CARD_BOUND_STATES
+
+
+def gated_walk(
+    state: str, walk: tuple[str, ...], failure: gates.Failure | None
+) -> tuple[str, ...]:
+    """The walk once the deciding gate has spoken (04 §6): an exclusion or
+    a suppression at once; a hold instead of the route (``found`` passes
+    through ``scored``; a held candidate stays held)."""
+    if failure is None:
+        return walk
+    if failure.decision in ("excluded", "suppressed"):
+        return (failure.decision,)
+    if state == "hold":
+        return ()
+    return ("scored", "hold") if state == "found" else ("hold",)
+
+
+def _later(a: datetime | None, b: datetime | None) -> datetime | None:
+    return max((x for x in (a, b) if x is not None), default=None)
 
 
 # --- the 'found' candidate (02 §2.9) ------------------------------------------------
@@ -556,8 +589,11 @@ async def apply_score(
     *,
     now: datetime,
     auto_push: bool,
+    gate: gates.GateResult | None = None,
 ) -> tuple[str, ...]:
-    """Walk ``candidate`` through ``route``'s states; returns the walk."""
+    """Walk ``candidate`` through ``route``'s states — or, when ``gate``
+    has a deciding failure, through ``gated_walk``'s — and record every
+    gate's mark in ``score_breakdown.gates``; returns the walk."""
     facts = RouteFacts(
         auto_push=auto_push,
         hold_until=candidate.hold_until,
@@ -565,12 +601,38 @@ async def apply_score(
         usable_phone=result.usable_phone,
         no_phone=_handoff(candidate.score_breakdown),
     )
-    walk = route(candidate.state, result.tier, facts, now=now)
+    state = candidate.state
+    walk = route(state, result.tier, facts, now=now)
+    failure: gates.Failure | None = None
+    if gate is not None:
+        failure = gate.decide(card=card_bound(state, walk))
+        walk = gated_walk(state, walk, failure)
+        breakdown = dict(candidate.score_breakdown or {})
+        breakdown["gates"] = {**dict(breakdown.get("gates") or {}), **gate.marks}
+        candidate.score_breakdown = breakdown
+        await gates.apply_effects(session, candidate.company_id, failure)
+    held_until = failure.until if failure is not None else None
     for target in walk:
-        approved_by = (
-            f"auto:{candidate.primary_source_key}" if target == "approved" else None
+        await transition(
+            session,
+            candidate,
+            target,
+            now=now,
+            approved_by=(
+                f"auto:{candidate.primary_source_key}" if target == "approved" else None
+            ),
+            exclude_reason=failure.reason if target == "excluded" and failure else None,
+            suppressed_by=(
+                failure.hit.id
+                if target == "suppressed" and failure and failure.hit
+                else None
+            ),
+            hold_until=held_until if target == "hold" else None,
         )
-        await transition(session, candidate, target, now=now, approved_by=approved_by)
+    if failure is not None and failure.decision == "hold" and not walk:
+        # Already held: the gate's window extends the hold, never shortens it.
+        candidate.hold_until = _later(candidate.hold_until, held_until)
+        await session.flush()
     return walk
 
 
@@ -734,6 +796,7 @@ async def _score_one(
                     result,
                     now=now,
                     auto_push=await _auto_push(session, candidate.primary_source_key),
+                    gate=await gates.evaluate(session, candidate.company_id, now=now),
                 )
         except Exception as exc:
             # A candidate that cannot be scored costs only itself; the error

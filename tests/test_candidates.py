@@ -78,6 +78,16 @@ SPEC = {
     "suppressed": set(),
 }
 ALLOWED = sorted((a, b) for a, tos in SPEC.items() for b in tos)
+# The marks score_job writes for make_firm's firm (04 §6, services/gates).
+PASSING_GATES = {
+    "is_b2b": "pass:legal_form",
+    "not_competitor": "pass",
+    "not_supplier": "pass",
+    "not_client": "pass",
+    "not_dnc": "pass",
+    "not_recent": "pass",
+    "active_entity": "unknown",
+}
 REFUSED = sorted(
     (a, b) for a in e.CANDIDATE_STATES for b in e.CANDIDATE_STATES if b not in SPEC[a]
 )
@@ -87,11 +97,15 @@ REFUSED = sorted(
 
 
 async def make_firm(session, *, phone: str | None = "+998900000011", **fields) -> Company:
+    """A firm that passes the gates (04 §6): a legal form makes it B2B (gate
+    1), and nothing else about it fails one — the routing tests here are
+    about the score, test_gates.py is about the gates."""
     n = next(_SEQ)
     firm = Company(
         display_name=f"Namuna Firma {n}",
         name_key=f"namuna firma {n}",
         state=fields.pop("state", "active"),
+        legal_form=fields.pop("legal_form", "MChJ"),
         **fields,
     )
     session.add(firm)
@@ -935,7 +949,8 @@ async def test_a_review_card_is_rescored_but_stays_the_owner_s(session):
     row = await reload(session, cand)
     # origin 20 + recency 10 + a mobile 6
     assert (row.state, row.score, row.tier) == ("review", 36, "cold")
-    assert row.score_breakdown["gates"] == {"not_dnc": "pass"}
+    # The gates' own marks (T-19) replace the stale ones, the trail is kept.
+    assert row.score_breakdown["gates"] == PASSING_GATES
     assert row.score_breakdown["enrichment"] == [{"step": "E2"}]
 
 
@@ -1156,7 +1171,7 @@ async def test_a_phone_ends_the_phone_less_handoff_mark(session):
     row = await reload(session, cand)
     assert row.state == "review"
     assert row.score_breakdown["usable_phone"] is True
-    assert row.score_breakdown["gates"] == {"is_b2b": "pass"}
+    assert row.score_breakdown["gates"] == PASSING_GATES  # no_phone is gone
 
 
 async def test_the_company_s_own_channel_is_no_username_to_write_to(session):

@@ -656,6 +656,19 @@ LEGAL_FORM_RE = re.compile(
     rf"ТОО|JV|QO{_A}?SHMA)(?!\w)",
     re.I,
 )
+# A Chinese-side supplier's name (04 §6 gate 3: «Co\.?,?\s*Ltd|有限公司|Trading
+# Co\.|Imp(ort)?\s*&\s*Exp(ort)?» without a UZ legal form or address): the
+# English company endings of a Chinese exporter's card, and 有限公司 («limited
+# company»). Read on a name only; «& Exp.» is the shortened form exhibitor
+# lists print; «Co» and «Ltd» need a separator («Coltd» is a word).
+SUPPLIER_NAME_RE = re.compile(
+    r"(?<!\w)(?:Co[.,\s][.,\s]*Ltd\.?|Trading\s+Co\.|Imp(?:ort)?\.?\s*&\s*Exp(?:ort)?\.?)(?!\w)"
+    r"|有限公司",
+    re.I,
+)
+# A CJK ideograph (04 §6 gate 3: «website title in Chinese»): one is enough —
+# an Uzbek importer's site is never titled in Chinese characters.
+CJK_RE = re.compile(r"[㐀-䶿一-鿿豈-﫿]")
 CAPTCHA_MARKERS = (
     "captcha",
     "anomaly.js",

@@ -575,6 +575,70 @@ CASES: dict[str, tuple[re.Pattern[str], Extract, Cases]] = {
             ),
         },
     ),
+    # 04 §6 gate 3 (T-19): a Chinese exporter's name; read on names only.
+    "SUPPLIER_NAME_RE": (
+        kw.SUPPLIER_NAME_RE,
+        _whole,
+        {
+            "uz-Latn": (
+                [
+                    ("Yiwu Namuna Trading Co., Ltd", "Trading Co."),
+                    ("Guangzhou Namuna Co.,Ltd.", "Co.,Ltd."),
+                    ("Namuna Import & Export", "Import & Export"),
+                    ("Ningbo Namuna Imp. & Exp. Co", "Imp. & Exp."),
+                    ("义乌市纳木纳有限公司", "有限公司"),
+                ],
+                ["Namuna Savdo MChJ", "Namuna Import MChJ", "Coltd mebel"],
+            ),
+            "uz-Cyrl": (
+                [
+                    ("Хитой фирмаси Yiwu Namuna Co. Ltd", "Co. Ltd"),
+                    ("Етказиб берувчи: Namuna Trading Co.", "Trading Co."),
+                    ("Завод: Namuna Imp & Exp", "Imp & Exp"),
+                ],
+                ["Намуна савдо МЧЖ", "Намуна импорт", "Колтд мебел"],
+            ),
+            "ru": (
+                [
+                    ("Поставщик Shenzhen Namuna Co., Ltd", "Co., Ltd"),
+                    ("Фабрика Namuna Import&Export", "Import&Export"),
+                    ("Компания Namuna Trading Co. (Китай)", "Trading Co."),
+                ],
+                ["ООО «Намуна Трейдинг»", "Импорт и экспорт из Китая", "Ltd товары"],
+            ),
+        },
+    ),
+    # 04 §6 gate 3 (T-19): a website title in Chinese.
+    "CJK_RE": (
+        kw.CJK_RE,
+        _whole,
+        {
+            "uz-Latn": (
+                [
+                    ("Sayt nomi: 义乌纳木纳", "义"),
+                    ("Namuna 家具 fabrikasi", "家"),
+                    ("灯具 optom", "灯"),
+                ],
+                ["Namuna Mebel", "Xitoydan mebel", "Ōzbekiston"],
+            ),
+            "uz-Cyrl": (
+                [
+                    ("Сайт: 纺织品 Намуна", "纺"),
+                    ("Намуна 有限公司", "有"),
+                    ("Хитой 工厂", "工"),
+                ],
+                ["Намуна мебел", "Хитойдан мато", "Ўзбекистон"],
+            ),
+            "ru": (
+                [
+                    ("Сайт фабрики 照明", "照"),
+                    ("ООО 纳木纳", "纳"),
+                    ("Каталог 鞋子", "鞋"),
+                ],
+                ["Мебель из Китая", "Каталог товаров", "Ёлки оптом"],
+            ),
+        },
+    ),
     "B2B_RE": (
         kw.B2B_RE,
         _whole,
