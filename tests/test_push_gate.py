@@ -778,6 +778,32 @@ async def test_14_a_fallen_score_goes_back_to_the_owner(session, erp_ready):
     assert [(r.state, r.note) for r in live] == [("pending", "Ball tushdi")]
 
 
+@pytest.mark.parametrize(
+    ("fields", "lead_fields", "code"),
+    [
+        ({"is_competitor": True}, {}, "competitor"),
+        ({"is_supplier_cn": True}, {}, "supplier_cn"),
+        ({"state": "client"}, {}, "client_state"),
+        ({}, {"shared_phone": True}, "shared_phone"),
+    ],
+)
+async def test_14_what_only_the_owner_can_resolve_goes_back_to_review(
+    session, erp_ready, fields, lead_fields, code
+):
+    """A fact that arrived after the approval and that no rerun of the job
+    can clear: the candidate leaves ``approved`` for a new card that says
+    why, instead of being refused again every run."""
+    _, _, cand, body = await pushable(session, lead_fields=lead_fields, **fields)
+    result = await push_gate.claim(
+        session, cand.id, now=NOW, payload=body, endpoint=ENDPOINT
+    )
+    assert not result.claimed
+    got = await session.get(LeadCandidate, cand.id, populate_existing=True)
+    live = (await session.scalars(sa.select(LeadReview))).all()
+    assert got is not None and got.state == "review"
+    assert [(r.state, r.note) for r in live] == [("pending", push_gate.REFUSAL_UZ[code])]
+
+
 async def test_14_a_dnc_after_the_approval_suppresses(session, erp_ready):
     owner, _, cand, body = await pushable(session)
     dnc = await row(session, "dnc", "phone_tail", tail(61))
