@@ -161,6 +161,14 @@ REFUSAL_UZ: Final[Mapping[str, str]] = {
     "not_root": "Kompaniya boshqasiga birlashtirilgan",
     "external_id": "Lid identifikatori mos emas",
     "score_low": "Ball tushdi",
+    # What the push itself learned (crm_push, 05 §B.1 / 02 §2.10 rule 5): a
+    # 4xx other than 404 — «ERP rad etdi (HTTP n)»; a re-push the outcomes
+    # feed never showed either; a re-push asked twice; an id the ERP has
+    # already reported (/push tekshir, 06 §1.2).
+    "erp_refused": "ERP rad etdi",
+    "unconfirmed": "CRM tasdiqlamadi",
+    "repushed": "Bu push allaqachon bir marta qayta yuborilgan",
+    "reported": "ERP bu pushni allaqachon koʻrsatgan",
 }
 # The job runs again: nothing for the owner to read (05 §B.1).
 SILENT: Final = frozenset(
@@ -195,6 +203,8 @@ TO_REVIEW: Final = frozenset(
         "not_root",
         "external_id",
         "score_low",
+        "erp_refused",
+        "unconfirmed",
     }
 )
 
@@ -214,6 +224,8 @@ class Refusal:
     @property
     def text(self) -> str:
         words = REFUSAL_UZ[self.code]
+        if self.code == "erp_refused" and self.detail:
+            words += f" (HTTP {self.detail})"
         if self.until is not None and self.code != "breaker":
             local = self.until.astimezone(settings.tz)
             words += f" ({local.strftime('%d.%m.%Y %H:%M')} gacha)"
@@ -430,9 +442,11 @@ def _contact_refusals(contact: Contact | None, *, shared_ok: bool) -> list[Refus
     return []
 
 
-async def _stated_m3(
+async def stated_m3(
     session: AsyncSession, lineage: Sequence[uuid.UUID]
 ) -> Decimal | None:
+    """The stated volume a ``kub`` may carry (item 11): the largest stated
+    amount over the lineage — the one home ``crm_push`` reads too."""
     value = await session.scalar(
         sa.select(sa.func.max(Signal.value)).where(
             Signal.company_id.in_(list(lineage)),
@@ -614,7 +628,7 @@ async def evaluate(
             | {"external_id": external_id},
             display_name=company.display_name,
             phone=contact.phone if contact is not None else None,
-            stated_m3=await _stated_m3(session, got.lineage),
+            stated_m3=await stated_m3(session, got.lineage),
         )
         if problems:
             refuse(Refusal(11, "payload", detail=";".join(problems)))
@@ -743,10 +757,17 @@ async def claim(
     payload: Mapping[str, Any] | None,
     endpoint: str,
     repush_of: int | None = None,
+    skip_checks: frozenset[int] = frozenset(),
+    record: bool = True,
 ) -> ClaimResult:
     """Lock, check and claim one ``push_log`` row (``status='sending'``) in
     the caller's transaction — or record the refusals. The caller commits
-    before it sends (02 §2.10 rule 3)."""
+    before it sends (02 §2.10 rule 3).
+
+    ``skip_checks`` drops the refusals of those items — only ``make
+    push-test``'s synthetic company, which has no score (item 13, 05 §B.1);
+    ``record=False`` returns the refusals without writing them (the same
+    tool rolls its synthetic company back instead)."""
     candidate = await lock_candidate(session, candidate_id)
     if candidate is None:
         return ClaimResult(refusals=(Refusal(1, "not_approved"),))
@@ -754,8 +775,10 @@ async def claim(
     if repush_of is not None and prior is None:
         return ClaimResult(refusals=(Refusal(12, "external_id"),))
     plan = await evaluate(session, candidate, now=now, payload=payload, repush_of=prior)
+    plan.refusals = [r for r in plan.refusals if r.check not in skip_checks]
     if plan.refusals:
-        await record_refusals(session, candidate, plan.refusals, now=now)
+        if record:
+            await record_refusals(session, candidate, plan.refusals, now=now)
         return ClaimResult(refusals=tuple(plan.refusals))
     assert payload is not None and plan.tail is not None and plan.external_id
     assert plan.payload_sha256 is not None
@@ -806,6 +829,7 @@ __all__ = [
     "owner_word",
     "payload_problems",
     "record_refusals",
+    "stated_m3",
     "text_len",
     "window_opens",
 ]

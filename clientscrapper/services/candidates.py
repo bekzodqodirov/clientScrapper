@@ -61,6 +61,7 @@ import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from decimal import Decimal
 from typing import Any, Final
 
 import sqlalchemy as sa
@@ -73,6 +74,7 @@ from clientscrapper.db.enums import sql_list
 from clientscrapper.db.models import (
     Company,
     Contact,
+    Evidence,
     LeadCandidate,
     Observation,
     Outcome,
@@ -851,3 +853,185 @@ async def score_job(
     if report.claimed:
         log.info("score_job", extra={"counts": counts})
     return counts
+
+
+# --- what a push reads (05 §B.1 ``CandidateView``) -----------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class SignalEvidence:
+    """One signal of the company's lineage with the evidence it stands on:
+    what the ERP note cites (URL + date + verbatim quote)."""
+
+    signal_id: int
+    key: str
+    group: str
+    points: int
+    value: Decimal | None
+    quote: str | None
+    observed_at: datetime
+    source_key: str
+    source_family: str
+    evidence_id: int
+    url: str
+    published_at: datetime | None
+    fetched_at: datetime
+    excerpt: str
+
+
+@dataclass(frozen=True, slots=True)
+class PersonView:
+    """The one decision maker the note may name — a person-tier contact with
+    its ``legal_basis`` (CLAUDE.md: at most one per company)."""
+
+    full_name: str
+    role: str | None
+    telegram_username: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class CandidateView:
+    """Read-only: everything ``crm_push.build_payload`` reads (05 §B.1). The
+    signals are ranked best first — the volume group before origin before
+    the rest, by points, then the newest."""
+
+    candidate_id: uuid.UUID
+    company_id: uuid.UUID
+    external_id: str
+    display_name: str
+    legal_form: str | None
+    stir: str | None
+    city: str | None
+    address: str | None
+    website_domain: str | None
+    telegram: str | None
+    instagram: str | None
+    registry_status: str
+    sectors: tuple[str, ...]
+    goods: tuple[str, ...]
+    volume_band: str
+    phone: str | None
+    person: PersonView | None
+    signals: tuple[SignalEvidence, ...]
+    stated_m3: Decimal | None
+    score: int
+    breakdown: Mapping[str, Any]
+    opener: str | None = None
+    per_month: str | None = None
+
+
+# The groups a note's first line may cite, in the order it prefers them.
+CITED_GROUPS: Final = ("volume", "origin", "solidity")
+
+
+def _signal_rank(s: SignalEvidence) -> tuple[int, int, float]:
+    group = CITED_GROUPS.index(s.group) if s.group in CITED_GROUPS else len(CITED_GROUPS)
+    return (group, -s.points, -s.observed_at.timestamp())
+
+
+async def load_view(
+    session: AsyncSession, candidate_id: uuid.UUID, *, now: datetime
+) -> CandidateView:
+    """Assemble the ``CandidateView`` of ``candidate_id`` (05 §B.1): the
+    company, the lead contact the push gate chooses (``push_gate.lead_contact``),
+    the decision maker with a legal basis, the lineage's live signals with
+    their evidence, the stated volume, the score's breakdown and — when 04's
+    draft stored one — the opener (``score_breakdown.opener``; UNVERIFIED:
+    T-30 decides where the draft lives). Raises LookupError for a candidate
+    or a company that is gone."""
+    from clientscrapper.services import push_gate  # it imports this module
+
+    candidate = await session.get(LeadCandidate, candidate_id, populate_existing=True)
+    if candidate is None:
+        raise LookupError(f"candidate {candidate_id} is gone")
+    company = await session.get(Company, candidate.company_id, populate_existing=True)
+    if company is None:
+        raise LookupError(f"company {candidate.company_id} is gone")
+    lineage = sorted((await companies.lineages(session, [company.id]))[company.id])
+    lead = await push_gate.lead_contact(session, candidate)
+    contacts = (
+        await session.scalars(
+            sa.select(Contact)
+            .where(Contact.company_id.in_(lineage), Contact.anonymised_at.is_(None))
+            .order_by(Contact.created_at, Contact.id)
+        )
+    ).all()
+    person = next(
+        (
+            PersonView(c.full_name, c.role, c.telegram_username)
+            for c in sorted(contacts, key=lambda c: not c.is_decision_maker)
+            if c.tier == "person" and c.legal_basis and c.full_name
+        ),
+        None,
+    )
+    company_tier = [c for c in contacts if c.tier == "company"]
+    if lead is not None and lead.tier == "company":
+        company_tier.sort(key=lambda c: c.id != lead.id)
+    telegram = company.telegram_channel or next(
+        (c.telegram_username for c in company_tier if c.telegram_username), None
+    )
+    if telegram is None and person is not None:
+        telegram = person.telegram_username
+    instagram = company.instagram or next(
+        (c.instagram for c in company_tier if c.instagram), None
+    )
+    try:
+        weights = await scoring.load_weights(session)
+    except LookupError:
+        weights = scoring.weights_v1()
+    families = await source_families(session)
+    rows = (
+        await session.execute(
+            sa.select(Signal, Evidence)
+            .join(Evidence, Evidence.id == Signal.evidence_id)
+            .where(
+                Signal.company_id.in_(lineage),
+                sa.or_(Signal.expires_at.is_(None), Signal.expires_at > now),
+            )
+        )
+    ).all()
+    found = [
+        SignalEvidence(
+            signal_id=sig.id,
+            key=sig.key,
+            group=weights.rows[sig.key].group if sig.key in weights.rows else "other",
+            points=weights.rows[sig.key].points if sig.key in weights.rows else 0,
+            value=sig.value,
+            quote=sig.quote,
+            observed_at=sig.observed_at,
+            source_key=sig.source_key,
+            source_family=families.get(sig.source_key, sig.source_key),
+            evidence_id=ev.id,
+            url=ev.url,
+            published_at=ev.published_at,
+            fetched_at=ev.fetched_at,
+            excerpt=ev.excerpt,
+        )
+        for sig, ev in rows
+    ]
+    breakdown = candidate.score_breakdown or {}
+    opener = breakdown.get("opener")
+    return CandidateView(
+        candidate_id=candidate.id,
+        company_id=company.id,
+        external_id=push_gate.external_id_for(company.id, now),
+        display_name=company.display_name,
+        legal_form=company.legal_form,
+        stir=company.stir.strip() if company.stir else None,
+        city=company.city,
+        address=company.address,
+        website_domain=company.website_domain,
+        telegram=telegram,
+        instagram=instagram,
+        registry_status=company.registry_status,
+        sectors=tuple(company.sectors or ()),
+        goods=tuple(company.goods or ()),
+        volume_band=company.volume_band,
+        phone=lead.phone if lead is not None else None,
+        person=person,
+        signals=tuple(sorted(found, key=_signal_rank)),
+        stated_m3=await push_gate.stated_m3(session, lineage),
+        score=candidate.score or 0,
+        breakdown=breakdown,
+        opener=opener if isinstance(opener, str) and opener.strip() else None,
+    )

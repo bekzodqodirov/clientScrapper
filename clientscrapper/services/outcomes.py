@@ -393,7 +393,7 @@ async def record_page(
         values[row.external_id] = _outcome_values(row, src, push, label, precision, now)
     await _upsert_outcomes(session, list(values.values()))
     result.stored = len(values)
-    result.promoted = await _promote(session, [found[eid] for eid in values])
+    result.promoted = await promote(session, [found[eid] for eid in values])
     result.effects = await apply_effects(
         session, result.companies, now=now, hasher=hasher
     )
@@ -457,7 +457,7 @@ async def _upsert_outcomes(session: AsyncSession, values: list[dict[str, Any]]) 
     )
 
 
-async def _promote(session: AsyncSession, pushes: Sequence[Delivery]) -> int:
+async def promote(session: AsyncSession, pushes: Sequence[Delivery]) -> int:
     """Step 4: the ERP shows the id, so an ``unknown`` push landed — it
     becomes ``sent`` and its candidate ``approved → pushed`` (a candidate in
     any other state keeps it). ``http_status`` stays as it was when it is a
@@ -1184,5 +1184,6 @@ __all__ = [
     "desired",
     "normalise_label",
     "owned_reasons",
+    "promote",
     "record_page",
 ]

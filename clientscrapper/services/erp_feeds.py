@@ -25,7 +25,8 @@ moves no ``at`` — so ``cursor`` (the stored ``resume``) and ``recent`` (8 days
 nightly, ``quarter`` (90 days) on Sunday, ``year`` (everything) on the 1st,
 and ``unknown`` for the pushes whose fate the push itself could not read. What
 each row means and does is ``services/outcomes``'s. ``reconcile_unconfirmed``
-is the 48-hour rule's detection (02 §2.10 rule 5; the re-push is T-28's), and
+is the 48-hour rule's detection (02 §2.10 rule 5; the re-push and the
+review are ``crm_push.reconcile_job``'s, inside the push window), and
 ``source_precision`` the per-source numbers 04 §7's auto-push reads.
 
 ``suppression_fresh`` is THE home of feed freshness (``FULL_MAX_AGE_H``,
@@ -170,6 +171,8 @@ SyncMode = Literal["full", "delta"]
 FullBecause = Literal["no_anchor", "full_due"]
 ContractCode = Literal["bad_request", "rule_changed", "runaway", "shape"]
 BreakerKey = Literal["push_404", "erp_redirect"]
+# Who tripped the ERP breaker: a feed GET or a lead POST (05 §B.1).
+Tripper = Literal["feed", "push"]
 
 
 # --- errors ---------------------------------------------------------------------------
@@ -816,19 +819,28 @@ def register_health_probe() -> None:
 # --- the breaker and the owner -------------------------------------------------------
 
 
-def breaker_reason(key: BreakerKey, status: int) -> str:
+def breaker_reason(key: BreakerKey, status: int, *, by: Tripper = "feed") -> str:
     """What a FEED writes: ``push_404:feed`` / ``erp_redirect:<status>``
-    (health reads «<key>[:<detail>]»; the redirect's detail is its status)."""
-    return f"{key}:{FEED_TRIPPED}" if key == PUSH_404_PROBLEM else f"{key}:{status}"
+    (health reads «<key>[:<detail>]»; the redirect's detail is its status).
+    A PUSH (``crm_push``, T-28) writes a bare ``push_404`` — a later feed 200
+    cannot end it — and the same ``erp_redirect:<status>``."""
+    if key == PUSH_404_PROBLEM:
+        return key if by == "push" else f"{key}:{FEED_TRIPPED}"
+    return f"{key}:{status}"
 
 
 async def trip_breaker(
-    session: AsyncSession, key: BreakerKey, *, status: int, now: datetime
+    session: AsyncSession,
+    key: BreakerKey,
+    *,
+    status: int,
+    now: datetime,
+    by: Tripper = "feed",
 ) -> None:
     """``sources.erp_sync.breaker_until = now + 6 h`` with the reason (05 §B.1).
     A push's ``push_404`` still in force keeps its reason: the feed's 404 is
-    the same fact, and only the push's own cure may end it. The caller's
-    transaction writes it."""
+    the same fact, and only the push's own cure may end it. ``by='push'`` is
+    the push's own trip (``crm_push``). The caller's transaction writes it."""
     keep_push = sa.and_(
         sa.literal(key == PUSH_404_PROBLEM),
         Source.breaker_until > now,
@@ -840,7 +852,8 @@ async def trip_breaker(
         .values(
             breaker_until=now + BREAKER_FOR,
             breaker_reason=sa.case(
-                (keep_push, Source.breaker_reason), else_=breaker_reason(key, status)
+                (keep_push, Source.breaker_reason),
+                else_=breaker_reason(key, status, by=by),
             ),
         )
     )
@@ -1554,13 +1567,17 @@ async def _raise_stale_hit(
 class ReconcileReport:
     """``checked=False`` with ``why`` when the rule may not run yet.
     ``repushable`` are the push_log ids rule 5 may re-push once (a payload
-    kept, ``attempt < 3``, no earlier re-push of that id) — T-28's
-    ``push_one(repush_of=…)`` takes them; the rest are flagged only."""
+    kept, ``attempt < 3``, no earlier re-push of that id) —
+    ``crm_push.push_one(repush_of=…)`` takes them; ``exhausted`` the ones
+    whose id was re-pushed once already and still shows nothing (rule 5's
+    «another 48 h»: an ``approved`` candidate goes back to ``review``,
+    ``crm_push.reconcile_job``); the rest are flagged only."""
 
     checked: bool
     why: str | None = None
     unconfirmed: int = 0
     repushable: list[int] = field(default_factory=list)
+    exhausted: list[int] = field(default_factory=list)
 
     def as_meta(self) -> dict[str, Any]:
         return {k: v for k, v in asdict(self).items() if v is not None}
@@ -1578,8 +1595,9 @@ async def reconcile_unconfirmed(
     when there is none. Only while the feeds are configured and that night's
     cursor and recent walks both completed — a missing outcome means nothing
     after a failed read. ``sent`` rows too: the «Boshqa» door answers 200 to
-    a landing that threw (05 §B.3). ``erp`` is the client T-28's re-push
-    posts through; the detection reads only the database."""
+    a landing that threw (05 §B.3). ``erp`` is kept for the caller's
+    symmetry (``crm_push.reconcile_job`` posts the re-push through it); the
+    detection reads only the database."""
     on = feeds_configured() if configured is None else configured
     if not on:
         return ReconcileReport(checked=False, why="feeds_not_configured")
@@ -1619,6 +1637,7 @@ async def reconcile_unconfirmed(
     report.repushable = [
         r.id for r in rows if r.kept and r.attempt < 3 and r.external_id not in re_pushed
     ]
+    report.exhausted = [r.id for r in rows if r.external_id in re_pushed]
     if rows:
         await health.raise_problem(
             session,

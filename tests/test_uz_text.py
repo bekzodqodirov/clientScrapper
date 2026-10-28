@@ -28,20 +28,24 @@ SystemExit) and wherever the exception is a SystemExit. In rendered output a
 source's, so the apostrophe and Cyrillic rules leave it alone — but an
 unrestored pseudonym or an unfilled placeholder inside it is still ours, and
 those two rules read the whole text. bot/texts.py, services/cards.py,
-crm_push.py, digest.py and health.py arrive in later tasks; costs.py's alert
-texts, the doctor's lines and config.py's error lines reach the owner today
-and are held to the same rules.
+digest.py and health.py arrive in later tasks; costs.py's alert texts, the
+doctor's lines, config.py's error lines and crm_push.py's lead note, 4xx
+alert and /push tekshir view reach the owner and the managers today and are
+held to the same rules.
 """
 
 from __future__ import annotations
 
 import ast
 import re
+from dataclasses import replace
+from datetime import UTC, datetime
 from decimal import Decimal
 
 import pytest
 
-from clientscrapper.services import costs
+from clientscrapper.services import costs, crm_push
+from clientscrapper.services.candidates import PersonView
 from tests.ast_tools import (
     PACKAGE,
     attr_chain,
@@ -51,7 +55,7 @@ from tests.ast_tools import (
     texts,
     tree_of,
 )
-from tests.fixtures import uz_corpus
+from tests.fixtures import candidate_views, uz_corpus
 
 OWNER_TEXT_MODULES = (
     "bot/texts.py",
@@ -70,6 +74,8 @@ OWNER_TEXT_MODULES = (
     # by /import.
     "services/client_import.py",
     "tools/import_clients.py",
+    # 05 §B.1 (T-28): make push-test's lines and the synthetic lead's words.
+    "tools/push_test.py",
     # 04 §6/§7 (T-19): the card's gate words and the push gate's refusal
     # notes (lead_reviews.note, shown in /lidlar).
     "services/gates.py",
@@ -260,9 +266,66 @@ def test_the_spend_alerts_render_clean():
     assert [t for t in texts_out if problems(t, rendered=True)] == []
 
 
+EVIDENCE_PAIR_QUOTE = re.compile(r' — "([^"\n]*)"')
+
+
+def test_the_lead_note_and_push_texts_render_clean():
+    """crm_push.py's real renderers (T-28): the note at every shrink level
+    (with and without a decision maker, an opener, a Russian quote — verbatim
+    evidence, exempt), the note the ERP keeps, the 4xx alert, and the
+    /push tekshir view with each refusal."""
+    rich = replace(
+        candidate_views.view(),
+        person=PersonView("Namuna Akmal", "rahbar", None),
+        opener="Assalomu alaykum, Toshkentdagi mato savdongizni koʻrib yozyapman.",
+    )
+    russian = replace(
+        candidate_views.view(),
+        signals=(
+            candidate_views.sig(
+                quote="нужно 5 кубов ткани",
+                excerpt="Здравствуйте, нужно 5 кубов ткани из Иу, опт.",
+            ),
+        ),
+    )
+    views = [candidate_views.view(), rich, russian]
+    texts_out = [
+        crm_push.render_note(v, level=level)
+        for v in views
+        for level in range(len(crm_push.SHRINK_STEPS) + 1)
+    ]
+    # The evidence pair quotes in ASCII double quotes (05 §B.1: '<url> —
+    # "<quote ≤ 100>"'): that span is the same verbatim quote as «…».
+    texts_out += [
+        EVIDENCE_PAIR_QUOTE.sub(
+            r" — «\1»", crm_push.landed_note(crm_push.build_payload(v))
+        )
+        for v in views
+    ]
+    texts_out += [crm_push.rejected_text(status) for status in (403, None)]
+    checks = [
+        crm_push.PushCheck(
+            external_id="cs:00000000-0000-0000-0000-000000000002:202610",
+            push_log_id=7,
+            company="Namuna Tekstil Savdo",
+            attempt=1,
+            status="sent",
+            sent_at=datetime(2026, 10, 27, 11, 0, tzinfo=UTC),
+            http_status=200,
+            refusal=refusal,
+        )
+        for refusal in (None, *crm_push.PUSH_CHECK_REFUSED_UZ)
+    ]
+    texts_out += [crm_push.render_push_check(c) for c in checks]
+    assert texts_out and [t for t in texts_out if problems(t, rendered=True)] == []
+    # The Russian quote is in the note, inside «…», and nothing else is.
+    note = crm_push.render_note(russian)
+    assert "«нужно 5 кубов ткани»" in note
+    assert problems(QUOTE.sub("«»", note)) == set()
+
+
 RENDERERS = (
     ("services/cards.py", "render_review", "T-20"),
-    ("services/crm_push.py", "render_note", "T-28"),
     ("services/digest.py", "render_digest", "T-35"),
 )
 

@@ -28,7 +28,10 @@ from ``collectors/erp_sync.JOBS`` (T-09's suppression delta/full, T-10's
 outcomes/quarter/year walks), each ``run_collector(ErpSync, variant=…)``;
 ``resolve`` (T-17, ``services/companies.resolve_job``, every 2 minutes) and
 ``score`` (T-18, ``services/candidates.score_job``, every 15 minutes and at
-once on ``NOTIFY cs_interaction``).
+once on ``NOTIFY cs_interaction``); ``crm_push`` (T-28,
+``services/crm_push.crm_push_job``, every minute, sending only inside the
+push window) and ``reconcile`` (T-28, ``crm_push.reconcile_job``, every 10
+minutes: a crashed claim, the ``unknown`` outcomes walk, rule 5's re-push).
 
 The event-driven path (04 §0, 01 N-06): :func:`listen_for_wakes` holds a
 ``LISTEN`` on every channel a built slot ``wakes_on`` and moves that job's
@@ -85,6 +88,7 @@ from clientscrapper.services import (
     candidates,
     companies,
     costs,
+    crm_push,
     crontab,
     erp_feeds,
     health,
@@ -278,8 +282,14 @@ def job_table() -> tuple[JobSlot, ...]:
         JobSlot("enrich", ("*/10 7-21 * * *",), "T-24", note="every 10 min 07:00–22:00"),
         JobSlot("verdict", ("every 10m",), "T-30"),
         # --- 05: push, reconcile, precision ---------------------------------------
-        JobSlot("crm_push", ("every 1m",), "T-28", note="sends inside PUSH_WINDOW"),
-        JobSlot("reconcile", ("every 10m",), "T-28"),
+        JobSlot(
+            "crm_push",
+            ("every 1m",),
+            "T-28",
+            crm_push.crm_push_slot,
+            note="sends inside PUSH_WINDOW",
+        ),
+        JobSlot("reconcile", ("every 10m",), "T-28", crm_push.reconcile_slot),
         JobSlot("source_precision", ("0 4 * * 0",), "T-36"),
         # --- 06: digest, retention --------------------------------------------------
         JobSlot("digest", (_at(settings.digest_time_parsed),), "T-35"),

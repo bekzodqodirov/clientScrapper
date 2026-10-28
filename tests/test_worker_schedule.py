@@ -28,6 +28,7 @@ from clientscrapper.services import (
     candidates,
     companies,
     costs,
+    crm_push,
     crontab,
     erp_feeds,
     health,
@@ -95,6 +96,9 @@ BUILT = {
     "resolve",
     # T-18: the scorer.
     "score",
+    # T-28: the push and its reconcile.
+    "crm_push",
+    "reconcile",
 }
 # The ERP slots and the ErpSync variant each runs (03 §3, 05 §B.2).
 ERP_VARIANTS = {
@@ -176,6 +180,23 @@ def test_the_scorer_is_the_score_slot_s_job_and_wakes_on_cs_interaction():
     job = scheduler.get_job("score")
     assert job is not None and job.func.__name__ == "woken_score"
     assert worker.wake_channels() == {"cs_interaction": ("score",)}
+
+
+def test_the_push_and_reconcile_slots_are_crm_push_s_jobs():
+    table = {s.id: s for s in worker.job_table()}
+    assert table["crm_push"].job is crm_push.crm_push_slot
+    assert table["reconcile"].job is crm_push.reconcile_slot
+    assert (table["crm_push"].triggers, table["reconcile"].triggers) == (
+        ("every 1m",),
+        ("every 10m",),
+    )
+    scheduler = worker.build_scheduler()
+    for job_id, func in (
+        ("crm_push", crm_push.crm_push_slot),
+        ("reconcile", crm_push.reconcile_slot),
+    ):
+        job = scheduler.get_job(job_id)
+        assert job is not None and job.func is func
 
 
 class _Moved:
