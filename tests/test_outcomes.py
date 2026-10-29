@@ -1009,6 +1009,8 @@ async def test_the_rule_s_edges_and_who_may_be_re_pushed(world, session):
     report = await erp_feeds.reconcile_unconfirmed(session, world.erp, now=NOW)
     assert report.unconfirmed == 6
     assert report.repushable == [at_30d.push_id, at_48.push_id]
+    # «Another 48 h» (rule 5): the re-push itself is the exhausted one.
+    assert report.exhausted == [again.push_id]
     assert (await raised(session))["push_unconfirmed"]["detail"] == {
         "n": 6,
         "repushable": 2,
@@ -1104,7 +1106,12 @@ async def test_the_nightly_run_walks_both_and_then_checks_the_rule(world, sessio
     assert set(run.meta["outcomes"]) == {"cursor", "recent"}
     assert run.meta["outcomes"]["cursor"]["rows"] == 1
     assert run.meta["outcomes"]["recent"]["foreign"] == 0
-    assert run.meta["reconcile"] == {"checked": True, "unconfirmed": 0, "repushable": []}
+    assert run.meta["reconcile"] == {
+        "checked": True,
+        "unconfirmed": 0,
+        "repushable": [],
+        "exhausted": [],
+    }
     assert "catch_up" not in run.meta
     beat = await session.get(Heartbeat, "collector:erp_sync.outcomes",
                              populate_existing=True)  # fmt: skip
@@ -1710,5 +1717,6 @@ async def test_a_failing_catch_up_never_holds_the_rule(world, session):
         "checked": True,
         "unconfirmed": 1,
         "repushable": [lost.push_id],
+        "exhausted": [],
     }
     assert (await raised(session))["push_unconfirmed"]["detail"]["n"] == 1

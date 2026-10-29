@@ -21,7 +21,13 @@ forced a change — each is named in a comment beside it:
   needs a word start and a separator, else «big shop» read as the handle
   «shop» and «Instagramda» as «da»;
 * STIR_RE's label needs a word start («Martin 301234567» is not a STIR);
-* LEGAL_FORM_RE gained МЧЖ, ХЧК and СП, the Cyrillic forms of MChJ, XChK, SP.
+* LEGAL_FORM_RE gained МЧЖ, ХЧК and СП, the Cyrillic forms of MChJ, XChK, SP;
+* TONNES_RE, VACANCY_IMPORT_RE, NON_CN_ORIGIN_RE and STATE_BODY_RE are not
+  03 §1.4's: they are 04 §5.1's detections of ``vol_stated_*`` (tonnes),
+  ``vol_vacancy_import``, ``neg_non_cn_origin`` and ``neg_state_body``, kept
+  here because this is where every regex lives (the rule signals of
+  ``services/signals.py`` and the gates read them); each gained the Uzbek
+  Cyrillic spellings of its Latin words and the endings people write.
 
 The word lists are matched through ``terms_re``: whole words, case-blind,
 apostrophe-blind, е/ё-blind, and inflection-aware — «Guangzhoudan» is
@@ -142,6 +148,28 @@ CHINA_WORDS = (
     "Qashqar",
     "Кашгар",
     "Shenzhen",
+)
+# An origin other than China (04 §5.1 ``neg_non_cn_origin``: «Rossiya|Россия|
+# Turkiya|Турция|Koreya|Корея|Yevropa|Европа|Eron|Иран»), plus the Uzbek
+# Cyrillic «Туркия», «Эрон» and the genitive «Ирана», which a four-letter word
+# does not grow by itself (INFLECT_MIN / RU_INFLECT_MIN below). Not 03 §1.4's.
+# These are the country WORDS (NON_CN_COUNTRY_RE, the quote of a model's
+# ``origin_cn='other_origin'``); the rule itself reads only a country named as
+# the origin (NON_CN_ORIGIN_RE below).
+NON_CN_ORIGIN_WORDS = (
+    "Rossiya",
+    "Россия",
+    "Turkiya",
+    "Туркия",
+    "Турция",
+    "Koreya",
+    "Корея",
+    "Yevropa",
+    "Европа",
+    "Eron",
+    "Эрон",
+    "Иран",
+    "Ирана",
 )
 # A channel's about names its companion «xaridorlar/buyers» group (03 §2.3) the
 # way it names its admin: «Xaridorlar guruhi: @…» beside «Murojaat uchun: @…».
@@ -464,12 +492,29 @@ VOLUME_RE = re.compile(
 )
 # Container / truck / batch words (no number needed), with their Uzbek suffixes
 # («konteynerda», «furaga», «партияси») and Russian case endings («контейнера»,
-# «фуру», «партии»): 03 §1.4's bare words missed the inflected forms.
+# «фуру», «партии»): 03 §1.4's bare words missed the inflected forms. A half
+# truck is written in all three scripts — «yarim fura», «ярим фура», «полфуры»
+# or «пол фуры» — and is matched whole, so its «fura» is never read as a full
+# one (04 §5.3 rule 1 counts it as ≈ 40 m³). «full truck» and «FTL» are 04
+# §5.1's container/truck words (not in 03 §1.4).
 CONTAINER_RE = re.compile(
     rf"(?<!\w)(?:(?:konteyner|kontayner|yarim\s*fura|fura|tonna|partiya){_UZ_LATN}"
-    rf"|(?:контейнер|фура|тонна|партия){_UZ_CYRL}"
-    rf"|(?:контейнер|фур|тонн){_RU_NOUN}|парти(?:ями|ях|ям|ей|я|и|ю|й)|полфуры"
+    rf"|(?:контейнер|ярим\s*фура|фура|тонна|партия){_UZ_CYRL}"
+    rf"|(?:контейнер|фур|тонн){_RU_NOUN}|парти(?:ями|ях|ям|ей|я|и|ю|й)"
+    rf"|пол\s*-?\s*фур(?:ы|у|ой|е)"
+    r"|full\s*truck(?:load)?s?|FTL"
     rf"|20\s*(?:ft|fut|фут|{_A})|40\s*(?:ft|fut|фут|{_A}))(?!\w)",
+    re.I,
+)
+# A weight next to a tonne word (04 §5.1 ``vol_stated_3plus``: «(\d+)\s*(tonna|
+# тонн)»; 1 t of mixed goods ≈ 3 m³ at the low end, 04 §4.3). Group 1 = the
+# number, a decimal allowed («1,5 tonna»); the unit takes its endings
+# («tonnadan», «тоннали», «3 тонны», «10 тонн»). A tonne word with no number
+# is CONTAINER_RE's (and counts as nothing there, 04 §5.3 rule 2).
+TONNES_RE = re.compile(
+    r"(?<![\d.,])(\d{1,3}(?:[.,]\d{1,2})?)\s*"
+    rf"(?:tonna{_UNIT_LATN}|тонна{_UNIT_CYRL}|тонн{_RU_NOUN})"
+    rf"{_NO_LETTER}",
     re.I,
 )
 # Buyer intent (groups): Latin, Cyrillic Uzbek, Russian. «олиб кел(иш|ади|…)»
@@ -521,11 +566,117 @@ COMPETITOR_RE = re.compile(
     r"экспресс|1688\s*(?:kargo|cargo|карго|zakupka))(?!\w)",
     re.I,
 )
+# Gate 2 on a self-description (04 §6; T-19 review): what a forwarder says of
+# itself, without the words an importer also writes about its own trade.
+# COMPETITOR_RE stays 03's — the tout filter's on a sender, the collectors' —
+# but on a wholesaler's own listing its delivery words read «Доставка по
+# Ташкенту бесплатно», «Bepul dostavka», «Toshkent boʻylab yetkazib beramiz»,
+# «своя логистика и склад»: every importer delivers, and gate 2's exclusion
+# never reopens. So the gate reads the cargo core: kargo/карго (with -xona and
+# the endings), ekspeditor, broker, vikup, rastamojka as a service (not «…
+# rastamojka qilingan / oʻtgan», «растаможенный»: goods cleared, an importer's
+# selling point), bojxona xizmati/brokeri, таможенное оформление,
+# грузоперевозки, yuk tashish, yuk yetkazib berish, «доставка грузов | из
+# Китая» and «Xitoydan dostavka» (03 §2.6's OLX words «карго, выкуп, доставка
+# из Китая, 1688 cargo»; 04 §4.3's tout «dostavka Xitoydan»), 1688 kargo, and
+# logistics offered as a service. «dostavka», «yetkazib beramiz», «express»
+# and «logistika» alone are no exclusion.
+_CARGO_CORE = (
+    rf"(?:avia\s*)?(?:kargo|cargo){_KARGO_LATN}|karga|"
+    rf"(?:авиа\s*)?карго{_KARGO_CYRL}|"
+    rf"(?:ekspeditor|broker|vikup){_UZ_LATN}|"
+    rf"rastamojka{_UZ_LATN}(?!\w)(?!\s+(?:qilin\w*|o{_A}?t(?:gan|kaz)\w*))|"
+    r"экспедитор\w*|экспедиров\w*|брокер\w*|растаможк\w*|растаможива\w*|"
+    r"выкуп(?:ом|а|у)?|"
+    r"yuk\s+tashi(?:sh|ymiz|sh\s+xizmati)|юк\s+таши(?:ш|ймиз|ш\s+хизмати)|"
+    r"yuk(?:lar)?(?:ingiz(?:ni)?|ni)?\s+yetkazib\s+ber(?:amiz|ish\w*)|"
+    r"юк(?:лар)?(?:ингиз(?:ни)?|ни)?\s+етказиб\s+бер(?:амиз|иш\w*)|"
+    r"доставк\w*\s+(?:груз\w*|из\s+Кита[яе])|"
+    r"(?:dostavka\s+Xitoydan|Xitoydan\s+dostavka|доставка\s+Хитойдан|"
+    r"Хитойдан\s+доставка)|"
+    r"божхона\s+(?:хизмат|брокер)\w*|bojxona\s+(?:xizmat|broker)\w*|"
+    r"грузоперевозк\w*|таможенн(?:ое|ый)\s+оформлен\w*|"
+    r"1688\s*(?:kargo|cargo|карго|zakupka)|"
+    r"logistika\s+(?:xizmat|kompaniya)\w*|логистика\s+(?:хизмат|компания)\w*|"
+    r"логистическ\w+\s+(?:услуг|компани|сервис)\w*|"
+    r"logistics?\s+(?:services?|company)"
+)
+COMPETITOR_SELF_RE = re.compile(rf"(?<!\w)(?:{_CARGO_CORE})(?!\w)", re.I)
+# Gate 2 on a NAME: the core, and the logistics words — a firm named for
+# logistics is a forwarder («Namuna Logistika MChJ», «Namuna Logistics»). Not
+# «Express» (a furniture shop is «Mebel Express»; the cargo channels named
+# «… Express» are seeds, gate 2 reads them as ``chat_monitors`` competitors).
+COMPETITOR_NAME_RE = re.compile(
+    rf"(?<!\w)(?:{_CARGO_CORE}|logistika{_UZ_LATN}|logistik|logistics?|"
+    rf"логистика{_UZ_CYRL}|логистик(?:ами|ах|ам|ой|а|е|и|у)?|логистическ\w*)(?!\w)",
+    re.I,
+)
 # B2C / personal use.
 B2C_RE = re.compile(
     rf"(?<!\w)(?:o{_A}?zim\s+uchun|ўзим\s+учун|для\s+себя|1\s*(?:dona|шт\.?|штук[аи]?)|"
     r"bitta\s+(?:dona|narsa)|битта|shaxsiy|шахсий|лично\s+для|taobao\s*zakaz|"
     r"zakaz\s+qilib\s+ber|в\s+розницу|доставка\s+по\s+городу)(?!\w)",
+    re.I,
+)
+# An import duty in a vacancy (04 §5.1 ``vol_vacancy_import``: «ВЭД|деклар|
+# закуп\w*\s.{0,20}Кита|tashqi savdo|xitoy tili|китайск\w+ язык»). The Uzbek
+# Cyrillic spellings of the Latin words and the Latin «VED» join; «деклар» and
+# the phrases keep their endings («деклараций», «xitoy tilini»). Read on a
+# vacancy's text only (04 §9.3): a vacancy's other duties are not volume.
+VACANCY_IMPORT_RE = re.compile(
+    r"(?<!\w)(?:ВЭД|VED(?!\w)|деклар\w*|закуп\w*\s.{0,20}?Кита[йяею]|"
+    r"tashqi\s+savdo|ташқи\s+савдо|xitoy\s+til\w*|хитой\s+тил\w*|"
+    r"китайск\w+\s+язык\w*)",
+    re.I,
+)
+# A state body (04 §5.1 ``neg_state_body``: «davlat|ГУП|ДУК|министер|vazirlig|
+# hokimiyat|hokimligi|agentlig|maktab|shifoxona|поликлиник|МВД|IIB»), the
+# stems with their endings («hokimligi», «Министерство», «поликлиника») and the
+# Uzbek Cyrillic spellings (with ҳ and with х). Gate 7 reads it on the name; a
+# word in the text only is the −20 negative, never an exclusion (04 §6). Two
+# readings are not a state body: «davlat roʻyxatidan oʻtkazilgan» (state
+# registration — every registry page says it of a private firm) and a state
+# body named as the customer («maktablar uchun», «shifoxonalar uchun»: for
+# schools, for hospitals — a supplier, not the body).
+_NOT_STATE_BODY = (
+    rf"(?!\s+(?:ro{_A}?y?xat\w*|рўйхат\w*|руйхат\w*)|\s+(?:uchun|учун)(?!\w))"
+)
+STATE_BODY_RE = re.compile(
+    r"(?<!\w)(?:davlat\w*|давлат\w*|ГУП|ДУК|министер\w*|vazirlig\w*|вазирлиг\w*|"
+    r"hokimiyat\w*|hokimlig\w*|[ҳх]окимият\w*|[ҳх]окимлиг\w*|agentlig\w*|"
+    r"агентлиг\w*|maktab\w*|мактаб\w*|shifoxona\w*|шифохона\w*|поликлиник\w*|"
+    rf"МВД|IIB|ИИБ)(?!\w){_NOT_STATE_BODY}",
+    re.I,
+)
+# Gate 7 on a NAME (04 §6; T-19 review): a state body by its shape, not by
+# STATE_BODY_RE's stems — «Davlat», «Davlatbek», «Davlatov» are given names
+# and surnames firms carry («Davlatbek Mebel», «IP Davlatov»), and school and
+# hospital equipment traders are classic China importers («Maktab Mebel
+# Import», «Shifoxona Jihozlari Savdo»). A state body's name: an office's own
+# word (hokimligi/hokimiyati, vazirligi, министерство, МВД, IIB/ИИБ, ГУП/ДУК
+# and the Latin DUK, поликлиника); «Davlat … qoʻmitasi | inspeksiyasi |
+# xizmati | korxonasi | muassasasi | boshqarmasi | agentligi» — the
+# institution in the possessive, so «Davlat Xizmat Servis» is a person's firm (and
+# «государственн… комитет | инспекция | предприятие | учреждение | служба |
+# агентство»); a numbered school («5-maktab», «12-son maktab», «школа № 5»);
+# a hospital in the possessive or numbered («… shifoxonasi», «3-son
+# shifoxona»). A word that is no name of a body stays the text negative.
+_WORD = rf"(?:\w|{_A})+"
+STATE_BODY_NAME_RE = re.compile(
+    r"(?<!\w)(?:ГУП|ДУК|DUK|МВД|IIB|ИИБ|министер\w*|vazirlig\w*|вазирлиг\w*|"
+    r"hokimiyat\w*|hokimlig\w*|[ҳх]окимият\w*|[ҳх]окимлиг\w*|поликлиник\w*|"
+    r"poliklinika\w*|"
+    rf"davlat\s+(?:{_WORD}\s+){{0,4}}?(?:qo{_A}?mitasi|inspeksiyasi|xizmat(?:i|lari)|"
+    r"korxonasi|muassasasi|boshqarmasi|agentligi|unitar)\w*|"
+    r"давлат\s+(?:\w+\s+){0,4}?(?:[қк][ўу]митаси|инспекцияси|[ҳх]измат(?:и|лари)|"
+    r"корхонаси|муассасаси|бош[қк]армаси|агентлиги|унитар)\w*|"
+    r"государственн\w+\s+(?:\w+\s+){0,3}?(?:комитет|инспекц|предприят|учрежден|"
+    r"служб|агентств)\w*|"
+    rf"\d+\s*(?:-\s*|\s+(?=son))(?:son(?:li)?\s+)?(?:{_WORD}\s+){{0,2}}?"
+    r"(?:maktab|shifoxona)\w*|"
+    r"\d+\s*(?:-\s*|\s+(?=сон))(?:сон(?:ли)?\s+)?(?:\w+\s+){0,2}?(?:мактаб|шифохона)\w*|"
+    r"школ\w*\s*№\s*\d+|shifoxonasi\w*|шифохонаси\w*)(?!\w)"
+    rf"{_NOT_STATE_BODY}",
     re.I,
 )
 # A price in a message (03 §2.3 tout filter): 03's ``\d{2,}\s*(?:so'm|сум|\$|usd|
@@ -581,6 +732,38 @@ LEGAL_FORM_RE = re.compile(
     rf"ТОО|JV|QO{_A}?SHMA)(?!\w)",
     re.I,
 )
+# A Chinese-side supplier's name (04 §6 gate 3: «Co\.?,?\s*Ltd|有限公司|Trading
+# Co\.|Imp(ort)?\s*&\s*Exp(ort)?» without a UZ legal form or address): the
+# English company endings of a Chinese exporter's card, and 有限公司 («limited
+# company»). Read on a name only; «& Exp.» is the shortened form exhibitor
+# lists print; «Co» and «Ltd» need a separator («Coltd» is a word). «Co.,
+# Limited» and «Company Limited» are the same ending written out (T-19
+# review: common on Chinese exporters' cards).
+SUPPLIER_NAME_RE = re.compile(
+    r"(?<!\w)(?:Co[.,\s][.,\s]*(?:Ltd\.?|Limited)|Company\s+Limited|Trading\s+Co\.|"
+    r"Imp(?:ort)?\.?\s*&\s*Exp(?:ort)?\.?)(?!\w)"
+    r"|有限公司",
+    re.I,
+)
+# China as an exhibitor table prints it (04 §6 gate 3 «exhibitor country CN»;
+# 03 §2.8's tables are in the show's languages), upper-cased.
+CN_COUNTRY_NAMES = frozenset(
+    {
+        "CN",
+        "CHN",
+        "PRC",
+        "CHINA",
+        "CHINA (MAINLAND)",
+        "XITOY",
+        "ХИТОЙ",
+        "КИТАЙ",
+        "КНР",
+        "中国",
+    }
+)
+# A CJK ideograph (04 §6 gate 3: «website title in Chinese»): one is enough —
+# an Uzbek importer's site is never titled in Chinese characters.
+CJK_RE = re.compile(r"[㐀-䶿一-鿿豈-﫿]")
 CAPTCHA_MARKERS = (
     "captcha",
     "anomaly.js",
@@ -629,6 +812,25 @@ def terms_re(terms: Iterable[str], *, inflect: bool = True) -> re.Pattern[str]:
 
 B2B_RE = terms_re(chain.from_iterable(B2B_MARKERS.values()))
 CHINA_RE = terms_re(CHINA_WORDS)
+NON_CN_COUNTRY_RE = terms_re(NON_CN_ORIGIN_WORDS)
+# 04 §5.1 «named as origin»: a country is an origin only in an origin form —
+# the Uzbek ablative («Turkiyadan», «Кореядан»), «X ishlab chiqarish / X
+# mahsuloti» (made in X), the Russian «из …», «производства …» /
+# «производство: …». A destination («Rossiyaga ham yetkazib beramiz», «по
+# России») and a mention («работа с Россией») are not an origin.
+_ORIGIN_LATN = "(?:Rossiya|Turkiya|Koreya|Yevropa|Eron)"
+_ORIGIN_CYRL = "(?:Россия|Туркия|Корея|Европа|Эрон)"
+_ORIGIN_RU_GEN = r"(?:Южной\s+)?(?:России|Турции|Кореи|Европы|Ирана)"
+_ORIGIN_RU_NOM = r"(?:Южная\s+)?(?:Россия|Турция|Корея|Европа|Иран)"
+NON_CN_ORIGIN_RE = re.compile(
+    rf"(?<!\w)(?:{_ORIGIN_LATN}dan{_UZ_LATN}"
+    rf"|{_ORIGIN_LATN}(?:da)?\s+(?:ishlab\s+chiqar\w*|mahsulot\w*)"
+    rf"|{_ORIGIN_CYRL}дан{_UZ_CYRL}"
+    rf"|{_ORIGIN_CYRL}(?:да)?\s+(?:ишлаб\s+чи[қк]ар\w*|ма[ҳх]сулот\w*)"
+    rf"|(?:из|производств[аоу]?|производител[ья])\s+{_ORIGIN_RU_GEN}"
+    rf"|производств[оа]\s*[:\-–—]\s*{_ORIGIN_RU_NOM})(?!\w)",
+    re.I,
+)
 COMPANION_RE = terms_re(COMPANION_WORDS)
 GEO_RE = terms_re(GEO)
 CITY_RES: dict[str, re.Pattern[str]] = {city: terms_re(t) for city, t in GEO_CITY.items()}

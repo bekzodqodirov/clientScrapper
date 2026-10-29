@@ -110,12 +110,16 @@ CASES: dict[str, tuple[re.Pattern[str], Extract, Cases]] = {
                     ("furaga yuk kerak", "furaga"),
                     ("2 ta konteynerlarimiz bor", "konteynerlarimiz"),
                     ("tonnadan sotamiz", "tonnadan"),
+                    # 04 §5.1's truck words beyond 03 §1.4 (T-18 review)
+                    ("full truck kerak", "full truck"),
+                    ("FTL yuk Xitoydan", "FTL"),
                 ],
                 [
                     "kontakt raqam",
                     "furgon xizmati",
                     "tonnel qurilishi",
                     "partiyaviy ish",
+                    "full stack dasturchi",
                 ],
             ),
             "uz-Cyrl": (
@@ -127,6 +131,9 @@ CASES: dict[str, tuple[re.Pattern[str], Extract, Cases]] = {
                     ("контейнерда келади", "контейнерда"),
                     ("фурага юк", "фурага"),
                     ("партияси тайёр", "партияси"),
+                    # the half truck whole, never its «фура» alone (T-18 review)
+                    ("Хитойдан ярим фура мебел", "ярим фура"),
+                    ("ярим фурага юк", "ярим фурага"),
                 ],
                 ["фургон хизмати", "тоннел", "контакт рақам"],
             ),
@@ -142,8 +149,10 @@ CASES: dict[str, tuple[re.Pattern[str], Extract, Cases]] = {
                     ("5 фур в месяц", "фур"),
                     ("10 тонн груза", "тонн"),
                     ("новые партии", "партии"),
+                    ("Нужно пол фуры мебели", "пол фуры"),
+                    ("пол-фуры обоев", "пол-фуры"),
                 ],
-                ["фургон", "тоннель", "партийный билет", "фурнитура"],
+                ["фургон", "тоннель", "партийный билет", "фурнитура", "пол фурнитуры"],
             ),
         },
     ),
@@ -268,6 +277,98 @@ CASES: dict[str, tuple[re.Pattern[str], Extract, Cases]] = {
                     ("услуги выкупа", "выкупа"),
                 ],
                 ["Ткани оптом", "Мебельная фабрика", "Цены договорные"],
+            ),
+        },
+    ),
+    # Gate 2 on a self-description (T-19 review): the cargo core; the delivery
+    # words an importer writes about its own trade are no match.
+    "COMPETITOR_SELF_RE": (
+        kw.COMPETITOR_SELF_RE,
+        _whole,
+        {
+            "uz-Latn": (
+                [
+                    ("1688 kargo Toshkentga", "1688 kargo"),
+                    ("Xitoydan yuk tashish xizmati", "yuk tashish"),
+                    ("Rastamojka qilamiz", "Rastamojka"),
+                    ("Bojxona xizmati", "Bojxona xizmati"),
+                    ("Namuna kargoxonasi", "kargoxonasi"),
+                    ("yukingizni yetkazib beramiz", "yukingizni yetkazib beramiz"),
+                    ("dostavka Xitoydan 3 kunda", "dostavka Xitoydan"),
+                    ("logistika xizmatlari", "logistika xizmatlari"),
+                ],
+                [
+                    "Oshxona mebeli optom. Toshkent bo'ylab yetkazib beramiz!",
+                    "Bepul dostavka, optom narxlar",
+                    "Barcha tovarlar rastamojka qilingan",
+                    "Tovarlar rastamojkadan o'tgan",
+                    "Mato optom, buyurtmalar yetkazib beriladi",
+                    "Mebel Express",
+                ],
+            ),
+            "uz-Cyrl": (
+                [
+                    ("Хитойдан карго хизмати", "карго"),
+                    ("Хитойдан юк ташиш хизмати", "юк ташиш"),
+                    ("Божхона брокер хизмати", "Божхона брокер"),
+                    ("Растаможка хизмати", "Растаможка"),
+                    ("юкингизни етказиб берамиз", "юкингизни етказиб берамиз"),
+                ],
+                [
+                    "Тошкент бўйлаб етказиб берамиз",
+                    "Бепул доставка",
+                    "Мебель оптом, ўз логистикамиз",
+                ],
+            ),
+            "ru": (
+                [
+                    ("Карго из Китая", "Карго"),
+                    ("таможенное оформление грузов", "таможенное оформление"),
+                    ("грузоперевозки по Узбекистану", "грузоперевозки"),
+                    ("доставка из Китая", "доставка из Китая"),
+                    ("Доставка грузов из Гуанчжоу", "Доставка грузов"),
+                    ("экспедиторская компания", "экспедиторская"),
+                    ("услуги выкупа", "выкупа"),
+                    ("логистические услуги", "логистические услуги"),
+                ],
+                [
+                    "Стиральные машины оптом со склада. Доставка по Ташкенту бесплатно.",
+                    "Сантехника из Китая оптом, своя логистика и склад",
+                    "растаможенный товар в наличии",
+                    "Доставка по городу",
+                ],
+            ),
+        },
+    ),
+    # Gate 2 on a name: the core and the logistics words, never «Express».
+    "COMPETITOR_NAME_RE": (
+        kw.COMPETITOR_NAME_RE,
+        _whole,
+        {
+            "uz-Latn": (
+                [
+                    ("Namuna Logistika MChJ", "Logistika"),
+                    ("Namuna Logistics", "Logistics"),
+                    ("Namuna Kargo", "Kargo"),
+                    ("Namuna Ekspeditor", "Ekspeditor"),
+                ],
+                ["Mebel Express", "Namuna Dostavka Optom", "Namuna Savdo MChJ"],
+            ),
+            "uz-Cyrl": (
+                [
+                    ("Намуна Логистика", "Логистика"),
+                    ("Намуна Карго", "Карго"),
+                    ("Намуна каргохонаси", "каргохонаси"),
+                ],
+                ["Намуна Экспресс Мебель", "Намуна Савдо", "Намуна Текстил"],
+            ),
+            "ru": (
+                [
+                    ("ООО «Намуна Логистик»", "Логистик"),
+                    ("Намуна Грузоперевозки", "Грузоперевозки"),
+                    ("Намуна Экспедиторская компания", "Экспедиторская"),
+                ],
+                ["Мебель Экспресс", "Намуна Доставка", "ООО «Намуна Трейд»"],
             ),
         },
     ),
@@ -566,6 +667,77 @@ CASES: dict[str, tuple[re.Pattern[str], Extract, Cases]] = {
             ),
         },
     ),
+    # 04 §6 gate 3 (T-19): a Chinese exporter's name; read on names only.
+    "SUPPLIER_NAME_RE": (
+        kw.SUPPLIER_NAME_RE,
+        _whole,
+        {
+            "uz-Latn": (
+                [
+                    ("Yiwu Namuna Trading Co., Ltd", "Trading Co."),
+                    ("Guangzhou Namuna Co.,Ltd.", "Co.,Ltd."),
+                    ("Namuna Import & Export", "Import & Export"),
+                    ("Ningbo Namuna Imp. & Exp. Co", "Imp. & Exp."),
+                    ("义乌市纳木纳有限公司", "有限公司"),
+                    ("Yiwu Namuna Co., Limited", "Co., Limited"),
+                    ("Guangzhou Namuna Company Limited", "Company Limited"),
+                ],
+                [
+                    "Namuna Savdo MChJ",
+                    "Namuna Import MChJ",
+                    "Coltd mebel",
+                    "Limited edition",
+                ],
+            ),
+            "uz-Cyrl": (
+                [
+                    ("Хитой фирмаси Yiwu Namuna Co. Ltd", "Co. Ltd"),
+                    ("Етказиб берувчи: Namuna Trading Co.", "Trading Co."),
+                    ("Завод: Namuna Imp & Exp", "Imp & Exp"),
+                ],
+                ["Намуна савдо МЧЖ", "Намуна импорт", "Колтд мебел"],
+            ),
+            "ru": (
+                [
+                    ("Поставщик Shenzhen Namuna Co., Ltd", "Co., Ltd"),
+                    ("Фабрика Namuna Import&Export", "Import&Export"),
+                    ("Компания Namuna Trading Co. (Китай)", "Trading Co."),
+                ],
+                ["ООО «Намуна Трейдинг»", "Импорт и экспорт из Китая", "Ltd товары"],
+            ),
+        },
+    ),
+    # 04 §6 gate 3 (T-19): a website title in Chinese.
+    "CJK_RE": (
+        kw.CJK_RE,
+        _whole,
+        {
+            "uz-Latn": (
+                [
+                    ("Sayt nomi: 义乌纳木纳", "义"),
+                    ("Namuna 家具 fabrikasi", "家"),
+                    ("灯具 optom", "灯"),
+                ],
+                ["Namuna Mebel", "Xitoydan mebel", "Ōzbekiston"],
+            ),
+            "uz-Cyrl": (
+                [
+                    ("Сайт: 纺织品 Намуна", "纺"),
+                    ("Намуна 有限公司", "有"),
+                    ("Хитой 工厂", "工"),
+                ],
+                ["Намуна мебел", "Хитойдан мато", "Ўзбекистон"],
+            ),
+            "ru": (
+                [
+                    ("Сайт фабрики 照明", "照"),
+                    ("ООО 纳木纳", "纳"),
+                    ("Каталог 鞋子", "鞋"),
+                ],
+                ["Мебель из Китая", "Каталог товаров", "Ёлки оптом"],
+            ),
+        },
+    ),
     "B2B_RE": (
         kw.B2B_RE,
         _whole,
@@ -631,6 +803,256 @@ CASES: dict[str, tuple[re.Pattern[str], Extract, Cases]] = {
                     ("Кашгар — Ташкент", "Кашгар"),
                 ],
                 ["из Турции", "местное производство", "Казахстан"],
+            ),
+        },
+    ),
+    # T-18: 04 §5.1's detections (the rule signals of services/signals.py).
+    "NON_CN_ORIGIN_RE": (
+        kw.NON_CN_ORIGIN_RE,
+        _whole,
+        {
+            # only a country named as the origin (04 §5.1); a destination or
+            # a mention is not one (T-18 review)
+            "uz-Latn": (
+                [
+                    ("Turkiyadan mato keldi", "Turkiyadan"),
+                    ("Yevropadan uskunalar", "Yevropadan"),
+                    ("Erondan kafel", "Erondan"),
+                    ("Koreya mahsuloti", "Koreya mahsuloti"),
+                    ("Turkiya ishlab chiqarishi", "Turkiya ishlab chiqarishi"),
+                ],
+                [
+                    "Xitoydan mato",
+                    "evro remont",
+                    "turkcha",
+                    "Rossiyaga ham yetkazib beramiz",
+                    "Turkiyada filialimiz bor",
+                ],
+            ),
+            "uz-Cyrl": (
+                [
+                    ("Туркиядан мато", "Туркиядан"),
+                    ("Россиядан юк", "Россиядан"),
+                    ("Эрондан кафел", "Эрондан"),
+                    ("Корея маҳсулоти", "Корея маҳсулоти"),
+                ],
+                ["Тошкентдан", "евро ремонт", "туркча", "Россияга етказамиз"],
+            ),
+            "ru": (
+                [
+                    ("ткани из Турции", "из Турции"),
+                    ("товары из России", "из России"),
+                    ("плитка из Ирана", "из Ирана"),
+                    ("косметика из Южной Кореи", "из Южной Кореи"),
+                    ("Производство: Турция", "Производство: Турция"),
+                    ("мебель производства Европы", "производства Европы"),
+                ],
+                [
+                    "из Китая",
+                    "евроремонт",
+                    "турецкий",
+                    "доставка по Узбекистану и России",
+                    "работа с Россией",
+                ],
+            ),
+        },
+    ),
+    # The country words alone: the quote of a model's other_origin verdict.
+    "NON_CN_COUNTRY_RE": (
+        kw.NON_CN_COUNTRY_RE,
+        _whole,
+        {
+            "uz-Latn": (
+                [
+                    ("Koreya kosmetikasi", "Koreya"),
+                    ("Rossiyaga yetkazamiz", "Rossiyaga"),
+                    ("Turkiyadan", "Turkiyadan"),
+                ],
+                ["Xitoydan mato", "evro remont", "turkcha"],
+            ),
+            "uz-Cyrl": (
+                [
+                    ("Туркиядан мато", "Туркиядан"),
+                    ("Эрон гиламлари", "Эрон"),
+                    ("Корея", "Корея"),
+                ],
+                ["Тошкентдан", "евро ремонт", "туркча"],
+            ),
+            "ru": (
+                [
+                    ("ткани из Турции", "Турции"),
+                    ("доставка по России", "России"),
+                    ("плитка из Ирана", "Ирана"),
+                ],
+                ["из Китая", "евроремонт", "турецкий"],
+            ),
+        },
+    ),
+    "TONNES_RE": (
+        kw.TONNES_RE,
+        _first,
+        {
+            "uz-Latn": (
+                [
+                    ("2 tonna mato", "2"),
+                    ("1,5 tonnadan ortiq", "1,5"),
+                    ("10 tonnalik yuk", "10"),
+                ],
+                ["tonnadan sotamiz", "tonnel qurilishi", "2 tonnelga"],
+            ),
+            "uz-Cyrl": (
+                [
+                    ("2 тонна шакар", "2"),
+                    ("5 тоннадан", "5"),
+                    ("3 тоннали юк", "3"),
+                ],
+                ["тоннадан сотамиз", "тоннел", "2 тоннелга"],
+            ),
+            "ru": (
+                [
+                    ("3 тонны груза", "3"),
+                    ("10 тонн", "10"),
+                    ("0,5 тонны", "0,5"),
+                    ("по 2 тонне", "2"),
+                ],
+                ["тоннель", "тонна груза", "2 тоннеля"],
+            ),
+        },
+    ),
+    "VACANCY_IMPORT_RE": (
+        kw.VACANCY_IMPORT_RE,
+        _whole,
+        {
+            "uz-Latn": (
+                [
+                    ("VED menejeri kerak", "VED"),
+                    ("tashqi savdo bo'limiga", "tashqi savdo"),
+                    ("xitoy tilini biladigan", "xitoy tilini"),
+                ],
+                ["savdo menejeri", "tashqi reklama", "xitoy taomlari", "vedomost"],
+            ),
+            "uz-Cyrl": (
+                [
+                    ("ВЭД менежери", "ВЭД"),
+                    ("ташқи савдо бўлими", "ташқи савдо"),
+                    ("хитой тилини билиш", "хитой тилини"),
+                ],
+                ["савдо менежери", "ташқи реклама", "хитой таомлари"],
+            ),
+            "ru": (
+                [
+                    ("Менеджер ВЭД", "ВЭД"),
+                    ("оформление деклараций", "деклараций"),
+                    ("закупки оборудования в Китае", "закупки оборудования в Китае"),
+                    ("со знанием китайского языка", "китайского языка"),
+                ],
+                [
+                    "менеджер по продажам",
+                    "закупщик продуктов",
+                    "китайская кухня",
+                    "ведущий специалист",
+                ],
+            ),
+        },
+    ),
+    "STATE_BODY_RE": (
+        kw.STATE_BODY_RE,
+        _whole,
+        {
+            "uz-Latn": (
+                [
+                    ("Toshkent shahar hokimligi", "hokimligi"),
+                    ("Davlat soliq qo'mitasi", "Davlat"),
+                    ("5-maktab", "maktab"),
+                    ("Sog'liqni saqlash vazirligi", "vazirligi"),
+                ],
+                [
+                    "savdo markazi",
+                    "hokim aka",
+                    "agent",
+                    "davomat",
+                    # state registration, a state body as the customer (T-18 review)
+                    "Davlat ro'yxatidan o'tkazilgan sana",
+                    "Maktablar uchun mebel",
+                ],
+            ),
+            "uz-Cyrl": (
+                [
+                    ("Тошкент шаҳар ҳокимлиги", "ҳокимлиги"),
+                    ("Давлат солиқ қўмитаси", "Давлат"),
+                    ("12-мактаб", "мактаб"),
+                    ("ИИБ ходими", "ИИБ"),
+                ],
+                [
+                    "савдо маркази",
+                    "агент",
+                    "давомат",
+                    "дукон",
+                    "Давлат рўйхатидан ўтказилган",
+                    "Шифохоналар учун ускуналар",
+                ],
+            ),
+            "ru": (
+                [
+                    ("Министерство здравоохранения", "Министерство"),
+                    ("ГУП «Намуна»", "ГУП"),
+                    ("городская поликлиника", "поликлиника"),
+                    ("МВД", "МВД"),
+                ],
+                ["министр туризма", "клиника", "магазин"],
+            ),
+        },
+    ),
+    # Gate 7 on a name (T-19 review): a state body by its shape; a founder's
+    # name and an equipment trader's are no match.
+    "STATE_BODY_NAME_RE": (
+        kw.STATE_BODY_NAME_RE,
+        _whole,
+        {
+            "uz-Latn": (
+                [
+                    ("Yunusobod tumani hokimligi", "hokimligi"),
+                    ("Davlat soliq qoʻmitasi", "Davlat soliq qoʻmitasi"),
+                    ("Davlat unitar korxonasi «Namuna»", "Davlat unitar"),
+                    ("Sog'liqni saqlash vazirligi", "vazirligi"),
+                    ("12-son maktab", "12-son maktab"),
+                    ("5-maktab", "5-maktab"),
+                    ("Toshkent shahar 3-son shifoxonasi", "3-son shifoxonasi"),
+                    ("Respublika ko'z shifoxonasi", "shifoxonasi"),
+                ],
+                [
+                    "Davlatbek Savdo",
+                    "Davlat Mebel Plus",
+                    "IP Davlatov",
+                    "Davlat Xizmat Servis",
+                    "Maktab Mebel Import",
+                    "Maktab Jihozlari Savdo",
+                    "Shifoxona Jihozlari Savdo",
+                    "Namuna Reklama Agentligi",
+                    "Maktablar uchun mebel",
+                ],
+            ),
+            "uz-Cyrl": (
+                [
+                    ("Тошкент шаҳар ҳокимлиги", "ҳокимлиги"),
+                    ("Давлат солиқ қўмитаси", "Давлат солиқ қўмитаси"),
+                    ("12-мактаб", "12-мактаб"),
+                    ("ИИБ", "ИИБ"),
+                ],
+                ["Давлатбек Савдо", "Мактаб Жиҳозлари", "Давлатов Мебел"],
+            ),
+            "ru": (
+                [
+                    ("Министерство здравоохранения", "Министерство"),
+                    ("ГУП «Намуна»", "ГУП"),
+                    ("городская поликлиника №5", "поликлиника"),
+                    (
+                        "Государственный налоговый комитет",
+                        "Государственный налоговый комитет",
+                    ),
+                    ("школа № 5", "школа № 5"),
+                ],
+                ["ИП Давлатов", "Школьная мебель оптом", "Больничное оборудование"],
             ),
         },
     ),

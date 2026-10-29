@@ -24,7 +24,15 @@ from clientscrapper.collectors.base import Collector, Observation
 from clientscrapper.collectors.runner import run_collector
 from clientscrapper.config import settings
 from clientscrapper.db import models as m
-from clientscrapper.services import companies, costs, crontab, erp_feeds, health
+from clientscrapper.services import (
+    candidates,
+    companies,
+    costs,
+    crm_push,
+    crontab,
+    erp_feeds,
+    health,
+)
 from clientscrapper.worker import main as worker
 
 TZ = ZoneInfo("Asia/Tashkent")
@@ -86,6 +94,11 @@ BUILT = {
     "erp_sync_year",
     # T-17: the resolver.
     "resolve",
+    # T-18: the scorer.
+    "score",
+    # T-28: the push and its reconcile.
+    "crm_push",
+    "reconcile",
 }
 # The ERP slots and the ErpSync variant each runs (03 §3, 05 §B.2).
 ERP_VARIANTS = {
@@ -158,6 +171,103 @@ def test_the_resolver_is_the_resolve_slot_s_job():
     job = scheduler.get_job("resolve")
     assert job is not None and job.func is companies.resolve_job
     assert (job.max_instances, job.coalesce) == (1, True)
+
+
+def test_the_scorer_is_the_score_slot_s_job_and_wakes_on_cs_interaction():
+    [slot] = [s for s in worker.job_table() if s.id == "score"]
+    assert (slot.job, slot.wakes_on) == (candidates.score_job, "cs_interaction")
+    scheduler = worker.build_scheduler()
+    job = scheduler.get_job("score")
+    assert job is not None and job.func.__name__ == "woken_score"
+    assert worker.wake_channels() == {"cs_interaction": ("score",)}
+
+
+def test_the_push_and_reconcile_slots_are_crm_push_s_jobs():
+    table = {s.id: s for s in worker.job_table()}
+    assert table["crm_push"].job is crm_push.crm_push_slot
+    assert table["reconcile"].job is crm_push.reconcile_slot
+    assert (table["crm_push"].triggers, table["reconcile"].triggers) == (
+        ("every 1m",),
+        ("every 10m",),
+    )
+    scheduler = worker.build_scheduler()
+    for job_id, func in (
+        ("crm_push", crm_push.crm_push_slot),
+        ("reconcile", crm_push.reconcile_slot),
+    ):
+        job = scheduler.get_job(job_id)
+        assert job is not None and job.func is func
+
+
+class _Moved:
+    """A scheduler stand-in: records each job moved to now."""
+
+    def __init__(self, ids: set[str]) -> None:
+        self.ids = ids
+        self.moved: list[tuple[str, datetime]] = []
+
+    def get_job(self, job_id: str):
+        if job_id not in self.ids:
+            return None
+        moved = self.moved
+
+        class _Job:
+            def modify(self, next_run_time: datetime) -> None:
+                moved.append((job_id, next_run_time))
+
+        return _Job()
+
+
+async def test_a_notify_on_cs_interaction_runs_score_at_once(session):
+    """01 N-06's event path (04 §0): the userbot's or the resolver's
+    ``NOTIFY cs_interaction`` moves score_job's next run to now — the card
+    does not wait for the 15-minute sweep."""
+    scheduler = _Moved({"score"})
+    stop = asyncio.Event()
+    listener = asyncio.create_task(worker.listen_for_wakes(scheduler, stop))
+    try:
+        for _ in range(100):
+            listening = await session.scalar(
+                sa.text(
+                    "SELECT count(*) FROM pg_stat_activity "
+                    "WHERE query = 'LISTEN \"cs_interaction\"'"
+                )
+            )
+            if listening:
+                break
+            await asyncio.sleep(0.05)
+        before = datetime.now(TZ)
+        await session.execute(sa.text("SELECT pg_notify('cs_interaction', '42')"))
+        await session.commit()
+        for _ in range(100):
+            if scheduler.moved:
+                break
+            await asyncio.sleep(0.05)
+    finally:
+        stop.set()
+        await asyncio.wait_for(listener, timeout=worker.WAKE_POLL_SECONDS + 5)
+    [(job_id, at)] = scheduler.moved
+    assert job_id == "score"
+    assert before - timedelta(seconds=1) <= at <= datetime.now(TZ)
+
+
+async def test_a_wake_while_the_job_runs_makes_it_run_once_more():
+    runs: list[int] = []
+    scheduler = _Moved({"score"})
+
+    async def job() -> None:
+        runs.append(len(runs))
+        if len(runs) == 1:
+            # a notification arrives in the middle of the first run
+            assert worker.wake(scheduler, "score", NOW) is True
+
+    await worker.woken("score", job)()
+    assert runs == [0, 1]
+    assert scheduler.moved == []  # a running job is not moved, it goes round again
+    assert worker._wakes.pending == set() and worker._wakes.running == set()
+    assert worker.wake(scheduler, "score", NOW) is True
+    assert scheduler.moved == [("score", NOW)]
+    worker._wakes.pending.clear()
 
 
 def test_wire_registers_the_suppression_probe():

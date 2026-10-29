@@ -87,6 +87,7 @@ from clientscrapper.services.normalise import (
     legal_form_code,
     website_key,
 )
+from clientscrapper.services.signals import mark_stale
 from clientscrapper.services.text import fold_apostrophes, to_latin
 
 log = logging.getLogger(__name__)
@@ -1782,10 +1783,20 @@ async def merge_into(
     values: dict[str, Any] = {name: getattr(src, name) for name in carried}
     if tgt.dup_of == src.id:
         values["dup_of"] = None
+    if signals and src.last_signal_at is not None:
+        # The target now holds the source's signals: its newest is the newer
+        # of the two, so the stale sweep (04 §0) sees them too.
+        values["last_signal_at"] = sa.func.greatest(
+            sa.func.coalesce(Company.last_signal_at, src.last_signal_at),
+            src.last_signal_at,
+        )
     if values:
         await session.execute(
             sa.update(Company).where(Company.id == tgt.id).values(**values)
         )
+    # The target's open candidate (its own, or the one that moved) is scored
+    # again on what it holds now: moved signals and contacts change its score.
+    await mark_stale(session, tgt.id)
     session.add(
         MergeLog(
             source_company_id=src.id,
@@ -1935,6 +1946,10 @@ async def unmerge(
         )
     entry.undone_at = moment
     entry.undone_by = by
+    # Both companies hold a different set of signals and contacts than their
+    # open candidates were scored on.
+    await mark_stale(session, src.id)
+    await mark_stale(session, tgt.id)
     await session.flush()
     log.warning("unmerged company %s from %s (by %s)", src.id, tgt.id, by)
     await _reload(session, tgt.id)
