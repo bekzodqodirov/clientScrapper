@@ -57,6 +57,7 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import html
 import logging
 import re
 from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
@@ -1988,6 +1989,24 @@ async def _store_flips(session: AsyncSession, run: PrecisionRun) -> None:
     )
 
 
+def _flips_of(value: Any) -> list[PrecisionFlip]:
+    """The flips a stored ``FLIPS_FLAG`` value lists."""
+    found: list[PrecisionFlip] = []
+    items = value.get("flips") if isinstance(value, dict) else None
+    for item in items if isinstance(items, list) else []:
+        if isinstance(item, dict):
+            found.append(
+                PrecisionFlip(
+                    key=str(item.get("key")),
+                    title=str(item.get("title")),
+                    on=item.get("on") is True,
+                    pct=item.get("pct") if isinstance(item.get("pct"), int) else None,
+                    pushes=int(item.get("pushes") or 0),
+                )
+            )
+    return found
+
+
 async def precision_flips(
     session: AsyncSession, *, since: datetime
 ) -> list[PrecisionFlip]:
@@ -2002,19 +2021,111 @@ async def precision_flips(
         return []
     if at < since:
         return []
-    found: list[PrecisionFlip] = []
-    for item in row.value.get("flips") or []:
-        if isinstance(item, dict):
-            found.append(
-                PrecisionFlip(
-                    key=str(item.get("key")),
-                    title=str(item.get("title")),
-                    on=item.get("on") is True,
-                    pct=item.get("pct") if isinstance(item.get("pct"), int) else None,
-                    pushes=int(item.get("pushes") or 0),
+    return _flips_of(row.value)
+
+
+# --- telling the owner a flip (06 §1.8, §4.3) -------------------------------------------
+
+# A week's flips are told once, through the owner seam, at the first chance
+# outside QUIET_HOURS (06 §4.3: a warning waits for them to end — the job
+# runs at Sunday 04:00, so the first health sweep after 08:00 says them);
+# the digest names them as well (06 §1.8 «a flip of auto_push is its own
+# line»). The claim is the flag's own ``told_at``: a new week's value has
+# none, an undelivered alert gives it back.
+FLIPS_TOLD: Final = "told_at"
+FLIPS_HEAD_UZ: Final = "🔁 Haftalik aniqlik hisobi — avtomatik push oʻzgardi:"
+# auto_push earned while AUTO_APPROVE is off approves nothing yet
+# (candidates.auto_approves): said, so «yoqildi» is never read as «sent
+# without your card».
+FLIPS_NOT_LIVE_UZ: Final = (
+    "  AUTO_APPROVE oʻchiq — bu manbalarning kartalari hali ham sizga keladi"
+)
+
+
+def flip_line(title: str, *, on: bool, pct: int | None, pushes: int | None) -> str:
+    """One flip as the owner reads it (the digest's line and the alert's,
+    one home): the title HTML-escaped, the job's numbers when it made it."""
+    word = "yoqildi" if on else "oʻchirildi"
+    numbers = (
+        f" — aniqlik {pct}% ({pushes} push)"
+        if pct is not None and pushes is not None
+        else ""
+    )
+    return f"🔁 Avtomatik push {word}: {html.escape(title, quote=False)}{numbers}"
+
+
+def flips_alert(flips: Sequence[PrecisionFlip], *, auto_approve: bool) -> str:
+    """The owner's message for a week's flips."""
+    lines = [FLIPS_HEAD_UZ]
+    lines += [
+        "  " + flip_line(f.title, on=f.on, pct=f.pct, pushes=f.pushes) for f in flips
+    ]
+    if not auto_approve and any(f.on for f in flips):
+        lines.append(FLIPS_NOT_LIVE_UZ)
+    return "\n".join(lines)
+
+
+def _untold() -> sa.ColumnElement[bool]:
+    """The stored week has flips and nobody has told them yet."""
+    flips = RuntimeFlag.value["flips"]
+    listed = sa.case(
+        (sa.func.jsonb_typeof(flips) == "array", sa.func.jsonb_array_length(flips)),
+        else_=0,
+    )
+    return sa.and_(
+        RuntimeFlag.key == FLIPS_FLAG,
+        sa.not_(RuntimeFlag.value.has_key(FLIPS_TOLD)),
+        listed > 0,
+    )
+
+
+async def tell_flips(
+    session_factory: SessionFactory,
+    notify: Callable[[str], Any],
+    *,
+    now: datetime,
+) -> bool:
+    """Tell the owner the last run's ``auto_push`` flips, once, outside
+    QUIET_HOURS: claimed (``told_at``, committed) before ``notify`` and given
+    back unless it reported the message delivered. True when told."""
+    if health.in_quiet_hours(now):
+        return False
+    stamp = sa.func.jsonb_build_object(FLIPS_TOLD, now.isoformat())
+    async with session_factory() as session:
+        claimed = await session.scalar(
+            sa.update(RuntimeFlag)
+            .where(_untold())
+            .values(value=sa.type_coerce(RuntimeFlag.value.op("||")(stamp), JSONB))
+            .returning(RuntimeFlag.value)
+        )
+        await session.commit()
+    flips = _flips_of(claimed)
+    if not flips:
+        return False
+    delivered = False
+    try:
+        delivered = bool(
+            await notify(flips_alert(flips, auto_approve=settings.auto_approve))
+        )
+    finally:
+        if not delivered:
+            async with session_factory() as session:
+                await session.execute(
+                    sa.update(RuntimeFlag)
+                    .where(
+                        RuntimeFlag.key == FLIPS_FLAG,
+                        RuntimeFlag.value["at"].astext == str(claimed.get("at")),
+                    )
+                    .values(
+                        value=sa.type_coerce(
+                            RuntimeFlag.value.op("-")(sa.literal(FLIPS_TOLD)), JSONB
+                        )
+                    )
                 )
-            )
-    return found
+                await session.commit()
+    if delivered:
+        log.info("auto_push flips told", extra={"flips": len(flips)})
+    return delivered
 
 
 SessionFactory = Callable[[], AbstractAsyncContextManager[AsyncSession]]
@@ -2142,6 +2253,7 @@ __all__ = [
     "DELTA_MAX_AGE_H",
     "ERP_KEY_HEADERS",
     "FEED_RULE",
+    "FLIPS_TOLD",
     "FULL_DUE_AFTER",
     "FULL_MAX_AGE_H",
     "LOW_PRECISION_BELOW",
@@ -2177,6 +2289,8 @@ __all__ = [
     "end_low_precision_pause",
     "feeds_configured",
     "fetch_pages",
+    "flip_line",
+    "flips_alert",
     "fmt_since",
     "forbidden_of",
     "freshness",
@@ -2196,5 +2310,6 @@ __all__ = [
     "suppression_fresh",
     "sync_outcomes",
     "sync_suppression",
+    "tell_flips",
     "walk_params",
 ]

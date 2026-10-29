@@ -1766,25 +1766,52 @@ def problems(status: Status) -> list[Problem]:
     return [found[k] for k in PROBLEM_KEYS if k in found]
 
 
-def _low_precision_lines(reported: Reported) -> tuple[tuple[str, str], ...]:
-    """(source key, its line) per auto-paused source (T-36 raises
+@dataclass(frozen=True, slots=True)
+class LowPrecision:
+    """One source the weekly precision job paused (06 §4.2
+    ``source_low_precision``): its key, title and whole percent, as raised."""
+
+    key: str
+    title: str
+    pct: str
+
+
+def _low_precision_items(reported: Reported) -> tuple[LowPrecision, ...]:
+    """The paused sources of the open row (T-36 raises
     ``detail={"sources": [{"key", "title", "pct"}, …]}``)."""
     sources = reported.detail.get("sources")
     items = sources if isinstance(sources, list) else [reported.detail]
-    lines: list[tuple[str, str]] = []
+    found: list[LowPrecision] = []
     for item in items:
         if not isinstance(item, Mapping):
             continue
-        key = str(item.get("key") or item.get("title") or "?")
-        title = escape(item.get("title") or item.get("key") or "?")
-        pct = escape(item.get("pct", "?"))
-        lines.append(
-            (
-                key,
-                f"⚠️ {title} aniqligi {pct}% — bir haftaga toʻxtatildi "
-                "(/manbalar bilan yoqiladi)",
+        found.append(
+            LowPrecision(
+                key=str(item.get("key") or item.get("title") or "?"),
+                title=str(item.get("title") or item.get("key") or "?"),
+                pct=str(item.get("pct", "?")),
             )
         )
+    return tuple(found)
+
+
+def low_precision_sources(status: Status) -> tuple[LowPrecision, ...]:
+    """The sources a low precision holds paused now — the alert's subjects,
+    and the digest's own line for each (06 §1.8): one reading of the row."""
+    reported = status.reported.get("source_low_precision")
+    return () if reported is None else _low_precision_items(reported)
+
+
+def _low_precision_lines(reported: Reported) -> tuple[tuple[str, str], ...]:
+    """(source key, its line) per auto-paused source."""
+    lines = [
+        (
+            item.key,
+            f"⚠️ {escape(item.title)} aniqligi {escape(item.pct)}% — bir haftaga "
+            "toʻxtatildi (/manbalar bilan yoqiladi)",
+        )
+        for item in _low_precision_items(reported)
+    ]
     return tuple(lines) or (
         ("?", "⚠️ Manba aniqligi past — bir haftaga toʻxtatildi (/manbalar)"),
     )

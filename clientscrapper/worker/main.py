@@ -828,9 +828,13 @@ async def health_job(
                 await _adopt_offline()
                 found = health.problems(status)
                 _log_problems(found, now)
-                return await health.tell(
+                report = await health.tell(
                     session, found, speak, now=now, unjudged=health.unjudged(status)
                 )
+                # A week's auto_push flips the precision job could not say in
+                # QUIET_HOURS: the first sweep after them does (06 §4.3).
+                await _tell_flips(now, speak)
+                return report
     except Exception:
         # Leaving the scope commits; with the database gone that can fail
         # too. A failure with the database *up* is a real one and stays loud.
@@ -1014,11 +1018,23 @@ async def backup_job(*, now: datetime | None = None) -> backup.BackupResult:
 async def source_precision_job(*, now: datetime | None = None) -> dict[str, Any]:
     """Weekly, Sunday 04:00 (05 §B.2): every source's 30-day precision, its
     ``auto_push`` flipped both ways (never on while the owner forbids it)
-    and a source below 20 % over 30 pushes paused for a week (06 §4.2)."""
-    run = await erp_feeds.source_precision_job(
-        session_scope, now or datetime.now(settings.tz)
-    )
+    and a source below 20 % over 30 pushes paused for a week (06 §4.2,
+    ``source_low_precision``: the health sweep tells it). The week's flips are
+    told to the owner at once outside QUIET_HOURS, else by the first health
+    sweep after them (``erp_feeds.tell_flips``); the digest names both."""
+    now = now or datetime.now(settings.tz)
+    run = await erp_feeds.source_precision_job(session_scope, now)
+    await _tell_flips(now, _seams.notify)
     return run.as_dict()
+
+
+async def _tell_flips(now: datetime, notify: health.OwnerNotify) -> None:
+    """The precision job's flips to the owner (``erp_feeds.tell_flips``):
+    never a failure of the job that asks."""
+    try:
+        await erp_feeds.tell_flips(session_scope, notify, now=now)
+    except Exception as exc:
+        log.error("auto_push flips not told", extra={"error": type(exc).__name__})
 
 
 async def restore_drill_job() -> restore_drill.DrillResult | None:

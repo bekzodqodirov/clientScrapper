@@ -453,3 +453,132 @@ async def test_a_switched_off_paused_source_switched_on_runs_again(session):
     olx = await row(session, "olx_business")
     assert (olx.enabled, olx.paused_until, olx.paused_reason) == (True, None, None)
     assert await problem(session) is None
+
+
+# --- the owner hears it: the alert and the digest (T-36 → T-35, wave-4 seam) ----------
+
+
+class Owner:
+    """The owner seam: records what was told, delivered or not."""
+
+    def __init__(self, delivered: bool = True) -> None:
+        self.told: list[str] = []
+        self.delivered = delivered
+
+    async def __call__(self, text: str) -> bool:
+        self.told.append(text)
+        return self.delivered
+
+
+MORNING = NOW.replace(hour=8, minute=5)  # the first minute past QUIET_HOURS
+
+
+async def test_a_flip_is_told_once_outside_quiet_hours(session, monkeypatch):
+    """06 §1.8 / §4.3: the week's auto_push flips reach the owner as their
+    own message — held through QUIET_HOURS (the job runs at 04:00), given
+    back when Telegram did not take it, told once."""
+    monkeypatch.setattr(erp_feeds.settings, "auto_approve", False)
+    await pushes(session, "telegram_monitor", good=15)
+    await erp_feeds.source_precision_job(SessionLocal, NOW)
+    title = (await row(session, "telegram_monitor")).title_uz
+    owner_ = Owner()
+    assert await erp_feeds.tell_flips(SessionLocal, owner_, now=NOW) is False
+    assert owner_.told == []
+    refused = Owner(delivered=False)
+    assert await erp_feeds.tell_flips(SessionLocal, refused, now=MORNING) is False
+    assert len(refused.told) == 1
+    assert await erp_feeds.tell_flips(SessionLocal, owner_, now=MORNING) is True
+    [text] = owner_.told
+    assert text.splitlines() == [
+        erp_feeds.FLIPS_HEAD_UZ,
+        "  " + erp_feeds.flip_line(title, on=True, pct=100, pushes=15),
+        erp_feeds.FLIPS_NOT_LIVE_UZ,
+    ]
+    assert "aniqlik 100% (15 push)" in text
+    assert await erp_feeds.tell_flips(SessionLocal, owner_, now=MORNING) is False
+    assert len(owner_.told) == 1
+    # A week with no flip tells nothing.
+    await erp_feeds.source_precision_job(SessionLocal, NOW + 7 * DAY)
+    assert (
+        await erp_feeds.tell_flips(SessionLocal, owner_, now=MORNING + 7 * DAY)
+    ) is False
+
+
+async def test_the_health_sweep_tells_the_pause_and_the_flip(session, monkeypatch):
+    """The job at 04:00 says nothing in QUIET_HOURS; the first sweep after
+    them says both: the low-precision pause as 06 §4.2's alert and the flip
+    as its own message."""
+    from clientscrapper.worker import main as worker
+
+    monkeypatch.setattr(erp_feeds.settings, "auto_approve", True)
+    await enable(session, "olx_business")
+    await pushes(session, "telegram_monitor", good=15)
+    await pushes(session, "olx_business", good=3, bad=27)
+    owner_ = Owner()
+    monkeypatch.setattr(worker._seams, "notify", owner_)
+    await worker.source_precision_job(now=NOW)
+    assert owner_.told == []
+    await worker.health_job(now=MORNING, notify=owner_)
+    tg, olx = await row(session, "telegram_monitor"), await row(session, "olx_business")
+    pause = (
+        f"⚠️ {olx.title_uz} aniqligi 10% — bir haftaga toʻxtatildi "
+        "(/manbalar bilan yoqiladi)"
+    )
+    assert any(pause in text for text in owner_.told)
+    flips = [t for t in owner_.told if t.startswith(erp_feeds.FLIPS_HEAD_UZ)]
+    assert flips == [
+        erp_feeds.FLIPS_HEAD_UZ
+        + "\n  "
+        + erp_feeds.flip_line(tg.title_uz, on=True, pct=100, pushes=15)
+    ]
+    # The next sweep repeats neither the flip nor (inside its window) the alert.
+    owner_.told.clear()
+    await worker.health_job(now=MORNING + timedelta(minutes=5), notify=owner_)
+    assert owner_.told == []
+
+
+async def test_the_digest_names_the_flip_and_the_pause_on_their_own_lines(session):
+    """06 §1.8 «a flip of auto_push is its own line», with the job's numbers;
+    the low-precision pause has its own line beside the alert."""
+    from clientscrapper.services import digest
+
+    keys = list(await session.scalars(sa.select(Source.key)))
+    session.add(
+        RuntimeFlag(
+            key=digest.AUTO_PUSH_FLAG,
+            value={k: False for k in keys},
+            updated_by="worker:digest",
+        )
+    )
+    await session.commit()
+    await enable(session, "olx_business")
+    await pushes(session, "telegram_monitor", good=15)
+    await pushes(session, "olx_business", good=3, bad=27)
+    await erp_feeds.source_precision_job(SessionLocal, NOW)
+    tg, olx = await row(session, "telegram_monitor"), await row(session, "olx_business")
+    view = (await digest.load(session, now=NOW.replace(hour=9))).view
+    assert view.flips == (digest.Flip(tg.title_uz, True, pct=100, pushes=15),)
+    assert view.paused_low == (digest.LowPause(olx.title_uz, "10"),)
+    lines = digest.render_digest(view).splitlines()
+    assert erp_feeds.flip_line(tg.title_uz, on=True, pct=100, pushes=15) in lines
+    assert (f"⏸ {olx.title_uz}: aniqlik 10% — bir haftaga toʻxtatildi") in lines
+
+
+async def test_a_flip_the_owner_made_has_no_numbers(session):
+    """A forbid by the owner turns auto_push off with no job run behind it:
+    the digest's line says the flip, without numbers it does not have."""
+    from clientscrapper.services import digest
+
+    await pushes(session, "telegram_monitor", good=15)
+    await erp_feeds.source_precision_job(SessionLocal, NOW - 8 * DAY)
+    keys = list(await session.scalars(sa.select(Source.key)))
+    seen = {k: k == "telegram_monitor" for k in keys}
+    session.add(
+        RuntimeFlag(key=digest.AUTO_PUSH_FLAG, value=seen, updated_by="worker:digest")
+    )
+    await session.commit()
+    await forbid(session, "telegram_monitor")
+    view = (await digest.load(session, now=NOW.replace(hour=9))).view
+    title = (await row(session, "telegram_monitor")).title_uz
+    assert view.flips == (digest.Flip(title, False),)
+    assert f"🔁 Avtomatik push oʻchirildi: {title}" in digest.render_digest(view)

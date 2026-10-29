@@ -33,14 +33,20 @@ lines other sections hand the digest:
   the owner's escalation «Menejer javobi» (07 §3, R9: the managers' number,
   not the agent's). Every lost-reason label no
   ``outcomes.LOST_REASON_PATTERNS`` class matched is listed (decision 1a),
-  all of them — the first ``UNCLASSED_SHOWN`` by name and «va yana N ta
-  sabab» for the rest: a ``lost_other`` row that carries a reason is exactly
-  such a label, since the ERP sends labels only.
+  all of them — the first ``cards.UNCLASSED_SHOWN`` by name and «va yana N
+  ta sabab» for the rest: a ``lost_other`` row that carries a reason is
+  exactly such a label, since the ERP sends labels only. The pushes, the
+  contact rule and the labels are ``services/metrics``' (``/holat``'s and the
+  MVP report's numbers: one home), the label line ``cards.unclassed_lines``.
 * «Manbalar» is ``owner.source_lines`` (the 30-day precision and pushes, the
   ✅/⏸/⛔ state) with the companies the source's runs found yesterday; a
   flip of ``auto_push`` since the last digest is its own line (05 §B.2), told
   by comparing with what the previous digest saw (``runtime_flags``
-  ``digest_auto_push``) — whoever flipped it.
+  ``digest_auto_push``) — whoever flipped it — with the precision job's
+  numbers when the job made it (``erp_feeds.precision_flips``,
+  ``erp_feeds.flip_line``); a source the job paused for low precision is its
+  own line too (06 §4.2 ``source_low_precision``, ``health.low_precision_sources``),
+  beside the alert the health sweep says.
 * The managers' day (06 §1.7): «📞 Bogʻlandim» counted, «🙅 Yozmang dedi»
   listed by company, «Menejer javob bermadi: {n}».
 * «Tekshiruv» is the last ``make smoke`` run (``services/smoke``): a skipped
@@ -60,7 +66,7 @@ import html
 import logging
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import date, datetime, time, timedelta, tzinfo
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Any, Final, Literal
 
@@ -77,7 +83,6 @@ from clientscrapper.db.models import (
     Interaction,
     LeadCandidate,
     LeadReview,
-    Outcome,
     PushLog,
     ReminderLog,
     RuntimeFlag,
@@ -85,13 +90,25 @@ from clientscrapper.db.models import (
 )
 from clientscrapper.db.session import session_scope
 from clientscrapper.services import (
+    cards,
     costs,
     erp_feeds,
     health,
+    metrics,
     outcomes,
     owner,
     reviews,
     smoke,
+)
+from clientscrapper.services.candidates import synthetic_sql
+
+# One home (services/metrics, T-36): the contact rule and decision 1a's
+# labels, re-exported for the digest's readers.
+from clientscrapper.services.metrics import (
+    Unclassed,
+    contacted_in_time,
+    next_business_day_end,
+    unclassed_labels,
 )
 
 log = logging.getLogger(__name__)
@@ -106,16 +123,20 @@ ERP_WINDOW: Final = timedelta(days=30)
 MESSAGE_MAX: Final = 4096
 # Lines of one list inside the digest (sources, labels, names).
 MAX_SOURCES: Final = 10
-MAX_FLIPS: Final = 5
+# A weekly flip is rare; past these the rest are counted (/manbalar names
+# them), so the longest digest stays one message with the job's numbers.
+MAX_FLIPS: Final = 3
+# Low-precision pauses named one by one (the alert names them all, with the
+# remedy).
+MAX_PAUSED: Final = 2
 MAX_NAMES: Final = 5
-# Decision 1a's labels by name (/holat names as many, cards.UNCLASSED_SHOWN
-# on T-36's branch); the rest are counted, never dropped.
-UNCLASSED_SHOWN: Final = 10
+# Decision 1a's labels by name (cards.unclassed_lines, /holat's line too);
+# the rest are counted, never dropped.
+UNCLASSED_SHOWN: Final = cards.UNCLASSED_SHOWN
 NAME_MAX: Final = 40
-LABEL_MAX: Final = 48
-NOT_CLASSED: Final = "lost_other"
-# 07 §3.2: «Mon–Sat Tashkent calendar».
-BUSINESS_DAYS: Final = frozenset({1, 2, 3, 4, 5, 6})
+# How far back the precision job's numbers are read for a flip line: its
+# weekly run, with a day to spare.
+FLIP_NUMBERS_SINCE: Final = timedelta(days=8)
 # 07 §3.2's contact target and R9's escalation (07 §3: «menejer javobi»).
 CONTACT_TARGET_PCT: Final = 40
 ESCALATION_MIN_PUSHES: Final = 20
@@ -148,15 +169,6 @@ class QueueLine:
     enriching: int = 0
     hold: int = 0
     handoff_open: int = 0
-
-
-@dataclass(frozen=True, slots=True)
-class Unclassed:
-    """A dictionary label no ``LOST_REASON_PATTERNS`` class matched, as the
-    ERP spelt it last, and how many outcomes carry it."""
-
-    label: str
-    n: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -206,6 +218,18 @@ class SourceRow:
 class Flip:
     title: str
     on: bool
+    # The precision job's numbers when the job made the flip (a forbid by
+    # the owner has none).
+    pct: int | None = None
+    pushes: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class LowPause:
+    """A source the precision job paused for a week (06 §4.2)."""
+
+    title: str
+    pct: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -251,6 +275,7 @@ class DigestView:
     unclassed: tuple[Unclassed, ...] = ()
     sources: tuple[SourceRow, ...] = ()
     flips: tuple[Flip, ...] = ()
+    paused_low: tuple[LowPause, ...] = ()
     reader: ReaderLine | None = None
     managers: ManagerLine = field(default_factory=ManagerLine)
     spend: SpendLine = field(default_factory=SpendLine)
@@ -328,21 +353,15 @@ def _erp_lines(erp: ErpLine, unclassed: Sequence[Unclassed]) -> list[str]:
         said = [f"{word} {n}" for n, word in dropped if n]
         if said:
             lines.append("ERP qabul qilmadi: " + " · ".join(said))
-    if unclassed:
-        shown = " · ".join(
-            f"«{esc(_clip(u.label, LABEL_MAX))}» {u.n} ta"
-            for u in unclassed[:UNCLASSED_SHOWN]
-        )
-        rest = len(unclassed) - UNCLASSED_SHOWN
-        more = f" · va yana {rest} ta sabab" if rest > 0 else ""
-        lines.append(
-            f"⚠️ Sinflanmagan yoʻqotish sabablari: {shown}{more} — dasturchiga "
-            "ayting, aniqlik hisobiga qoʻshilsin"
-        )
+    lines += cards.unclassed_lines(unclassed)
     return lines
 
 
-def _source_lines(sources: Sequence[SourceRow], flips: Sequence[Flip]) -> list[str]:
+def _source_lines(
+    sources: Sequence[SourceRow],
+    flips: Sequence[Flip],
+    paused: Sequence[LowPause] = (),
+) -> list[str]:
     lines: list[str] = []
     if sources:
         lines.append("Manbalar:")
@@ -354,10 +373,23 @@ def _source_lines(sources: Sequence[SourceRow], flips: Sequence[Flip]) -> list[s
         if len(sources) > MAX_SOURCES:
             lines.append(f"  … yana {len(sources) - MAX_SOURCES} ta")
     for flip in flips[:MAX_FLIPS]:
-        word = "yoqildi" if flip.on else "oʻchirildi"
-        lines.append(f"🔁 Avtomatik push {word}: {esc(_clip(flip.title, NAME_MAX))}")
+        lines.append(
+            erp_feeds.flip_line(
+                _clip(flip.title, NAME_MAX),
+                on=flip.on,
+                pct=flip.pct,
+                pushes=flip.pushes,
+            )
+        )
     if len(flips) > MAX_FLIPS:
         lines.append(f"🔁 … yana {len(flips) - MAX_FLIPS} ta oʻzgarish — /manbalar")
+    for low in paused[:MAX_PAUSED]:
+        lines.append(
+            f"⏸ {esc(_clip(low.title, NAME_MAX))}: aniqlik {esc(low.pct)}% — bir "
+            "haftaga toʻxtatildi"
+        )
+    if len(paused) > MAX_PAUSED:
+        lines.append(f"⏸ … yana {len(paused) - MAX_PAUSED} ta manba — /manbalar")
     return lines
 
 
@@ -439,7 +471,7 @@ def render_digest(view: DigestView) -> str:
             "ERP: yoʻqotilgan lidlar roʻyxati yoʻq — faqat mijozlar XLSX importi "
             "tekshiriladi («Boshqa» eshigi)"
         )
-    lines += _source_lines(view.sources, view.flips)
+    lines += _source_lines(view.sources, view.flips, view.paused_low)
     lines += _manager_lines(view.managers)
     reader = view.reader
     if reader is not None:
@@ -509,23 +541,15 @@ def yesterday_window(now: datetime) -> tuple[datetime, datetime]:
     return costs.day_start(today - timedelta(hours=12)), today
 
 
-def _test_mark() -> sa.ColumnElement[Any]:
-    """``score_breakdown.gates.test`` (crm_push.due_candidates' reading of
-    make push-test's mark, 05 §B.1), false when absent."""
-    test = LeadCandidate.score_breakdown["gates"]["test"].as_boolean()
-    return sa.func.coalesce(test, sa.false())
-
-
 def _not_synthetic() -> sa.ColumnElement[bool]:
-    """Not ``make push-test``'s synthetic company (05 §B.1)."""
-    return _test_mark().is_(False)
+    """Not ``make push-test``'s synthetic company (05 §B.1;
+    ``candidates.synthetic_sql``, the reading crm_push and metrics use)."""
+    return ~synthetic_sql()
 
 
 def _company_not_synthetic() -> sa.ColumnElement[bool]:
     """A company no synthetic candidate stands on (push-test mints both)."""
-    return ~sa.exists().where(
-        LeadCandidate.company_id == Company.id, _test_mark().is_(True)
-    )
+    return ~sa.exists().where(LeadCandidate.company_id == Company.id, synthetic_sql())
 
 
 async def _count(session: AsyncSession, stmt: sa.Select[Any]) -> int:
@@ -614,58 +638,17 @@ def _deliveries() -> sa.Subquery:
     )
 
 
-def next_business_day_end(at: datetime, tz: tzinfo | None = None) -> datetime:
-    """The end (the next local midnight) of the first business day after
-    ``at``'s own Tashkent day: a push on Friday has until Saturday 24:00, one
-    on Saturday or Sunday until Monday 24:00 (07 §3.2). T-36's
-    ``metrics.next_business_day_end`` on its branch; one home once merged."""
-    zone = tz or settings.tz
-    day = at.astimezone(zone).date() + timedelta(days=1)
-    while day.isoweekday() not in BUSINESS_DAYS:
-        day += timedelta(days=1)
-    return datetime.combine(day + timedelta(days=1), time.min, tzinfo=zone)
-
-
-def contacted_in_time(
-    rows: Sequence[tuple[datetime, str | None, datetime | None]], *, now: datetime
-) -> tuple[int, int]:
-    """(contacted by the end of the next business day, of the created leads
-    that had that day — or were contacted in it already): ``(sent_at,
-    landing, contacted_at)`` rows. T-36's ``metrics.contacted_in_time``."""
-    hit = due = 0
-    for sent_at, landing, contacted_at in rows:
-        if landing != "created":
-            continue
-        deadline = next_business_day_end(sent_at)
-        in_time = contacted_at is not None and contacted_at <= deadline
-        if in_time or deadline <= now:
-            due += 1
-            hit += in_time
-    return hit, due
-
-
 async def erp_line(session: AsyncSession, now: datetime) -> ErpLine:
-    """The pushes delivered in the last 30 days, by their outcome row."""
-    dated = _deliveries()
-    rows = (
-        await session.execute(
-            sa.select(
-                dated.c.sent_at, Outcome.landing, Outcome.label, Outcome.contacted_at
-            )
-            .select_from(dated)
-            .outerjoin(Outcome, Outcome.external_id == dated.c.external_id)
-            .where(dated.c.sent_at >= now - ERP_WINDOW, dated.c.sent_at <= now)
-        )
-    ).all()
-    labels = [str(label) for _, _, label, _ in rows if label is not None]
-    in_time, due = contacted_in_time(
-        [(sent, landing, at) for sent, landing, _, at in rows], now=now
-    )
+    """The pushes delivered in the last 30 days, by their outcome row
+    (``metrics.pushes``: /holat's and the MVP report's own reading)."""
+    rows = await metrics.pushes(session, since=now - ERP_WINDOW, until=now)
+    labels = [r.label for r in rows if r.label is not None]
+    contact = contacted_in_time(rows, now=now)
     return ErpLine(
         pushes=len(rows),
-        created=sum(1 for _, landing, _, _ in rows if landing == "created"),
-        due=due,
-        in_time=in_time,
+        created=sum(1 for r in rows if r.landing == "created"),
+        due=contact.of,
+        in_time=contact.n,
         won=sum(1 for label in labels if label in outcomes.CLIENT_LABELS),
         lost=sum(1 for label in labels if label.startswith("lost_")),
         lost_no_contact=labels.count("lost_no_contact"),
@@ -674,28 +657,6 @@ async def erp_line(session: AsyncSession, now: datetime) -> ErpLine:
         dropped_suppressed=labels.count("dropped_suppressed"),
         dropped_other=labels.count("dropped_other"),
     )
-
-
-async def unclassed_labels(session: AsyncSession) -> tuple[Unclassed, ...]:
-    """Decision 1a: every lost-reason label no class matched — a
-    ``lost_other`` outcome with a reason — most used first, one entry per
-    normalised label (``outcomes.normalise_label``, the ERP's own), all of
-    them: a cut is the renderer's, and it says how many it left out. T-36's
-    ``metrics.unclassed_labels`` on its branch; one home once merged."""
-    rows = await session.execute(
-        sa.select(Outcome.lost_reason, Outcome.erp_at)
-        .where(Outcome.label == NOT_CLASSED, Outcome.lost_reason.is_not(None))
-        .order_by(Outcome.erp_at.desc(), Outcome.external_id)
-    )
-    found: dict[str, list[Any]] = {}
-    for reason, at in rows:
-        key = outcomes.normalise_label(reason)
-        if not key:
-            continue
-        entry = found.setdefault(key, [" ".join(str(reason).split()), 0, at])
-        entry[1] += 1
-    ranked = sorted(found.values(), key=lambda x: (-x[1], -x[2].timestamp(), x[0]))
-    return tuple(Unclassed(str(label), int(n)) for label, n, _ in ranked)
 
 
 async def _new_by_source(session: AsyncSession, now: datetime) -> dict[str, int]:
@@ -736,11 +697,28 @@ async def _sources(
     flips: tuple[Flip, ...] = ()
     if before is not None:
         titles = {line.key: line.title for line in lines}
-        flips = tuple(
-            Flip(titles[key], on)
-            for key, on in sorted(seen.items())
-            if isinstance(before.get(key), bool) and before[key] != on
-        )
+        # The precision job's own numbers for a flip it made (a forbid by the
+        # owner, or a job run older than the week, has none).
+        made = {
+            (f.key, f.on): f
+            for f in await erp_feeds.precision_flips(
+                session, since=now - FLIP_NUMBERS_SINCE
+            )
+        }
+        found: list[Flip] = []
+        for key, on in sorted(seen.items()):
+            if not isinstance(before.get(key), bool) or before[key] == on:
+                continue
+            job = made.get((key, on))
+            found.append(
+                Flip(
+                    titles[key],
+                    on,
+                    pct=job.pct if job is not None else None,
+                    pushes=job.pushes if job is not None else None,
+                )
+            )
+        flips = tuple(found)
     return rows, flips, seen
 
 
@@ -871,6 +849,9 @@ async def load(session: AsyncSession, *, now: datetime) -> Loaded:
         unclassed=await unclassed_labels(session),
         sources=sources,
         flips=flips,
+        paused_low=tuple(
+            LowPause(low.title, low.pct) for low in health.low_precision_sources(status)
+        ),
         reader=await _reader(session, status, now),
         managers=await _managers(session, now),
         spend=SpendLine(
@@ -974,6 +955,7 @@ __all__ = [
     "ErpLine",
     "Flip",
     "Loaded",
+    "LowPause",
     "ManagerLine",
     "QueueLine",
     "ReaderLine",

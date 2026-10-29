@@ -27,7 +27,7 @@ from clientscrapper.db.models import (
     Source,
     Suppression,
 )
-from clientscrapper.services import digest, health, smoke
+from clientscrapper.services import digest, health, metrics, smoke
 from tests import gate_fixtures as gf
 from tests.fixtures import digest_views as dv
 from tests.test_cards import BUBBLE_PX, width_px
@@ -54,8 +54,10 @@ def test_the_digest_fits_one_message_and_follows_the_text_rules(make):
 def test_the_longest_digest_still_has_room():
     # Every list at its cap: the caps, not the clip, keep it in one message —
     # measured as Telegram can count it at its widest (UTF-16 of the HTML).
+    # 4,000 of 4,096 since the flips carry the precision job's numbers and
+    # the low-precision pauses their own lines (wave-4 integration).
     text = digest.render_digest(dv.longest())
-    assert digest.units(text) <= 3900
+    assert digest.units(text) <= 4000
     assert "  …" not in text.splitlines()
 
 
@@ -118,14 +120,16 @@ def test_won_is_labelled_the_first_shipment_proxy_and_each_unclassed_label_shown
         replace_view(
             view,
             unclassed=(
-                digest.Unclassed("Mijoz oʻzi olib ketdi", 2),
-                digest.Unclassed("Klient <b>yoʻq</b>", 1),
+                digest.Unclassed("Mijoz oʻzi olib ketdi", 2, NOW),
+                digest.Unclassed("Klient <b>yoʻq</b>", 1, NOW),
             ),
         )
     )
     assert "«Mijoz oʻzi olib ketdi» 2 ta · «Klient &lt;b&gt;yoʻq&lt;/b&gt;» 1 ta" in many
     # Decision 1a: every label — the first ten by name, the rest counted.
-    eleven = tuple(digest.Unclassed(f"Namuna sabab {n:02}", 11 - n) for n in range(11))
+    eleven = tuple(
+        digest.Unclassed(f"Namuna sabab {n:02}", 11 - n, NOW) for n in range(11)
+    )
     line = [
         x
         for x in digest.render_digest(replace_view(view, unclassed=eleven)).splitlines()
@@ -197,7 +201,7 @@ def test_fit_counts_what_telegram_can_count_at_its_widest():
     view = replace_view(
         dv.longest(),
         managers=digest.ManagerLine(said_no=tuple("🚚" * 40 for _ in range(5))),
-        unclassed=tuple(digest.Unclassed("🚚" * 60, 1) for _ in range(12)),
+        unclassed=tuple(digest.Unclassed("🚚" * 60, 1, NOW) for _ in range(12)),
     )
     assert digest.units(digest.render_digest(view)) <= 4096
 
@@ -367,7 +371,7 @@ def test_contacted_in_time_counts_only_the_leads_whose_day_is_over():
     tz = dv.TZ
     now = datetime(2026, 11, 3, 12, 0, tzinfo=tz)  # Tuesday
     friday = datetime(2026, 10, 30, 16, 0, tzinfo=tz)
-    rows = [
+    raw = [
         (friday, "created", datetime(2026, 10, 31, 23, 59, tzinfo=tz)),  # in time
         (friday, "created", datetime(2026, 11, 1, 0, 1, tzinfo=tz)),  # late
         (friday, "created", None),  # due, never contacted
@@ -375,7 +379,13 @@ def test_contacted_in_time_counts_only_the_leads_whose_day_is_over():
         (datetime(2026, 11, 3, 9, 0, tzinfo=tz), "created", None),  # not due yet
         (datetime(2026, 11, 3, 9, 0, tzinfo=tz), "created", now),  # early hit
     ]
-    assert digest.contacted_in_time(rows, now=now) == (2, 4)
+    rows = [
+        metrics.PushRow(
+            f"cs:{n}", sent, 72, landing=landing, label="open", contacted_at=at
+        )
+        for n, (sent, landing, at) in enumerate(raw)
+    ]
+    assert digest.contacted_in_time(rows, now=now) == metrics.Ratio(2, 4)
 
 
 async def test_unclassed_labels_are_every_lost_other_reason_once(session):
@@ -391,10 +401,10 @@ async def test_unclassed_labels_are_every_lost_other_reason_once(session):
         log = await pushed(session, n, sent_at=t)
         await outcome(session, log, label, lost_reason=reason, erp_at=at)
     await session.commit()
-    assert await digest.unclassed_labels(session) == (
-        digest.Unclassed("mijoz oʻzi olib ketdi", 2),
-        digest.Unclassed("Сезон закончился", 1),
-    )
+    assert [(u.label, u.n) for u in await digest.unclassed_labels(session)] == [
+        ("mijoz oʻzi olib ketdi", 2),
+        ("Сезон закончился", 1),
+    ]
 
 
 async def test_a_re_pushed_lead_is_dated_by_the_push_the_erp_recorded(session):

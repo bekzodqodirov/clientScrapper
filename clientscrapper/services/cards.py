@@ -1302,15 +1302,28 @@ def render_results(results: metrics.Results) -> list[str]:
 
 # Decision 1a's line names this many labels (most used first) and counts the rest.
 UNCLASSED_SHOWN: Final = 10
+# A label is the ERP's own text: one line, at most this long, so ten of them
+# still leave the digest (4,096) and /holat room for the rest.
+UNCLASSED_LABEL_MAX: Final = 48
+
+
+def _label(text: str) -> str:
+    one = " ".join(text.split())
+    if len(one) <= UNCLASSED_LABEL_MAX:
+        return one
+    return one[: UNCLASSED_LABEL_MAX - 1] + "…"
 
 
 def unclassed_lines(found: Sequence[metrics.Unclassed]) -> list[str]:
     """Decision 1a: every lost-reason label no class matched, so it is
     mapped — the first ``UNCLASSED_SHOWN`` by name, «va yana N ta» for the
-    rest, none, no line (T-35's digest says it the same way)."""
+    rest, none, no line. The one rendering of the line: /holat, the MVP
+    report and T-35's digest."""
     if not found:
         return []
-    shown = " · ".join(f"«{esc(u.label)}» {u.n} ta" for u in found[:UNCLASSED_SHOWN])
+    shown = " · ".join(
+        f"«{esc(_label(u.label))}» {u.n} ta" for u in found[:UNCLASSED_SHOWN]
+    )
     rest = len(found) - UNCLASSED_SHOWN
     more = f" · va yana {rest} ta sabab" if rest > 0 else ""
     return [

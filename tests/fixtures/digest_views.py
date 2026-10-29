@@ -54,7 +54,7 @@ def busy() -> digest.DigestView:
             dropped_capped=1,
             dropped_suppressed=2,
         ),
-        unclassed=(digest.Unclassed("Mijoz oʻzi olib ketdi", 2),),
+        unclassed=(digest.Unclassed("Mijoz oʻzi olib ketdi", 2, NOW),),
         sources=(
             digest.SourceRow("hh.uz vakansiyalari", "on", 5, Decimal("0.62"), 18),
             digest.SourceRow("OLX sotuvchilari", "paused", 0, None, 0),
@@ -112,7 +112,7 @@ def longest() -> digest.DigestView:
             dropped_other=99999,
         ),
         unclassed=tuple(
-            digest.Unclassed("Клиент передумал и ушёл к другому " * 3 + str(n), 999)
+            digest.Unclassed("Клиент передумал и ушёл к другому " * 3 + str(n), 999, NOW)
             # Past the shown ones: the rest are counted (decision 1a).
             for n in range(digest.UNCLASSED_SHOWN + 2)
         ),
@@ -120,7 +120,13 @@ def longest() -> digest.DigestView:
             digest.SourceRow(f"{long_title}{n}", "off", 99999, Decimal("1"), 99999)
             for n in range(23)
         ),
-        flips=tuple(digest.Flip(f"{long_title}{n}", n % 2 == 0) for n in range(23)),
+        flips=tuple(
+            digest.Flip(f"{long_title}{n}", n % 2 == 0, pct=100, pushes=99999)
+            for n in range(23)
+        ),
+        paused_low=tuple(
+            digest.LowPause(f"{long_title}{n}", "19") for n in range(digest.MAX_PAUSED + 2)
+        ),
         reader=digest.ReaderLine(
             chats_on=500, hits=99999, joined=3, flood_until=NOW + timedelta(hours=20)
         ),
