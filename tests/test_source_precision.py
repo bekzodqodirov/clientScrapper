@@ -354,6 +354,15 @@ async def test_the_worker_slot_runs_the_job(session):
     assert (await row(session, "telegram_monitor")).auto_push is True
 
 
+async def tap_source(session, key: str, *, now: datetime) -> bool | None:
+    """One ``src:<key>:t`` tap, committed before anything is asserted — a
+    failing assertion must not leave the row locked under the fixture's
+    put-back."""
+    done = await owner.toggle_source(session, key, now=now)
+    await session.commit()
+    return done
+
+
 async def test_one_tap_on_the_paused_row_resumes_it_and_its_alert_line_goes(session):
     """06 §4.2 «/manbalar bilan yoqiladi»: one tap on the ⏸ row the job holds
     resumes the source (it stays on) and takes its line out of the open
@@ -370,8 +379,7 @@ async def test_one_tap_on_the_paused_row_resumes_it_and_its_alert_line_goes(sess
         "olx_business",
     ]
     tap = NOW + DAY
-    assert await owner.toggle_source(session, "olx_business", now=tap) is True
-    await session.commit()
+    assert await tap_source(session, "olx_business", now=tap) is True
     olx = await row(session, "olx_business")
     assert (olx.enabled, olx.paused_until, olx.paused_reason) == (True, None, None)
     raised = await problem(session)
@@ -381,11 +389,10 @@ async def test_one_tap_on_the_paused_row_resumes_it_and_its_alert_line_goes(sess
     }
     assert raised["until"] == (NOW + 7 * DAY).isoformat()
     assert raised["since"] == NOW.isoformat()
-    assert await owner.toggle_source(session, "hh_vacancies", now=tap) is True
-    await session.commit()
+    assert await tap_source(session, "hh_vacancies", now=tap) is True
     assert await problem(session) is None
     # A second tap is an ordinary switch: off.
-    assert await owner.toggle_source(session, "olx_business", now=tap) is False
+    assert await tap_source(session, "olx_business", now=tap) is False
     # A breaker-held row: the tap switches it off, the breaker's pause stays,
     # and switching it back on leaves that pause too.
     await session.execute(
@@ -394,9 +401,8 @@ async def test_one_tap_on_the_paused_row_resumes_it_and_its_alert_line_goes(sess
         .values(paused_until=tap + DAY, paused_reason="host_blocked:hh.uz")
     )
     await session.commit()
-    assert await owner.toggle_source(session, "hh_vacancies", now=tap) is False
-    assert await owner.toggle_source(session, "hh_vacancies", now=tap) is True
-    await session.commit()
+    assert await tap_source(session, "hh_vacancies", now=tap) is False
+    assert await tap_source(session, "hh_vacancies", now=tap) is True
     hh = await row(session, "hh_vacancies")
     assert (hh.paused_until, hh.paused_reason) == (tap + DAY, "host_blocked:hh.uz")
 
@@ -407,9 +413,8 @@ async def test_a_low_precision_pause_that_ran_out_is_no_hold(session):
     await pushes(session, "olx_business", good=1, bad=29)
     await erp_feeds.source_precision_job(SessionLocal, NOW)
     after = NOW + 7 * DAY
-    assert await owner.toggle_source(session, "olx_business", now=after) is False
-    assert await owner.toggle_source(session, "olx_business", now=after) is True
-    await session.commit()
+    assert await tap_source(session, "olx_business", now=after) is False
+    assert await tap_source(session, "olx_business", now=after) is True
     olx = await row(session, "olx_business")
     assert (olx.enabled, olx.paused_until, olx.paused_reason) == (True, None, None)
 
@@ -421,8 +426,7 @@ async def test_a_switched_off_paused_source_switched_on_runs_again(session):
     await pushes(session, "olx_business", good=1, bad=29)
     await erp_feeds.source_precision_job(SessionLocal, NOW)
     await enable(session, "olx_business", on=False)
-    assert await owner.toggle_source(session, "olx_business", now=NOW + DAY) is True
-    await session.commit()
+    assert await tap_source(session, "olx_business", now=NOW + DAY) is True
     olx = await row(session, "olx_business")
     assert (olx.enabled, olx.paused_until, olx.paused_reason) == (True, None, None)
     assert await problem(session) is None
