@@ -121,6 +121,16 @@ async def record(
     return run
 
 
+async def last_run_at(session: AsyncSession, *, now: datetime) -> datetime | None:
+    """When the newest smoke run up to ``now`` started, or None (never)."""
+    found: datetime | None = await session.scalar(
+        sa.select(sa.func.max(CollectorRun.started_at)).where(
+            is_smoke(), CollectorRun.started_at <= now
+        )
+    )
+    return found
+
+
 async def latest(
     session: AsyncSession, *, now: datetime, window: timedelta = SMOKE_WINDOW
 ) -> SmokeRun | None:
@@ -184,6 +194,7 @@ __all__ = [
     "SmokeRun",
     "TestResult",
     "is_smoke",
+    "last_run_at",
     "latest",
     "not_smoke",
     "record",

@@ -293,6 +293,17 @@ class PageResult:
     effects: Effects | None = None
 
 
+def delivery_order() -> tuple[sa.ColumnElement[Any], sa.ColumnElement[int]]:
+    """Which of an ``external_id``'s push_log rows its outcome is about, best
+    first (after ``ORDER BY external_id`` under ``DISTINCT ON``): the live
+    delivered row — a re-push supersedes the attempt the ERP never recorded
+    (02 §2.10 rule 5) — then any delivered one, then the rest, oldest attempt
+    first. services/metrics dates a push by the same row."""
+    delivered = PushLog.status.in_(e.PUSH_DELIVERED_STATUSES)
+    live = sa.and_(delivered, PushLog.superseded_at.is_(None))
+    return (sa.case((live, 0), (delivered, 1), else_=2), PushLog.attempt.asc())
+
+
 async def deliveries(
     session: AsyncSession, external_ids: Iterable[str]
 ) -> dict[str, Delivery]:
@@ -301,8 +312,6 @@ async def deliveries(
     ids = sorted(set(external_ids))
     if not ids:
         return {}
-    delivered = PushLog.status.in_(e.PUSH_DELIVERED_STATUSES)
-    live = sa.and_(delivered, PushLog.superseded_at.is_(None))
     rows = await session.execute(
         sa.select(
             PushLog.id,
@@ -317,11 +326,7 @@ async def deliveries(
         .join(LeadCandidate, LeadCandidate.id == PushLog.candidate_id)
         .where(PushLog.external_id.in_(ids))
         .distinct(PushLog.external_id)
-        .order_by(
-            PushLog.external_id,
-            sa.case((live, 0), (delivered, 1), else_=2),
-            PushLog.attempt,
-        )
+        .order_by(PushLog.external_id, *delivery_order())
     )
     return {
         r.external_id: Delivery(

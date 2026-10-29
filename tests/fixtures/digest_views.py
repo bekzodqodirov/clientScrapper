@@ -45,7 +45,8 @@ def busy() -> digest.DigestView:
         erp=digest.ErpLine(
             pushes=48,
             created=40,
-            contacted=27,
+            due=40,
+            in_time=27,
             won=3,
             lost=9,
             lost_no_contact=2,
@@ -99,7 +100,9 @@ def longest() -> digest.DigestView:
         erp=digest.ErpLine(
             pushes=99999,
             created=99999,
-            contacted=99999,
+            due=99999,
+            # Under 40 %: the «Menejer javobi» escalation is said too.
+            in_time=9999,
             won=99999,
             lost=99999,
             lost_no_contact=99999,
@@ -110,7 +113,8 @@ def longest() -> digest.DigestView:
         ),
         unclassed=tuple(
             digest.Unclassed("Клиент передумал и ушёл к другому " * 3 + str(n), 999)
-            for n in range(digest.MAX_LABELS)
+            # Past the shown ones: the rest are counted (decision 1a).
+            for n in range(digest.UNCLASSED_SHOWN + 2)
         ),
         sources=tuple(
             digest.SourceRow(f"{long_title}{n}", "off", 99999, Decimal("1"), 99999)

@@ -7,7 +7,7 @@ leaves the day's digest due."""
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -52,8 +52,11 @@ def test_the_digest_fits_one_message_and_follows_the_text_rules(make):
 
 
 def test_the_longest_digest_still_has_room():
-    # Every list at its cap: the caps, not the clip, keep it in one message.
-    assert len(digest.render_digest(dv.longest())) <= 3600
+    # Every list at its cap: the caps, not the clip, keep it in one message —
+    # measured as Telegram can count it at its widest (UTF-16 of the HTML).
+    text = digest.render_digest(dv.longest())
+    assert digest.units(text) <= 3900
+    assert "  …" not in text.splitlines()
 
 
 def test_a_quiet_morning_says_only_the_always_said_lines():
@@ -73,8 +76,9 @@ def test_a_busy_morning_is_06_s_layout():
         "Kecha: topildi 37 · ball olgan 21 · karta 12 · tasdiq 7 · CRMʼga 6/10 · rad 3",
         "Navbat: koʻrib chiqish 9 (eng eskisi 1 kun) · boyitish 4 · kutish 11 · "
         "menejerda 2",
-        "ERP (30 kun): bogʻlanildi 67% · yutuq 3 (birinchi yuk oʻrniga, taxminiy) · "
-        "yoʻqotildi 9 (shundan «Qayta qilinmasin» 2, notoʻgʻri raqam 1)",
+        "ERP (30 kun): 1 ish kunida bogʻlanildi 67% (27/40) · yutuq 3 (birinchi yuk "
+        "oʻrniga, taxminiy) · yoʻqotildi 9 (shundan «Qayta qilinmasin» 2, notoʻgʻri "
+        "raqam 1)",
         "ERP qabul qilmadi: chegara 1 · bostirilgan 2",
         "⚠️ Sinflanmagan yoʻqotish sabablari: «Mijoz oʻzi olib ketdi» 2 ta — "
         "dasturchiga ayting, aniqlik hisobiga qoʻshilsin",
@@ -89,7 +93,8 @@ def test_a_busy_morning_is_06_s_layout():
         "Telegram oʻquvchi: 14 chat · kecha 33 signal · 1 yangi chat · flood yoʻq",
         "Xarajat: kecha $6.18 · oy $74.90/$250.00 (29%)",
         "Tekshiruv: ✓ 9 / ✗ 1 / oʻtkazildi 2",
-        "  ✗ oʻzgargan: OLX sotuvchilari — fixture yangilansin, /manbalar",
+        "  ✗ oʻzgargan: OLX sotuvchilari — sayt tuzilishi oʻzgargan boʻlishi mumkin, "
+        "dasturchiga ayting; /manbalar",
         "  oʻtkazildi: Instagram biznes akkauntlari, Google Places",
         "Tizim: 2 ta muammo — /holat",
         "Sizni 9 ta karta kutmoqda → /lidlar",
@@ -119,6 +124,18 @@ def test_won_is_labelled_the_first_shipment_proxy_and_each_unclassed_label_shown
         )
     )
     assert "«Mijoz oʻzi olib ketdi» 2 ta · «Klient &lt;b&gt;yoʻq&lt;/b&gt;» 1 ta" in many
+    # Decision 1a: every label — the first ten by name, the rest counted.
+    eleven = tuple(digest.Unclassed(f"Namuna sabab {n:02}", 11 - n) for n in range(11))
+    line = [
+        x
+        for x in digest.render_digest(replace_view(view, unclassed=eleven)).splitlines()
+        if "Sinflanmagan" in x
+    ]
+    assert line == [
+        "⚠️ Sinflanmagan yoʻqotish sabablari: "
+        + " · ".join(f"«Namuna sabab {n:02}» {11 - n} ta" for n in range(10))
+        + " · va yana 1 ta sabab — dasturchiga ayting, aniqlik hisobiga qoʻshilsin"
+    ]
 
 
 def test_the_dead_man_line_says_an_unset_or_refused_watcher():
@@ -158,6 +175,52 @@ def test_fit_drops_middle_lines_and_keeps_the_first_and_the_last():
     assert digest.fit(["a", "b"], limit=1000) == "a\nb"
 
 
+def test_fit_keeps_the_closing_lines_it_is_told_to():
+    lines = ["bosh", *[f"qator {n} " + "x" * 90 for n in range(60)], "t1", "t2", "t3"]
+    text = digest.fit(lines, limit=1000, keep_tail=3)
+    assert digest.units(text) <= 1000
+    assert text.startswith("bosh\nqator 0 ") and text.endswith("\n  …\nt1\nt2\nt3")
+
+
+def test_fit_counts_what_telegram_can_count_at_its_widest():
+    """A name made of emoji off the BMP is two UTF-16 units a character: a
+    code-point count would let 4,096 such characters through as 4,096."""
+    wide = "🚚" * 30
+    assert (len(wide), digest.units(wide)) == (30, 60)
+    lines = ["bosh", *[wide for _ in range(80)], "oxir"]
+    text = digest.fit(lines, limit=1000)
+    assert digest.units(text) <= 1000 < len(text) * 2
+    assert text.endswith("\n  …\noxir")
+    view = replace_view(
+        dv.longest(),
+        managers=digest.ManagerLine(said_no=tuple("🚚" * 40 for _ in range(5))),
+        unclassed=tuple(digest.Unclassed("🚚" * 60, 1) for _ in range(12)),
+    )
+    assert digest.units(digest.render_digest(view)) <= 4096
+
+
+def test_the_manager_escalation_is_said_under_target_with_twenty_pushes():
+    """07 §3 / R9: contacted within one business day < 40 % while pushes ≥ 20
+    is the owner's «Menejer javobi» — the managers' number, not a code fix."""
+    view = dv.busy()
+
+    def said(**erp: int) -> list[str]:
+        line = replace_view(view, erp=digest.ErpLine(**erp))
+        return [
+            x for x in digest.render_digest(line).splitlines() if "Menejer javobi" in x
+        ]
+
+    assert said(pushes=20, created=20, due=20, in_time=7) == [
+        "⚠️ Menejer javobi: 1 ish kunida bogʻlanildi 35% (7/20), maqsad ≥ 40% "
+        "(faqat ERP koʻrgani) — menejerlar bilan gaplashing; ERPda arizalar kimga "
+        "tushayotganini tekshiring"
+    ]
+    assert said(pushes=19, created=19, due=19, in_time=0) == []
+    assert said(pushes=20, created=20, due=20, in_time=8) == []  # 40 %: on target
+    assert said(pushes=25, created=25, due=0, in_time=0) == []  # nobody due yet
+    assert digest.ErpLine(pushes=20, due=20, in_time=7).escalated
+
+
 def test_a_digest_past_the_caps_is_still_one_message():
     """No list can pass its cap; a count can (an int has no bound): the
     renderer gives way line by line instead of handing Telegram 4,097."""
@@ -167,7 +230,14 @@ def test_a_digest_past_the_caps_is_still_one_message():
     assert len(text) <= 4096
     lines = text.splitlines()
     assert lines[0] == "☀️ 29.10.2026 — Qidiruv agenti"
-    assert lines[-2:] == ["  …", "Sizni 99999 ta karta kutmoqda → /lidlar"]
+    # The closing lines are the last to give way: the system's state, the
+    # outside watcher and the cards waiting are still said.
+    assert lines[-4:] == [
+        "  …",
+        "Tizim: 33 ta muammo — /holat",
+        "⚠️ Tashqi kuzatuvchi oxirgi signalni olmadi (HTTP 404) — manzilni tekshiring",
+        "Sizni 99999 ta karta kutmoqda → /lidlar",
+    ]
     assert uz_problems(text, rendered=True) == set()
 
 
@@ -263,7 +333,8 @@ async def test_the_erp_line_counts_first_deliveries_by_label(session):
     assert line == digest.ErpLine(
         pushes=5,
         created=3,
-        contacted=2,
+        due=3,
+        in_time=2,
         won=1,
         lost=2,
         lost_no_contact=1,
@@ -271,6 +342,37 @@ async def test_the_erp_line_counts_first_deliveries_by_label(session):
         dropped_capped=1,
     )
     assert line.contacted_pct == 66
+
+
+def test_the_next_business_day_ends_at_its_tashkent_midnight():
+    tz = dv.TZ
+    friday = datetime(2026, 10, 30, 16, 0, tzinfo=tz)
+    saturday = datetime(2026, 10, 31, 10, 0, tzinfo=tz)
+    sunday = datetime(2026, 11, 1, 10, 0, tzinfo=tz)
+    assert digest.next_business_day_end(friday) == datetime(2026, 11, 1, 0, 0, tzinfo=tz)
+    for weekend in (saturday, sunday):
+        assert digest.next_business_day_end(weekend) == datetime(
+            2026, 11, 3, 0, 0, tzinfo=tz
+        )
+    # A UTC moment is read on the Tashkent calendar: 20:00 UTC Thursday is
+    # already Friday in Tashkent.
+    late = datetime(2026, 10, 29, 20, 0, tzinfo=UTC)
+    assert digest.next_business_day_end(late) == datetime(2026, 11, 1, 0, 0, tzinfo=tz)
+
+
+def test_contacted_in_time_counts_only_the_leads_whose_day_is_over():
+    tz = dv.TZ
+    now = datetime(2026, 11, 3, 12, 0, tzinfo=tz)  # Tuesday
+    friday = datetime(2026, 10, 30, 16, 0, tzinfo=tz)
+    rows = [
+        (friday, "created", datetime(2026, 10, 31, 23, 59, tzinfo=tz)),  # in time
+        (friday, "created", datetime(2026, 11, 1, 0, 1, tzinfo=tz)),  # late
+        (friday, "created", None),  # due, never contacted
+        (friday, "client", None),  # not a lead the managers work
+        (datetime(2026, 11, 3, 9, 0, tzinfo=tz), "created", None),  # not due yet
+        (datetime(2026, 11, 3, 9, 0, tzinfo=tz), "created", now),  # early hit
+    ]
+    assert digest.contacted_in_time(rows, now=now) == (2, 4)
 
 
 async def test_unclassed_labels_are_every_lost_other_reason_once(session):
@@ -290,6 +392,85 @@ async def test_unclassed_labels_are_every_lost_other_reason_once(session):
         digest.Unclassed("mijoz oʻzi olib ketdi", 2),
         digest.Unclassed("Сезон закончился", 1),
     )
+
+
+async def test_a_re_pushed_lead_is_dated_by_the_push_the_erp_recorded(session):
+    """Rule 5 re-pushes an id the ERP never recorded (02 §2.10): the lead was
+    born at the re-push, so the managers' day runs from there — as /holat
+    and the daily cap date it (the live row)."""
+    first = NOW - timedelta(days=8)  # Wednesday 21.10
+    log = await pushed(session, 1, sent_at=first)
+    log.superseded_at = first + timedelta(days=2)
+    await session.flush()
+    again = await gf.push(
+        session,
+        (await session.get(gf.LeadCandidate, log.candidate_id)),
+        sent_at=NOW - timedelta(days=2),  # Tuesday 27.10
+        phone_tail=gf.tail(1),
+        external_id=log.external_id,
+        attempt=2,
+    )
+    await outcome(session, again, "contacted_open", contacted_at=NOW - timedelta(days=1))
+    await session.commit()
+    line = await digest.erp_line(session, NOW)
+    assert (line.pushes, line.in_time, line.due) == (1, 1, 1)
+
+
+async def test_slow_managers_reach_the_owner_as_menejer_javobi(session):
+    """The review's probe: twenty pushes contacted four days later — 0 % in
+    one business day, said as the escalation (it read 100 % before)."""
+    t = NOW - timedelta(days=10)
+    for n in range(1, 21):
+        log = await pushed(session, n, sent_at=t)
+        await outcome(session, log, "contacted_open", contacted_at=t + timedelta(days=4))
+    await session.commit()
+    text = digest.render_digest((await digest.load(session, now=NOW)).view)
+    erp = [x for x in text.splitlines() if x.startswith(("ERP (30", "⚠️ Menejer"))]
+    assert erp == [
+        "ERP (30 kun): 1 ish kunida bogʻlanildi 0% (0/20) · yutuq 0 (birinchi yuk "
+        "oʻrniga, taxminiy) · yoʻqotildi 0 (shundan «Qayta qilinmasin» 0, notoʻgʻri "
+        "raqam 0)",
+        "⚠️ Menejer javobi: 1 ish kunida bogʻlanildi 0% (0/20), maqsad ≥ 40% "
+        "(faqat ERP koʻrgani) — menejerlar bilan gaplashing; ERPda arizalar kimga "
+        "tushayotganini tekshiring",
+    ]
+
+
+async def test_every_unclassed_label_reaches_the_digest(session):
+    """Decision 1a «every»: seven labels, seven in the view, none dropped."""
+    t = NOW - timedelta(days=2)
+    words = ("bahor", "yoz", "kuz", "qish", "erta", "kech", "tun")
+    for n, word in enumerate(words, start=1):
+        log = await pushed(session, n, sent_at=t)
+        reason = f"Mijoz {word} ketdi"
+        await outcome(session, log, "lost_other", lost_reason=reason, erp_at=t)
+    await session.commit()
+    view = (await digest.load(session, now=NOW)).view
+    assert sorted(u.label for u in view.unclassed) == sorted(
+        f"Mijoz {w} ketdi" for w in words
+    )
+    text = digest.render_digest(view)
+    assert all(f"«Mijoz {w} ketdi» 1 ta" in text for w in words)
+
+
+async def test_push_test_s_company_is_in_none_of_yesterday_s_counts(session):
+    """05 §B.1: make push-test's synthetic company — found, scored, approved,
+    pushed or rejected — is no number of the owner's morning."""
+    from clientscrapper.tools import push_test
+
+    inside = YESTERDAY.replace(hour=10)
+    company, cand = await push_test.mint(session, "+998900000099", now=inside)
+    company.created_at = inside
+    cand.last_scored_at = inside
+    cand.rejected_at = inside
+    await session.commit()
+    assert await digest._yesterday(session, NOW) == digest.Yesterday()
+    # A real company the same hour is counted.
+    real = await gf.firm(session, "Namuna Haqiqiy", created_at=inside)
+    await gf.candidate(session, real, state="rejected", rejected_at=inside)
+    await session.commit()
+    got = await digest._yesterday(session, NOW)
+    assert (got.found, got.rejected) == (1, 1)
 
 
 async def test_yesterday_s_counts_are_the_tashkent_day_before(session):
@@ -564,6 +745,42 @@ async def test_the_last_smoke_run_of_the_day_is_read(session):
     assert await smoke.latest(session, now=NOW + timedelta(days=1)) is None
 
 
+async def test_a_weekly_smoke_run_that_stopped_coming_is_said(session):
+    view = dv.quiet()
+    for days, said in ((None, False), (7, False), (9, True)):
+        last = None if days is None else NOW - timedelta(days=days, hours=1)
+        text = digest.render_digest(replace_view(view, smoke_last_at=last))
+        expected = (
+            f"⚠️ Haftalik tekshiruv {days} kundan beri boʻlmadi — serverdagi cron "
+            "(<code>make smoke-cron</code>)"
+        )
+        assert (expected in text.splitlines()) is said, days
+    results = [smoke.TestResult("hh_vacancies", "tests/live/t.py::t", "passed")]
+    started = NOW - timedelta(days=9)
+    await smoke.record(session, results, started_at=started, now=started, full=False)
+    await session.commit()
+    loaded = (await digest.load(session, now=NOW)).view
+    assert (loaded.smoke, loaded.smoke_last_at) == (None, started)
+    assert "Haftalik tekshiruv 9 kundan beri" in digest.render_digest(loaded)
+
+
+def test_the_digest_restates_t_36_s_metrics_only_until_they_merge():
+    """One home: ``services/metrics`` (T-36's branch) owns the contact rule
+    and the unclassed labels. The digest's copies stand only while that
+    module does not exist on this tree; once it does, this goes red until
+    the digest reads it (the merge's task)."""
+    import importlib.util
+
+    restated = {"next_business_day_end", "contacted_in_time", "unclassed_labels"}
+    if importlib.util.find_spec("clientscrapper.services.metrics") is None:
+        assert restated <= set(vars(digest))
+        return
+    for name in restated:
+        found = getattr(digest, name, None)
+        home = getattr(found, "__module__", "clientscrapper.services.metrics")
+        assert home == "clientscrapper.services.metrics", f"digest.{name}: read metrics'"
+
+
 # --- once a day, to the owner only -----------------------------------------------------
 
 
@@ -662,6 +879,70 @@ async def test_the_digest_job_reaches_the_owner_and_no_one_else(session, monkeyp
     assert len(text) <= 4096
 
 
+async def test_an_undelivered_digest_is_tried_again_the_same_day(session, monkeypatch):
+    """Telegram is down at 09:00: the digest job moves itself to the next
+    backoff step (5, 15, 30 minutes, then hourly) while the digest is due,
+    and the first attempt Telegram takes sends it — once."""
+    from clientscrapper.worker import main as worker
+
+    monkeypatch.setattr(worker, "_digest_retry", worker._DigestRetry())
+    scheduler = worker.build_scheduler()
+    job = scheduler.get_job("digest")
+    down = Owner(delivered=False)
+    at = NOW
+    steps = []
+    for _ in range(5):
+        assert await worker.digest_job(scheduler, now=at, notify=down) == "undelivered"
+        at = scheduler.get_job("digest").next_run_time
+        steps.append(at.strftime("%H:%M"))
+    assert steps == ["09:05", "09:20", "09:50", "10:50", "11:50"]
+    assert await digest_rows(session) == []
+    up = Owner()
+    assert await worker.digest_job(scheduler, now=at, notify=up) == "sent"
+    assert len(up.told) == 1 and len(down.told) == 5
+    assert await digest_rows(session) == [("digest", "2026-10-29")]
+    # Sent: nothing moves the job again today; the cron's tomorrow stands.
+    assert scheduler.get_job("digest").next_run_time == at
+    assert job.id == "digest"
+
+
+async def test_a_retry_past_review_hours_waits_for_tomorrow(session, monkeypatch):
+    from clientscrapper.worker import main as worker
+
+    monkeypatch.setattr(worker, "_digest_retry", worker._DigestRetry(tries=3))
+    monkeypatch.setattr(worker._digest_retry, "day", "2026-10-29")
+    scheduler = worker.build_scheduler()
+    late = NOW.replace(hour=17, minute=30)
+    assert (
+        await worker.digest_job(scheduler, now=late, notify=Owner(delivered=False))
+        == "undelivered"
+    )
+    # Not moved: the pending job still has only its cron (no run time set).
+    assert getattr(scheduler.get_job("digest"), "next_run_time", None) is None
+    # A new day starts the backoff from its first step.
+    tomorrow = NOW + timedelta(days=1)
+    assert (
+        await worker.digest_job(scheduler, now=tomorrow, notify=Owner(delivered=False))
+        == "undelivered"
+    )
+    assert scheduler.get_job("digest").next_run_time == tomorrow + timedelta(minutes=5)
+
+
+async def test_a_digest_run_that_raises_is_tried_again(session, monkeypatch):
+    from clientscrapper.worker import main as worker
+
+    monkeypatch.setattr(worker, "_digest_retry", worker._DigestRetry())
+
+    async def broken(text: str) -> bool:
+        raise ConnectionError("telegram")
+
+    scheduler = worker.build_scheduler()
+    with pytest.raises(ConnectionError):
+        await worker.digest_job(scheduler, now=NOW, notify=broken)
+    assert scheduler.get_job("digest").next_run_time == NOW + timedelta(minutes=5)
+    assert await digest_rows(session) == []
+
+
 @pytest.mark.parametrize(
     ("clock", "due"),
     [((8, 59), False), ((9, 0), True), ((17, 59), True), ((18, 0), False)],
@@ -704,7 +985,7 @@ async def test_load_reads_a_whole_morning(session, monkeypatch):
     view = loaded.view
     assert view.day == dv.DAY
     assert view.yesterday.pushed == 1 and view.yesterday.approved == 1
-    assert view.erp.won == 1 and view.erp.contacted == 1
+    assert view.erp.won == 1 and (view.erp.in_time, view.erp.due) == (1, 1)
     assert view.deadman == digest.DeadmanLine(configured=False)
     assert view.smoke is None
     text = digest.render_digest(view)

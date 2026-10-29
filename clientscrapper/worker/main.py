@@ -372,7 +372,14 @@ def job_table() -> tuple[JobSlot, ...]:
         JobSlot("reconcile", ("every 10m",), "T-28", crm_push.reconcile_slot),
         JobSlot("source_precision", ("0 4 * * 0",), "T-36"),
         # --- 06: digest, retention --------------------------------------------------
-        JobSlot("digest", (_at(settings.digest_time_parsed),), "T-35", digest_job),
+        JobSlot(
+            "digest",
+            (_at(settings.digest_time_parsed),),
+            "T-35",
+            digest_job,
+            note="an undelivered one is tried again with a backoff while it is due",
+            pass_scheduler=True,
+        ),
         JobSlot("retention", ("15 4 * * *",), "T-31"),
     )
 
@@ -830,14 +837,61 @@ async def health_job(
 # --- the digest (06 §1.8) --------------------------------------------------------------
 
 
+# A digest Telegram did not take (or the owner seam not wired yet) is tried
+# again this long after each attempt, the last step repeating, while it is
+# still due (``digest_due``): a blip at 09:00 must not cost the day's digest.
+DIGEST_RETRY: Final = (
+    timedelta(minutes=5),
+    timedelta(minutes=15),
+    timedelta(minutes=30),
+    timedelta(hours=1),
+)
+
+
+@dataclass(slots=True)
+class _DigestRetry:
+    day: str | None = None
+    tries: int = 0
+
+
+_digest_retry = _DigestRetry()
+
+
+def _retry_digest(scheduler: AsyncIOScheduler | None, now: datetime) -> datetime | None:
+    """Move the digest job's next run to the next backoff step (the cron's
+    own job: ``max_instances=1`` holds), or None when it is due no longer
+    then or there is no scheduler to ask."""
+    day = digest.day_ref(now)
+    if _digest_retry.day != day:
+        _digest_retry.day, _digest_retry.tries = day, 0
+    wait = DIGEST_RETRY[min(_digest_retry.tries, len(DIGEST_RETRY) - 1)]
+    _digest_retry.tries += 1
+    at = now + wait
+    if not digest_due(at) or not _run_now(scheduler, "digest", at):
+        log.warning("digest not delivered; due again at the next start-up")
+        return None
+    log.warning("digest not delivered; tried again", extra={"at": at.isoformat()})
+    return at
+
+
 async def digest_job(
-    *, now: datetime | None = None, notify: health.OwnerNotify | None = None
+    scheduler: AsyncIOScheduler | None = None,
+    *,
+    now: datetime | None = None,
+    notify: health.OwnerNotify | None = None,
 ) -> digest.SendOutcome:
     """The owner's morning digest at DIGEST_TIME, once per Tashkent day
-    (``reminder_log(kind='digest')``), through the owner seam."""
-    return await digest.send(
-        notify or _seams.notify, now=now or datetime.now(settings.tz)
-    )
+    (``reminder_log(kind='digest')``), through the owner seam. One that was
+    not delivered — or whose run raised — is tried again (``DIGEST_RETRY``)
+    while it is still due."""
+    now = now or datetime.now(settings.tz)
+    outcome: digest.SendOutcome = "undelivered"
+    try:
+        outcome = await digest.send(notify or _seams.notify, now=now)
+    finally:
+        if outcome == "undelivered":
+            _retry_digest(scheduler, now)
+    return outcome
 
 
 def digest_due(now: datetime) -> bool:

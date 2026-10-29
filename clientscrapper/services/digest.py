@@ -6,7 +6,8 @@ view through the services that own each number; ``send`` claims the day's
 ``reminder_log(kind='digest', ref=<date>)`` before it tells the owner and
 takes the claim back unless the message was delivered, so a restart never
 sends a second digest and an unreachable Telegram leaves the day's digest
-due (the worker's start-up catch-up sends it). The notifier is the owner
+due (the worker tries it again with a backoff while it is due, and its
+start-up catch-up sends a missed one). The notifier is the owner
 seam (``bot/deliver.owner_notifier``): no recipient argument, the owner only
 (06 §4.3).
 
@@ -16,17 +17,25 @@ lines other sections hand the digest:
 * «Kecha» counts the Tashkent day before ``now``: companies found
   (``companies.created_at``), candidates scored, owner cards shown
   (``reviews.asked_today``'s count), approved, pushed (delivered push_log
-  ids; ``make push-test``'s synthetic companies never count, 05 §B.1) and
-  rejected; past ``REVIEW_DAILY_CAP`` the cards waiting are said (06 §1.6).
+  ids, dated as the daily cap dates them: by the live row) and rejected —
+  ``make push-test``'s synthetic company in none of them (05 §B.1); past
+  ``REVIEW_DAILY_CAP`` the cards waiting are said (06 §1.6).
 * «Navbat» is ``health.gather``'s queues and the live manager cards.
-* «ERP (30 kun)» counts the pushes first delivered in the last 30 days by
-  their outcome label (``outcomes.derive_label``'s, never re-derived):
-  contacted of created, won — shown as the first-shipment proxy and labelled
-  so (01 §7 decision 3a) — lost with «Qayta qilinmasin» and wrong numbers,
-  and the ERP's drops (05 §B.2/§B.6 «digest»). Every lost-reason label no
-  ``outcomes.LOST_REASON_PATTERNS`` class matched is listed (decision 1a): a
-  ``lost_other`` row that carries a reason is exactly such a label, since
-  the ERP sends labels only.
+* «ERP (30 kun)» counts the pushes delivered in the last 30 days — each
+  ``external_id`` once, dated by the row its outcome is about
+  (``outcomes.delivery_order``: the live one, rule 5's re-push included) —
+  by their outcome label (``outcomes.derive_label``'s, never re-derived):
+  contacted within one business day of the created leads whose day has
+  passed (07 §3.2: Mon–Sat Tashkent; what the ERP can see, 01 §7 decision
+  6a), won — shown as the first-shipment proxy and labelled so (decision
+  3a) — lost with «Qayta qilinmasin» and wrong numbers, and the ERP's drops
+  (05 §B.2/§B.6 «digest»). Under 40 % contacted in time with ≥ 20 pushes is
+  the owner's escalation «Menejer javobi» (07 §3, R9: the managers' number,
+  not the agent's). Every lost-reason label no
+  ``outcomes.LOST_REASON_PATTERNS`` class matched is listed (decision 1a),
+  all of them — the first ``UNCLASSED_SHOWN`` by name and «va yana N ta
+  sabab» for the rest: a ``lost_other`` row that carries a reason is exactly
+  such a label, since the ERP sends labels only.
 * «Manbalar» is ``owner.source_lines`` (the 30-day precision and pushes, the
   ✅/⏸/⛔ state) with the companies the source's runs found yesterday; a
   flip of ``auto_push`` since the last digest is its own line (05 §B.2), told
@@ -35,9 +44,12 @@ lines other sections hand the digest:
 * The managers' day (06 §1.7): «📞 Bogʻlandim» counted, «🙅 Yozmang dedi»
   listed by company, «Menejer javob bermadi: {n}».
 * «Tekshiruv» is the last ``make smoke`` run (``services/smoke``): a skipped
-  live test is listed as skipped, never counted green (07 §1.12).
+  live test is listed as skipped, never counted green (07 §1.12); a weekly
+  run that stopped coming (none for ``SMOKE_STALE``) is said too.
 * «Tizim» is ``health.problems``' count; the dead-man line says when the
   outside watcher is not set or did not take the last ping (06 §4.2).
+  These and «Sizni … kutmoqda» close the message and are the last to give
+  way should it ever not fit (``fit``).
 * With the feeds off and an XLSX import standing: «yoʻqotilgan lidlar
   roʻyxati yoʻq» (07 §1.5).
 """
@@ -48,7 +60,7 @@ import html
 import logging
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta, tzinfo
 from decimal import Decimal
 from typing import Any, Final, Literal
 
@@ -96,10 +108,19 @@ MESSAGE_MAX: Final = 4096
 MAX_SOURCES: Final = 10
 MAX_FLIPS: Final = 5
 MAX_NAMES: Final = 5
-MAX_LABELS: Final = 6
+# Decision 1a's labels by name (/holat names as many, cards.UNCLASSED_SHOWN
+# on T-36's branch); the rest are counted, never dropped.
+UNCLASSED_SHOWN: Final = 10
 NAME_MAX: Final = 40
-LABEL_MAX: Final = 60
+LABEL_MAX: Final = 48
 NOT_CLASSED: Final = "lost_other"
+# 07 §3.2: «Mon–Sat Tashkent calendar».
+BUSINESS_DAYS: Final = frozenset({1, 2, 3, 4, 5, 6})
+# 07 §3.2's contact target and R9's escalation (07 §3: «menejer javobi»).
+CONTACT_TARGET_PCT: Final = 40
+ESCALATION_MIN_PUSHES: Final = 20
+# A weekly smoke run that has not come for this long has stopped (06 §7.1).
+SMOKE_STALE: Final = timedelta(days=8)
 
 SourceState = Literal["on", "paused", "off"]
 STATE_ICON: Final[Mapping[SourceState, str]] = {"on": "✅", "paused": "⏸", "off": "⛔"}
@@ -140,11 +161,14 @@ class Unclassed:
 
 @dataclass(frozen=True, slots=True)
 class ErpLine:
-    """The pushes first delivered in the last 30 days, by outcome."""
+    """The pushes delivered in the last 30 days, by outcome. ``due``: the
+    created leads whose next business day has ended (or that were contacted
+    in it already); ``in_time``: those contacted by its end (07 §3.2)."""
 
     pushes: int = 0
     created: int = 0
-    contacted: int = 0
+    due: int = 0
+    in_time: int = 0
     won: int = 0
     lost: int = 0
     lost_no_contact: int = 0
@@ -155,7 +179,18 @@ class ErpLine:
 
     @property
     def contacted_pct(self) -> int | None:
-        return None if self.created == 0 else self.contacted * 100 // self.created
+        return None if self.due == 0 else self.in_time * 100 // self.due
+
+    @property
+    def escalated(self) -> bool:
+        """R9 (07 §3): the managers' contact rate under target with enough
+        pushes to judge it — the owner's to raise, not a code fix."""
+        pct = self.contacted_pct
+        return (
+            self.pushes >= ESCALATION_MIN_PUSHES
+            and pct is not None
+            and pct < CONTACT_TARGET_PCT
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -220,6 +255,8 @@ class DigestView:
     managers: ManagerLine = field(default_factory=ManagerLine)
     spend: SpendLine = field(default_factory=SpendLine)
     smoke: smoke.SmokeRun | None = None
+    # The newest smoke run ever recorded, when ``smoke`` is None.
+    smoke_last_at: datetime | None = None
     problems: int = 0
     deadman: DeadmanLine = field(default_factory=DeadmanLine)
     no_lost_list: bool = False
@@ -263,16 +300,26 @@ def _precision(value: Decimal | None) -> str:
     return "—" if value is None else f"{int(value * 100)}%"
 
 
+def _contact(erp: ErpLine) -> str:
+    pct = erp.contacted_pct
+    return "—" if pct is None else f"{pct}% ({erp.in_time}/{erp.due})"
+
+
 def _erp_lines(erp: ErpLine, unclassed: Sequence[Unclassed]) -> list[str]:
     lines: list[str] = []
     if erp.pushes:
-        pct = erp.contacted_pct
         lines.append(
-            f"ERP (30 kun): bogʻlanildi {'—' if pct is None else f'{pct}%'} · "
+            f"ERP (30 kun): 1 ish kunida bogʻlanildi {_contact(erp)} · "
             f"yutuq {erp.won} (birinchi yuk oʻrniga, taxminiy) · yoʻqotildi "
             f"{erp.lost} (shundan «Qayta qilinmasin» {erp.lost_no_contact}, "
             f"notoʻgʻri raqam {erp.lost_wrong_number})"
         )
+        if erp.escalated:
+            lines.append(
+                f"⚠️ Menejer javobi: 1 ish kunida bogʻlanildi {_contact(erp)}, "
+                f"maqsad ≥ {CONTACT_TARGET_PCT}% (faqat ERP koʻrgani) — menejerlar "
+                "bilan gaplashing; ERPda arizalar kimga tushayotganini tekshiring"
+            )
         dropped = [
             (erp.dropped_capped, "chegara"),
             (erp.dropped_suppressed, "bostirilgan"),
@@ -283,11 +330,14 @@ def _erp_lines(erp: ErpLine, unclassed: Sequence[Unclassed]) -> list[str]:
             lines.append("ERP qabul qilmadi: " + " · ".join(said))
     if unclassed:
         shown = " · ".join(
-            f"«{esc(_clip(u.label, LABEL_MAX))}» {u.n} ta" for u in unclassed
+            f"«{esc(_clip(u.label, LABEL_MAX))}» {u.n} ta"
+            for u in unclassed[:UNCLASSED_SHOWN]
         )
+        rest = len(unclassed) - UNCLASSED_SHOWN
+        more = f" · va yana {rest} ta sabab" if rest > 0 else ""
         lines.append(
-            f"⚠️ Sinflanmagan yoʻqotish sabablari: {shown} — dasturchiga ayting, "
-            "aniqlik hisobiga qoʻshilsin"
+            f"⚠️ Sinflanmagan yoʻqotish sabablari: {shown}{more} — dasturchiga "
+            "ayting, aniqlik hisobiga qoʻshilsin"
         )
     return lines
 
@@ -311,15 +361,23 @@ def _source_lines(sources: Sequence[SourceRow], flips: Sequence[Flip]) -> list[s
     return lines
 
 
-def _smoke_lines(run: smoke.SmokeRun | None) -> list[str]:
+def _smoke_lines(
+    run: smoke.SmokeRun | None, last_at: datetime | None, now: datetime | None
+) -> list[str]:
     if run is None:
-        return []
+        if last_at is None or now is None or now - last_at < SMOKE_STALE:
+            return []
+        return [
+            f"⚠️ Haftalik tekshiruv {(now - last_at).days} kundan beri boʻlmadi — "
+            "serverdagi cron (<code>make smoke-cron</code>)"
+        ]
     passed, failed, skipped = run.counts
     head = "Choraklik tekshiruv" if run.full else "Tekshiruv"
     lines = [f"{head}: ✓ {passed} / ✗ {failed} / oʻtkazildi {skipped}"]
     if run.failed:
         lines.append(
-            f"  ✗ oʻzgargan: {_names(run.failed)} — fixture yangilansin, /manbalar"
+            f"  ✗ oʻzgargan: {_names(run.failed)} — sayt tuzilishi oʻzgargan "
+            "boʻlishi mumkin, dasturchiga ayting; /manbalar"
         )
     if run.skipped:
         lines.append(f"  oʻtkazildi: {_names(run.skipped)}")
@@ -399,31 +457,47 @@ def render_digest(view: DigestView) -> str:
         f"Xarajat: kecha {_money(s.day_usd)} · oy {_money(s.month_usd)}/"
         f"{_money(s.monthly_cap)} ({_pct(s.month_usd, s.monthly_cap)}%)"
     )
-    lines += _smoke_lines(view.smoke)
-    lines.append(
+    lines += _smoke_lines(view.smoke, view.smoke_last_at, view.now)
+    tail = [
         "Tizim: hammasi joyida"
         if view.problems == 0
         else f"Tizim: {view.problems} ta muammo — /holat"
-    )
-    lines += _deadman_line(view.deadman)
+    ]
+    tail += _deadman_line(view.deadman)
     if view.waiting_cards:
-        lines.append(f"Sizni {view.waiting_cards} ta karta kutmoqda → /lidlar")
-    return fit(lines)
+        tail.append(f"Sizni {view.waiting_cards} ta karta kutmoqda → /lidlar")
+    return fit([*lines, *tail], keep_tail=len(tail))
 
 
-def fit(lines: Sequence[str], limit: int = MESSAGE_MAX) -> str:
-    """The lines joined, within ``limit``: the lists are capped so a digest
-    fits, and should one not, whole lines from the end of the middle give way
-    (each line is its own balanced HTML, so a cut never breaks a tag) — the
-    first and the last line («Sizni … kutmoqda») stay."""
+def units(text: str) -> int:
+    """A message's length the way that can only over-count Telegram's: the
+    UTF-16 code units (an emoji off the BMP is two) of the raw HTML (a tag or
+    an entity is longer than what it renders)."""
+    return len(text.encode("utf-16-le")) // 2
+
+
+def _cut(text: str, limit: int) -> str:
+    """``text`` to at most ``limit`` UTF-16 units, never half a pair."""
+    raw = text.encode("utf-16-le")[: limit * 2]
+    return raw.decode("utf-16-le", errors="ignore")
+
+
+def fit(lines: Sequence[str], limit: int = MESSAGE_MAX, *, keep_tail: int = 1) -> str:
+    """The lines joined, within ``limit`` (``units``): the lists are capped so a
+    digest fits, and should one not, whole lines from the end of the middle
+    give way (each line is its own balanced HTML, so a cut never breaks a tag)
+    — the first line and the last ``keep_tail`` («Tizim», the dead-man line,
+    «Sizni … kutmoqda») stay."""
     text = "\n".join(lines)
-    if len(text) <= limit:
+    if units(text) <= limit:
         return text
-    kept = list(lines)
+    keep = max(0, min(keep_tail, len(lines) - 1))
+    head = list(lines[: len(lines) - keep])
+    tail = list(lines[len(lines) - keep :])
     gap = "  …"
-    while len(kept) > 2 and len("\n".join([*kept[:-1], gap, kept[-1]])) > limit:
-        del kept[-2]
-    return "\n".join([*kept[:-1], gap, kept[-1]])[:limit]
+    while len(head) > 1 and units("\n".join([*head, gap, *tail])) > limit:
+        del head[-1]
+    return _cut("\n".join([*head, gap, *tail]), limit)
 
 
 # --- loading ----------------------------------------------------------------------
@@ -435,10 +509,23 @@ def yesterday_window(now: datetime) -> tuple[datetime, datetime]:
     return costs.day_start(today - timedelta(hours=12)), today
 
 
+def _test_mark() -> sa.ColumnElement[Any]:
+    """``score_breakdown.gates.test`` (crm_push.due_candidates' reading of
+    make push-test's mark, 05 §B.1), false when absent."""
+    test = LeadCandidate.score_breakdown["gates"]["test"].as_boolean()
+    return sa.func.coalesce(test, sa.false())
+
+
 def _not_synthetic() -> sa.ColumnElement[bool]:
     """Not ``make push-test``'s synthetic company (05 §B.1)."""
-    test = LeadCandidate.score_breakdown["gates"]["test"].as_boolean()
-    return sa.func.coalesce(test, sa.false()).is_(False)
+    return _test_mark().is_(False)
+
+
+def _company_not_synthetic() -> sa.ColumnElement[bool]:
+    """A company no synthetic candidate stands on (push-test mints both)."""
+    return ~sa.exists().where(
+        LeadCandidate.company_id == Company.id, _test_mark().is_(True)
+    )
 
 
 async def _count(session: AsyncSession, stmt: sa.Select[Any]) -> int:
@@ -452,15 +539,20 @@ async def _yesterday(session: AsyncSession, now: datetime) -> Yesterday:
         return sa.and_(column >= start, column < end)
 
     count = sa.select(sa.func.count())
-    first = _first_deliveries()
-    pushed = sa.select(sa.func.count()).select_from(first).where(between(first.c.sent_at))
+    dated = _deliveries()
+    pushed = sa.select(sa.func.count()).select_from(dated).where(between(dated.c.sent_at))
     return Yesterday(
         found=await _count(
-            session, count.select_from(Company).where(between(Company.created_at))
+            session,
+            count.select_from(Company).where(
+                between(Company.created_at), _company_not_synthetic()
+            ),
         ),
         scored=await _count(
             session,
-            count.select_from(LeadCandidate).where(between(LeadCandidate.last_scored_at)),
+            count.select_from(LeadCandidate).where(
+                between(LeadCandidate.last_scored_at), _not_synthetic()
+            ),
         ),
         asked=await reviews.asked_today(session, start),
         approved=await _count(
@@ -472,7 +564,9 @@ async def _yesterday(session: AsyncSession, now: datetime) -> Yesterday:
         pushed=await _count(session, pushed),
         rejected=await _count(
             session,
-            count.select_from(LeadCandidate).where(between(LeadCandidate.rejected_at)),
+            count.select_from(LeadCandidate).where(
+                between(LeadCandidate.rejected_at), _not_synthetic()
+            ),
         ),
     )
 
@@ -501,40 +595,77 @@ async def _waiting_cards(session: AsyncSession) -> int:
     )
 
 
-def _first_deliveries() -> sa.Subquery:
-    """Each pushed ``external_id`` once, dated by its first delivered row (a
-    re-push supersedes a row and writes another with the same id, 02 §2.10);
-    none of ``make push-test``'s."""
+def _deliveries() -> sa.Subquery:
+    """Each pushed ``external_id`` once, dated by the row its outcome is about
+    (``outcomes.delivery_order``: the live delivered one — rule 5 re-pushes
+    an id the ERP never recorded, so its lead was born at the re-push, 02
+    §2.10; the daily cap counts the live row too); none of ``make
+    push-test``'s."""
     return (
         sa.select(
             PushLog.external_id.label("external_id"),
-            sa.func.min(PushLog.sent_at).label("sent_at"),
+            PushLog.sent_at.label("sent_at"),
         )
         .join(LeadCandidate, LeadCandidate.id == PushLog.candidate_id)
         .where(PushLog.status.in_(e.PUSH_DELIVERED_STATUSES), _not_synthetic())
-        .group_by(PushLog.external_id)
+        .distinct(PushLog.external_id)
+        .order_by(PushLog.external_id, *outcomes.delivery_order())
         .subquery()
     )
 
 
+def next_business_day_end(at: datetime, tz: tzinfo | None = None) -> datetime:
+    """The end (the next local midnight) of the first business day after
+    ``at``'s own Tashkent day: a push on Friday has until Saturday 24:00, one
+    on Saturday or Sunday until Monday 24:00 (07 §3.2). T-36's
+    ``metrics.next_business_day_end`` on its branch; one home once merged."""
+    zone = tz or settings.tz
+    day = at.astimezone(zone).date() + timedelta(days=1)
+    while day.isoweekday() not in BUSINESS_DAYS:
+        day += timedelta(days=1)
+    return datetime.combine(day + timedelta(days=1), time.min, tzinfo=zone)
+
+
+def contacted_in_time(
+    rows: Sequence[tuple[datetime, str | None, datetime | None]], *, now: datetime
+) -> tuple[int, int]:
+    """(contacted by the end of the next business day, of the created leads
+    that had that day — or were contacted in it already): ``(sent_at,
+    landing, contacted_at)`` rows. T-36's ``metrics.contacted_in_time``."""
+    hit = due = 0
+    for sent_at, landing, contacted_at in rows:
+        if landing != "created":
+            continue
+        deadline = next_business_day_end(sent_at)
+        in_time = contacted_at is not None and contacted_at <= deadline
+        if in_time or deadline <= now:
+            due += 1
+            hit += in_time
+    return hit, due
+
+
 async def erp_line(session: AsyncSession, now: datetime) -> ErpLine:
-    """The pushes first delivered in the last 30 days, by their outcome row."""
-    first = _first_deliveries()
+    """The pushes delivered in the last 30 days, by their outcome row."""
+    dated = _deliveries()
     rows = (
         await session.execute(
-            sa.select(Outcome.landing, Outcome.label, Outcome.contacted_at)
-            .select_from(first)
-            .outerjoin(Outcome, Outcome.external_id == first.c.external_id)
-            .where(first.c.sent_at >= now - ERP_WINDOW, first.c.sent_at <= now)
+            sa.select(
+                dated.c.sent_at, Outcome.landing, Outcome.label, Outcome.contacted_at
+            )
+            .select_from(dated)
+            .outerjoin(Outcome, Outcome.external_id == dated.c.external_id)
+            .where(dated.c.sent_at >= now - ERP_WINDOW, dated.c.sent_at <= now)
         )
     ).all()
-    labels = [str(label) for _, label, _ in rows if label is not None]
+    labels = [str(label) for _, _, label, _ in rows if label is not None]
+    in_time, due = contacted_in_time(
+        [(sent, landing, at) for sent, landing, _, at in rows], now=now
+    )
     return ErpLine(
         pushes=len(rows),
-        created=sum(1 for landing, _, _ in rows if landing == "created"),
-        contacted=sum(
-            1 for landing, _, at in rows if landing == "created" and at is not None
-        ),
+        created=sum(1 for _, landing, _, _ in rows if landing == "created"),
+        due=due,
+        in_time=in_time,
         won=sum(1 for label in labels if label in outcomes.CLIENT_LABELS),
         lost=sum(1 for label in labels if label.startswith("lost_")),
         lost_no_contact=labels.count("lost_no_contact"),
@@ -545,12 +676,12 @@ async def erp_line(session: AsyncSession, now: datetime) -> ErpLine:
     )
 
 
-async def unclassed_labels(
-    session: AsyncSession, *, limit: int = MAX_LABELS
-) -> tuple[Unclassed, ...]:
+async def unclassed_labels(session: AsyncSession) -> tuple[Unclassed, ...]:
     """Decision 1a: every lost-reason label no class matched — a
     ``lost_other`` outcome with a reason — most used first, one entry per
-    normalised label (``outcomes.normalise_label``, the ERP's own)."""
+    normalised label (``outcomes.normalise_label``, the ERP's own), all of
+    them: a cut is the renderer's, and it says how many it left out. T-36's
+    ``metrics.unclassed_labels`` on its branch; one home once merged."""
     rows = await session.execute(
         sa.select(Outcome.lost_reason, Outcome.erp_at)
         .where(Outcome.label == NOT_CLASSED, Outcome.lost_reason.is_not(None))
@@ -564,7 +695,7 @@ async def unclassed_labels(
         entry = found.setdefault(key, [" ".join(str(reason).split()), 0, at])
         entry[1] += 1
     ranked = sorted(found.values(), key=lambda x: (-x[1], -x[2].timestamp(), x[0]))
-    return tuple(Unclassed(str(label), int(n)) for label, n, _ in ranked[:limit])
+    return tuple(Unclassed(str(label), int(n)) for label, n, _ in ranked)
 
 
 async def _new_by_source(session: AsyncSession, now: datetime) -> dict[str, int]:
@@ -746,6 +877,7 @@ async def load(session: AsyncSession, *, now: datetime) -> Loaded:
             spent_day.day_usd, spent_month.month_usd, settings.monthly_cost_cap_usd
         ),
         smoke=await smoke.latest(session, now=now),
+        smoke_last_at=await smoke.last_run_at(session, now=now),
         problems=len(health.problems(status)),
         deadman=_deadman(status),
         no_lost_list=await _no_lost_list(session),
@@ -827,7 +959,6 @@ async def send(notify: Notify, *, now: datetime) -> SendOutcome:
             else:
                 await own.execute(sa.delete(ReminderLog).where(ReminderLog.id == claim))
     if not delivered:
-        log.warning("digest not delivered; due again at the next start-up")
         return "undelivered"
     log.info("digest sent", extra={"chars": len(text)})
     return "sent"
@@ -850,13 +981,16 @@ __all__ = [
     "SpendLine",
     "Unclassed",
     "Yesterday",
+    "contacted_in_time",
     "day_ref",
     "erp_line",
     "fit",
     "load",
+    "next_business_day_end",
     "render_digest",
     "send",
     "sent_today",
     "unclassed_labels",
+    "units",
     "yesterday_window",
 ]
