@@ -757,7 +757,9 @@ async def _note_row(session: AsyncSession, candidate: LeadCandidate) -> LeadRevi
     """The owner review row a refusal is written on: the live card, else the
     newest answered one. An auto-approved candidate never had a card, and no
     row is made for it — a row with no tap would read as the owner's
-    decision (``/lidlar``, the reports); its refusals go to the log."""
+    decision (``/lidlar``, the reports); its refusals go to
+    ``lead_candidates.push_note`` (0004, T-21), which ``/lidlar holat``
+    lists."""
     row: LeadReview | None = await session.scalar(
         sa.select(LeadReview)
         .where(LeadReview.candidate_id == candidate.id, LeadReview.kind == "owner")
@@ -775,13 +777,17 @@ def _joined(refusals: Sequence[Refusal]) -> str:
     return "; ".join(dict.fromkeys(r.text for r in refusals))[:REVIEW_NOTE_MAX]
 
 
-async def _write_note(session: AsyncSession, candidate: LeadCandidate, note: str) -> None:
+async def _write_note(
+    session: AsyncSession, candidate: LeadCandidate, note: str, *, now: datetime
+) -> None:
     row = await _note_row(session, candidate)
     if row is None:
         log.info(
             "push refused",
             extra={"candidate_id": str(candidate.id), "refusal": note[:80]},
         )
+        candidate.push_note = note[:REVIEW_NOTE_MAX]
+        candidate.push_noted_at = now
         return
     row.note = noted(row.note, note)
 
@@ -805,7 +811,7 @@ async def record_refusals(
     note = _joined(visible)
     suppressed = next((r for r in visible if r.code == "suppressed" and r.hit), None)
     if candidate.state == "approved" and suppressed is not None and suppressed.hit:
-        await _write_note(session, candidate, note)
+        await _write_note(session, candidate, note, now=now)
         if suppressed.hit.kind in CLIENT_KINDS:
             await gates.apply_effects(
                 session,
@@ -831,7 +837,7 @@ async def record_refusals(
         live.note = note
         await session.flush()
         return
-    await _write_note(session, candidate, note)
+    await _write_note(session, candidate, note, now=now)
     await session.flush()
 
 

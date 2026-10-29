@@ -96,12 +96,15 @@ async def to_person(
     edit_message_id: int | None = None,
     document: Path | None = None,
     caption: str | None = None,
+    markup_only: bool = False,
 ) -> Message | bool | None:
     """Send ``text`` (or edit message ``edit_message_id`` to it, or send
     ``document``) to ``telegram_id`` — the owner or an allow-listed manager
-    only, else ``NotAllowed`` before anything leaves. The sent message (an
-    edit's: the message, or True when Telegram only says so), or None when
-    Telegram did not take it."""
+    only, else ``NotAllowed`` before anything leaves. ``markup_only``: the
+    message ``edit_message_id`` keeps its text and gets ``keyboard`` (None
+    removes its buttons — an expired or stale card, 06 §1.3). The sent
+    message (an edit's: the message, or True when Telegram only says so), or
+    None when Telegram did not take it."""
     owner = settings.owner_telegram_id
     managers = settings.manager_telegram_ids
     if owner is None or telegram_id <= 0:
@@ -112,6 +115,10 @@ async def to_person(
         if telegram_id != owner:
             raise NotAllowed(telegram_id)
         return await _send_document(bot, telegram_id, document, caption)
+    if markup_only:
+        if edit_message_id is None:
+            raise ValueError("a keyboard edit needs its message")
+        return await _edit_markup(bot, telegram_id, edit_message_id, keyboard)
     if text is None:
         raise ValueError("nothing to send")
     if edit_message_id is not None:
@@ -162,6 +169,23 @@ async def _edit(
             log.warning("edit failed", extra={"error": type(exc).__name__})
             return None
     return None
+
+
+async def _edit_markup(
+    bot: Bot, chat_id: int, message_id: int, keyboard: InlineKeyboardMarkup | None
+) -> Message | bool | None:
+    try:
+        return await bot.edit_message_reply_markup(
+            chat_id=chat_id, message_id=message_id, reply_markup=keyboard
+        )
+    except TelegramBadRequest as exc:
+        if NOT_MODIFIED in str(exc):
+            return True
+        log.warning("keyboard edit refused")
+        return None
+    except Exception as exc:
+        log.warning("keyboard edit failed", extra={"error": type(exc).__name__})
+        return None
 
 
 async def _send_document(
