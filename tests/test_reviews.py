@@ -969,7 +969,9 @@ async def test_a_refused_later_card_does_not_stop_the_owners(session, setup):
     """A manager's ⏭ card whose manager blocked the bot comes first in remind
     order; Telegram refuses it every run, and the owner's ⏭ card behind it
     still goes out (the loop stops for that recipient, never for all)."""
-    held = await lead(session, 61, person=True, username="namuna_tg", state="hold")
+    held = await lead(
+        session, 61, person=True, username="namuna_tg", phone_number=None, state="hold"
+    )
     blocked = await card(
         session, held, kind="manager", state="asked", by_telegram_id=OTHER_MANAGER
     )
@@ -990,7 +992,9 @@ async def test_a_refused_later_card_does_not_stop_the_owners(session, setup):
 async def test_a_later_manager_card_whose_manager_left_goes_to_another(
     session, setup, monkeypatch
 ):
-    held = await lead(session, 61, person=True, username="namuna_tg", state="hold")
+    held = await lead(
+        session, 61, person=True, username="namuna_tg", phone_number=None, state="hold"
+    )
     gone = await card(
         session, held, kind="manager", state="asked", by_telegram_id=OTHER_MANAGER
     )

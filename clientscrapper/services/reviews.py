@@ -83,6 +83,14 @@ of the run; the others still get theirs. Every card is rendered with the
 gates evaluated at that moment (``cards.review_view``, 04 §6); a card that
 cannot be shown leaves the queue (``cards.set_aside``).
 
+**The manager card's opener** (06 §1.7 «✍️ Taklif», 04 §4.1): every path
+that sends a manager card — the job's ``send_pending_managers``, the ⏭
+resend and the 👤 tap's own send — first gives its candidate an opener
+(``ensure_manager_opener`` → ``openers.ensure_opener``) in a transaction of
+its own, before the card's row is claimed: the model call holds no row lock,
+and the card then carries the opener at once rather than the playbook's
+template line until the next ``verdict_job``.
+
 The cards go out through a ``CardSender`` (``bot/cards_out.BotCards`` over
 ``bot/deliver.to_person``: the owner and the allow-listed managers only).
 Nothing here imports aiogram.
@@ -121,6 +129,7 @@ from clientscrapper.services import (
     gates,
     health,
     normalise,
+    openers,
     owner,
     push_gate,
     scoring,
@@ -1218,6 +1227,38 @@ async def _manager_for(
     return chosen
 
 
+async def ensure_manager_opener(
+    session_factory: SessionFactory, review_id: int, *, now: datetime
+) -> None:
+    """The opener of manager card ``review_id``'s candidate, made and
+    committed before the card's row is claimed (the module docstring):
+    ``openers.ensure_opener`` in a session that holds no lock, so its model
+    call — a draft for a hot candidate, else the playbook template — waits on
+    nothing and blocks nothing. Not while ``/toxtat`` holds (no card goes out
+    then, and a refused draft would be stored as a template). Never raises: a
+    card whose opener could not be made shows the template line
+    (``cards.OPENER_FALLBACK_UZ``) and ``verdict.ensure_openers`` tries
+    again."""
+    try:
+        async with session_factory() as session:
+            if await owner.paused(session):
+                return
+            candidate_id = await session.scalar(
+                sa.select(LeadReview.candidate_id).where(
+                    LeadReview.id == review_id, LeadReview.kind == "manager"
+                )
+            )
+            if candidate_id is None:
+                return
+            await openers.ensure_opener(session, candidate_id, now=now)
+            await session.commit()
+    except Exception as exc:
+        log.error(
+            "manager card opener not made",
+            extra={"review_id": review_id, "error": type(exc).__name__},
+        )
+
+
 async def send_manager_card(
     session: AsyncSession,
     review_id: int,
@@ -1369,17 +1410,19 @@ async def resend_later(
     recipient Telegram did not take is skipped for the rest of the run — the
     others still get theirs. Returns (owner, manager) cards sent."""
     async with session_factory() as session:
-        due = list(
-            await session.scalars(
-                sa.select(LeadReview.id)
+        due = (
+            await session.execute(
+                sa.select(LeadReview.id, LeadReview.kind)
                 .where(LeadReview.state == "asked", LeadReview.remind_at <= now)
                 .order_by(LeadReview.remind_at, LeadReview.id)
                 .limit(SWEEP_LIMIT)
             )
-        )
+        ).all()
     sent_owner = sent_manager = 0
     refused: set[int] = set()
-    for review_id in due:
+    for review_id, kind in due:
+        if kind == "manager":
+            await ensure_manager_opener(session_factory, review_id, now=now)
         async with session_factory() as session:
             review = await _lock_live(session, review_id, now=now, due=True)
             if review is None:
@@ -1498,6 +1541,7 @@ async def send_pending_managers(
     for review_id in waiting:
         if sent >= settings.review_burst_max:
             break
+        await ensure_manager_opener(session_factory, review_id, now=now)
         async with session_factory() as session:
             out = await send_manager_card(
                 session, review_id, sender, now=now, refused=refused
@@ -1812,6 +1856,7 @@ __all__ = [
     "close_card",
     "close_stale",
     "edit_phone",
+    "ensure_manager_opener",
     "ensure_pending",
     "expire_due",
     "expired_count",

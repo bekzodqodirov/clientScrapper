@@ -28,9 +28,11 @@ from clientscrapper.bot.texts import t
 from clientscrapper.config import settings
 from clientscrapper.db.models import LeadReview, Suppression
 from clientscrapper.db.session import session_scope
-from clientscrapper.services import candidates, cards, owner, reviews
+from clientscrapper.services import candidates, cards, crm_push, openers, owner, reviews
 from tests import gate_fixtures
 from tests.ast_tools import PACKAGE, dotted_name, imported_modules, is_under, tree_of
+from tests.fakes import message
+from tests.fixtures import uz_corpus
 from tests.gate_fixtures import NOW
 from tests.review_fixtures import (
     MANAGER,
@@ -39,6 +41,7 @@ from tests.review_fixtures import (
     STRANGER,
     FakeSender,
     card,
+    company_of,
     configure,
     contacts_of,
     fresh,
@@ -48,6 +51,8 @@ from tests.review_fixtures import (
 )
 
 USERNAME = "namuna_tg"
+# A clean Telegram-group draft (tests/test_verdict's).
+GOOD_DRAFT = uz_corpus.REDLINE_GOOD[8][0]
 NO_PHONE: dict[str, Any] = {"score_breakdown": {"gates": {"no_phone": True}}}
 
 
@@ -585,3 +590,128 @@ async def test_edit_phone_waits_five_minutes_and_no_longer(session, setup):
     [contact] = await contacts_of(session, cand)
     assert contact.phone == "+998900000061"
     assert (await fresh(session, review)).answer is None
+
+
+# --- the opener rides with the card (T-30 → T-21, wave-4 integration) ----------------
+
+
+def _taklif(text: str) -> str:
+    [line] = [x for x in text.splitlines() if x.startswith("✍️ Taklif: ")]
+    return line
+
+
+async def _stored_opener(session, cand) -> str:
+    found = await fresh(session, cand)
+    opener = openers.stored(found.score_breakdown)
+    assert opener is not None
+    assert found.score_breakdown[openers.META_KEY]["source"] in ("draft", "template")
+    return opener
+
+
+def _fallback(segment: str | None = None) -> str:
+    return "✍️ Taklif: " + cards.OPENER_FALLBACK_UZ.format(
+        segment=cards.segment_label(segment)
+    )
+
+
+async def test_the_handoff_card_carries_its_opener_at_once(session, setup):
+    """06 §1.7 «✍️ Taklif»: 👤 pressed before any verdict_job run — the card
+    the manager receives already carries the opener (openers.ensure_opener
+    before the card's row is claimed), never the playbook's template line."""
+    cand, review = await handoff_lead(session)
+    assert openers.stored((await fresh(session, cand)).score_breakdown) is None
+    w = world(session_scope)
+    await w.press(cb.review(review.id, "h"))
+    [sent] = [m for m in w.fake.named("SendMessage") if m["chat_id"] == MANAGER]
+    opener = await _stored_opener(session, cand)
+    line = _taklif(sent["text"])
+    assert line != _fallback()
+    assert line == "✍️ Taklif: " + cards.esc(crm_push.fit_opener(opener, cards.OPENER_MAX))
+
+
+async def test_the_job_s_manager_card_carries_its_opener(session, setup):
+    """The card the job hands over the next morning carries it too."""
+    cand, review = await handoff_lead(session)
+    w = world(session_scope, clock=NOW.replace(hour=19))
+    await w.press(cb.review(review.id, "h"))
+    assert openers.stored((await fresh(session, cand)).score_breakdown) is None
+    sender = FakeSender()
+    morning = NOW.replace(hour=9, minute=5) + timedelta(days=1)
+    assert (await reviews.run_cards(sender, now=morning)).managers == 1
+    [text] = sender.texts()
+    opener = await _stored_opener(session, cand)
+    assert _taklif(text) == "✍️ Taklif: " + cards.esc(
+        crm_push.fit_opener(opener, cards.OPENER_MAX)
+    )
+
+
+async def test_a_resent_manager_card_carries_its_opener(session, setup):
+    """⏭ on a manager card: the resend a day later makes the opener first."""
+    cand, manager = await held_lead(session)
+    manager.remind_at = NOW - timedelta(minutes=1)
+    await session.commit()
+    sender = FakeSender()
+    await reviews.run_cards(sender, now=NOW)
+    [(to, text, layout, rid)] = sender.sent
+    assert (to, layout, rid) == (MANAGER, "manager", manager.id)
+    opener = await _stored_opener(session, cand)
+    assert _taklif(text) == "✍️ Taklif: " + cards.esc(
+        crm_push.fit_opener(opener, cards.OPENER_MAX)
+    )
+
+
+async def test_the_opener_is_made_before_the_card_row_is_claimed(
+    session, setup, monkeypatch, model_api
+):
+    """The model call holds no row lock: while ``ensure_opener`` runs — a hot
+    candidate's paid draft here — the card's row is still ``pending`` and
+    another session can lock it at once (``FOR UPDATE NOWAIT``), and nothing
+    has been sent yet; the card then carries the draft."""
+    cand = await lead(session, person=True, username=USERNAME, state="hold")
+    assert cand.tier == "hot"
+    pending = await card(session, cand, kind="manager", by_telegram_id=MANAGER)
+    await session.commit()
+    model_api.queue(message({"lang": "uz", "text": GOOD_DRAFT, "hook": "Telegram"}))
+    sender = FakeSender()
+    real = openers.ensure_opener
+    seen: list[tuple[str, int]] = []
+
+    async def checking(session_: Any, candidate_id: Any, **kw: Any) -> Any:
+        async with session_scope() as other:
+            state = await other.scalar(
+                sa.select(LeadReview.state)
+                .where(LeadReview.id == pending.id)
+                .with_for_update(nowait=True)
+            )
+        seen.append((str(state), len(sender.tried)))
+        return await real(session_, candidate_id, **kw)
+
+    monkeypatch.setattr(openers, "ensure_opener", checking)
+    assert (await reviews.run_cards(sender, now=NOW)).managers == 1
+    assert seen == [("pending", 0)]
+    [(to, text, _, _)] = sender.sent
+    assert to == MANAGER
+    found = await fresh(session, cand)
+    assert found.score_breakdown[openers.META_KEY]["source"] == "draft"
+    assert _taklif(text) == "✍️ Taklif: " + cards.esc(
+        crm_push.fit_opener(GOOD_DRAFT, cards.OPENER_MAX)
+    )
+
+
+async def test_an_opener_that_fails_never_stops_the_card(session, setup, monkeypatch):
+    """A failure making the opener is a log line: the card still goes out,
+    with the playbook's template line (verdict.ensure_openers tries again)."""
+    cand = await lead(
+        session, person=True, username=USERNAME, phone_number=None, state="hold"
+    )
+    await card(session, cand, kind="manager", by_telegram_id=MANAGER)
+    await session.commit()
+
+    async def broken(*_: Any, **__: Any) -> Any:
+        raise RuntimeError("no opener")
+
+    monkeypatch.setattr(openers, "ensure_opener", broken)
+    sender = FakeSender()
+    assert (await reviews.run_cards(sender, now=NOW)).managers == 1
+    [text] = sender.texts()
+    assert _taklif(text) == _fallback((await company_of(session, cand)).segment)

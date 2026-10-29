@@ -123,11 +123,15 @@ async def _send_handoff(tap: Tap, manager_review_id: int) -> str | None:
     """👤: the manager card goes out at once inside the hours (06 §1.6) and
     not while ``/toxtat`` holds (``send_manager_card``), else the card job
     sends it and edits the owner's card then; the footer names the manager
-    by first name (``reviews.handoff_line``), never by id."""
+    by first name (``reviews.handoff_line``), never by id. Its opener is made
+    first (``reviews.ensure_manager_opener``), before the row is claimed."""
     now = tap.deps.clock()
     bot = tap.query.bot
     if bot is None or not reviews.sending_hours(now):
         return None
+    await reviews.ensure_manager_opener(
+        tap.deps.session_factory, manager_review_id, now=now
+    )
     async with tap.deps.session_factory() as session:
         out = await reviews.send_manager_card(
             session, manager_review_id, BotCards(bot), now=now

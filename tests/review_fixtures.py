@@ -117,6 +117,11 @@ async def lead(
     cand = await gate_fixtures.candidate(
         s, owner, state=state, lead=contact, score=72, **(fields or {})
     )
+    if number is None:
+        # 04 §5.2 / §3 S4: hot needs a usable phone — a phone-less candidate
+        # at 72 is warm (the handoff variant's own tier), and its opener is
+        # the playbook template, never a paid draft (04 §4.1).
+        cand.tier = "warm"
     await s.flush()
     return cand
 
