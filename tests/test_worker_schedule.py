@@ -882,6 +882,64 @@ async def test_catch_up_runs_a_missed_backup(monkeypatch):
     assert calls == [NOW]
 
 
+async def test_the_drill_beat_carries_its_last_proof_across_skips(session, monkeypatch):
+    """Seam review wave 4: a drill skipped for want of the key beat ok=True
+    every Sunday and health never looked past the last word — the proof's
+    moment rides on every beat now, and the no-key skip is said."""
+    from clientscrapper.services import restore_drill
+
+    results = iter(
+        [
+            restore_drill.DrillResult(ok=True, counts={"companies": 2}),
+            restore_drill.DrillResult(ok=True, skipped="no_key"),
+        ]
+    )
+
+    async def fake_run(**kw):
+        return next(results)
+
+    monkeypatch.setattr(restore_drill, "run", fake_run)
+    await worker.restore_drill_job(now=NOW)
+    week = NOW + timedelta(days=7)
+    await worker.restore_drill_job(now=week)
+    detail = (await health.beats(session))["restore_drill"].detail
+    assert (detail["skipped"], detail["proved_at"]) == ("no_key", NOW.isoformat())
+    status = await health.gather(session, now=week, disk=(10**12, 10**12))
+    [problem] = [p for p in health.problems(status) if p.key == "restore_drill_failed"]
+    assert problem.text == health.DRILL_NO_KEY_UZ
+
+
+async def test_catch_up_hands_an_overdue_drill_to_its_scheduler_job(session, monkeypatch):
+    """A restart across Sunday 05:00 is past the misfire grace: backups
+    unproved for over DRILL_STALE get the drill at the next start."""
+    monkeypatch.setattr(settings, "backup_age_recipient", "age1namuna")
+    scheduler, _ = _scheduler_with("restore_drill")
+    scheduler.start(paused=True)
+    moment = datetime.now(TZ)
+    try:
+        for proved, moved in ((timedelta(days=2), False), (timedelta(days=9), True)):
+            await health.beat(
+                session,
+                "restore_drill",
+                detail={
+                    "ok": True,
+                    "skipped": None,
+                    "proved_at": (moment - proved).isoformat(),
+                },
+                now=moment,
+            )
+            await session.commit()
+            job = scheduler.get_job("restore_drill")
+            assert job is not None
+            job.modify(next_run_time=moment + timedelta(days=3))
+            await worker.catch_up(now=moment, scheduler=scheduler)
+            job = scheduler.get_job("restore_drill")
+            assert job is not None
+            assert (job.next_run_time <= moment + timedelta(seconds=1)) is moved
+    finally:
+        scheduler.shutdown(wait=False)
+
+
 async def test_a_busy_drill_writes_no_beat(session, monkeypatch):
     from clientscrapper.services import restore_drill
 

@@ -1903,3 +1903,58 @@ def test_the_raised_key_scan_catches_each_shape():
         "noted_kaput",
     }
     assert (PACKAGE / "services" / "health.py").is_file()
+
+
+# --- the drill proves the backups (seam review wave 4) -----------------------------
+
+
+@pytest.mark.parametrize(
+    ("drill", "oldest", "said"),
+    [
+        # A drill that proved a backup two days ago: nothing.
+        (_beat("restore_drill", timedelta(days=2), ok=True), None, None),
+        # Sixty days of ok beats with no proof: the skips hid it.
+        (
+            _beat(
+                "restore_drill",
+                timedelta(days=1),
+                ok=True,
+                skipped="disk_low",
+                proved_at=(NOW - timedelta(days=60)).isoformat(),
+            ),
+            None,
+            "60 kundan beri oʻtmadi",
+        ),
+        # A pre-proved_at beat sixty days old (ok, not skipped): its own time.
+        (_beat("restore_drill", timedelta(days=60), ok=True), None, "60 kundan beri"),
+        # No key on the server: said, whatever the beat's «ok».
+        (
+            _beat("restore_drill", timedelta(hours=1), ok=True, skipped="no_key"),
+            None,
+            "serverda kalit fayli yoʻq",
+        ),
+        # Never a drill, a backup on disk for ten days: the first Sunday went by.
+        (None, NOW - timedelta(days=10), "10 kundan beri oʻtmadi"),
+        # Never a drill, the first backup three days old: the grace.
+        (None, NOW - timedelta(days=3), None),
+    ],
+)
+def test_backups_unproved_for_over_a_week_are_said(drill, oldest, said):
+    status = healthy_status()
+    status.restore_drill = drill
+    status.backup = replace(status.backup, oldest_at=oldest)
+    found = [p for p in health.problems(status) if p.key == "restore_drill_failed"]
+    if said is None:
+        assert found == []
+    else:
+        [problem] = found
+        assert said in problem.text and problem.severity == "critical"
+        assert uz_problems(problem.text, rendered=True) == set()
+
+
+def test_an_unproved_drill_is_not_said_when_the_drill_is_off(monkeypatch):
+    monkeypatch.setattr(settings, "restore_drill_enabled", False)
+    status = healthy_status()
+    status.restore_drill = None
+    status.backup = replace(status.backup, oldest_at=NOW - timedelta(days=30))
+    assert [p.key for p in health.problems(status)] == []

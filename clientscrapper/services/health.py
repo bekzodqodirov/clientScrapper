@@ -454,6 +454,9 @@ class BackupInfo:
     error: str | None = None
     # Did *this* file reach Telegram (06 §1.4 «Telegramga yetdi»).
     sent: bool = False
+    # The oldest backup still on disk: how long there has been one to prove
+    # (``drill_stale``'s grace before the first drill).
+    oldest_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -679,8 +682,10 @@ def set_suppression_probe(probe: SuppressionProbe | None) -> None:
 
 async def _backup_info(rows: Mapping[str, Heartbeat], now: datetime) -> BackupInfo:
     configured = bool(settings.backup_age_recipient)
-    path = await backup.newest_backup()
+    current = await asyncio.to_thread(backup.current_backups)
+    path = current[-1] if current else None
     created_at = backup.backup_stamp(path) if path is not None else None
+    oldest_at = backup.backup_stamp(current[0]) if current else None
     size: int | None = None
     if path is not None:
         try:
@@ -701,6 +706,7 @@ async def _backup_info(rows: Mapping[str, Heartbeat], now: datetime) -> BackupIn
         ok=ok,
         error=str(detail["error"])[:200] if ok is False and detail.get("error") else None,
         sent=about_this_file and detail.get("sent") is True,
+        oldest_at=oldest_at,
     )
 
 
@@ -1357,6 +1363,50 @@ HEALTH_JOB: Final = "health"
 STILL_RUNNING: Final = "still_running"
 
 
+# The weekly drill (06 §4.4) proves a backup restores: no proof for longer
+# than a week and a day — a drill that skipped for want of the key, one a
+# restart across its Sunday missed — means the backups go unverified while
+# /holat says nothing (seam review wave 4).
+DRILL_STALE: Final = timedelta(days=8)
+DRILL_NO_KEY_UZ: Final = (
+    "⛔ Zaxirani tiklash sinovi qilinmayapti: serverda kalit fayli yoʻq "
+    "(<code>secrets/backup-key.txt</code>) — zaxiralar tekshirilmayapti; "
+    "kalitni oʻzingizdagi nusxadan qaytaring"
+)
+
+
+def drill_proved_at(drill: Component | None) -> datetime | None:
+    """When a drill last restored a backup and matched it: ``proved_at`` in
+    its beat (carried across skips, ``worker.restore_drill_job``), or — a
+    beat from before it carried one — the beat's own time when it was a
+    proof (ok, not skipped)."""
+    if drill is None:
+        return None
+    raw = drill.detail.get("proved_at")
+    if isinstance(raw, str):
+        try:
+            return datetime.fromisoformat(raw)
+        except ValueError:
+            return None
+    proof = drill.detail.get("ok") is True and drill.detail.get("skipped") is None
+    return drill.last_seen_at if proof else None
+
+
+def drill_stale(status: Status) -> timedelta | None:
+    """How long the backups have gone unproved, once that is longer than
+    ``DRILL_STALE`` (None otherwise): since the last proof, or — never
+    proved — since the oldest backup still on disk (the grace before the
+    first Sunday). Only while the drill is on and backups are configured."""
+    info = status.backup
+    if not settings.restore_drill_enabled or not info.configured:
+        return None
+    since = drill_proved_at(status.restore_drill) or info.oldest_at
+    if since is None:
+        return None
+    age = status.now - since
+    return age if age > DRILL_STALE else None
+
+
 def job_subject(job_id: str) -> str:
     """job_failing's subject for one scheduler job (``PER_SUBJECT_KEYS``)."""
     return JOB_PREFIX + job_id
@@ -1579,6 +1629,14 @@ def problems(status: Status) -> list[Problem]:
             "restore_drill_failed",
             "⛔ Zaxirani tiklash sinovi oʻtmadi — zaxiralar ishonchsiz "
             f"(<code>{escape(error)}</code>)",
+        )
+    elif drill is not None and drill.detail.get("skipped") == "no_key":
+        add("restore_drill_failed", DRILL_NO_KEY_UZ)
+    elif (unproved := drill_stale(status)) is not None:
+        add(
+            "restore_drill_failed",
+            f"⛔ Zaxirani tiklash sinovi {unproved.days} kundan beri oʻtmadi — "
+            "zaxiralar tekshirilmayapti; <code>make worker</code> loglari",
         )
     sup = status.suppression
     if sup is not None and not sup.fresh:

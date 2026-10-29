@@ -1076,10 +1076,16 @@ async def _tell_flips(now: datetime, notify: health.OwnerNotify) -> None:
         log.error("auto_push flips not told", extra={"error": type(exc).__name__})
 
 
-async def restore_drill_job() -> restore_drill.DrillResult | None:
-    """Weekly: restore the newest backup into a scratch database (06 §4.4)."""
+async def restore_drill_job(
+    *, now: datetime | None = None
+) -> restore_drill.DrillResult | None:
+    """Weekly: restore the newest backup into a scratch database (06 §4.4).
+    Its beat carries ``proved_at`` — the last run that restored and matched
+    — across the skips, so health can say backups went unproved
+    (``health.drill_stale``) whatever the last run's word."""
     if not settings.restore_drill_enabled:
         return None
+    now = now or datetime.now(settings.tz)
     newest = await backup.newest_backup()
     expected: dict[str, int] | None = None
     async with session_scope() as session:
@@ -1089,12 +1095,22 @@ async def restore_drill_job() -> restore_drill.DrillResult | None:
         if newest is not None and detail.get("path") == str(newest):
             counts = detail.get("counts")
             expected = dict(counts) if isinstance(counts, dict) else None
+        drilled = rows.get(health.RESTORE_DRILL_COMPONENT)
+        proved = health.drill_proved_at(
+            health.component_of(health.RESTORE_DRILL_COMPONENT, drilled, now=now)
+            if drilled is not None
+            else None
+        )
     result = await restore_drill.run(expected=expected)
     if result.skipped in ("no_backup", "busy"):
         # Nothing to prove yet / another process is proving it and beats.
         return result
+    beat = result.detail()
+    if result.ok and result.skipped is None:
+        proved = now
+    beat["proved_at"] = proved.isoformat() if proved is not None else None
     async with session_scope() as session:
-        await health.beat(session, health.RESTORE_DRILL_COMPONENT, detail=result.detail())
+        await health.beat(session, health.RESTORE_DRILL_COMPONENT, detail=beat, now=now)
     log.info(
         "restore drill finished",
         extra={"ok": result.ok, "skipped": result.skipped, "seconds": result.seconds},
@@ -1151,6 +1167,7 @@ async def catch_up(
     now = now or datetime.now(settings.tz)
     await _catch_up_outcomes(now, scheduler)
     await _catch_up_digest(now, scheduler)
+    await _catch_up_drill(now, scheduler)
     if not settings.backup_age_recipient:
         return
     try:
@@ -1165,6 +1182,28 @@ async def catch_up(
                 await backup_job(now=now)
         except Exception as exc:
             log.error("catch-up backup failed", extra={"error": type(exc).__name__})
+
+
+async def _catch_up_drill(now: datetime, scheduler: AsyncIOScheduler | None) -> None:
+    """The weekly restore drill when backups have gone unproved longer than
+    ``health.DRILL_STALE`` (a restart across its Sunday 05:00 is past the
+    misfire grace): handed to the scheduler, never run here — it restores a
+    whole database."""
+    if scheduler is None or not settings.restore_drill_enabled:
+        return
+    if not settings.backup_age_recipient:
+        return
+    try:
+        async with session_scope() as session:
+            status = await health.gather(session, now=now)
+        if health.drill_stale(status) is not None and _run_now(
+            scheduler, "restore_drill", now
+        ):
+            log.info("catch-up: backups unproved for over a week; running the drill")
+    except Exception as exc:
+        log.error(
+            "catch-up of the restore drill failed", extra={"error": type(exc).__name__}
+        )
 
 
 async def _catch_up_outcomes(now: datetime, scheduler: AsyncIOScheduler | None) -> None:
