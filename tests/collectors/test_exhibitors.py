@@ -781,3 +781,79 @@ async def test_a_stored_row_resolves_to_a_company_gate_3_reads_the_country_of(
         clock.now(),
     )
     assert not result.marks["not_supplier"].startswith("fail")
+
+
+async def test_a_page_the_site_answers_304_is_read_from_the_stored_copy(
+    session, exhibitors_row, tmp_path
+):
+    """The Fetcher's conditional GET (03 §1.1): the catalogue sends
+    ``last-modified``; a week on, a 304 is the page as stored, read again and
+    counted, with nothing new written."""
+    await exhibitors_row([ENTRY["automechanika2026"]])
+    stamp = "Mon, 09 Nov 2026 04:00:00 GMT"
+
+    def conditional(body: bytes) -> Callable[[httpx.Request], httpx.Response]:
+        def answer(request: httpx.Request) -> httpx.Response:
+            if request.headers.get("if-modified-since") == stamp:
+                return httpx.Response(304, headers={"last-modified": stamp})
+            return httpx.Response(
+                200, headers={**HTML, "last-modified": stamp}, content=body
+            )
+
+        return answer
+
+    def site(clock: FakeClock) -> Site:
+        return automechanika_site(
+            clock,
+            {},
+            **{CATALOGUE: conditional(raw("automechanika_catalog_2026_p1.html"))},
+        )
+
+    clock = FakeClock(MONDAY)
+    await swept(session, "automechanika", at=MONDAY - timedelta(days=30))
+    await run(site(clock), clock, tmp_path)
+    first = await last_run(session)
+    assert first.new_observations == 4
+
+    clock = FakeClock(MONDAY + timedelta(days=7))
+    again = site(clock)
+    await run(again, clock, tmp_path)
+    second = await last_run(session)
+    conditional_asks = [
+        s
+        for s in again.seen
+        if s.url == CATALOGUE and "if-modified-since" in s.request.headers
+    ]
+    assert len(conditional_asks) == 1
+    assert second.meta["lists"][0]["rows"] == 48
+    assert (second.new_observations, second.meta["unchanged"]) == (0, 1)
+
+
+async def test_an_era_index_that_fails_its_weekly_read_is_said(
+    session, exhibitors_row, tmp_path
+):
+    """Nothing due, the sweep done: the weekly index read alone, failed —
+    the run is partial and names it."""
+    await exhibitors_row([ENTRY["uzbuild2027"]])
+    clock = FakeClock(TODAY)
+    await swept(session, "uzbuild", at=TODAY - timedelta(days=30))
+    site = Site(clock, {"https://uzbuild.uz/en/exhibitors-list": httpx.Response(404)})
+    report = await run(site, clock, tmp_path)
+    assert report.status == "partial"
+    row = await last_run(session)
+    assert row.meta["lists"] == [
+        {
+            "show": "uzbuild",
+            "year": None,
+            "edition": None,
+            "why": "index",
+            "status": "failed",
+            "rows": 0,
+            "kept": 0,
+            "foreign": 0,
+            "skipped": 0,
+            "pages": 0,
+            "error": "http_404",
+        }
+    ]
+    assert row.meta["incomplete"] == ["uzbuild:failed"]

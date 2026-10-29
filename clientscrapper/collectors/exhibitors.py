@@ -25,11 +25,10 @@ edition it lists inside its window is crawled even when the calendar does
 not name it (TextileExpo had two editions a year in 2024 and 2025 and one in
 2026 — the site, not a fixed May-and-autumn pair, says when). Expodat prints
 no dates: its index is read only for a calendar entry in its window or the
-archive sweep. **The
-archive** — every edition the index lists whose window is over — is swept
-once a year per show (``ARCHIVE_EVERY``): a run that read every archive of a
-show names it in ``meta.archived``, and the next sweep of that show waits 365
-days from that run.
+archive sweep. **The archive** — every edition the index lists whose window
+is over — is swept once a year per show (``ARCHIVE_EVERY``): a run that read
+every archive of a show names it in ``meta.archived``, and the next sweep of
+that show waits 365 days from that run.
 
 **Two platforms, one parser each** (``tests/fixtures/exhibitors/README.md``,
 «Day-1 answers»): the expodat catalogue (Automechanika, Joomla ``com_expo``,
@@ -101,7 +100,7 @@ from clientscrapper.collectors.keywords import (
 from clientscrapper.config import settings
 from clientscrapper.db.models import CollectorRun, Source
 from clientscrapper.services import health
-from clientscrapper.services.http import Fetcher, RobotsDisallowed
+from clientscrapper.services.http import Fetcher, FetchResult, RobotsDisallowed
 from clientscrapper.services.text import fold_apostrophes, normalise_for_search, to_latin
 
 if TYPE_CHECKING:
@@ -110,7 +109,9 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 Platform = Literal["era", "expodat"]
-Why = Literal["window", "archive"]
+# A list read in its window, one read by the archive sweep, or (for an index
+# that failed with nothing due) the show's weekly index alone.
+Why = Literal["window", "archive", "index"]
 ListStatus = Literal["complete", "truncated", "removed", "missing", "failed", "robots"]
 
 SOURCE: Final = "exhibitors"
@@ -1110,7 +1111,7 @@ class Exhibitors(Collector):
         except RobotsDisallowed:
             self._index_failed(visit, "robots")
             return False
-        if index.status != 200:
+        if not served(index):
             self._index_failed(visit, "failed", error=f"http_{index.status}")
             return False
         if visit.platform == "era":
@@ -1156,8 +1157,9 @@ class Exhibitors(Collector):
                 )
             )
         if not visit.due:
+            why: Why = "archive" if visit.archive else "index"
             self._record(
-                ListResult(visit.show, None, None, "archive", status, None, error=error)
+                ListResult(visit.show, None, None, why, status, None, error=error)
             )
 
     def _record(self, result: ListResult) -> None:
@@ -1225,7 +1227,7 @@ class Exhibitors(Collector):
                 budget=budget,
                 params={"draw": draw, "start": start, "length": ERA_PAGE},
             )
-            if answer.status != 200:
+            if not served(answer):
                 result.status, result.error = "failed", f"http_{answer.status}"
                 return
             page = self.parse_era_rows(
@@ -1267,7 +1269,7 @@ class Exhibitors(Collector):
             answer = await self.fetcher.get(
                 url, source=self.key, budget=budget, params=params
             )
-            if answer.status != 200:
+            if not served(answer):
                 result.status, result.error = "failed", f"http_{answer.status}"
                 return
             page = self.parse_expodat_page(
@@ -1308,6 +1310,12 @@ class Exhibitors(Collector):
         earlier runs (in the run's transaction)."""
         now = self.started_at or datetime.now(settings.tz)
         await note_short_lists(session, self.lists, now=now)
+
+
+def served(result: FetchResult) -> bool:
+    """A page to read: a 200, or a 304 whose body is the stored copy (the
+    Fetcher's conditional GET, 03 §1.1)."""
+    return result.status == 200 or result.not_modified
 
 
 def _exclude_of(visit: Visit) -> tuple[str, ...]:
