@@ -25,9 +25,15 @@ from clientscrapper.bot.handlers.common import (
 from clientscrapper.bot.texts import t
 from clientscrapper.services import chats, keys
 from clientscrapper.services.owner import owner_ref
+from clientscrapper.services.text import fold_apostrophes
 
-# «qoʻsh» as a phone keyboard types it (any apostrophe, or none), and «add».
-ADD_WORDS: Final = frozenset({"qoʻsh", "qo'sh", "qo‘sh", "qo’sh", "qosh", "add"})
+# «/chats qoʻsh» as a phone keyboard types it — any apostrophe or none, read
+# with the apostrophes folded and dropped — and «add».
+ADD_WORDS: Final = frozenset({"qosh", "add"})
+
+
+def is_add(word: str) -> bool:
+    return fold_apostrophes(word).replace("'", "").lower() in ADD_WORDS
 
 
 async def _page(deps: Deps, page: int) -> tuple[str, InlineKeyboardMarkup]:
@@ -70,7 +76,7 @@ async def _page(deps: Deps, page: int) -> tuple[str, InlineKeyboardMarkup]:
 
 async def chats_command(message: Message, deps: Deps) -> None:
     args = args_of(message).split()
-    if args and args[0].lower() in ADD_WORDS:
+    if args and is_add(args[0]):
         await _add(message, deps, args[1] if len(args) > 1 else "", deps.clock())
         return
     text, keyboard = await _page(deps, 0)
@@ -129,4 +135,4 @@ async def on_toggle(tap: Tap) -> None:
     await toast(tap.query, t("chats.on" if enabled else "chats.off", title=title))
 
 
-__all__ = ["ADD_WORDS", "chats_command", "on_noop", "on_page", "on_toggle"]
+__all__ = ["ADD_WORDS", "chats_command", "is_add", "on_noop", "on_page", "on_toggle"]

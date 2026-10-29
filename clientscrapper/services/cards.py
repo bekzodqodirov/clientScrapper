@@ -75,14 +75,15 @@ CARD_MAX: Final = 3500
 QUOTE_MAX: Final = crm_push.QUOTE_MAX
 CardLayout = Literal["review", "handoff", "manager"]
 
-# The card's first line must fit a 360 px phone (07 §3.1): short segment
-# words (01 §2's segments A–E; X competitor/supplier, Z unclear — 04 §4.4).
+# The card's first line must fit a 360 px phone on one line (07 §3.1;
+# tests/test_cards.py measures it at 100/100): short segment words (01 §2's
+# segments A–E; X competitor/supplier, Z unclear — 04 §4.4).
 SEGMENT_UZ: Final[Mapping[str, str]] = {
-    "A": "Bozor optomchisi",
+    "A": "Bozor optom",
     "B": "Marketpleys",
     "C": "Fabrika",
     "D": "Qurilish/mebel",
-    "E": "Elektronika/avto",
+    "E": "Elektronika",
     "X": "Raqobatchi",
     "Z": "Aniqlanmagan",
 }
@@ -359,7 +360,9 @@ def render_manager(mv: ManagerView) -> Card:
     else:
         offer = esc(OPENER_FALLBACK_UZ.format(segment=segment_label(mv.segment)))
     lines = [
-        f"📨 Telegram nomzod · {c.score}/100 · {esc(segment_label(mv.segment))}",
+        # 06 §1.7's «Telegram orqali» left line 1 for the 360 px phone: the
+        # 📨 and the «Yozish: t.me/…» line say it.
+        f"📨 Nomzod · {c.score}/100 · {esc(segment_label(mv.segment))}",
         _company_line(c, details=False),
         f"📦 {_goods(c)}" + (f" · 📐 {esc(volume)}" if volume else ""),
         _quote_line(quote, title, cited),
