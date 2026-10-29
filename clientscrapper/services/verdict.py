@@ -75,7 +75,7 @@ from __future__ import annotations
 import logging
 import uuid
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, time, timedelta
 from typing import Any, Final
 from urllib.parse import urlsplit
@@ -89,6 +89,7 @@ from clientscrapper.db.models import (
     Company,
     Contact,
     Evidence,
+    Interaction,
     LeadCandidate,
     LeadReview,
     ModelJob,
@@ -109,7 +110,7 @@ from clientscrapper.services import (
     signals,
     validators,
 )
-from clientscrapper.services.classify import clip_masked
+from clientscrapper.services.classify import clip_masked, name_words
 from clientscrapper.services.evidence import EXCERPT_MAX
 from clientscrapper.services.prompts import VERDICT_PROMPT_VERSION, VERDICT_SYSTEM
 from clientscrapper.services.pseudonyms import TOKEN_RE, Pseudonymised, pseudonymise
@@ -180,6 +181,8 @@ class Bundle:
     user: Pseudonymised
     blocks: tuple[Block, ...]
     dropped: int = 0
+    # The names it was masked with (``people_of``): the checker's too.
+    names: tuple[str, ...] = ()
 
     @property
     def evidence_ids(self) -> list[int]:
@@ -329,23 +332,73 @@ class People:
     handles: tuple[str, ...] = ()
 
 
-async def people_of(session: AsyncSession, lineage: Iterable[uuid.UUID]) -> People:
+async def people_of(
+    session: AsyncSession,
+    lineage: Iterable[uuid.UUID],
+    *,
+    evidence_ids: Iterable[int] = (),
+    excerpts: Iterable[str] = (),
+) -> People:
+    """Every name and handle the agent has held for the lineage's people —
+    not only its live decision maker (seam review wave 4: a poster the
+    resolver dropped, a person R4/R5 or a newcomer anonymised, and the
+    sender of the cited message all went to the model raw, while classify
+    masks the same message). The live person-tier contacts; the lineage's
+    observations (``parsed.person.name``, and an intent post's
+    ``handles.telegram`` / ``handles.tg_user_id`` until R3 strips them); the
+    evidence's own messages (``interactions``: the sender's name words,
+    username, Telegram id and the names its bio states — classify's set);
+    and the person names the excerpts themselves state
+    (``normalise.person_names``: an anonymised person's name stays in an
+    excerpt, the contact that held it is gone). The checker refuses a
+    reason naming any of them (``relevance_verdict``'s ``names``)."""
+    ids = list(lineage)
+    names: list[str] = []
+    handles: list[object] = []
     rows = (
         await session.scalars(
             sa.select(Contact).where(
-                Contact.company_id.in_(list(lineage)), Contact.anonymised_at.is_(None)
+                Contact.company_id.in_(ids), Contact.anonymised_at.is_(None)
             )
         )
     ).all()
-    persons = [c for c in rows if c.tier == "person"]
-    names = tuple(c.full_name for c in persons if c.full_name)
-    handles = tuple(
-        h
-        for c in persons
-        for h in (c.telegram_username, str(c.telegram_id) if c.telegram_id else None)
-        if h
+    for c in rows:
+        if c.tier != "person":
+            continue
+        if c.full_name:
+            names.append(c.full_name)
+        handles += [h for h in (c.telegram_username, c.telegram_id) if h]
+    parsed_rows = await session.scalars(
+        sa.select(ObservationRow.parsed).where(ObservationRow.company_id.in_(ids))
     )
-    return People(names, handles)
+    for parsed in parsed_rows:
+        if not isinstance(parsed, Mapping):
+            continue
+        person = parsed.get("person")
+        if isinstance(person, Mapping) and isinstance(person.get("name"), str):
+            names += name_words(person["name"])
+        held = parsed.get("handles")
+        if parsed.get("kind") == "intent_post" and isinstance(held, Mapping):
+            handles += [held.get("telegram"), held.get("tg_user_id")]
+    evidence = sorted({int(e) for e in evidence_ids})
+    if evidence:
+        senders = await session.execute(
+            sa.select(
+                Interaction.sender_name,
+                Interaction.sender_username,
+                Interaction.sender_id,
+                Interaction.sender_bio,
+            ).where(Interaction.evidence_id.in_(evidence))
+        )
+        for name, username, sender_id, bio in senders.all():
+            names += [*name_words(name), *normalise.person_names(bio)]
+            handles += [username, sender_id]
+    for text in excerpts:
+        names += normalise.person_names(text)
+    return People(
+        tuple(dict.fromkeys(n for n in names if n)),
+        tuple(dict.fromkeys(str(h).lstrip("@") for h in handles if h)),
+    )
 
 
 async def bundle_for(session: AsyncSession, company: Company) -> Bundle | None:
@@ -355,8 +408,13 @@ async def bundle_for(session: AsyncSession, company: Company) -> Bundle | None:
     found = await evidence_of(session, lineage)
     if not found:
         return None
-    people = await people_of(session, lineage)
-    return build_bundle(
+    people = await people_of(
+        session,
+        lineage,
+        evidence_ids=[f.evidence_id for f in found],
+        excerpts=[f.excerpt for f in found],
+    )
+    bundle = build_bundle(
         display_name=company.display_name,
         legal_form=company.legal_form,
         city=company.city,
@@ -365,6 +423,7 @@ async def bundle_for(session: AsyncSession, company: Company) -> Bundle | None:
         names=people.names,
         handles=people.handles,
     )
+    return replace(bundle, names=people.names)
 
 
 # --- the checker ----------------------------------------------------------------------
@@ -411,7 +470,14 @@ async def batch_checker(
     names: tuple[str, ...] = ()
     if job.company_id is not None:
         lineage = (await companies.lineages(session, [job.company_id]))[job.company_id]
-        names = (await people_of(session, lineage)).names
+        names = (
+            await people_of(
+                session,
+                lineage,
+                evidence_ids=job.evidence_ids or (),
+                excerpts=excerpts.values(),
+            )
+        ).names
     return checker_for(excerpts, dict(job.pseudonyms or {}), names, dealers)
 
 
@@ -822,8 +888,6 @@ async def ask_instant(
     if bundle is None:
         report.skipped += 1
         return "waits"
-    lineage = (await companies.lineages(session, [company.id]))[company.id]
-    people = await people_of(session, lineage)
     result = await extraction.call(
         session,
         op=OP,
@@ -835,7 +899,7 @@ async def ask_instant(
         evidence_ids=bundle.evidence_ids,
         prompt_version=VERDICT_PROMPT_VERSION,
         validate=checker_for(
-            bundle.excerpts, bundle.user.reverse, people.names, bundle.dealer_refs
+            bundle.excerpts, bundle.user.reverse, bundle.names, bundle.dealer_refs
         ),
     )
     if result.refused:

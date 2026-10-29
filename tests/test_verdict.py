@@ -39,6 +39,7 @@ from clientscrapper.db import models as m
 from clientscrapper.services import (
     candidates,
     cards,
+    contacts,
     costs,
     crm_push,
     gates,
@@ -1361,3 +1362,174 @@ async def test_the_night_takes_no_more_than_the_room_left(session, monkeypatch):
     assert await verdict.select_company_verdicts(now=TUESDAY_NIGHT) == 2
     monkeypatch.setattr(model_jobs, "BATCH_MAX", 1)
     assert await verdict.select_company_verdicts(now=TUESDAY_NIGHT) == 0
+
+
+# --- every name the agent has held is masked (seam review wave 4) ----------------
+
+E_DM = "Direktor Rustam Namunov: Guangzhoudan 2 ta konteyner mato olib kelamiz, optom."
+
+
+async def _asked(session, model_api, *, reasons=None) -> str:
+    model_api.queue(message(answer(**({"reasons": reasons} if reasons else {}))))
+    await verdict.verdict_batch(now=NOW)
+    [req] = model_api.requests
+    return str(req["messages"][0]["content"])
+
+
+async def test_an_anonymised_persons_name_in_an_excerpt_is_masked(session, model_api):
+    """R4/R5 or a higher-ranked newcomer anonymised the person: the contact
+    that held the name is gone, the excerpt still states it."""
+    owner = await firm(session, goods=["mato"])
+    await evidence(session, owner, E_DM, days=1, quote="2 ta konteyner mato")
+    await candidate(session, owner)
+    p = await person(session, owner, full_name="Rustam Namunov")
+    contacts.anonymise(p, now=NOW)
+    await session.commit()
+    content = await _asked(session, model_api)
+    assert "Rustam" not in content and "Namunov" not in content
+
+
+async def test_a_second_person_the_resolver_dropped_is_masked(session, model_api):
+    owner = await firm(session, goods=["mato"])
+    second = "Murojaat: menejer Dilnoza Karimova. Guangzhoudan 2 ta konteyner mato."
+    await evidence(session, owner, E_DM, days=2, quote="2 ta konteyner mato")
+    await evidence(session, owner, second, days=1, quote="2 ta konteyner mato")
+    await candidate(session, owner)
+    await person(session, owner, full_name="Rustam Namunov", role="direktor")
+    await session.commit()
+    content = await _asked(session, model_api)
+    assert "Rustam" not in content and "Dilnoza" not in content
+    assert "Karimova" not in content
+
+
+async def _posted_by(session, owner, ev, *, sender_id: int, username: str) -> None:
+    obs = m.Observation(
+        evidence_id=ev.id,
+        ordinal=0,
+        source_key="telegram_monitor",
+        status="resolved",
+        parsed={
+            "kind": "intent_post",
+            "person": {"name": "Dilnoza Karimova", "role": None},
+            "handles": {"telegram": username, "tg_user_id": sender_id},
+        },
+        company_id=owner.id,
+        resolved_at=NOW,
+    )
+    session.add(obs)
+    await session.flush()
+    session.add(
+        m.Interaction(
+            tg_chat_id=-1007,
+            tg_message_id=sender_id % 1000,
+            sender_id=sender_id,
+            sender_username=username,
+            sender_name="Dilnoza Karimova",
+            text=ev.excerpt,
+            occurred_at=NOW - timedelta(days=1),
+            prefilter_hit=["volume_kub"],
+            evidence_id=ev.id,
+            observation_id=obs.id,
+        )
+    )
+    await session.commit()
+
+
+async def test_the_posters_name_and_bare_handle_are_masked_as_classify_does(
+    session, model_api
+):
+    owner = await firm(session, goods=["mato"])
+    text = "Dilnoza Karimova: 2 ta konteyner mato kerak, yozing dilnoza_mebel"
+    ev = await evidence(session, owner, text, days=1, quote="2 ta konteyner mato")
+    await candidate(session, owner)
+    await person(session, owner, full_name="Rustam Namunov", role="direktor")
+    await _posted_by(session, owner, ev, sender_id=5100000088, username="dilnoza_mebel")
+    content = await _asked(session, model_api)
+    assert "Dilnoza" not in content and "dilnoza_mebel" not in content
+    assert "Karimova" not in content
+
+
+async def test_a_reason_naming_the_poster_is_not_stored(session, model_api):
+    owner = await firm(session, goods=["mato"])
+    text = "Dilnoza Karimova: 2 ta konteyner mato kerak"
+    ev = await evidence(session, owner, text, days=1, quote="2 ta konteyner mato")
+    await candidate(session, owner)
+    await person(session, owner, full_name="Rustam Namunov", role="direktor")
+    await _posted_by(session, owner, ev, sender_id=5100000089, username="dilnoza_mebel2")
+    await _asked(session, model_api, reasons=["Dilnoza Karimova mato olib keladi"])
+    await session.refresh(owner)
+    assert owner.verdict is not None
+    assert not any("Dilnoza" in r for r in owner.verdict["reasons"])
+
+
+async def _held(session, owner, ev, *, parsed=None, sender=None) -> None:
+    """One source at a time: an observation's parsed payload, or the cited
+    message's sender (``interactions``), never both."""
+    obs_id = None
+    if parsed is not None:
+        obs = m.Observation(
+            evidence_id=ev.id,
+            ordinal=0,
+            source_key="telegram_monitor",
+            status="resolved",
+            parsed=parsed,
+            company_id=owner.id,
+            resolved_at=NOW,
+        )
+        session.add(obs)
+        await session.flush()
+        obs_id = obs.id
+    if sender is not None:
+        session.add(
+            m.Interaction(
+                tg_chat_id=-1008,
+                tg_message_id=ev.id,
+                text=ev.excerpt,
+                occurred_at=NOW - timedelta(days=1),
+                prefilter_hit=["volume_kub"],
+                evidence_id=ev.id,
+                observation_id=obs_id,
+                **sender,
+            )
+        )
+    await session.commit()
+
+
+@pytest.mark.parametrize(
+    ("parsed", "sender"),
+    [
+        ({"kind": "intent_post", "person": {"name": "Xolbeka", "role": None}}, None),
+        (None, {"sender_id": 5100000090, "sender_name": "Xolbeka"}),
+    ],
+    ids=["observation", "interaction"],
+)
+async def test_a_name_only_one_source_holds_is_masked(session, model_api, parsed, sender):
+    """«Xolbeka» is no given name and no surname, so the excerpt alone names
+    nobody: only the observation, or only the sender row, knows it is one."""
+    owner = await firm(session, goods=["mato"])
+    text = "Xolbeka: 2 ta konteyner mato kerak, optom"
+    ev = await evidence(session, owner, text, days=1, quote="2 ta konteyner mato")
+    await candidate(session, owner)
+    await person(session, owner, full_name="Rustam Namunov", role="direktor")
+    await _held(session, owner, ev, parsed=parsed, sender=sender)
+    assert "Xolbeka" not in await _asked(session, model_api)
+
+
+@pytest.mark.parametrize(
+    ("parsed", "sender"),
+    [
+        ({"kind": "intent_post", "handles": {"telegram": "xolbeka_mato"}}, None),
+        (None, {"sender_id": 5100000091, "sender_username": "xolbeka_mato"}),
+    ],
+    ids=["observation", "interaction"],
+)
+async def test_a_bare_handle_only_one_source_holds_is_masked(
+    session, model_api, parsed, sender
+):
+    owner = await firm(session, goods=["mato"])
+    text = "2 ta konteyner mato kerak, yozing xolbeka_mato"
+    ev = await evidence(session, owner, text, days=1, quote="2 ta konteyner mato")
+    await candidate(session, owner)
+    await person(session, owner, full_name="Rustam Namunov", role="direktor")
+    await _held(session, owner, ev, parsed=parsed, sender=sender)
+    assert "xolbeka_mato" not in await _asked(session, model_api)
