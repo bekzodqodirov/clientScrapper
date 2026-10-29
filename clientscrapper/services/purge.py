@@ -1085,6 +1085,10 @@ async def _stop(
         # SQL NULL, not JSON 'null' (a JSONB column takes None as the latter).
         "verdict": sa.null(),
         "verdict_at": None,
+        # A sole trader's (YaTT) address may be a home (06 §5.1 Forbidden
+        # tier, seam review wave 4); nothing reads a purged firm's address,
+        # and the STIR, domain and suppression keys still answer «purged».
+        "address": None,
     }
     roots = list(scope.roots)
     sources = [m for m in members if m not in set(roots)]

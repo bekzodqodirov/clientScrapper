@@ -779,7 +779,7 @@ Deleted: `contacts`, `observations`, `interactions` of the subject's `tg_user_id
 ledger keeps its candidate, 02 §2.10): such a candidate moves to a terminal state instead —
 `suppressed`, pointing at the `legal`/`dnc` row the purge writes (`suppressed_by`, 02 §2.9), or
 `excluded` with `exclude_reason='owner'` for any other purge reason — `sheet_rows`
-(tombstoned). Anonymised: `push_log.payload := NULL`, `companies.display_name := '[oʻchirilgan]'`
+(tombstoned). Anonymised: `push_log.payload := NULL`, `companies.display_name := '[oʻchirilgan]'`, `companies.address := NULL` (as built, seam review wave 4: a sole trader's address may be a home, §5.1)
 and `state='purged'` when the whole company goes (a company row is never deleted; a merged source's
 `merged_into` is cleared in the same UPDATE, 02 §2.4). Kept: `outcomes`, `purge_log` (hash only),
 `usage_log`, and hashed `suppression` rows; with `reason='legal_request'` or `'dnc'` a

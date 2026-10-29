@@ -493,6 +493,10 @@ async def test_the_companies_are_tombstoned_and_a_merged_source_keeps_its_own_ke
     session, root
 ):
     w = await subject(session, root)
+    for company in (w.root, w.source, w.control):
+        company.address = "Toshkent, Namuna koʻchasi 1-uy"
+        company.city = "Toshkent"
+    await session.commit()
     plan = await purge.plan_company(session, w.root.id)
     await purge.execute(session, plan, requested_by="owner:1001", now=now(), root=root)
     firm = await fresh(session, m.Company, w.root.id)
@@ -504,6 +508,8 @@ async def test_the_companies_are_tombstoned_and_a_merged_source_keeps_its_own_ke
             purge.PURGED_NAME_KEY,
         )
         assert company.merged_into is None and company.verdict is None
+        # A sole trader's address may be a home: it goes; the city stays.
+        assert (company.address, company.city) == (None, "Toshkent")
     # The root keeps what the resolver answers «purged» by; so does the source,
     # for a STIR and a domain nobody else holds.
     assert (firm.stir, firm.website_domain, firm.telegram_channel, firm.instagram) == (
@@ -517,6 +523,7 @@ async def test_the_companies_are_tombstoned_and_a_merged_source_keeps_its_own_ke
     assert (twin.dup_of, twin.dup_score) == (None, None)
     control = await fresh(session, m.Company, w.control.id)
     assert (control.state, control.stir) == ("active", "300000049")
+    assert control.address == "Toshkent, Namuna koʻchasi 1-uy"
 
 
 async def test_a_candidate_with_push_history_is_ended_never_deleted(session, root):
