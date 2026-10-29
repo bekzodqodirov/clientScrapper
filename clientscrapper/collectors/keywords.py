@@ -26,6 +26,10 @@ forced a change — each is named in a comment beside it:
 * PINFL_RE (a 14-digit run) is new: the normaliser, the pseudonymiser and
   the output hygiene ask the one pattern;
 * LEGAL_FORM_RE gained МЧЖ, ХЧК and СП, the Cyrillic forms of MChJ, XChK, SP;
+* INDIVIDUAL_FORM_RE (an individual entrepreneur's form, the directories'
+  «ИндП» included, never «ИП ООО») and WHOLESALE_RUBRIC_RE (a directory's
+  wholesale rubric, «Оптовая торговля» / ``stroymaterialy-optom``) are new:
+  the directory parsers' two shapes (03 §2.6, T-22);
 * QUESTION_RE is new, and so are ``buyer_question`` and ``cargo_offer``: the
   tout filter's text rule (03 §2.3) reads a message for the cargo core only
   when it is not a buyer's ask — «kim kargo qiladi?» is a buyer (04 §6);

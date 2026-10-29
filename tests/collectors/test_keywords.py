@@ -1149,6 +1149,66 @@ CASES: dict[str, tuple[re.Pattern[str], Extract, Cases]] = {
             ),
         },
     ),
+    "INDIVIDUAL_FORM_RE": (
+        kw.INDIVIDUAL_FORM_RE,
+        _whole,
+        {
+            "uz-Latn": (
+                [
+                    ("YaTT Karimov", "YaTT"),
+                    ("Karimov YaTT", "YaTT"),
+                    ("Namuna Savdo IP", "IP"),
+                ],
+                ["Namuna MChJ", "IP OOO Namuna", "Ip man", "Ripley"],
+            ),
+            "uz-Cyrl": (
+                [
+                    ("ЯТТ Каримов", "ЯТТ"),
+                    ("Каримов ЯТТ", "ЯТТ"),
+                    ("Намуна ИП", "ИП"),
+                ],
+                ["Намуна МЧЖ", "ИП МЧЖ «Намуна»", "Ипак йўли"],
+            ),
+            "ru": (
+                [
+                    ("Seller 04 ИндП", "ИндП"),
+                    ("ИП Каримов", "ИП"),
+                    ("Каримов ИнП", "ИнП"),
+                ],
+                ['"XITOY UPAKOVSHIK" ИП ООО', "ИПОТЕКА", "ООО «Намуна»"],
+            ),
+        },
+    ),
+    "WHOLESALE_RUBRIC_RE": (
+        kw.WHOLESALE_RUBRIC_RE,
+        _whole,
+        {
+            "uz-Latn": (
+                [
+                    ("Ulgurji savdo", "Ulgurji"),
+                    ("Qurilish mollari optom", "optom"),
+                    ("stroymaterialy-optom", "optom"),
+                ],
+                ["Chakana savdo", "Optika salon", "Optimal narx"],
+            ),
+            "uz-Cyrl": (
+                [
+                    ("Улгуржи савдо", "Улгуржи"),
+                    ("Мебель оптом", "оптом"),
+                    ("Улгуржи нархларда", "Улгуржи"),
+                ],
+                ["Чакана савдо", "Оптика дўкони", "Ўйинчоқлар дўкони"],
+            ),
+            "ru": (
+                [
+                    ("Оптовая торговля", "Оптовая"),
+                    ("Оптово-розничная торговля", "Оптово"),
+                    ("мелкий опт", "опт"),
+                ],
+                ["Оптика", "Розничная торговля", "оптический прицел"],
+            ),
+        },
+    ),
     "STATE_BODY_RE": (
         kw.STATE_BODY_RE,
         _whole,
