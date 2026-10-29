@@ -1,7 +1,9 @@
 # Fixtures: directories
 
-Recorded with `python -m clientscrapper.tools.record_fixture` (07 §1.1), driven over a URL
-list by one `Fetcher` per batch (`record()` called per URL, `scrub="on"`). Every request
+Recorded through `clientscrapper.tools.record_fixture.record()` — the function the CLI
+`python -m clientscrapper.tools.record_fixture` (07 §1.1) calls — by a driver script that is not
+in the repo (build session scratchpad), over a URL list, one `Fetcher` per batch, `record()`
+called per URL with `scrub="on"`. The CLI itself was not run. Every request
 went through `services/http.Fetcher`: User-Agent `clientScrapperBot/0.1.0 python-httpx/0.28.1`
 (no `+mailto` part: `HH_USER_AGENT` is blank in the sandbox), robots.txt read once per
 authority with the project's RFC 9309 parser, per-host pace 0.3 req/s (`COLLECTOR_RPS_DEFAULT`),
@@ -16,7 +18,8 @@ no cookies, no reveal/XHR call was made anywhere.
   person data the scrubber cannot see (section «Scrubbing»). Firm names, legal entities'
   STIRs, addresses and rubrics are kept (company tier). Full phones in the files are
   synthetic `+998 90 000 00 NN` shapes (written the way each site writes them), e-mails
-  `namuna_NN@example.uz`, handles `namuna_NN`, the person names found `Seller NN`, the one
+  `namuna_NN@example.uz`, handles `namuna_NN` (the directories' own Telegram bots stay
+  verbatim, «Scrubbing» item 3), the person names found `Seller NN`, the one
   individual entrepreneur's STIR `400000001`. Masked phones: goldenpages' `+998 (NN) NNN-XX-XX`
   rewritten to `+998 (90) 000-XX-XX`; yellowpages' `+998NN ...` / `NN Позвонить` keep the
   2-digit area/operator code as served (not a number; it does not match the synthetic
@@ -42,7 +45,7 @@ no cookies, no reveal/XHR call was made anywhere.
 | `topuz_stroymaterialy_optom_p99_negative.html` | https://top.uz/section/stroymaterialy-optom?PAGEN_1=99 | 200 | allowed | negative / paginator stop: `current_page` 99, `data` = [] (no redirect, no repeat) |
 | `topuz_optovaya_torgovlya_p1.html` | https://top.uz/section/optovaya-torgovlya | 200 | allowed | payload `meta.total` = 815 (= organiser's figure), `last_page` 41 |
 | `topuz_company_uzbek_chinese_trading_house.html` | https://top.uz/company/international-business-and-travel-sp-ooo-uzbeksko-kitayskiy-torgovyy-dom-predstavitelstvo | 200 | allowed | company card: visible «+998...Позвонить», the full number in `a[href^="tel:"]` and in the payload; description names Chinese manufacturers |
-| `glotr_oborudovanie_p1.html` | https://glotr.uz/ru/oborudovanie/ (redirected to https://glotr.uz/oborudovanie/) | 200 | allowed, `Crawl-delay: 10` | category page 1: «Найдено 39 162 предложений», 56 product cards each with its seller link `/showcase/<slug>[-<id>]/?s=1`; brand filters `/oborudovanie/<brand>/`; pagination links `?page=N` |
+| `glotr_oborudovanie_p1.html` | https://glotr.uz/ru/oborudovanie/ (redirected to https://glotr.uz/oborudovanie/) | 200 | allowed, `Crawl-delay: 10` | category page 1: «Найдено 39 162 предложений», 56 product cards each with its seller link `/showcase/<slug>[-<id>]/` (50 of them end in `?s=1`, 6 carry no query); brand filters `/oborudovanie/<brand>/`; pagination links `?page=N` |
 | `glotr_showcase_jack.html` | https://glotr.uz/showcase/jack/ | 200 | allowed | seller showcase: JSON-LD LocalBusiness with telephone, e-mail, address, geo, `sameAs` (Instagram/Facebook/Telegram); «Проверено … Soliq.uz» text; 27 product cards; official distributor of a Chinese brand in the description |
 | `glotr_showcase_missing_negative.html` | https://glotr.uz/showcase/namuna-net-takogo-prodavca-0/ (redirected to https://glotr.uz/showcases/) | 200 | allowed | negative: an unknown showcase is a soft 404 — a redirect to the partners index («Наши партнеры»), status 200 |
 
@@ -51,14 +54,22 @@ block page, and the eight other yellowpages `/teg/` pages (status only, below).
 Kept beside them: the five robots.txt files the verdicts were read from (`robots/`, section
 «robots.txt»).
 
+**Sidecars.** Every `.html` above has a `<name>.headers.json` written by the recorder (18 in
+all): `url` (as requested), `final_url` (after redirects), `status`, `fetched_at` and the
+response headers (no `set-cookie`). Three VERIFIED answers below rest on a sidecar, not on
+the body: the goldenpages paginator stop (`goldenpages_rubric_1424_p99_negative.headers.json`),
+glotr's `/ru/` → `/` redirect (`glotr_oborudovanie_p1.headers.json`) and glotr's soft 404
+(`glotr_showcase_missing_negative.headers.json`). `fetched_at` also dates each recording (see
+«Scrubbing» item 5 for the re-recorded batch).
+
 ### Requests made (HTTP requests sent, robots.txt and redirect hops included)
 
 | Host | Requests | Note |
 |---|---|---|
 | www.goldenpages.uz | 13 | robots 1; 10 recorder calls (5 pages recorded twice — the first copies lost their CRs to my own second-pass script, see «Scrubbing»); 2 redirect hops (Page=99 → page 1) |
 | www.yellowpages.uz | 14 | robots 1; rubrika p1 + `?page=2` probe + card + negative; the 9 `/teg/` seeds the task asked to check |
-| top.uz | 11 | robots 1; 5 pages, recorded twice (same reason as goldenpages) |
-| glotr.uz | 7 | robots 1; category p1 (+1 redirect hop /ru/ → /), showcase (twice), negative (+1 redirect hop); page 2 refused locally, nothing sent |
+| top.uz | 11 | robots 1; 5 pages, recorded twice (in the same 20:01 re-record batch; the stored top.uz pages have no CRs to lose — see «Scrubbing» item 5) |
+| glotr.uz | 7 | robots 1; category p1 (+1 redirect hop /ru/ → /), showcase (twice — re-recorded in the 20:01 batch with the goldenpages/top.uz pages, see «Scrubbing» item 5), negative (+1 redirect hop); page 2 refused locally, nothing sent |
 | prom.uz | 2 | robots.txt 403, then `/tags/optom/` 403 — stopped after the second (see below) |
 
 No 429, no captcha, no 403 except prom.uz. The breaker never opened.
@@ -89,8 +100,11 @@ for the run like a page refusal does.
 | `/teg/optovaya-prodazha` | 200 | 8 |
 | `/teg/optovaya-torgovlya-v-uzbekistane` | 200 | 1 |
 
-All nine seeds return 200, but together they hold 60 organisations (with overlaps); tags are
-self-applied labels and sparse, as `manbalar.json` [v 23] predicted. Rubrika pages are the
+Only the first row is backed by a file in this folder. The other eight rows are what the
+recorder's status checks returned on 2026-10-29; their bodies stayed in the build session's
+scratch directory and are not in the repo, so those eight statuses and totals (and the sum
+of 60 organisations, with overlaps) cannot be re-checked from here. As observed, tags are
+self-applied labels and sparse, as `manbalar.json` [v 23] predicted: rubrika pages are the
 primary seed, tags a supplement only.
 
 ## Day-1 answers (03 §2.6)
@@ -104,7 +118,9 @@ primary seed, tags a supplement only.
   20 cards per page. robots.txt does not disallow `Page`; it disallows `*&s=*`, `*&tab=*`,
   `*&region=*`, `*/?sort=*`, `*/search/*`, `*/person/*`, `*/maps/*` among others.
 - **Paginator stop — VERIFIED.** `&Page=99` redirects to `/rubrics/?Id=1424` and serves page 1
-  again (`goldenpages_rubric_1424_p99_negative.html`, final URL without `Page`). Stop when the
+  again (`goldenpages_rubric_1424_p99_negative.html`; the final URL without `Page` is in
+  `goldenpages_rubric_1424_p99_negative.headers.json`: `url` `…&Page=99`, `final_url`
+  `https://www.goldenpages.uz/rubrics/?Id=1424`). Stop when the
   final URL has no `Page` or the first card id repeats (the spec's rule works).
 - **Phones server-rendered? — VERIFIED: not in the visible markup, yes in JSON-LD on the card.**
   List and card show the number masked as `+998 (NN) NNN-XX-XX` (in the stored files every
@@ -149,8 +165,11 @@ primary seed, tags a supplement only.
   files.
 - **Organiser figures.** Rubric 1424 now holds 74 organisations (`manbalar.json` said 71).
   Rubric 106080 «Оборудование из Китая» holds 8, all on one page.
-- **The page's own help-desk numbers** appear in the header and footer (`tel:` links in
-  `<header>`/`<footer>`); a parser must read phones only from the company block / JSON-LD.
+- **The page's own help-desk numbers** are four `tel:` links on every goldenpages file: one in
+  `<header id="js-header">`, two in the `<footer>`, and one in the mobile menu
+  (`div.menu > div.menu__inner#menu-nav`, beside `t.me/gpuzbot`), which is inside neither. A
+  filter that drops only header/footer `tel:` links still picks the menu one up; a parser must
+  read phones only from the company block / JSON-LD.
 - **STILL UNVERIFIED:** whether the card JSON-LD phone list is complete for cards with many
   numbers (one card seen, 2 numbers); `/street/?Id=41003` and rubrics 1277, 1558, 1029, 1686,
   1800 not fetched.
@@ -205,9 +224,12 @@ primary seed, tags a supplement only.
   its host unknown. Day-1 on the VPS: open a 2-page rubric in a browser, read the address bar
   after «next», record page 2 with the recorder. Until then only page 1 (15 rows) per
   rubric/city is reachable; `pagesize=` is disallowed by robots.txt.
-- **`/teg/` seeds — VERIFIED:** all nine return 200 (table above); 60 organisations in total.
-  `tovary-iz-kitaya` lists a single firm, a logistics/cargo company — `china_origin` from this
-  tag must pass the competitor filter first (`yellowpages_teg_tovary_iz_kitaya.html`).
+- **`/teg/` seeds — VERIFIED for `tovary-iz-kitaya` only** (`yellowpages_teg_tovary_iz_kitaya.html`:
+  200, `meta.total` 1): it lists a single firm, a logistics/cargo company — `china_origin` from
+  this tag must pass the competitor filter first. The other eight seeds — STILL UNVERIFIED from
+  the repo: they answered 200 with the totals in the table above when checked through the
+  recorder, but those bodies were not kept, so no file shows it (re-record them on the VPS if a
+  test or a seed list is to rest on them).
 - **Negative — VERIFIED:** an unknown `/kompaniya/` slug is a real 404 (`yellowpages_kompaniya_missing_negative.html`).
 - **STILL UNVERIFIED:** city sub-paths other than `/tashkent`, the `/en/rubric/` mirror, the
   rubric index used to pick slugs.
@@ -259,9 +281,15 @@ primary seed, tags a supplement only.
   products grouped by seller» crawl must be rebuilt on those entry points.
 - **Category page — VERIFIED.** «Найдено 39 162 предложений» (manbalar: ~38k); 56
   `div.product-card__parent` per page; product link `a.product-card__swiper[href$="-p-<id>/"]`;
-  seller `div.product_company a.product_company_link[href^="/showcase/"]` (with `?s=1`) and an
-  `i.fa-badge-check` icon on 55 of 56 sellers (what that icon certifies is STILL UNVERIFIED);
-  `/ru/` URLs redirect to the unprefixed path.
+  seller `div.product_company a.product_company_link[href^="/showcase/"]` (56 links; 50 end in
+  `/?s=1`, 6 have no query string — `/showcase/ooo-mezon-plast-11871/`,
+  `/showcase/ooo-imagine-7309/`, `/showcase/kans-profil-36855/`,
+  `/showcase/ooo-kans-art-sales-8109/`, `/showcase/joymax-35067/`,
+  `/showcase/texnosaruz-28535/`, the last one also present once with `?s=1`: do not require
+  `?s=1`, key a seller on the path with the query dropped) and an `i.fa-badge-check` icon on
+  55 of 56 sellers (what that icon certifies is STILL UNVERIFIED); `/ru/` URLs redirect to the
+  unprefixed path (`glotr_oborudovanie_p1.headers.json`: `url` `/ru/oborudovanie/`,
+  `final_url` `/oborudovanie/`).
 - **Showcase — VERIFIED.** `script[type="application/ld+json"]` LocalBusiness: `name`,
   `description`, `telephone`, `email`, `address{streetAddress, addressRegion, addressLocality}`,
   `geo`, `openingHoursSpecification`, `aggregateRating`, `sameAs` [Instagram, Facebook, t.me];
@@ -271,7 +299,9 @@ primary seed, tags a supplement only.
   showcase (no page-2 links); «≥ 20 SKUs» holds for this seller on page 1 alone; a total SKU count
   is not printed (STILL UNVERIFIED for sellers with more products).
 - **Negative — VERIFIED:** an unknown showcase is a soft 404 — 200 at `/showcases/`
-  («Наши партнеры», 48 showcase links) (`glotr_showcase_missing_negative.html`). The parser must
+  («Наши партнеры», 48 showcase links) (`glotr_showcase_missing_negative.html`; the redirect and
+  the 200 are in `glotr_showcase_missing_negative.headers.json`: `final_url`
+  `https://glotr.uz/showcases/`, `status` 200). The parser must
   check the final URL / `h1`, not the status.
 - **STILL UNVERIFIED:** the spec's named showcases (China Motors, Uzbek-Chinese Trading House,
   XITOY UPAKOVSHIK, TAO.UZ) — their URLs were not linked from the recorded page and were not
@@ -322,8 +352,11 @@ primary seed, tags a supplement only.
      (`files.glotr.uz/user/<user id>/photo/…`) → `/static/img/user-avatar.png`, the generic
      avatar the other five reviewers already carry.
    Afterwards, by script over the whole folder (`robots/` included): no phone outside the
-   synthetic range, no e-mail outside `example.uz`, no t.me/Instagram handle other than
-   `namuna_NN`, no `files.glotr.uz/user/` link, no masked prefix with real digits, no
+   synthetic range, no e-mail outside `example.uz`, no Instagram handle other than `namuna_NN`,
+   no t.me handle other than `namuna_NN` and the directories' **own** Telegram bots, which stay
+   verbatim as company-tier (`t.me/gpuzbot` in the 5 goldenpages files, `t.me/topuz2_bot` in
+   the 5 top.uz files, `t.me/yellowpages_support_bot` in the 2 rubrika files — a parser must not
+   take them as a listed firm's handle), no `files.glotr.uz/user/` link, no masked prefix with real digits, no
    patronymic, no name beside a review date other than `Seller NN`, none of the names found
    in any pass remains (see «Final check»).
 4. **Scrubber gaps found (for a code fix, then re-scrub; nothing in code was changed here):**
@@ -344,9 +377,16 @@ primary seed, tags a supplement only.
    - Masked phones are left as served: goldenpages' 5-digit masks were fixed by hand (above);
      yellowpages' `+99871 ...` (2-digit code only) and top.uz's `+998...` stay.
 5. My own mistake, recorded: the first version of the second-pass script read and wrote text
-   with universal newlines and dropped the CRs of the goldenpages pages (96 on p1); the five
-   goldenpages and five top.uz files were therefore re-recorded (same URLs) and the fixed script
-   re-applied. The ledger's sha256/bytes describe the files as stored now.
+   with universal newlines and dropped the CRs of the goldenpages pages (96 on p1). Eleven
+   files were therefore re-recorded in one batch (same URLs, `fetched_at`
+   2026-10-29T20:01:12–20:01:31 in their sidecars): the five goldenpages files, the five top.uz
+   files and `glotr_showcase_jack.html`; the fixed script was re-applied to them. The other
+   seven files keep their first recording (19:45–19:53). Only the goldenpages pages contain CRs
+   (46–96 per stored file); the stored top.uz and glotr pages contain none, so the CR loss
+   explains the goldenpages re-records only. Why the top.uz files and the glotr showcase went
+   into the same batch is not recorded in the recorder's notes and is not claimed here (the
+   yellowpages pages the second pass also changed were not re-recorded). The ledger's
+   sha256/bytes describe the files as stored now.
 
 ## Refused / not recorded
 
@@ -365,6 +405,11 @@ primary seed, tags a supplement only.
   recorded (budget of ~12 requests per host; not needed to answer the Day-1 lines above).
 - The goldenpages phone XHR (`loadDataByOrg`), the yellowpages/top.uz `api/v1/organizations`
   APIs and glotr's «показать номер» — never called.
+- **Left open after review, because closing them needs a new recording (none was made in the
+  close-out):** the eight yellowpages `/teg/` bodies other than `tovary-iz-kitaya` (status
+  checks only, not kept — their statuses and totals rest on no committed file); a yellowpages
+  row with only a fax or an e-mail (no recorded row has one, so that parser branch has no
+  fixture); the robots.txt-403 stop for prom.uz is a Fetcher code change, not a fixture.
 
 ## robots.txt (`robots/`)
 
@@ -389,7 +434,9 @@ disallowed (`/*?page=`). A fresh fetch is still the rule on the VPS (24 h cache)
 A script over every file in this folder and `robots/` (raw text and HTML-unescaped), with the
 repo's own patterns (`scripts/secret_scan.py` `PHONE`/`EMAIL`/`synthetic()`,
 `collectors/keywords.PHONE_RE`) plus: t.me / instagram.com / `@handle` other than
-`namuna_NN`; `files.glotr.uz/user/`; goldenpages masks with digits other than `(90) 000`;
+`namuna_NN` (as worded this rule matches the three directory bots named in «Scrubbing» item 3,
+14 occurrences, so the «hits: 0» below holds only with them excluded as company-tier);
+`files.glotr.uz/user/`; goldenpages masks with digits other than `(90) 000`;
 patronymic endings (`-овна/-евна/-ович/-евич/qizi/o‘g‘li/…`); any text beside a review
 timestamp that is not `Seller NN`; the review authors' names and the individual's STIR
 removed in pass 3; `is_person_shaped` over every devalue payload string that is not a
@@ -397,6 +444,21 @@ lowercase slug. Not counted as phones: digit runs inside a hex hash, UUID or fil
 goldenpages input-mask template `+998(99) 999-99-99`, and the kept legal-entity STIR `313…`.
 Result: `files checked: 42; hits: 0`. `python scripts/secret_scan.py` over the folder and
 `robots/`: `secret_scan: clean`.
+
+**Close-out re-check (2026-10-29, after the review findings were closed; no file body changed
+in that step, only this README).** A wider grep over this folder (and `exhibitors`,
+`registries`, `tenders`, `maps`), raw, HTML-unescaped and `\uXXXX`-unescaped: `+998` numbers in
+every separator form, `(+998NN) NNNNNNN`, URL-encoded `%2B998…`, foreign `+7/+86/+90/…`
+shapes, the digits of every `tel:` and `wa.me` link, operator-coded bare 9-digit runs near a
+phone word, e-mails (also `[at]`/`&#64;`), t.me and instagram.com handles, `@handles`,
+patronymic and `o‘g‘li`/`qizi` shapes, initials-name shapes, avatar / profile-photo URL shapes,
+4xx–6xx nine-digit runs near a STIR word, PINFL and passport shapes, and `is_person_shaped`
+over every text node and JSON string. Every hit was read: none is person data. What is left is
+district and place names (`Зафар`, `Гульбахор`, `Ахунбабаев` …), firm names that contain a
+person's name (`AKMAL KONSULT ООО`, `INAGOMOV MILLIY TAOMLARI ООО` — a firm's name stays,
+company tier), a street (`ul. SHERKULOVA`), CSS class names (`reviews-rating__avatar`,
+`user-avatar`), the generic `/static/img/user-avatar.png`, glotr's own Twitter meta already
+pseudonymised to `@namuna_01.uz`, and this README's own prose.
 
 ## Recorder ledger
 

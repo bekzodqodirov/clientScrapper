@@ -187,6 +187,10 @@ entries — every ratio is above the 50 % alert line, MebelExpo the lowest.
 - No POST was sent to any `companies_list.php`; the claim that the endpoint answers a GET the
   same way as the site's POST is untested.
 - Only English pages were recorded (`/en/`); the RU/UZ variants of the lists were not.
+- UzBuild 2022–2023: the `docs/manbalar.json` archive URL
+  (`/en/exhibition/spisok-uchastnikov.php?ELEMENT_ID=57355`) and ERA ids below 401 were not
+  requested, so «2022–2023 are gone» is inferred from the edition select only; settling it
+  needs a new recording (from the VPS).
 - Not fetched at all: CCPIT / China–Central Asia Trade Expo, the Chinese brands fair,
   TransLogistica.
 - Scrubber artefacts (not hand-edited, 07 §1.1): EXZAP → `namuna_02` in
@@ -206,8 +210,13 @@ One line per file: file · date · url · sha256 · status · bytes · scrubbed 
 (written by the recorder; `power_2027_companies_foreign_only.json` was renamed from
 `power_2027_companies_empty.json` after its body showed one foreign row;
 `uzbuild_custom_js.html` was moved here from the recorder's scratch aux directory).
+Three notes were written before the body was read and say what the URL was expected to be,
+not what came back; each carries a bracketed `[README correction: …]` after it, and the Files
+tables above describe the bodies. The file name `automechanika_2026_list_en.html` is kept (it
+is the page at the spec's 2026 list URL, `/exhibitorslisteng`) although that page holds no
+2026 rows.
 
-- automechanika_2026_list_en.html · 2026-10-29 · https://automechanika.uz/exhibitorslisteng · 6cae0334b6d15d08134bc9bb0898a96277b79e8f8c5a64131426d08858c466c4 · 200 · 131202 · scrubbed: yes · Automechanika Tashkent 2026 exhibitor list (Tilda page)
+- automechanika_2026_list_en.html · 2026-10-29 · https://automechanika.uz/exhibitorslisteng · 6cae0334b6d15d08134bc9bb0898a96277b79e8f8c5a64131426d08858c466c4 · 200 · 131202 · scrubbed: yes · Automechanika Tashkent 2026 exhibitor list (Tilda page) [README correction: not a 2026 list — `<title>` «Automechanika Uzbekistan | Exhibitors list», no rows, buttons only to 2024 (`/exhibitors-eng2024`) and 2025 (catalogue 6400); the 2026 rows are in `automechanika_catalog_2026_*`]
 - automechanika_participants_en.html · 2026-10-29 · https://automechanika.uz/eng/participants · 4096bb12ee58e4ddf0f93e85a8dd7ecee8791e56a796aa67dee1b341cabde886 · 200 · 138071 · scrubbed: yes · Automechanika 'Participants' landing (EN menu target of 'Exhibitors List')
 - automechanika_catalog_2026_p1.html · 2026-10-29 · https://catalog.automechanika.uz/en/expositions/exposition/7012 · b369c2be9ed3af9816b542e7e8baf3beb28f915f2ecfa4a656452e975b9caee6 · 200 · 160577 · scrubbed: yes · Automechanika Tashkent 2026 exhibitors catalogue, page 1
 - automechanika_catalog_2026_p2.html · 2026-10-29 · https://catalog.automechanika.uz/en/expositions/exposition/7012-automechanika-tashkent-comtrux-tashkent-bautrux-tashkent-2026.html?start=48 · 5579b1bf3bf16b2eda73e49664dcc76d98f99a5038ddd39b01481c5299ebb3de · 200 · 157963 · scrubbed: yes · Automechanika 2026 catalogue, page 2 (start=48)
@@ -215,11 +224,11 @@ One line per file: file · date · url · sha256 · status · bytes · scrubbed 
 - automechanika_catalog_2026_last.html · 2026-10-29 · https://catalog.automechanika.uz/en/expositions/exposition/7012-automechanika-tashkent-comtrux-tashkent-bautrux-tashkent-2026.html?start=456 · 351d38dcceccb2e03f235cf781b4089553022a34d4b98863defe4bb22eb27b69 · 200 · 52484 · scrubbed: yes · Automechanika 2026 catalogue, last page (start=456, the pager's End link) - gives the row total
 - automechanika_catalog_2026_past_end.html · 2026-10-29 · https://catalog.automechanika.uz/en/expositions/exposition/7012-automechanika-tashkent-comtrux-tashkent-bautrux-tashkent-2026.html?start=504 · 66d6d1fc28f79a85eb9d3942180e3a192cc45f3ea499389fe7b0bef318ebb200 · 200 · 37112 · scrubbed: yes · NEGATIVE: start=504 is past the 462-row end - the paginator-stop case
 - automechanika_catalog_company_uz.html · 2026-10-29 · https://catalog.automechanika.uz/en/companies/company/150345-exzap.html · cdc05a382796aa1bb3ed7019b563d8e437d31733a387b8cb24998f39be58dac4 · 200 · 25298 · scrubbed: yes · Automechanika 2026 catalogue: one Uzbek exhibitor's card (EXZAP)
-- automechanika_catalog_2025_p1.html · 2026-10-29 · https://catalog.automechanika.uz/en/expositions/exposition/6400 · e8a55faef32d7dcc912399588f292bedeeeeeac5668ac7dfda16cdf0de1720c1 · 200 · 31831 · scrubbed: yes · Automechanika Tashkent 2025 exhibitors catalogue (archive edition), page 1
+- automechanika_catalog_2025_p1.html · 2026-10-29 · https://catalog.automechanika.uz/en/expositions/exposition/6400 · e8a55faef32d7dcc912399588f292bedeeeeeac5668ac7dfda16cdf0de1720c1 · 200 · 31831 · scrubbed: yes · Automechanika Tashkent 2025 exhibitors catalogue (archive edition), page 1 [README correction: not a catalogue page — `final_url` `…/automechanika-main.html` (`.headers.json`), «The event was not found» on the «Авторизация» login page, no `#scroll_list`, 0 rows: the removed-list negative]
 - automechanika_2024_list_en.html · 2026-10-29 · https://automechanika.uz/exhibitors-eng2024 · 7d470e507fab16b1f177792605043dd10583f232f618a2f726d1c84f770b3871 · 200 · 141616 · scrubbed: yes · Automechanika Tashkent 2024 exhibitor list (Tilda page, the 'Exhibitors List 2024' button)
 - uzbuild_list_en.html · 2026-10-29 · https://uzbuild.uz/en/exhibitors-list · faf98e2a6dd440b7f424d8f50917b791f4862672caf1317812b0c129e12356b7 · 200 · 93002 · scrubbed: yes · UzBuild current exhibitor list (EN)
 - uzbuild_custom_js.html · 2026-10-29 · https://uzbuild.uz/era_cms/plugins/custom.js?v=50.3.1 · 76934389645990da226de4a1c30edcbf5ae272c20e6c236af80cb31cc57de825 · 200 · 11398 · scrubbed: no (scrub_fixture afterwards: nothing) · the site's DataTables init script (lengthMenu, serverSide, POST)
-- uzbuild_archive_p1.html · 2026-10-29 · https://uzbuild.uz/en/exhibition/spisok-uchastnikov.php?PAGEN_2=1 · 193e0f159c1890eee2fd5554be95beeb3fdc91161fac48741ee90e56f131c501 · 404 · 115773 · scrubbed: yes · UzBuild archive exhibitor list (Bitrix), PAGEN_2=1
+- uzbuild_archive_p1.html · 2026-10-29 · https://uzbuild.uz/en/exhibition/spisok-uchastnikov.php?PAGEN_2=1 · 193e0f159c1890eee2fd5554be95beeb3fdc91161fac48741ee90e56f131c501 · 404 · 115773 · scrubbed: yes · UzBuild archive exhibitor list (Bitrix), PAGEN_2=1 [README correction: not a list — HTTP 404 with the site's home page as the body, 0 rows: the archive-gone negative]
 - uzbuild_2026_companies_all.json · 2026-10-29 · https://uzbuild.uz/ERAForms/companies_list.php?l=en&exhibition=461&draw=1&start=0&length=500 · d56fdc87282b9f632b745e6b69f1a83174aa67347f9f5dc82afff0bac257dca4 · 200 · 119712 · scrubbed: yes · UzBuild 2026 (exhibition=461) DataTables XHR as GET, start=0 length=500 = every row
 - uzbuild_2026_companies_p2.json · 2026-10-29 · https://uzbuild.uz/ERAForms/companies_list.php?l=en&exhibition=461&draw=2&start=100&length=100 · b5860b250e0e513996718918155020e01c5ea8cd651e9d96d26d1069ad03f2bb · 200 · 35105 · scrubbed: yes · UzBuild 2026 XHR page 2 (start=100 length=100) - proves start/length pagination
 - uzbuild_2026_company_uz.html · 2026-10-29 · https://uzbuild.uz/en/exhibitor-info-461-1155 · efb002428cc43b466491f39849bbcd41bae2f912cdc4fbdee21b3361c23b0ab0 · 200 · 82595 · scrubbed: yes · UzBuild 2026: one Uzbek exhibitor's card (row link /en/exhibitor-info-<exhibition>-<company id>)
