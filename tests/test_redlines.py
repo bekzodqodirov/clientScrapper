@@ -15,6 +15,8 @@ Synthetic data only (07 §1.0).
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from clientscrapper.services import cards, playbook, prompts, redlines, validators
@@ -40,7 +42,7 @@ def check(text: str, lang: str) -> redlines.GuardResult:
     )
 
 
-# --- the corpus ---------------------------------------------------------------------
+# --- the corpus -----------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -52,7 +54,9 @@ def test_a_bad_draft_raises_exactly_its_flags(text, lang, flags):
     assert set(found.flags) == flags
 
 
-@pytest.mark.parametrize(("text", "lang"), uz_corpus.REDLINE_GOOD, ids=lambda x: str(x)[:40])
+@pytest.mark.parametrize(
+    ("text", "lang"), uz_corpus.REDLINE_GOOD, ids=lambda x: str(x)[:40]
+)
 def test_a_good_draft_passes(text, lang):
     assert check(text, lang) == redlines.GuardResult(ok=True, flags=())
 
@@ -154,7 +158,7 @@ def test_trips_is_the_gate_on_one_value():
     assert not redlines.trips("oʻyinchoq")
 
 
-# --- the templates ---------------------------------------------------------------------
+# --- the templates --------------------------------------------------------------------
 
 
 def test_the_runtime_templates_are_the_reference_copy():
@@ -165,6 +169,23 @@ def test_the_runtime_templates_are_the_reference_copy():
         uz_corpus.PLAYBOOK_TEMPLATES_RU
     )
     assert set(uz_corpus.PLAYBOOK_TEMPLATES) == set(playbook.SEGMENTS) == set("ABCDE")
+
+
+PLAYBOOK_DOC = Path(__file__).resolve().parents[1] / "docs" / "sotuv-playbook.md"
+
+
+def test_the_sales_playbook_prints_the_code_templates_and_opt_out_lines():
+    """docs/sotuv-playbook.md §3.0 and §2.6 show managers what the card
+    suggests: the code's own text, so a change to one is a change to both."""
+    doc = PLAYBOOK_DOC.read_text(encoding="utf-8")
+    blocks = doc.split("```")[1::2]
+    for (segment, lang), template in playbook.TEMPLATES.items():
+        assert f"\n{template}\n" in blocks, (segment, lang)
+    opt_out = doc.split("### 2.6 ", 1)[1].split("\n### ", 1)[0]
+    assert f"- UZ Latin: `{redlines.OPTOUT_UZ}`" in opt_out
+    assert f"- UZ Cyrillic: `{redlines.OPTOUT_UZ_CYRL}`" in opt_out
+    assert f"- RU: `{redlines.OPTOUT_RU}`" in opt_out
+    assert "**No price before density.**" in doc
 
 
 @pytest.mark.parametrize("segment", [*playbook.SEGMENTS, "X", "Z", None])
@@ -238,7 +259,7 @@ def test_the_template_opener_is_the_fill():
     assert "Увидел в Telegram-группе ваше предприятие: «mato»." in made.text
 
 
-# --- the draft validator -----------------------------------------------------------------
+# --- the draft validator --------------------------------------------------------------
 
 
 def draft(text: str, *, lang: str = "uz", hook: str = "OLX, mato") -> DraftOpener:
@@ -257,7 +278,12 @@ def validate(answer: DraftOpener, lang: str = "uz") -> validators.Validated:
 def test_a_clean_draft_stands_with_no_flags():
     text = uz_corpus.REDLINE_GOOD[0][0]
     checked = validate(draft(text))
-    assert checked.result == {"lang": "uz", "text": text, "hook": "OLX, mato", "flags": []}
+    assert checked.result == {
+        "lang": "uz",
+        "text": text,
+        "hook": "OLX, mato",
+        "flags": [],
+    }
     assert checked.leaks == ()
 
 

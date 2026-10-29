@@ -136,9 +136,7 @@ SHARED_PHONE_UZ: Final = "⚠️ Raqam 3+ firmada uchraydi"
 MANAGER_HOURS_UZ: Final = "oʻz akkauntingizdan, 10:00–17:00 (Du–Sha)"
 # The last sentence is the opt-out line of the playbook (§2.6) the redline
 # gate holds every opener to (services/redlines.OPTOUT_UZ — one home).
-NO_PRICE_UZ: Final = (
-    f"⚠️ Birinchi xabarda narx yoʻq. Oxirgi jumla: «{redlines.OPTOUT_UZ}»"
-)
+NO_PRICE_UZ: Final = f"⚠️ Birinchi xabarda narx yoʻq. Oxirgi jumla: «{redlines.OPTOUT_UZ}»"
 ERP_FIRST_UZ: Final = "🔍 Yozishdan oldin ERPda nomi boʻyicha qidiring"
 OPENER_MAX: Final = crm_push.OPENER_MAX
 # Without 04's draft: the playbook's segment script (docs/sotuv-playbook.md

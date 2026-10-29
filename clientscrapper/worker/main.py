@@ -34,8 +34,9 @@ outcomes/quarter/year walks), each ``run_collector(ErpSync, variant=…)``;
 00:30–08:00 — the ``company_verdict`` kind they carry, and the night's
 selection the submit runs first, are T-30's ``services/verdict``, which also
 fills ``verdict`` (every 10 minutes: the instant verdicts, then the openers;
-never the batch lane's fallbacks, which only the 23:30 run takes); ``score`` (T-18, ``services/candidates.score_job``, every 15
-minutes and at once on ``cs_interaction``); ``crm_push`` (T-28,
+never the batch lane's fallbacks, which only the 23:30 run takes);
+``score`` (T-18, ``services/candidates.score_job``, every 15 minutes and at
+once on ``cs_interaction``); ``crm_push`` (T-28,
 ``services/crm_push.crm_push_job``, every minute, sending only inside the
 push window) and ``reconcile`` (T-28, ``crm_push.reconcile_job``, every 10
 minutes: a crashed claim, the ``unknown`` outcomes walk, rule 5's re-push).

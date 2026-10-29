@@ -5,8 +5,10 @@ their answers are comparable (04 §4.4): the header ``COMPANY: <name> |
 <legal form> | <city> | STIR: <9 digits or ->``, then at most
 ``BLOCKS_MAX`` blocks of the company's evidence (its lineage's: the
 observations resolved to it and the evidence its signals stand on), newest
-first, each ``[E<n>] <source family> <date> <url host>`` and the
-pseudonymised excerpt (≤ 600 characters). The bundle is held to
+first, each ``[E<n>] <source family> | <date> | <url host>`` and the
+pseudonymised excerpt (≤ 600 characters) — the bars because «telegram
+2026-10-26» is a messenger id to ``pseudonyms.unmasked`` (a label and a
+word with digits), which ``extraction`` refuses to send. The bundle is held to
 ``BUNDLE_TOKENS_MAX`` tokens (two bytes a token, under what Latin or
 Cyrillic text averages; ``extraction`` claims the money by its own
 byte-per-token bound): older blocks are dropped and the header says how
@@ -224,7 +226,7 @@ def build_bundle(
         masked = pseudonymise(item.excerpt, names=names, handles=handles, prior=prior)
         when = item.observed_at.astimezone(settings.tz).date().isoformat()
         text = (
-            f"[{ref}] {item.family} {when} {_host(item.url)}\n"
+            f"[{ref}] {item.family} | {when} | {_host(item.url)}\n"
             f"{clip_masked(masked.text, EXCERPT_MAX)}"
         )
         size = len(text.encode("utf-8")) + 2
