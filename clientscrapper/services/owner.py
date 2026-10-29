@@ -49,7 +49,8 @@ from clientscrapper.services import companies, costs, erp_feeds, keys
 
 PAUSE_FLAG: Final = costs.PAUSE_FLAG
 REASON_MAX: Final = 200
-AUTO_PUSH_FORBIDDEN: Final = "auto_push_forbidden"
+# One home: the precision job reads it (erp_feeds), the owner sets it here.
+AUTO_PUSH_FORBIDDEN: Final = erp_feeds.AUTO_PUSH_FORBIDDEN
 # 06 §1.2: «last 5 collector_runs».
 INFO_RUNS: Final = 5
 # 04 §3 E4: the owner's STIR is a registry fact the agent did not fetch.
@@ -146,8 +147,7 @@ class SourceLine:
         return "on"
 
 
-def forbidden_of(config: Any) -> bool:
-    return isinstance(config, dict) and config.get(AUTO_PUSH_FORBIDDEN) is True
+forbidden_of = erp_feeds.forbidden_of
 
 
 async def source_lines(session: AsyncSession, *, now: datetime) -> list[SourceLine]:

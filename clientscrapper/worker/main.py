@@ -35,7 +35,9 @@ outcomes/quarter/year walks), each ``run_collector(ErpSync, variant=…)``;
 minutes and at once on ``cs_interaction``); ``crm_push`` (T-28,
 ``services/crm_push.crm_push_job``, every minute, sending only inside the
 push window) and ``reconcile`` (T-28, ``crm_push.reconcile_job``, every 10
-minutes: a crashed claim, the ``unknown`` outcomes walk, rule 5's re-push).
+minutes: a crashed claim, the ``unknown`` outcomes walk, rule 5's re-push);
+``source_precision`` (T-36, ``erp_feeds.source_precision_job``, Sunday 04:00:
+the 30-day precision, ``auto_push`` both ways, the low-precision pause).
 
 **The event-driven path** (04 §0, 01 N-06). A slot with ``wakes_on`` also
 runs when its ``NOTIFY`` channel speaks: :func:`listen_for_wakes` holds a
@@ -349,7 +351,7 @@ def job_table() -> tuple[JobSlot, ...]:
             note="sends inside PUSH_WINDOW",
         ),
         JobSlot("reconcile", ("every 10m",), "T-28", crm_push.reconcile_slot),
-        JobSlot("source_precision", ("0 4 * * 0",), "T-36"),
+        JobSlot("source_precision", ("0 4 * * 0",), "T-36", source_precision_job),
         # --- 06: digest, retention --------------------------------------------------
         JobSlot("digest", (_at(settings.digest_time_parsed),), "T-35"),
         JobSlot("retention", ("15 4 * * *",), "T-31"),
@@ -860,6 +862,16 @@ async def backup_job(*, now: datetime | None = None) -> backup.BackupResult:
     except Exception as exc:
         log.error("backup heartbeat not written", extra={"error": type(exc).__name__})
     return result
+
+
+async def source_precision_job(*, now: datetime | None = None) -> dict[str, Any]:
+    """Weekly, Sunday 04:00 (05 §B.2): every source's 30-day precision, its
+    ``auto_push`` flipped both ways (never on while the owner forbids it)
+    and a source below 20 % over 30 pushes paused for a week (06 §4.2)."""
+    run = await erp_feeds.source_precision_job(
+        session_scope, now or datetime.now(settings.tz)
+    )
+    return run.as_dict()
 
 
 async def restore_drill_job() -> restore_drill.DrillResult | None:
