@@ -496,10 +496,12 @@ async def test_a_pending_manager_card_of_a_candidate_out_of_hold_is_not_sent(
 
 
 async def test_a_manager_who_blocked_the_bot_does_not_hold_back_the_others(
-    session, setup
+    session, setup, monkeypatch
 ):
-    """Two older cards of a manager Telegram refuses, one newer of another:
-    the refused manager is tried once, the other's card goes out."""
+    """Two older cards of a manager Telegram refuses, one newer of another,
+    a burst of two: the refused manager is tried once and does not use the
+    burst up — the other's card goes out."""
+    monkeypatch.setattr(settings, "review_burst_max", 2)
     made = []
     for nn, to in ((61, OTHER_MANAGER), (62, OTHER_MANAGER), (63, MANAGER)):
         cand = await lead(
