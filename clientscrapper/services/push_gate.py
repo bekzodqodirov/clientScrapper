@@ -97,6 +97,7 @@ from clientscrapper.services import (
     erp_feeds,
     gates,
     scoring,
+    signals,
 )
 from clientscrapper.services.pseudonyms import TOKEN_TRACE_RE, unmasked
 from clientscrapper.services.suppression import CLIENT_KINDS, Hit
@@ -412,12 +413,19 @@ async def lead_contact(session: AsyncSession, candidate: LeadCandidate) -> Conta
 
     def rank(c: Contact) -> tuple[bool, bool, bool]:
         return (
-            not scoring.usable_phone(_view(c)),
+            not usable_lead_phone(c),
             c.anonymised_at is not None,
             c.phone_kind != "mobile",
         )
 
     return sorted(rows, key=rank)[0]
+
+
+def usable_lead_phone(contact: Contact | None) -> bool:
+    """04 §1.1's usable phone (``scoring.usable_phone``) on a stored
+    contact: what ``lead_contact`` ranks first, and what tells the owner
+    card's handoff variant from the ✅ one (``services/cards``)."""
+    return contact is not None and scoring.usable_phone(_view(contact))
 
 
 def _view(c: Contact) -> scoring.ContactView:
@@ -475,18 +483,46 @@ def _contact_refusals(contact: Contact | None, *, shared_ok: bool) -> list[Refus
     return []
 
 
+async def _stated_rows(
+    session: AsyncSession, lineage: Sequence[uuid.UUID]
+) -> list[tuple[Decimal, str | None]]:
+    rows = await session.execute(
+        sa.select(Signal.value, Signal.quote).where(
+            Signal.company_id.in_(list(lineage)),
+            Signal.key.in_(sorted(STATED_KEYS)),
+            Signal.value.is_not(None),
+        )
+    )
+    return [(Decimal(v), q) for v, q in rows.all()]
+
+
 async def stated_m3(
     session: AsyncSession, lineage: Sequence[uuid.UUID]
 ) -> Decimal | None:
-    """The stated volume a ``kub`` may carry (item 11): the largest stated
-    amount over the lineage — the one home ``crm_push`` reads too."""
-    value = await session.scalar(
-        sa.select(sa.func.max(Signal.value)).where(
-            Signal.company_id.in_(list(lineage)),
-            Signal.key.in_(sorted(STATED_KEYS)),
-        )
-    )
-    return Decimal(value) if value is not None else None
+    """The stated volume a ``kub`` may carry (item 11): the largest amount
+    over the lineage that the poster stated — the one home ``crm_push``
+    reads too. A weight or a half truck converted to m³ (``signals.estimated``)
+    is the agent's estimate, never a stated volume (05 §A.2: the mapped
+    ``kub`` becomes the lead's quoted volume and the deal's quote);
+    ``estimated_m3`` names it."""
+    values = [
+        v for v, q in await _stated_rows(session, lineage) if not signals.estimated(q)
+    ]
+    return max(values, default=None)
+
+
+async def estimated_m3(
+    session: AsyncSession, lineage: Sequence[uuid.UUID]
+) -> signals.VolumeReading | None:
+    """The largest converted amount over the lineage (``signals.estimated``):
+    the note's «HAJM: taxminan 15 kub (5 tonna)», the card's «taxminan 15 kub
+    («5 tonna»)» — never ``kub``."""
+    readings = [
+        r
+        for r in (signals.estimated(q) for _, q in await _stated_rows(session, lineage))
+        if r is not None
+    ]
+    return max(readings, key=lambda r: r.m3, default=None)
 
 
 async def _attempt_refusals(
@@ -750,7 +786,9 @@ async def _note_row(session: AsyncSession, candidate: LeadCandidate) -> LeadRevi
     """The owner review row a refusal is written on: the live card, else the
     newest answered one. An auto-approved candidate never had a card, and no
     row is made for it — a row with no tap would read as the owner's
-    decision (``/lidlar``, the reports); its refusals go to the log."""
+    decision (``/lidlar``, the reports); its refusals go to
+    ``lead_candidates.push_note`` (0003, T-21), which ``/lidlar holat``
+    lists."""
     row: LeadReview | None = await session.scalar(
         sa.select(LeadReview)
         .where(LeadReview.candidate_id == candidate.id, LeadReview.kind == "owner")
@@ -768,13 +806,17 @@ def _joined(refusals: Sequence[Refusal]) -> str:
     return "; ".join(dict.fromkeys(r.text for r in refusals))[:REVIEW_NOTE_MAX]
 
 
-async def _write_note(session: AsyncSession, candidate: LeadCandidate, note: str) -> None:
+async def _write_note(
+    session: AsyncSession, candidate: LeadCandidate, note: str, *, now: datetime
+) -> None:
     row = await _note_row(session, candidate)
     if row is None:
         log.info(
             "push refused",
             extra={"candidate_id": str(candidate.id), "refusal": note[:80]},
         )
+        candidate.push_note = note[:REVIEW_NOTE_MAX]
+        candidate.push_noted_at = now
         return
     row.note = noted(row.note, note)
 
@@ -798,7 +840,7 @@ async def record_refusals(
     note = _joined(visible)
     suppressed = next((r for r in visible if r.code == "suppressed" and r.hit), None)
     if candidate.state == "approved" and suppressed is not None and suppressed.hit:
-        await _write_note(session, candidate, note)
+        await _write_note(session, candidate, note, now=now)
         if suppressed.hit.kind in CLIENT_KINDS:
             await gates.apply_effects(
                 session,
@@ -824,7 +866,7 @@ async def record_refusals(
         live.note = note
         await session.flush()
         return
-    await _write_note(session, candidate, note)
+    await _write_note(session, candidate, note, now=now)
     await session.flush()
 
 
@@ -914,5 +956,6 @@ __all__ = [
     "record_refusals",
     "stated_m3",
     "text_len",
+    "usable_lead_phone",
     "window_opens",
 ]

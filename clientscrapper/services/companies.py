@@ -57,10 +57,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from clientscrapper.config import settings
 from clientscrapper.db import enums as e
 from clientscrapper.db.models import (
+    CollectorRun,
     Company,
     CompanyAlias,
     CompanyId,
     Contact,
+    Evidence,
     LeadCandidate,
     MergeLog,
     ModelJob,
@@ -1469,6 +1471,100 @@ async def find_company(
     return match
 
 
+# 06 §1.2 /qidir: «trigram name match (≤ 5)»; 06 §1.3 🔀: «≤ 5 targets».
+NAME_MATCHES: Final = 5
+MERGE_TARGETS: Final = 5
+
+
+async def _scored_by_name(
+    session: AsyncSession, key: str, *, city: str | None
+) -> list[tuple[uuid.UUID, float]]:
+    """Every live company a name key reaches — its exact holders and the
+    trigram candidates — with the company's best pair score over its keys
+    (unguarded: a person asked by name), best first, then the oldest."""
+    found = await _exact_name_candidates(session, key)
+    found += await _name_candidates(session, key, city=city)
+    rows = [(c.company_id, k, c.city, c.first_seen_at) for c in found for k in c.keys]
+    best: dict[uuid.UUID, tuple[float, datetime]] = {}
+    for candidate in _group_candidates(rows):
+        if not _city_ok(city, candidate.city):
+            continue
+        score = max(
+            (_pair_score(key, k, guarded=False) for k in candidate.keys), default=0.0
+        )
+        held = best.get(candidate.company_id)
+        if held is None or score > held[0]:
+            best[candidate.company_id] = (score, candidate.first_seen_at)
+    ranked = sorted(best.items(), key=lambda kv: (-kv[1][0], kv[1][1], str(kv[0])))
+    return [(company_id, score) for company_id, (score, _) in ranked]
+
+
+async def find_companies(
+    session: AsyncSession,
+    name: str,
+    *,
+    city: str | None = None,
+    threshold: float = QUESTION_THRESHOLD,
+    limit: int = NAME_MATCHES,
+) -> list[tuple[uuid.UUID, float]]:
+    """The companies a typed name matches at ``threshold`` or better, best
+    first, at most ``limit`` (``/qidir``'s list). Never creates, never learns
+    an alias."""
+    key = name_key(name or "")
+    if not key:
+        return []
+    scored = await _scored_by_name(session, key, city=city)
+    return [(cid, score) for cid, score in scored if score >= threshold][:limit]
+
+
+async def suggest_merge_targets(
+    session: AsyncSession, company_id: uuid.UUID, *, limit: int = MERGE_TARGETS
+) -> list[Company]:
+    """The companies the owner's 🔀 may merge ``company_id`` into (06 §1.3):
+    the resolver's own suspicions first — its ``dup_of`` pointer and the
+    companies that point back — then the names in the review band and above
+    (``REVIEW_LOW``); roots only, live, never the company's own lineage, at
+    most ``limit``. Whether a merge is refused (two STIRs) is
+    ``merge_into``'s, at the tap."""
+    company = await session.get(Company, company_id)
+    if company is None:
+        return []
+    own = await company_lineage(session, company.id)
+    picked: list[uuid.UUID] = []
+    if company.dup_of is not None:
+        picked.append(company.dup_of)
+    picked += await _ids(
+        session,
+        sa.select(Company.id)
+        .where(Company.dup_of == company.id)
+        .order_by(Company.dup_score.desc().nulls_last(), Company.first_seen_at),
+    )
+    if usable_name(company.name_key):
+        picked += [
+            cid
+            for cid, score in await _scored_by_name(
+                session, company.name_key, city=company.city
+            )
+            if score >= REVIEW_LOW
+        ]
+    targets: list[Company] = []
+    for candidate_id in picked:
+        found = await session.get(Company, candidate_id)
+        if found is None:
+            continue
+        root = await _root(session, found)
+        if (
+            root.state in ("merged", "purged")
+            or root.id in own
+            or root.id in {t.id for t in targets}
+        ):
+            continue
+        targets.append(root)
+        if len(targets) >= limit:
+            break
+    return targets
+
+
 async def find_by_phone_tail(session: AsyncSession, tail: str) -> list[Company]:
     """Every live company a phone tail is on, roots, oldest first (MIYA
     ``find_by_phone``, all of them: a shared phone has several)."""
@@ -2069,6 +2165,26 @@ def _failure_facts(exc: BaseException) -> dict[str, str | None]:
     }
 
 
+async def count_minted(session: AsyncSession, evidence_id: int) -> None:
+    """One new company on the run whose evidence minted it (02 §2.2
+    ``collector_runs.new_companies``, what ``/holat``'s «bugun N yangi» and
+    ``/manbalar`` ℹ️'s run lines read). The runner writes 0 when the run
+    ends — its observations are not visible before that commit, so none of
+    them is resolved yet — and every company the resolver creates from one
+    of them is added here, in the resolving transaction. Evidence with no
+    run (its run row retired) counts nowhere."""
+    run_id = (
+        sa.select(Evidence.collector_run_id)
+        .where(Evidence.id == evidence_id)
+        .scalar_subquery()
+    )
+    await session.execute(
+        sa.update(CollectorRun)
+        .where(CollectorRun.id == run_id)
+        .values(new_companies=CollectorRun.new_companies + 1)
+    )
+
+
 async def _resolve_one(
     session_factory: SessionFactory,
     *,
@@ -2091,7 +2207,7 @@ async def _resolve_one(
         if obs is None:
             return False
         report.claimed += 1
-        obs_id, source_key = obs.id, obs.source_key
+        obs_id, source_key, evidence_id = obs.id, obs.source_key, obs.evidence_id
         values: dict[str, Any]
         try:
             async with session.begin_nested():
@@ -2136,6 +2252,8 @@ async def _resolve_one(
             }
             report.resolved += 1
             report.created += int(resolution.created)
+            if resolution.created:
+                await count_minted(session, evidence_id)
             if source_key == TELEGRAM_SOURCE:
                 # Wake score_job (04 §0): the notify is delivered at commit.
                 await session.execute(

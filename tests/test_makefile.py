@@ -106,7 +106,8 @@ def test_the_next_number_is_one_past_the_highest(tmp_path):
     for name in ("0001_initial.py", "0003_later.py", "cae10a182ef9_probe.py", "env.py"):
         (tmp_path / name).write_text("", encoding="utf-8")
     assert rid.revision_id("add x", tmp_path) == "0004_add_x"
-    assert rid.next_number() == 3  # this tree: 0001_initial, 0002_erp_contract
+    # This tree: 0001_initial, 0002_erp_contract, 0003_review_flow (T-21).
+    assert rid.next_number() == 4
 
 
 def test_alembic_names_the_file_after_the_id_alone(tmp_path):
@@ -120,10 +121,10 @@ def test_alembic_names_the_file_after_the_id_alone(tmp_path):
     cfg.set_section_option("post_write_hooks", "hooks", "")
     rev = rid.revision_id("probe slug", scripts / "versions")
     command.revision(cfg, message="probe slug", rev_id=rev)
-    assert rev == "0003_probe_slug"
-    assert (scripts / "versions" / "0003_probe_slug.py").is_file()
+    assert rev == "0004_probe_slug"
+    assert (scripts / "versions" / "0004_probe_slug.py").is_file()
     script = ScriptDirectory.from_config(cfg).get_revision(rev)
-    assert script is not None and script.down_revision == "0002_erp_contract"
+    assert script is not None and script.down_revision == "0003_review_flow"
 
 
 # --- the backup recipes (06 §3.3, §4.4) ----------------------------------------------
@@ -251,7 +252,61 @@ def test_a_switch_is_on_only_at_1(target, switches):
         assert f"{name}=yes: use {name}=1 (on) or {name}=0 (off)" in done.stderr
 
 
+def test_make_purge_passes_the_reason_through():
+    """T-31's ``--reason`` (legal_request by default, as /unut): ``REASON=owner``
+    is how docs/OPS.md frees the push-test's synthetic phone."""
+    assert "--reason" not in dry_run("purge", "PHONE=901234567")
+    line = dry_run("purge", "PHONE=901234567", "REASON=owner").replace("\\", " ")
+    assert '--reason "owner"' in " ".join(line.split())
+
+
+def test_make_purge_takes_a_telegram_username():
+    """/unut @username's rule from the terminal (seam review wave 4)."""
+    line = " ".join(dry_run("purge", "TG_HANDLE=@namuna_tg").replace("\\", " ").split())
+    assert '--tg-handle "@namuna_tg"' in line
+
+
 def test_skip_doctor_skips_only_at_1():
     assert "tools.doctor" in dry_run("up", "SKIP_DOCTOR=0")
     assert "tools.doctor" in dry_run("up")
     assert "tools.doctor" not in dry_run("up", "SKIP_DOCTOR=1")
+
+
+def test_mvp_report_passes_the_start_only_when_given():
+    out = dry_run("mvp-report", "START=2026-11-02")
+    assert 'clientscrapper.tools.mvp_report \\\n\t--start "2026-11-02"' in out
+    bare = dry_run("mvp-report")
+    assert "clientscrapper.tools.mvp_report" in bare and "--start" not in bare
+
+
+# The run targets that need init — the migration itself (migrate, downgrade)
+# and the one-time reader login before `make up` — and nothing else.
+INIT_RUNS = frozenset({"migrate", "downgrade", "userbot-login"})
+
+
+def test_a_one_off_run_never_re_runs_init():
+    """Seam review wave 4: `docker compose run` starts a service's
+    depends_on, and every app service depends on init — `chown -R` over the
+    evidence and `alembic upgrade head` on the live database. `make smoke`
+    (the Sunday cron) after a `git pull` with no `make update` migrated the
+    database under the old worker, bot and userbot, with no backup first;
+    import-clients, erp-sync, push-test, mvp-report and purge did the same.
+    Every `$(COMPOSE) run` recipe but INIT_RUNS carries --no-deps, and the
+    smoke service depends on the db alone."""
+    target = None
+    runs: dict[str, list[str]] = {}
+    for line in (ROOT / "Makefile").read_text().splitlines():
+        if line and not line[0].isspace() and ":" in line and not line.startswith("#"):
+            target = line.split(":", 1)[0].strip()
+        elif line.startswith("\t") and "run --rm" in line and target is not None:
+            runs.setdefault(target, []).append(line)
+    assert {"smoke", "purge", "import-clients", "erp-sync", "push-test"} <= set(runs)
+    missing = sorted(
+        t
+        for t, lines in runs.items()
+        if t not in INIT_RUNS and not all("--no-deps" in x for x in lines)
+    )
+    assert missing == []
+    compose = (ROOT / "docker-compose.yml").read_text()
+    smoke = compose.split("\n  smoke:\n", 1)[1].split("\n  searxng:", 1)[0]
+    assert "depends_on: { db: { condition: service_healthy } }" in smoke

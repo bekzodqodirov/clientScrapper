@@ -816,6 +816,59 @@ async def test_a_stored_ask_becomes_evidence_an_observation_and_a_linked_row(
     assert (person.telegram_id, person.legal_basis) == (POSTER, "public_source")
 
 
+async def test_the_companies_a_run_minted_are_counted_on_it_once_resolved(
+    session, enabled, offline, tmp_path
+):
+    """02 §2.2 ``collector_runs.new_companies``: 0 when the run ends (nothing
+    of it is resolved yet), then one per company the resolver creates from
+    the run's evidence — never one an observation only attached to. That is
+    the number ``/holat``'s «bugun N yangi» and ``/manbalar`` ℹ️ print."""
+    from clientscrapper.services import cards, health, owner
+
+    await chat(session)
+    await store(session, ASK, message_id=1, bio=BIO)
+    await store(session, "Yana 30 kub mato kerak, Guangzhoudan", message_id=2)
+    first = await run(offline, tmp_path)
+    await store(
+        session,
+        "Xitoydan 20 kub poyabzal olib kelish kerak",
+        message_id=3,
+        sender_id=POSTER + 1,
+        username="namuna_poyabzal",
+        name="Dilshod",
+        at=T0 + timedelta(minutes=5),
+    )
+    second = await run(offline, tmp_path, now=NOW + timedelta(minutes=15))
+    assert (first.counters["new_observations"], first.counters["new_companies"]) == (
+        2,
+        0,
+    )
+    assert (second.counters["new_observations"], second.counters["new_companies"]) == (
+        1,
+        0,
+    )
+    report = await companies.resolve_batch(now=NOW + timedelta(minutes=16))
+    assert (report.resolved, report.created) == (3, 2)
+    counted = (
+        await session.execute(
+            sa.select(m.CollectorRun.started_at, m.CollectorRun.new_companies)
+            .where(m.CollectorRun.source_key == "telegram_monitor")
+            .order_by(m.CollectorRun.started_at)
+            .execution_options(populate_existing=True)
+        )
+    ).all()
+    assert counted == [(NOW, 1), (NOW + timedelta(minutes=15), 1)]
+
+    later = NOW + timedelta(minutes=20)
+    status = await health.gather(session, now=later)
+    [source] = [s for s in status.sources if s.key == "telegram_monitor"]
+    assert source.new_companies_today == 2
+    assert "· bugun 2 yangi ·" in cards.render_holat(status, [])
+    info = await owner.source_info(session, "telegram_monitor", now=later)
+    assert info is not None
+    assert [r.new_companies for r in info.runs] == [1, 1]
+
+
 async def test_a_second_run_finds_nothing_left_to_do(session, enabled, offline, tmp_path):
     await chat(session)
     await store(session, ASK, message_id=1)

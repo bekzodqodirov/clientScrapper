@@ -73,6 +73,8 @@ files = [
     "clientscrapper/userbot/limits.py",
     # T-09
     "clientscrapper/services/erp_feeds.py",
+    "clientscrapper/services/metrics.py",
+    "clientscrapper/tools/mvp_report.py",
     "clientscrapper/collectors/erp_sync.py",
     "clientscrapper/tools/erp_sync.py",
     # T-11
@@ -102,6 +104,29 @@ files = [
     "clientscrapper/services/classify.py",
     # T-16
     "clientscrapper/services/model_jobs.py",
+    # T-20: the bot's pure halves (handlers and main stay out, like MIYA's)
+    "clientscrapper/bot/callbacks.py",
+    "clientscrapper/bot/texts.py",
+    "clientscrapper/bot/keyboards.py",
+    "clientscrapper/bot/pages.py",
+    "clientscrapper/bot/deliver.py",
+    "clientscrapper/services/cards.py",
+    "clientscrapper/services/owner.py",
+    # T-21
+    "clientscrapper/services/reviews.py",
+    "clientscrapper/bot/cards_out.py",
+    # T-35
+    "clientscrapper/services/smoke.py",
+    "clientscrapper/services/digest.py",
+    # T-30
+    "clientscrapper/services/redlines.py",
+    "clientscrapper/services/playbook.py",
+    "clientscrapper/services/openers.py",
+    "clientscrapper/services/verdict.py",
+    # T-31
+    "clientscrapper/services/retention.py",
+    "clientscrapper/services/purge.py",
+    "clientscrapper/tools/purge.py",
 ]
 
 # APScheduler 3 ships no type information.
@@ -115,6 +140,7 @@ asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 filterwarnings = ["error::DeprecationWarning:clientscrapper.*"]
 markers = [
-    "live: real network, run only from the VPS with LIVE=1 (make smoke)",
+    "live: real network, run only from the VPS with LIVE=1 (make smoke); live(source=<sources.key>)",
+    "quarterly: a live test the weekly make smoke leaves out (make smoke FULL=1 runs it)",
     "slow: seeds large data; runs only with CS_RUN_SLOW=1",
 ]

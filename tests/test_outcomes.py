@@ -1720,3 +1720,180 @@ async def test_a_failing_catch_up_never_holds_the_rule(world, session):
         "exhausted": [],
     }
     assert (await raised(session))["push_unconfirmed"]["detail"]["n"] == 1
+
+
+# --- 01 §7 decision 2a: a client is closed on every key it is known by ---------------
+
+
+async def _known_company(world: World, session, n: int) -> uuid.UUID:
+    """A company known by a Telegram channel, an Instagram account, a domain,
+    a STIR and an office contact's handles, plus an anonymised contact whose
+    handle is no longer the company's."""
+    cid = await world.company(
+        n,
+        telegram_channel="namuna_kanal",
+        instagram="namuna.savdo",
+        website_domain="namuna.example.uz",
+        stir="300000012",
+    )
+    await add_contact(
+        session, cid, telegram_username="namuna_ofis", instagram="namuna_ofis"
+    )
+    await add_contact(
+        session, cid, telegram_username="namuna_eski", anonymised_at=NOW - DAY
+    )
+    return cid
+
+
+def _keyed_rows(kind: str, p: Pushed) -> set[tuple[str, str, str, str]]:
+    r = because(p)
+    return {
+        (kind, "phone_tail", p.tail, r),
+        (kind, "tg_username", "namuna_kanal", r),
+        (kind, "tg_username", "namuna_ofis", r),
+        (kind, "instagram", "namuna.savdo", r),
+        (kind, "instagram", "namuna_ofis", r),
+        (kind, "domain", "namuna.example.uz", r),
+        (kind, "stir", "300000012", r),
+    }
+
+
+async def test_a_won_company_is_closed_on_every_key_and_the_retraction_reopens_it(
+    world, session
+):
+    """2a: the ERP checks a client by phone only, so the agent closes the
+    company's Telegram usernames, Instagram, domain and STIR as well as the
+    pushed tail; reviving the lead takes every one of them back."""
+    p = await world.push(21, company_id=await _known_company(world, session, 21))
+    world.fake.win(world.lead(p).id)
+    report = await world.walk()
+    assert await local(session) == _keyed_rows("client", p)
+    assert (report.inserted, report.deleted) == (7, 0)
+    assert (await company(session, p.company_id)).state == "client"
+    world.clock.set(NOW + timedelta(hours=1))
+    world.fake.revive(world.lead(p).id)
+    back = await world.walk("recent", now=NOW + timedelta(hours=2))
+    assert (await outcome(session, p.external_id)).label == "open_untouched"
+    assert back.deleted == 7
+    assert await local(session) == set()
+    assert (await company(session, p.company_id)).state == "active"
+
+
+async def test_a_fallback_client_landing_closes_every_key_too(world, session):
+    cid = await _known_company(world, session, 22)
+    world.fake.add_client([phone(22)])
+    p = await world.push(22, company_id=cid, door="other")
+    await world.walk()
+    assert (await outcome(session, p.external_id)).label == "landed_client"
+    assert await local(session) == _keyed_rows("client", p)
+
+
+async def test_won_moved_to_never_again_swaps_the_client_rows_for_lost_rows(
+    world, session
+):
+    p = await world.push(23, company_id=await _known_company(world, session, 23))
+    world.fake.win(world.lead(p).id)
+    await world.walk()
+    world.clock.set(NOW + timedelta(hours=1))
+    world.fake.move(world.lead(p).id, "lost", reason="Qayta qilinmasin")
+    await world.walk("recent", now=NOW + timedelta(hours=2))
+    assert (await outcome(session, p.external_id)).label == "lost_no_contact"
+    assert await local(session) == _keyed_rows("lost", p)
+
+
+async def test_a_client_row_stands_while_its_key_leaves_the_company(world, session):
+    """KEPT_WHILE_STANDING: an anonymised contact or a moved handle does not
+    reopen a client while the won label stands; the revival does."""
+    p = await world.push(24, company_id=await _known_company(world, session, 24))
+    world.fake.win(world.lead(p).id)
+    await world.walk()
+    await session.execute(
+        sa.update(Contact)
+        .where(Contact.company_id == p.company_id)
+        .values(telegram_username=None, instagram=None, anonymised_at=NOW)
+    )
+    await session.execute(
+        sa.update(Company)
+        .where(Company.id == p.company_id)
+        .values(telegram_channel=None, website_domain=None)
+    )
+    await session.commit()
+    report = await world.walk("year", now=NOW + DAY)
+    assert report.deleted == 0
+    assert await local(session) == _keyed_rows("client", p)
+    world.clock.set(NOW + DAY)
+    world.fake.revive(world.lead(p).id)
+    await world.walk("recent", now=NOW + 2 * DAY)
+    assert await local(session) == set()
+
+
+async def test_a_landed_client_s_rows_stand_while_its_keys_leave_the_company(
+    world, session
+):
+    """KEPT_WHILE_STANDING holds for the fallback's ``landed_client`` as for
+    ``won``: the handles, domain and STIR stay closed when the company no
+    longer holds them."""
+    cid = await _known_company(world, session, 27)
+    world.fake.add_client([phone(27)])
+    p = await world.push(27, company_id=cid, door="other")
+    await world.walk()
+    assert (await outcome(session, p.external_id)).label == "landed_client"
+    await session.execute(
+        sa.update(Contact)
+        .where(Contact.company_id == cid)
+        .values(telegram_username=None, instagram=None, anonymised_at=NOW)
+    )
+    await session.execute(
+        sa.update(Company)
+        .where(Company.id == cid)
+        .values(telegram_channel=None, instagram=None, website_domain=None, stir=None)
+    )
+    await session.commit()
+    report = await world.walk("year", now=NOW + DAY)
+    assert report.deleted == 0
+    assert await local(session) == _keyed_rows("client", p)
+
+
+async def test_another_company_on_a_client_s_handle_is_refused_as_a_client(
+    world, session
+):
+    """The point of 2a: the same firm found again through its Telegram
+    channel (no phone at all) is suppressed as a client."""
+    from clientscrapper.services import suppression
+
+    p = await world.push(25, company_id=await _known_company(world, session, 25))
+    world.fake.win(world.lead(p).id)
+    await world.walk()
+    again = await world.company(26, telegram_channel="namuna_kanal")
+    await session.commit()
+    hit = await suppression.is_suppressed(
+        session, await suppression.keys_for(session, again), now=NOW
+    )
+    assert hit is not None
+    assert (hit.kind, hit.key_type, hit.key, hit.source, hit.reason) == (
+        "client",
+        "tg_username",
+        "namuna_kanal",
+        "outcomes",
+        because(p),
+    )
+
+
+def test_company_keys_are_the_four_kinds_sorted_and_storable():
+    keys = outcomes.company_keys(
+        outcomes.CompanyKeys(
+            id=uuid.uuid4(),
+            tg_usernames=frozenset({"namuna_b", "namuna_a"}),
+            instagrams=frozenset({"ab", "namuna.ig"}),
+            domains=frozenset({"x" * 201, "namuna.example.uz"}),
+            stirs=frozenset({"300000013"}),
+            phone_tails=frozenset({"900000027"}),
+        )
+    )
+    assert keys == [
+        ("tg_username", "namuna_a"),
+        ("tg_username", "namuna_b"),
+        ("instagram", "namuna.ig"),
+        ("domain", "namuna.example.uz"),
+        ("stir", "300000013"),
+    ]

@@ -105,6 +105,7 @@ from clientscrapper.services import (
     validators,
 )
 from clientscrapper.services.scoring import ScoreResult, Tier
+from clientscrapper.services.signals import VolumeReading
 
 log = logging.getLogger(__name__)
 
@@ -613,11 +614,18 @@ classify.register_after_classify(after_classify)
 # --- scoring a candidate ------------------------------------------------------------
 
 
+# What other writers keep in score_breakdown beside the gates and the
+# enrichment trail: the opener (05 §B.1's NIMA DEYISH, 06 §1.7's «Taklif»).
+CARRIED_KEYS: Final = ("opener", "opener_meta")
+
+
 def _carried(
     previous: Mapping[str, Any] | None, breakdown: dict[str, Any]
 ) -> dict[str, Any]:
     """A re-score keeps what other writers put in the breakdown: the gates'
-    verdicts (T-19, incl. ``gates.no_phone``) and the enrichment trail (T-24).
+    verdicts (T-19, incl. ``gates.no_phone``), the enrichment trail (T-24)
+    and the opener with how it was made (``opener``/``opener_meta``, T-30's
+    ``services/openers``).
     ``gates.no_phone`` is the phone-less handoff's mark and holds only while
     there is no usable phone: a score that finds one drops it (the card is
     the ordinary one again, 06 §1.3; a manager's approval is recorded by
@@ -630,15 +638,22 @@ def _carried(
             merged["gates"] = {**dict(gates), **merged["gates"]}
         if isinstance(enrichment, list):
             merged["enrichment"] = list(enrichment)
+        for key in CARRIED_KEYS:
+            if key in previous and key not in merged:
+                merged[key] = previous[key]
     if merged.get("usable_phone") is True and "no_phone" in merged["gates"]:
         merged["gates"] = {k: v for k, v in merged["gates"].items() if k != "no_phone"}
     return merged
 
 
-def _handoff(breakdown: Mapping[str, Any] | None) -> bool:
-    """``score_breakdown.gates.no_phone`` is set (the phone-less handoff)."""
+def is_handoff(breakdown: Mapping[str, Any] | None) -> bool:
+    """``score_breakdown.gates.no_phone`` is set (the phone-less handoff;
+    the owner card's handoff variant reads this too, 06 §1.3)."""
     gates = (breakdown or {}).get("gates")
     return isinstance(gates, Mapping) and gates.get("no_phone") is True
+
+
+_handoff = is_handoff
 
 
 async def _attribute(session: AsyncSession, candidate: LeadCandidate) -> None:
@@ -693,11 +708,8 @@ async def rescore(
     if company is None:
         raise LookupError(f"company {candidate.company_id} is gone")
     weights = weights or await scoring.load_weights(session)
-    if families is None:
-        families = await source_families(session)
-    signal_views, contact_views = await scoring.views_for(session, company)
-    result = scoring.score(
-        signal_views, contact_views, source_families=families, weights=weights, now=now
+    result = await _score_company(
+        session, company, now=now, weights=weights, families=families
     )
     candidate.score = result.total
     candidate.tier = result.tier
@@ -710,9 +722,52 @@ async def rescore(
     return result
 
 
+async def _score_company(
+    session: AsyncSession,
+    company: Company,
+    *,
+    now: datetime,
+    weights: scoring.WeightSet,
+    families: Mapping[str, str] | None,
+) -> ScoreResult:
+    if families is None:
+        families = await source_families(session)
+    signal_views, contact_views = await scoring.views_for(session, company)
+    return scoring.score(
+        signal_views, contact_views, source_families=families, weights=weights, now=now
+    )
+
+
+async def live_score(
+    session: AsyncSession, candidate: LeadCandidate, *, now: datetime
+) -> ScoreResult | None:
+    """``candidate``'s company scored now and written nowhere — no lock, no
+    write: what an owner card is judged by before it is shown (04 §7 item
+    13's measure read before the owner is asked, not only at the push;
+    ``cards.render_review``'s ``score_low``). A ``review`` row keeps its
+    score between signals (score_job re-scores it on a new signal, never on
+    plain decay), so the stored total of a card put off for a week is not
+    the live one. None when the company is gone."""
+    company = await session.get(Company, candidate.company_id)
+    if company is None:
+        return None
+    weights = await scoring.load_weights(session)
+    return await _score_company(session, company, now=now, weights=weights, families=None)
+
+
 async def source_families(session: AsyncSession) -> dict[str, str]:
     rows = await session.execute(sa.select(Source.key, Source.family))
     return {str(k): str(f) for k, f in rows.all()}
+
+
+def auto_approves(auto_push: bool) -> bool:
+    """A source's ``auto_push`` approves its hot candidates (02 §2.9
+    ``scored → approved(auto:<source>)``) only while ``AUTO_APPROVE`` is on.
+    The weekly precision job earns ``auto_push`` (05 §B.2); whether earning
+    it lets a lead skip the owner's card is the owner's switch — off until
+    he turns it on (07 T-39, 06 open question 2: review everything until
+    the precision numbers exist). /manbalar and /holat say «avto» by this."""
+    return settings.auto_approve and auto_push
 
 
 async def _auto_push(session: AsyncSession, source_key: str | None) -> bool:
@@ -721,7 +776,26 @@ async def _auto_push(session: AsyncSession, source_key: str | None) -> bool:
     found = await session.scalar(
         sa.select(Source.auto_push).where(Source.key == source_key)
     )
-    return bool(found)
+    return auto_approves(bool(found))
+
+
+# make push-test's company (05 §B.1, tools/push_test.py): the only candidate
+# whose breakdown says ``gates.test``; never pushed by the job, never counted.
+SYNTHETIC_MARK: Final[Mapping[str, Any]] = {"gates": {"test": True}}
+
+
+def synthetic_marked(candidate: LeadCandidate) -> bool:
+    """``score_breakdown.gates.test`` is the JSON ``true``."""
+    breakdown = candidate.score_breakdown or {}
+    marks = breakdown.get("gates") if isinstance(breakdown, Mapping) else None
+    return isinstance(marks, Mapping) and marks.get("test") is True
+
+
+def synthetic_sql() -> sa.ColumnElement[bool]:
+    """``synthetic_marked`` as SQL: true for the JSON ``true`` only, false
+    (never NULL) for a candidate with no breakdown — so ``~synthetic_sql()``
+    keeps every other row (crm_push.due_candidates, services/metrics)."""
+    return LeadCandidate.score_breakdown.contains(SYNTHETIC_MARK).is_(sa.true())
 
 
 async def apply_score(
@@ -1060,6 +1134,9 @@ class CandidateView:
     breakdown: Mapping[str, Any]
     opener: str | None = None
     per_month: str | None = None
+    # A weight or a half truck converted to m³ (``push_gate.estimated_m3``):
+    # said as «taxminan», never sent as ``kub``.
+    estimated_m3: VolumeReading | None = None
 
 
 # The groups a note's first line may cite, in the order it prefers them.
@@ -1078,8 +1155,8 @@ async def load_view(
     company, the lead contact the push gate chooses (``push_gate.lead_contact``),
     the decision maker with a legal basis, the lineage's live signals with
     their evidence, the stated volume, the score's breakdown and — when 04's
-    draft stored one — the opener (``score_breakdown.opener``; UNVERIFIED:
-    T-30 decides where the draft lives). Raises LookupError for a candidate
+    draft or the playbook template stored one — the opener
+    (``score_breakdown.opener``, ``services/openers``). Raises LookupError for a candidate
     or a company that is gone."""
     from clientscrapper.services import push_gate  # it imports this module
 
@@ -1186,6 +1263,7 @@ async def load_view(
         person=person,
         signals=tuple(sorted(found, key=_signal_rank)),
         stated_m3=await push_gate.stated_m3(session, lineage),
+        estimated_m3=await push_gate.estimated_m3(session, lineage),
         score=candidate.score or 0,
         breakdown=breakdown,
         opener=opener if isinstance(opener, str) and opener.strip() else None,

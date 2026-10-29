@@ -219,7 +219,9 @@ async def enabled(session, tmp_path, monkeypatch):
     async with SessionLocal() as s:
         row = await s.get(m.Source, "telegram_monitor")
         assert row is not None
-        before = row.enabled
+        # ``sources`` is configuration, put back (07 §1.0): the run moves
+        # last_run_at too, which a later collector_silent test would read.
+        before = (row.enabled, row.last_run_at)
         row.enabled = True
         await s.commit()
     yield
@@ -227,7 +229,7 @@ async def enabled(session, tmp_path, monkeypatch):
         await s.execute(
             sa.update(m.Source)
             .where(m.Source.key == "telegram_monitor")
-            .values(enabled=before)
+            .values(enabled=before[0], last_run_at=before[1])
         )
         await s.commit()
 

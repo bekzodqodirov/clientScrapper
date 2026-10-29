@@ -23,11 +23,20 @@ def async_url(url: str) -> str:
     return url
 
 
+# A statement that waits this long on a row or table lock raises (a forgotten
+# `make psql` holding FOR UPDATE, a stuck transaction) instead of hanging its
+# job for ever while max_instances=1 refuses every later run: the job fails,
+# and job_failing says so (seam review wave 4). Longer than any wait this code
+# makes on purpose — a tap behind a card edit's Telegram call, a purge behind
+# a model call that holds its company (60 s per try).
+LOCK_TIMEOUT = "300s"
+
 engine: AsyncEngine = create_async_engine(
     async_url(settings.database_url),
     pool_pre_ping=True,
     pool_size=5,
     max_overflow=10,
+    connect_args={"options": f"-c lock_timeout={LOCK_TIMEOUT}"},
 )
 
 SessionLocal = async_sessionmaker(

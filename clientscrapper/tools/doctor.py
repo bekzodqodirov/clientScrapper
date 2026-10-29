@@ -98,6 +98,8 @@ EXPECTED_ENV_KEYS: tuple[str, ...] = (
     "PUSH_WINDOW",
     "PUSH_DAYS",
     "TEST_PHONE",
+    "QUOTE_STAGE_NAMES",
+    "AUTO_APPROVE",
     "REVIEW_HOURS",
     "REVIEW_BURST_MAX",
     "REVIEW_DAILY_CAP",
@@ -694,6 +696,21 @@ def check(
                 f"❌ DIGEST_TIME={value('DIGEST_TIME')} REVIEW_HOURS="
                 f"{value('REVIEW_HOURS')} oraligʻidan tashqarida — vaqtni oraliq "
                 "ichiga qoʻy."
+            )
+        )
+    quiet = _range(value("QUIET_HOURS") or "21:00-08:00")
+    if quiet is None:
+        found.append(
+            _error(
+                "❌ QUIET_HOURS oʻqilmadi — «SS:DD-SS:DD» boʻlsin, masalan 21:00-08:00."
+            )
+        )
+    elif digest is not None and _within(digest, *quiet):
+        found.append(
+            _error(
+                f"❌ DIGEST_TIME={value('DIGEST_TIME')} QUIET_HOURS="
+                f"{value('QUIET_HOURS')} ichida — dayjest egasini tunda bezovta "
+                "qiladi; vaqtni tinch soatlardan tashqariga qoʻy."
             )
         )
 

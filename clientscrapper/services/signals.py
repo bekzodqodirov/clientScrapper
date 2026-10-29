@@ -240,6 +240,11 @@ class SignalDraft:
 class VolumeReading:
     m3: Decimal
     quote: str
+    # The amount is the agent's conversion, not the poster's figure: a
+    # weight (1 t ≈ 3 m³) or a half truck (≈ 40 m³). 05 §A.2/§B.1: such an
+    # amount is never sent as ``kub`` (it would stand on the ERP card as the
+    # customer's quoted volume) — the note says «taxminan … kub».
+    estimate: bool = False
 
 
 @dataclass(slots=True)
@@ -351,12 +356,23 @@ def volume_reading(text: str) -> VolumeReading | None:
     for match in TONNES_RE.finditer(text):
         t = _number(match.group(1))
         if t is not None and not _unit_price(text, match, t):
-            readings.append(VolumeReading(t * TONNE_M3, match.group(0)))
+            readings.append(VolumeReading(t * TONNE_M3, match.group(0), estimate=True))
     for match in CONTAINER_RE.finditer(text):
         if _HALF_TRUCK.match(match.group(0)):
-            readings.append(VolumeReading(HALF_TRUCK_M3, match.group(0)))
+            readings.append(VolumeReading(HALF_TRUCK_M3, match.group(0), estimate=True))
     # The largest wins; of equal amounts the first written.
     return max(readings, key=lambda r: r.m3, default=None)
+
+
+def estimated(quote: str | None) -> VolumeReading | None:
+    """The conversion a stated-volume signal's quote stands for — «5 tonna»
+    (15 m³), «yarim fura» (40) — or None when its amount is the poster's own
+    figure («2 kub»), or the quote states no amount rule 1 reads (the
+    model's verified «stated» quote)."""
+    if not quote:
+        return None
+    reading = volume_reading(quote)
+    return reading if reading is not None and reading.estimate else None
 
 
 def stated_key(m3: Decimal) -> str | None:

@@ -126,16 +126,20 @@ async def suppressed(session: AsyncSession, phone: str, *, now: datetime) -> boo
 
 async def free_synthetic_keys(session: AsyncSession) -> str | None:
     """Earlier TEST companies give up the STIR and the domain (unique per live
-    company); None, or why a holder that is not a TEST company refuses."""
+    company); None, or why a holder that is not a TEST company refuses. A
+    purged holder gives them up too: ``tools/purge`` keeps a purged root's
+    STIR and domain (``services/purge``) and renames it «[oʻchirilgan]», so
+    the TEST company the owner purged after a run no longer carries its name,
+    and the two synthetic keys are this tool's alone."""
     holders = (
         await session.execute(
-            sa.select(Company.id, Company.display_name).where(
+            sa.select(Company.id, Company.display_name, Company.state).where(
                 sa.or_(Company.stir == TEST_STIR, Company.website_domain == TEST_DOMAIN),
                 Company.state != "merged",
             )
         )
     ).all()
-    foreign = [h for h in holders if h.display_name != TEST_NAME]
+    foreign = [h for h in holders if h.display_name != TEST_NAME and h.state != "purged"]
     if foreign:
         return f"STIR {TEST_STIR} yoki {TEST_DOMAIN} boshqa kompaniyada"
     if holders:

@@ -43,8 +43,11 @@ from clientscrapper.services import (
     crm_push,
     erp_feeds,
     health,
+    owner,
+    purge,
     push_gate,
     scoring,
+    signals,
 )
 from clientscrapper.services.candidates import CandidateView, PersonView
 from clientscrapper.services.crm_push import PushPayload
@@ -483,6 +486,38 @@ def test_a_stated_volume_is_kub_and_routes_by_itself():
     # < 1 m³: no kub.
     p3 = crm_push.build_payload(view(stated_m3=Decimal("0.5"), signals=(quiet,)))
     assert p3.kub is None
+
+
+def test_a_converted_volume_is_said_never_sent_as_kub():
+    """05 §A.2/§B.1: ``kub`` goes only for a STATED volume — the mapped kub
+    becomes the lead's quoted volume. «5 tonna» is 15 m³ by the agent's
+    1 t ≈ 3 m³ (seam review: it went out as ``kub: "15"``, «HAJM: 15 kub»)."""
+    tonnes = sig(quote="5 tonna mato", excerpt="Guangzhoudan 5 tonna mato kerak")
+    reading = signals.estimated(tonnes.quote)
+    assert reading is not None and (reading.m3, reading.quote) == (Decimal(15), "5 tonna")
+    p = crm_push.build_payload(
+        view(stated_m3=None, estimated_m3=reading, signals=(tonnes,))
+    )
+    assert p.kub is None
+    assert "HAJM: taxminan 15 kub (5 tonna)" in p.note.split("\n")
+    # It still routes: the number right before the first «kub» is the estimate.
+    assert crm_push.text_volume(p.name + "\n" + crm_push.landed_note(p)) == Decimal(15)
+    assert signals.estimated("yarim fura mato") is not None
+    assert signals.estimated("5 kub mato kerak") is None
+    assert signals.estimated(None) is None
+
+
+async def test_a_weight_quote_reaches_the_erp_with_no_kub(world):
+    cand = await world.lead(quote="5 tonna mato kerak", value=Decimal(15))
+    lineage = [cand.company_id]
+    assert await push_gate.stated_m3(world.session, lineage) is None
+    est = await push_gate.estimated_m3(world.session, lineage)
+    assert est is not None and (est.m3, est.quote) == (Decimal(15), "5 tonna")
+    result = await world.push(cand)
+    assert result.status == "sent", result
+    [(_, _, body)] = world.fake.posted
+    assert "kub" not in body
+    assert "HAJM: taxminan 15 kub (5 tonna)" in body["note"]
 
 
 def test_text_volume_is_parse_measure_s():
@@ -966,6 +1001,28 @@ async def test_push_test_tool_payload_has_every_optional_key(world, monkeypatch)
     ]
 
 
+async def test_push_test_s_lead_is_no_push_of_the_pilot(world, monkeypatch):
+    """Day 1's ``make push-test`` (06 §7.1 step 6) is delivered like any push
+    and marked ``gates.test``: the pilot's numbers (services/metrics) neither
+    start on it nor count it."""
+    from clientscrapper.services import metrics
+
+    monkeypatch.setattr(settings, "test_phone", "+998 90 000 00 99")
+    report = await push_test.run(now=NOW, erp=world.erp)
+    assert report.status == "sent", report
+    s = world.session
+    delivered = await s.scalar(
+        sa.select(sa.func.count())
+        .select_from(PushLog)
+        .where(PushLog.external_id == report.external_id, PushLog.status == "sent")
+    )
+    assert delivered == 1
+    assert await metrics.pilot_start(s) is None
+    window = {"since": NOW - timedelta(days=1), "until": NOW + timedelta(days=1)}
+    assert await metrics.pushes(s, **window) == []
+    assert (await metrics.holat(s, now=NOW + timedelta(hours=1))).pushed == 0
+
+
 # --- helpers for the answers --------------------------------------------------------
 
 
@@ -1303,6 +1360,65 @@ async def test_other_4xx_goes_back_to_review_and_tells_the_owner(world, told):
     assert await owner_note(world.session, cand) == "ERP rad etdi (HTTP 400)"
     assert told == [crm_push.rejected_text(400)]
     assert await world.breaker() == (None, None)
+
+
+async def test_a_4xx_telegram_did_not_take_is_said_by_the_sweep_until_a_push_lands(
+    world,
+):
+    """push_rejected is a 06 §4.2 key (05 §B.1 «owner alert»): crm_push says
+    it first, and when Telegram is down at that moment its undelivered note
+    lets the health sweep say it; the next push the ERP takes clears it, and
+    its recovery is said once."""
+    down: list[str] = []
+
+    async def unreachable(text: str) -> bool:
+        down.append(text)
+        return False
+
+    costs.set_cap_notifier(unreachable)
+    try:
+        cand = await world.lead()
+        erp, _ = answering(407, body=b"proxy auth")
+        assert (await world.push(cand, erp=erp)).error == "http_4xx"
+    finally:
+        costs.set_cap_notifier(None)
+    assert down == [crm_push.rejected_text(407)]
+    kinds = (await world.session.scalars(sa.select(ReminderLog.kind))).all()
+    assert kinds == ["undelivered:push_rejected"]
+
+    others = frozenset(health.PROBLEM_KEYS) - {"push_rejected"}
+
+    async def sweep(at: datetime) -> tuple[health.TellReport, list[str]]:
+        said: list[str] = []
+
+        async def owner(text: str) -> bool:
+            said.append(text)
+            return True
+
+        async with SessionLocal() as s:
+            found = [
+                p
+                for p in health.problems(await health.gather(s, now=at))
+                if p.key == "push_rejected"
+            ]
+            report = await health.tell(s, found, owner, now=at, unjudged=others)
+            await s.commit()
+        return report, said
+
+    report, said = await sweep(NOW + timedelta(minutes=5))
+    assert report.said == ("push_rejected",)
+    assert said == [
+        "⚠️ ERP pushni rad etdi (HTTP 407): <code>.env</code> dagi CRM_BASE_URL va "
+        "ERP oldidagi proksini tekshiring; lid koʻrib chiqishga qaytdi"
+    ]
+    assert (await sweep(NOW + timedelta(minutes=10)))[1] == []
+    # The proxy is fixed: the next push lands, the problem clears, once.
+    second = await world.lead(62)
+    assert (await world.push(second, now=NOW + timedelta(minutes=40))).status == "sent"
+    report, said = await sweep(NOW + timedelta(minutes=45))
+    assert report.recovered == ("push_rejected",)
+    assert said == ["✅ ERP pushlarni yana qabul qilyapti — tiklandi"]
+    assert (await sweep(NOW + timedelta(minutes=50)))[1] == []
 
 
 async def test_a_refused_connection_is_three_tries_then_conn(world):
@@ -1696,6 +1812,43 @@ async def test_crm_push_job_pushes_the_approved_best_first(world):
     assert (again.candidates, again.sent) == (0, 0)
 
 
+async def test_crm_push_job_gives_an_opener_less_lead_the_template_before_the_claim(
+    world,
+):
+    # T-30 → T-28: a candidate approved and pushed before verdict_job's next
+    # run reached the ERP with no «NIMA DEYISH». The job now stores the free
+    # template first (no model request — the autouse fake would refuse one).
+    cand = await world.lead(61)
+    assert "opener" not in ((await world.candidate(cand)).score_breakdown or {})
+    report = await crm_push.crm_push_job(SessionLocal, world.erp, now=NOW)
+    assert report.sent == 1
+    stored = (await world.candidate(cand)).score_breakdown
+    assert stored["opener_meta"]["source"] == "template"
+    [(_, _, body)] = world.fake.posted
+    deyish = next(x for x in body["note"].split("\n") if x.startswith("NIMA DEYISH: "))
+    assert deyish.removeprefix("NIMA DEYISH: ")[:20] == stored["opener"][:20]
+
+
+async def test_crm_push_job_keeps_a_stored_draft_and_writes_nothing_while_paused(world):
+    drafted = await world.lead(61)
+    held = await world.lead(62)
+    row = await world.candidate(drafted)
+    draft = "Assalomu alaykum! Xitoydan mato olib kelasizmi? Kerak boʻlmasa, yozing."
+    row.score_breakdown = {
+        **(row.score_breakdown or {}),
+        "opener": draft,
+        "opener_meta": {"source": "draft", "segment": "A", "lang": "uz"},
+    }
+    await world.session.commit()
+    await crm_push.opener_first(SessionLocal, drafted.id, now=NOW)
+    assert (await world.candidate(drafted)).score_breakdown["opener"] == draft
+    async with SessionLocal() as s:
+        await owner.pause(s, by="owner:1", reason=None, now=NOW)
+        await s.commit()
+    await crm_push.opener_first(SessionLocal, held.id, now=NOW)
+    assert "opener" not in ((await world.candidate(held)).score_breakdown or {})
+
+
 async def test_crm_push_job_stops_on_the_cap_window_and_breaker(world, monkeypatch):
     await world.lead(61)
     await world.lead(62)
@@ -1860,6 +2013,32 @@ async def test_push_test_tool_new_external_id_each_run(world, monkeypatch):
         "test.example.uz",
     )
     assert first.exit_code() == 0
+
+
+async def test_a_purged_push_test_company_frees_the_synthetic_keys(world, monkeypatch):
+    """``tools/purge`` keeps a purged root's STIR and domain and renames it:
+    the next push-test still mints (the purged holder gives them up), unless
+    the purge's reason wrote legal rows for the test phone (then it refuses,
+    as for any suppressed phone)."""
+    monkeypatch.setattr(settings, "test_phone", "+998900000099")
+    first = await push_test.run(now=NOW, erp=world.erp)
+    assert first.status == "sent", first
+    assert first.company_id is not None
+    plan = await purge.plan_company(world.session, first.company_id, reason="owner")
+    await purge.execute(world.session, plan, requested_by="owner:1", now=NOW)
+    purged = await world.session.get(Company, first.company_id, populate_existing=True)
+    assert purged is not None and (purged.state, purged.stir) == ("purged", "300000099")
+    later = NOW + timedelta(hours=25)
+    await fresh_at(world, later)
+    second = await push_test.run(now=later, erp=world.erp)
+    assert second.status == "sent", second
+    purged = await world.session.get(Company, first.company_id, populate_existing=True)
+    assert purged is not None and (purged.stir, purged.website_domain) == (None, None)
+    plan = await purge.plan_company(world.session, second.company_id)
+    await purge.execute(world.session, plan, requested_by="owner:1", now=later)
+    third = await push_test.run(now=later + timedelta(hours=25), erp=world.erp)
+    assert third.status == "refused"
+    assert third.reason is not None and third.reason.startswith("TEST_PHONE bostirilgan")
 
 
 async def test_push_test_refuses_a_suppressed_phone_before_minting(world, monkeypatch):

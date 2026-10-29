@@ -42,7 +42,11 @@ NOW = datetime(2026, 10, 24, 12, 0, tzinfo=TZ)
 NIGHT = datetime(2026, 10, 24, 23, 30, tzinfo=TZ)
 GB = 1000**3
 
-# 06 §4.2, copied from the spec table (incl. erp_redirect, T-07 verification).
+# 06 §4.2, copied from the spec table (incl. erp_redirect, T-07 verification),
+# plus push_rejected: 05 §B.1's «owner alert» for a push 4xx other than 404,
+# which crm_push said through costs.tell_once under a key no row held, so an
+# undelivered tell was never said again (T-35 review; the 06 §4.2 row is a
+# spec note).
 SPEC_KEYS = (
     "db_down",
     "disk_low",
@@ -64,6 +68,7 @@ SPEC_KEYS = (
     "spend_high",
     "no_signals_24h",
     "push_failing",
+    "push_rejected",
     "push_unconfirmed",
     "feed_contract",
     "suppression_shrunk",
@@ -128,7 +133,12 @@ def test_the_critical_keys_and_the_ones_told_first_elsewhere():
     assert health.CRITICAL_KEYS == SPEC_CRITICAL
     # Not flood_breaker: the reader never reports its own problem (06 §4.3),
     # so nothing but the sweep can say it first.
-    assert {"cost_cap", "push_404", "erp_redirect"} == health.TOLD_FIRST_ELSEWHERE
+    assert {
+        "cost_cap",
+        "push_404",
+        "erp_redirect",
+        "push_rejected",
+    } == health.TOLD_FIRST_ELSEWHERE
     assert {"cost_cap", "spend_high"} == health.DAILY_KEYS
     assert set(health.PROBLEM_KEYS) >= health.REPORTED_KEYS
 
@@ -324,6 +334,10 @@ TRIGGERS: dict[str, tuple[Callable[[Status], None], str]] = {
         "24 soatda bitta ham Telegram signal yoʻq",
     ),
     "push_failing": (_set(push_failing_streak=3), "(3 ta push muvaffaqiyatsiz)"),
+    "push_rejected": (
+        _reported("push_rejected", status=407),
+        "ERP pushni rad etdi (HTTP 407)",
+    ),
     "push_unconfirmed": (_reported("push_unconfirmed", n=4), "4 ta push 48 soatdan"),
     "feed_contract": (
         _reported("feed_contract", code="runaway"),
@@ -1767,13 +1781,26 @@ async def test_the_switch_is_the_one_costs_ask_reads(session):
 # --- the fence: PROBLEM_KEYS is the one list ---------------------------------------
 
 RAISERS = {"raise_problem", "clear_problem"}
+# The alert ledger's tellers (costs): the key a job says first under
+# ``alert:<key>`` or notes ``undelivered:<key>`` for — the argument index.
+TELLERS = {
+    "tell_once": 0,
+    "_say_once": 0,
+    "_note_undelivered": 0,
+    "claim_alert": 1,
+    "mark_undelivered": 1,
+    "note_undelivered": 1,
+}
 
 
 def raised_keys(tree: ast.Module) -> set[str]:
     """Problem keys a module raises: the literal key of raise_problem /
-    clear_problem, a module constant named ``*_PROBLEM`` or ``*_PROBLEM_KEY``
-    (and costs' ``*_KEY`` alert constants), and a ``"problem": "<key>"``
-    entry of a dict literal (a heartbeat detail naming its problem)."""
+    clear_problem, the key a teller says or notes (``TELLERS``: a key told
+    first through ``costs.tell_once`` is a problem key too — its undelivered
+    note is read only for a row of 06 §4.2), a module constant named
+    ``*_PROBLEM``, ``*_PROBLEM_KEY`` or ``*_ALERT_KEY`` (and costs' ``*_KEY``
+    alert constants), and a ``"problem": "<key>"`` entry of a dict literal (a
+    heartbeat detail naming its problem)."""
     consts: dict[str, str] = {}
     for node in tree.body:
         if isinstance(node, ast.Assign | ast.AnnAssign):
@@ -1785,7 +1812,7 @@ def raised_keys(tree: ast.Module) -> set[str]:
                         consts[target.id] = value.value
     found: set[str] = set()
     for name, value in consts.items():
-        if name.endswith(("_PROBLEM", "_PROBLEM_KEY")) or name in {
+        if name.endswith(("_PROBLEM", "_PROBLEM_KEY", "_ALERT_KEY")) or name in {
             "COST_CAP_KEY",
             "SPEND_HIGH_KEY",
         }:
@@ -1807,6 +1834,13 @@ def raised_keys(tree: ast.Module) -> set[str]:
             args = [*node.args[1:2], *(k.value for k in node.keywords if k.arg == "key")]
             if name in RAISERS and args and (key := literal(args[0])) is not None:
                 found.add(key)
+            if name in TELLERS:
+                told = [
+                    *node.args[TELLERS[name] : TELLERS[name] + 1],
+                    *(k.value for k in node.keywords if k.arg == "key"),
+                ]
+                if told and (key := literal(told[0])) is not None:
+                    found.add(key)
         if isinstance(node, ast.Dict):
             for k, v in zip(node.keys, node.values, strict=True):
                 if (
@@ -1839,21 +1873,98 @@ def test_every_key_raised_in_the_package_is_a_row_of_06():
     # The scan sees today's raisers: the Fetcher's breaker and the spend alerts.
     assert "collector_blocked" in raised["services/http.py"]
     assert {"cost_cap", "spend_high"} <= raised["services/costs.py"]
+    # crm_push's told-first 4xx alert is one of the table's keys.
+    assert "push_rejected" in raised["services/crm_push.py"]
 
 
 def test_the_raised_key_scan_catches_each_shape():
     source = (
         "FEED_PROBLEM = 'feed_kaput'\n"
+        "PUSH_ALERT_KEY = 'push_kaput'\n"
+        "TOLD = 'told_kaput'\n"
         "async def f(s, now):\n"
         "    await health.raise_problem(s, 'pii_leakk', now=now, by='x')\n"
         "    await clear_problem(s, FEED_PROBLEM)\n"
         "    detail = {'problem': 'blocked_hosts'}\n"
         "    detail['problem'] = 'not_a_key'\n"
+        "    await costs.tell_once(TOLD, 'matn', now=now)\n"
+        "    await costs.claim_alert(s, 'claimed_kaput', now)\n"
+        "    costs.mark_undelivered(s, 'noted_kaput', now)\n"
+        "    await costs.tell_once(key, 'matn', now=now)\n"
     )
     assert raised_keys(ast.parse(source)) == {
         "feed_kaput",
+        "push_kaput",
+        "told_kaput",
         "pii_leakk",
         "blocked_hosts",
         "not_a_key",
+        "claimed_kaput",
+        "noted_kaput",
     }
     assert (PACKAGE / "services" / "health.py").is_file()
+
+
+# --- the drill proves the backups (seam review wave 4) -----------------------------
+
+
+@pytest.mark.parametrize(
+    ("drill", "oldest", "said"),
+    [
+        # A drill that proved a backup two days ago: nothing.
+        (_beat("restore_drill", timedelta(days=2), ok=True), None, None),
+        # Sixty days of ok beats with no proof: the skips hid it.
+        (
+            _beat(
+                "restore_drill",
+                timedelta(days=1),
+                ok=True,
+                skipped="disk_low",
+                proved_at=(NOW - timedelta(days=60)).isoformat(),
+            ),
+            None,
+            "60 kundan beri oʻtmadi",
+        ),
+        # A pre-proved_at beat sixty days old (ok, not skipped): its own time.
+        (_beat("restore_drill", timedelta(days=60), ok=True), None, "60 kundan beri"),
+        # No key on the server: said, whatever the beat's «ok».
+        (
+            _beat("restore_drill", timedelta(hours=1), ok=True, skipped="no_key"),
+            None,
+            "serverda kalit fayli yoʻq",
+        ),
+        # Never a drill, a backup on disk for ten days: the first Sunday went by.
+        (None, NOW - timedelta(days=10), "10 kundan beri oʻtmadi"),
+        # Never a drill, the first backup three days old: the grace.
+        (None, NOW - timedelta(days=3), None),
+    ],
+)
+def test_backups_unproved_for_over_a_week_are_said(drill, oldest, said):
+    status = healthy_status()
+    status.restore_drill = drill
+    status.backup = replace(status.backup, oldest_at=oldest)
+    found = [p for p in health.problems(status) if p.key == "restore_drill_failed"]
+    if said is None:
+        assert found == []
+    else:
+        [problem] = found
+        assert said in problem.text and problem.severity == "critical"
+        assert uz_problems(problem.text, rendered=True) == set()
+
+
+def test_an_unproved_drill_is_not_said_when_the_drill_is_off(monkeypatch):
+    monkeypatch.setattr(settings, "restore_drill_enabled", False)
+    status = healthy_status()
+    status.restore_drill = None
+    status.backup = replace(status.backup, oldest_at=NOW - timedelta(days=30))
+    assert [p.key for p in health.problems(status)] == []
+
+
+def test_a_size_under_a_megabyte_is_not_zero():
+    """The backup caption said «0 MB» for a small file (seam review wave 4)."""
+    assert [health.size_label(n) for n in (None, 900, 5 * 1000**2, 3 * 1000**3)] == [
+        "?",
+        "<1 MB",
+        "5 MB",
+        "3.0 GB",
+    ]

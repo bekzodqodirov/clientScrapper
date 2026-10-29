@@ -59,7 +59,22 @@ from tests.fixtures import candidate_views, uz_corpus
 
 OWNER_TEXT_MODULES = (
     "bot/texts.py",
+    # T-20: the button labels, the list pages and every handler (their
+    # words are bot/texts', a literal left in one is caught here).
+    "bot/keyboards.py",
+    "bot/pages.py",
+    "bot/deliver.py",
+    "bot/main.py",
+    "bot/handlers/__init__.py",
+    "bot/handlers/common.py",
+    "bot/handlers/admin.py",
+    "bot/handlers/chats.py",
+    "bot/handlers/manager.py",
+    "bot/handlers/review.py",
+    "bot/handlers/sources.py",
+    "bot/handlers/status.py",
     "services/cards.py",
+    "services/owner.py",
     "services/crm_push.py",
     "services/digest.py",
     "services/health.py",
@@ -80,6 +95,12 @@ OWNER_TEXT_MODULES = (
     # notes (lead_reviews.note, shown in /lidlar).
     "services/gates.py",
     "services/push_gate.py",
+    # 06 §5.4 (T-31): the purge plan and result the bot sends and make purge
+    # prints.
+    "services/purge.py",
+    "tools/purge.py",
+    # T-36: the MVP report's lines (its words are services/cards').
+    "tools/mvp_report.py",
 )
 # Modules whose raise messages reach the owner (see the docstring).
 OWNER_RAISE_MODULES = frozenset({"config.py"})
@@ -326,8 +347,95 @@ def test_the_lead_note_and_push_texts_render_clean():
 
 RENDERERS = (
     ("services/cards.py", "render_review", "T-20"),
+    ("services/cards.py", "render_mvp", "T-36"),
     ("services/digest.py", "render_digest", "T-35"),
 )
+
+
+def _numbers_rendered() -> list[str]:
+    """T-36: /holat's numbers block and the MVP report, full and empty,
+    with an unclassed label that carries its own apostrophe (a «…» quote)."""
+    from datetime import date
+    from decimal import Decimal
+
+    from clientscrapper.services import cards, metrics
+
+    since = NOW_RENDER.replace(day=1)
+    full = metrics.Results(
+        since=since,
+        until=NOW_RENDER,
+        pushed=33,
+        hot=31,
+        importer=metrics.Ratio(2, 4),
+        precision=metrics.Ratio(1, 3),
+        contacted=metrics.Ratio(4, 7),
+        quoted=metrics.Ratio(2, 5),
+        first_shipment=metrics.Ratio(1, 33),
+        unclassed=(metrics.Unclassed("Mijoz o'ylab koʻradi", 2, NOW_RENDER),),
+    )
+    empty = metrics.Results(since=since, until=NOW_RENDER)
+    spend = (metrics.SpendDay(date(2026, 10, 3), Decimal("5.2"), Decimal("7.2")),)
+    reports = [
+        metrics.MvpReport(
+            start=date(2026, 10, 1),
+            now=NOW_RENDER,
+            week2_start=since,
+            week2_end=NOW_RENDER,
+            week2_hot=hot,
+            results=results,
+            spend=days,
+        )
+        for hot, results, days in ((22, full, spend), (0, empty, ()))
+    ]
+    out = ["\n".join(cards.render_results(r)) for r in (full, empty)]
+    return out + [cards.render_mvp(r) for r in reports]
+
+
+def _cards_rendered() -> list[str]:
+    """services/cards' real renderers (T-20) over the push tests' views: the
+    owner card, its handoff variant, a shared phone, a Russian quote (exempt
+    inside «…»), every segment, and the manager card with and without an
+    opener."""
+    from clientscrapper.services import cards, gates
+
+    company = gates.GateCompany(
+        id=candidate_views.view().company_id,
+        display_name="Namuna Tekstil Savdo",
+        legal_form="MChJ",
+    )
+    gate = gates.run_gates(company, (), (), None, None, gates.Recent(), NOW_RENDER)
+    russian = replace(
+        candidate_views.view(),
+        signals=(
+            candidate_views.sig(
+                quote="нужно 5 кубов ткани",
+                excerpt="Здравствуйте, нужно 5 кубов ткани из Иу, опт.",
+            ),
+        ),
+    )
+    phoneless = replace(candidate_views.view(), phone=None)
+    reviews = [
+        cards.ReviewView(
+            1, v, gate, segment=segment, phone_kind="mobile", shared_phone=True
+        )
+        for v in (candidate_views.view(), russian)
+        for segment in (*cards.SEGMENT_UZ, None)
+    ]
+    reviews.append(
+        cards.ReviewView(2, phoneless, gate, handoff=True, handoff_username="u_x")
+    )
+    out = [cards.render_review(r).text for r in reviews]
+    out += [
+        cards.render_manager(cards.ManagerView(3, v, "u_x", segment="B")).text
+        for v in (
+            phoneless,
+            replace(phoneless, opener="Assalomu alaykum, mato savdongizni koʻrdim."),
+        )
+    ]
+    return out
+
+
+NOW_RENDER = datetime(2026, 10, 27, 11, 0, tzinfo=UTC)
 
 
 @pytest.mark.parametrize(("module", "function", "task"), RENDERERS)
@@ -335,9 +443,41 @@ def test_rendered_cards_notes_and_digest_follow_the_rules(module, function, task
     path = PACKAGE / module
     if not path.exists():
         pytest.skip(f"{module}::{function} arrives with {task}")
+    if function == "render_review":
+        rendered = _cards_rendered()
+        assert len(rendered) == 2 * (7 + 1) + 3
+        assert [t for t in rendered if problems(t, rendered=True)] == []
+        return
+    if function == "render_digest":
+        from clientscrapper.services import digest
+        from tests.fixtures import digest_views
+
+        rendered = [digest.render_digest(make()) for make in digest_views.VIEWS]
+        assert len(rendered) == 3
+        assert [t for t in rendered if problems(t, rendered=True)] == []
+        return
+    if function == "render_mvp":
+        rendered = _numbers_rendered()
+        assert len(rendered) == 4
+        assert [t for t in rendered if problems(t, rendered=True)] == []
+        return
     # The renderers take views a later task defines; that task feeds its
     # golden fixtures through problems(rendered=True) here.
     pytest.fail(f"{module} exists: add its fixture views to this test ({task})")
+
+
+def test_every_button_label_fits_and_reads_right():
+    """bot/keyboards.KEYBOARD_SAMPLES (T-20): every label Uzbek Latin within
+    40 characters — the longest titles the builders cut included."""
+    from clientscrapper.bot import keyboards
+
+    labels = [
+        button.text
+        for build, kwargs in keyboards.KEYBOARD_SAMPLES
+        for row in build(**kwargs).inline_keyboard
+        for button in row
+    ]
+    assert labels and [b for b in labels if button_problems(b)] == []
 
 
 # --- text keys -------------------------------------------------------------------------

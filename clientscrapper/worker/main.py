@@ -31,11 +31,22 @@ outcomes/quarter/year walks), each ``run_collector(ErpSync, variant=…)``;
 ``classify`` (T-15, ``services/classify.classify_job``, woken by
 ``cs_interaction``); the batch lane (T-16, ``services/model_jobs``):
 ``model_batch_submit`` at 23:30 and ``model_batch_collect`` every 30 minutes
-00:30–08:00; ``score`` (T-18, ``services/candidates.score_job``, every 15
-minutes and at once on ``cs_interaction``); ``crm_push`` (T-28,
+00:30–08:00 — the ``company_verdict`` kind they carry, and the night's
+selection the submit runs first, are T-30's ``services/verdict``, which also
+fills ``verdict`` (every 10 minutes: the instant verdicts, then the openers;
+never the batch lane's fallbacks, which only the 23:30 run takes);
+``score`` (T-18, ``services/candidates.score_job``, every 15 minutes and at
+once on ``cs_interaction``); ``review_cards`` (T-21,
+``services/reviews.review_cards_job``, every 2 minutes: the expiry sweep at
+any hour, the cards inside ``REVIEW_HOURS``, through the owner bot's
+``BotCards`` that ``connect_owner_bot`` wires); ``crm_push`` (T-28,
 ``services/crm_push.crm_push_job``, every minute, sending only inside the
 push window) and ``reconcile`` (T-28, ``crm_push.reconcile_job``, every 10
-minutes: a crashed claim, the ``unknown`` outcomes walk, rule 5's re-push).
+minutes: a crashed claim, the ``unknown`` outcomes walk, rule 5's re-push);
+``source_precision`` (T-36, ``erp_feeds.source_precision_job``, Sunday 04:00:
+the 30-day precision, ``auto_push`` both ways, the low-precision pause);
+``retention`` (T-31, ``services/retention.retention_job``, 04:15: 02 §4's
+steps, each in its own transaction with its own ``purge_log`` row).
 
 **The event-driven path** (04 §0, 01 N-06). A slot with ``wakes_on`` also
 runs when its ``NOTIFY`` channel speaks: :func:`listen_for_wakes` holds a
@@ -63,10 +74,11 @@ APScheduler's own numbering). A collector's primary cadence is its
 seeded value and a test keeps the two equal.
 
 Alerts reach the owner through one seam, :func:`set_owner_notifier`: a
-callable ``(text) -> delivered`` with no recipient argument. The owner bot
-wires it (T-20, ``bot/deliver.to_person`` with ``OWNER_TELEGRAM_ID``); until
-then nothing is delivered, nothing is marked said, and every problem stays
-due. Nothing in this process sends a message to anyone else, ever.
+callable ``(text) -> delivered`` with no recipient argument, wired by
+``connect_owner_bot`` (``bot/deliver.to_person`` with ``OWNER_TELEGRAM_ID``)
+when a bot token and an owner are configured; without them nothing is
+delivered, nothing is marked said, and every problem stays due. Nothing in
+this process sends a message to anyone else, ever.
 """
 
 from __future__ import annotations
@@ -86,7 +98,13 @@ from typing import Any, Final
 
 import httpx
 import sqlalchemy as sa
-from apscheduler.events import EVENT_JOB_ERROR, EVENT_JOB_EXECUTED, JobExecutionEvent
+from apscheduler.events import (
+    EVENT_JOB_ERROR,
+    EVENT_JOB_EXECUTED,
+    EVENT_JOB_MAX_INSTANCES,
+    JobExecutionEvent,
+    JobSubmissionEvent,
+)
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.base import BaseTrigger
 from apscheduler.triggers.combining import OrTrigger
@@ -109,10 +127,14 @@ from clientscrapper.services import (
     costs,
     crm_push,
     crontab,
+    digest,
     erp_feeds,
     health,
     model_jobs,
     restore_drill,
+    retention,
+    reviews,
+    verdict,
 )
 from clientscrapper.services import http as http_layer
 from clientscrapper.services.lifecycle import (
@@ -159,6 +181,35 @@ def set_backup_sender(send: Callable[[Path, str], Awaitable[bool]] | None) -> No
 
 async def notify(text: str) -> bool:
     return await _seams.notify(text)
+
+
+def connect_owner_bot() -> Any | None:
+    """The owner seams over the owner bot (T-20): with a token and an owner,
+    the notifier and the backup sender are ``bot/deliver``'s — whose
+    ``to_person`` refuses every chat but the owner's; without them nothing
+    is delivered and nothing is marked said. The bot client, or None.
+    aiogram is imported here, not at the top: the scheduler's tests import
+    this module and need no Telegram client."""
+    from clientscrapper.bot import deliver
+    from clientscrapper.bot.cards_out import BotCards
+
+    if not deliver.configured():
+        return None
+    bot = deliver.make_bot()
+    set_owner_notifier(deliver.owner_notifier(bot))
+    set_backup_sender(deliver.document_sender(bot))
+    # review_cards_job's cards (T-21): the owner's and the managers' only.
+    reviews.set_card_sender(BotCards(bot))
+    return bot
+
+
+async def disconnect_owner_bot(bot: Any | None) -> None:
+    set_owner_notifier(None)
+    set_backup_sender(None)
+    reviews.set_card_sender(None)
+    if bot is not None:
+        with contextlib.suppress(Exception):
+            await bot.session.close()
 
 
 # --- the table -------------------------------------------------------------------
@@ -311,9 +362,15 @@ def job_table() -> tuple[JobSlot, ...]:
             candidates.score_job,
             wakes_on=chats.INTERACTION_CHANNEL,
         ),
-        JobSlot("review_cards", ("every 2m",), "T-21", note="sends inside REVIEW_HOURS"),
+        JobSlot(
+            "review_cards",
+            ("every 2m",),
+            "T-21",
+            reviews.review_cards_job,
+            note="sends inside REVIEW_HOURS",
+        ),
         JobSlot("enrich", ("*/10 7-21 * * *",), "T-24", note="every 10 min 07:00–22:00"),
-        JobSlot("verdict", ("every 10m",), "T-30"),
+        JobSlot("verdict", ("every 10m",), "T-30", verdict.verdict_job),
         # --- 05: push, reconcile, precision ---------------------------------------
         JobSlot(
             "crm_push",
@@ -323,10 +380,17 @@ def job_table() -> tuple[JobSlot, ...]:
             note="sends inside PUSH_WINDOW",
         ),
         JobSlot("reconcile", ("every 10m",), "T-28", crm_push.reconcile_slot),
-        JobSlot("source_precision", ("0 4 * * 0",), "T-36"),
+        JobSlot("source_precision", ("0 4 * * 0",), "T-36", source_precision_job),
         # --- 06: digest, retention --------------------------------------------------
-        JobSlot("digest", (_at(settings.digest_time_parsed),), "T-35"),
-        JobSlot("retention", ("15 4 * * *",), "T-31"),
+        JobSlot(
+            "digest",
+            (_at(settings.digest_time_parsed),),
+            "T-35",
+            digest_job,
+            note="an undelivered one is tried again with a backoff while it is due",
+            pass_scheduler=True,
+        ),
+        JobSlot("retention", ("15 4 * * *",), "T-31", retention.retention_job),
     )
 
 
@@ -589,13 +653,17 @@ async def listen_for_wakes(
 # --- self-monitoring -----------------------------------------------------------------
 
 
-async def record_job_event(job_id: str, *, ok: bool, error: str | None) -> None:
+async def record_job_event(
+    job_id: str, *, ok: bool, error: str | None, every: int | None = None
+) -> None:
     """Upsert the ``job:<id>`` heartbeat for one finished scheduler run:
     ``{ok, error, failures}``, ``failures`` being how many runs in a row have
     raised (06 §4.2 job_failing; a success resets it). Its own session, and it
     never raises: a heartbeat that cannot be written is a log line, not a
     second failure on top of the job's own. The error is the exception's
-    class: a message may carry what a row said."""
+    class: a message may carry what a row said. ``every`` (seconds) rides on
+    a skipped run of a short-interval job (``on_job_skipped``): health judges
+    such a streak by the time it spans (``health.job_failing_streak``)."""
     component = health.JOB_PREFIX + job_id
     try:
         async with session_scope() as session:
@@ -608,11 +676,10 @@ async def record_job_event(job_id: str, *, ok: bool, error: str | None) -> None:
                 if isinstance(count, bool) or not isinstance(count, int):
                     count = 0
                 failures = count + 1
-            await health.beat(
-                session,
-                component,
-                detail={"ok": ok, "error": error, "failures": failures},
-            )
+            detail: dict[str, Any] = {"ok": ok, "error": error, "failures": failures}
+            if every is not None and not ok:
+                detail["every"] = every
+            await health.beat(session, component, detail=detail)
     except Exception as exc:
         log.error(
             "job outcome not recorded",
@@ -620,16 +687,94 @@ async def record_job_event(job_id: str, *, ok: bool, error: str | None) -> None:
         )
 
 
+def job_period(
+    job_id: str, *, now: datetime | None = None, slots: tuple[JobSlot, ...] | None = None
+) -> int | None:
+    """Seconds between the job's next two fire times (its slot's triggers),
+    or None for a job the table does not schedule: what a raise's streak is
+    judged against (``health.job_failing_streak`` — a weekly job is said on
+    its first raise, not its third Sunday)."""
+    now = now or datetime.now(settings.tz)
+    for slot in slots if slots is not None else job_table():
+        if slot.id != job_id or slot.job is None:
+            continue
+        try:
+            trigger = build_trigger(slot.triggers, settings.tz)
+        except crontab.CrontabError:
+            return None
+        first = trigger.get_next_fire_time(None, now)
+        if first is None:
+            return None
+        second = trigger.get_next_fire_time(first, first + timedelta(seconds=1))
+        if second is None:
+            return None
+        return int((second - first).total_seconds())
+    return None
+
+
 def on_job_event(
     event: JobExecutionEvent, *, loop: asyncio.AbstractEventLoop
 ) -> asyncio.Future[None] | Any:
     """APScheduler listener (EVENT_JOB_EXECUTED | EVENT_JOB_ERROR). Listeners
     are plain callbacks: the upsert is handed to the loop; the future is for
-    tests."""
+    tests. A raise carries the job's period (``job_period``)."""
     exc = getattr(event, "exception", None)
     error = None if exc is None else type(exc).__name__
+    every = job_period(event.job_id) if exc is not None else None
     return asyncio.run_coroutine_threadsafe(
-        record_job_event(event.job_id, ok=exc is None, error=error), loop
+        record_job_event(event.job_id, ok=exc is None, error=error, every=every), loop
+    )
+
+
+# A skipped run counts for an in-process job on a short interval: a hung
+# review_cards (a row lock it waits on for ever) stops every card while
+# max_instances=1 refuses the later runs, and nothing else would say so
+# (seam review wave 4). A collector cadence may outlast its interval
+# legitimately (a long run) — its skip is no failure.
+SKIP_JUDGED_MAX: Final = timedelta(minutes=15)
+
+
+def skip_interval(job_id: str, slots: tuple[JobSlot, ...] | None = None) -> int | None:
+    """The interval in seconds of an in-process ``every <n>m|s`` job whose
+    skipped runs count (``SKIP_JUDGED_MAX`` at most, no collector), else
+    None."""
+    for slot in slots if slots is not None else job_table():
+        if slot.id != job_id:
+            continue
+        if slot.job is None or slot.source_key is not None or len(slot.triggers) != 1:
+            return None
+        spec = slot.triggers[0]
+        if not spec.startswith("every "):
+            return None
+        amount, unit = spec[len("every ") : -1], spec[-1]
+        if not amount.isdigit() or unit not in {"m", "s"}:
+            return None
+        seconds = int(amount) * (60 if unit == "m" else 1)
+        return seconds if seconds <= SKIP_JUDGED_MAX.total_seconds() else None
+    return None
+
+
+def on_job_skipped(
+    event: JobSubmissionEvent, *, loop: asyncio.AbstractEventLoop
+) -> asyncio.Future[None] | Any | None:
+    """APScheduler listener (EVENT_JOB_MAX_INSTANCES): a run skipped because
+    the previous one of the same job has not ended (``health.STILL_RUNNING``).
+    The health sweep's skip is a failed run: a hung sweep raises nothing and
+    says nothing, and the bot's watchdog reads its streak
+    (``health.sweep_failing``). An in-process short-interval job's skip
+    (``skip_interval``) is counted with its interval, and health judges the
+    streak by the time it spans (``health.job_failing_streak``: three skips
+    and at least 15 minutes). A collector cadence may outlast its interval
+    legitimately — its skip is no failure."""
+    if event.job_id == health.HEALTH_JOB:
+        every = None
+    else:
+        every = skip_interval(event.job_id)
+        if every is None:
+            return None
+    return asyncio.run_coroutine_threadsafe(
+        record_job_event(event.job_id, ok=False, error=health.STILL_RUNNING, every=every),
+        loop,
     )
 
 
@@ -650,6 +795,10 @@ async def prune_job_heartbeats(registered: list[str]) -> int:
 @dataclass(slots=True)
 class _Deadman:
     last: float | None = None
+    # The last ping's answer, carried in the next «worker» beat (``seen``) so
+    # the digest can say the outside watcher is not taking pings — a wrong
+    # URL is otherwise silent until the day it should have alarmed.
+    seen: dict[str, Any] | None = None
 
 
 _deadman = _Deadman()
@@ -666,7 +815,13 @@ async def deadman_ping(*, transport: httpx.AsyncBaseTransport | None = None) -> 
         return False
     _deadman.last = now
     status = await http_layer.ping(url, transport=transport)
-    return status is not None and 200 <= status < 300
+    ok = status is not None and 200 <= status < 300
+    _deadman.seen = {
+        "at": datetime.now(settings.tz).isoformat(),
+        "ok": ok,
+        "status": status,
+    }
+    return ok
 
 
 async def heartbeat_job(
@@ -678,8 +833,11 @@ async def heartbeat_job(
     only after the beat is durable, so a dead database stops the ping too and
     the outside watcher notices."""
     jobs = len(scheduler.get_jobs()) if scheduler is not None else 0
+    detail: dict[str, Any] = {"jobs": jobs}
+    if _deadman.seen is not None:
+        detail["deadman"] = dict(_deadman.seen)
     async with session_scope() as session:
-        await health.beat(session, "worker", detail={"jobs": jobs})
+        await health.beat(session, "worker", detail=detail)
     await deadman_ping(transport=transport)
 
 
@@ -735,9 +893,13 @@ async def health_job(
                 await _adopt_offline()
                 found = health.problems(status)
                 _log_problems(found, now)
-                return await health.tell(
+                report = await health.tell(
                     session, found, speak, now=now, unjudged=health.unjudged(status)
                 )
+                # A week's auto_push flips the precision job could not say in
+                # QUIET_HOURS: the first sweep after them does (06 §4.3).
+                await _tell_flips(now, speak)
+                return report
     except Exception:
         # Leaving the scope commits; with the database gone that can fail
         # too. A failure with the database *up* is a real one and stays loud.
@@ -749,6 +911,96 @@ async def health_job(
     _log_problems(found, now)
     await health.tell_offline(found, speak, now=now, memo=_offline_alerted_at)
     return None
+
+
+# --- the digest (06 §1.8) --------------------------------------------------------------
+
+
+# A digest Telegram did not take (or the owner seam not wired yet) is tried
+# again this long after each attempt, the last step repeating, while it is
+# still due (``digest_due``): a blip at 09:00 must not cost the day's digest.
+DIGEST_RETRY: Final = (
+    timedelta(minutes=5),
+    timedelta(minutes=15),
+    timedelta(minutes=30),
+    timedelta(hours=1),
+)
+
+
+@dataclass(slots=True)
+class _DigestRetry:
+    day: str | None = None
+    tries: int = 0
+
+
+_digest_retry = _DigestRetry()
+
+
+def _retry_digest(scheduler: AsyncIOScheduler | None, now: datetime) -> datetime | None:
+    """Move the digest job's next run to the next backoff step (the cron's
+    own job: ``max_instances=1`` holds), or None when it is due no longer
+    then or there is no scheduler to ask."""
+    day = digest.day_ref(now)
+    if _digest_retry.day != day:
+        _digest_retry.day, _digest_retry.tries = day, 0
+    wait = DIGEST_RETRY[min(_digest_retry.tries, len(DIGEST_RETRY) - 1)]
+    _digest_retry.tries += 1
+    at = now + wait
+    if not digest_due(at) or not _run_now(scheduler, "digest", at):
+        log.warning("digest not delivered; due again at the next start-up")
+        return None
+    log.warning("digest not delivered; tried again", extra={"at": at.isoformat()})
+    return at
+
+
+async def digest_job(
+    scheduler: AsyncIOScheduler | None = None,
+    *,
+    now: datetime | None = None,
+    notify: health.OwnerNotify | None = None,
+) -> digest.SendOutcome:
+    """The owner's morning digest at DIGEST_TIME, once per Tashkent day
+    (``reminder_log(kind='digest')``), through the owner seam. One that was
+    not delivered — or whose run raised — is tried again (``DIGEST_RETRY``)
+    while it is still due."""
+    now = now or datetime.now(settings.tz)
+    speak = notify or _seams.notify
+    if speak is _not_wired:
+        # No owner bot in this process (no token or no owner): nothing can
+        # be delivered before a start-up wires one, so the digest is neither
+        # read nor tried again all day (seam review wave 4) — the next
+        # start-up's catch-up sends it while it is due.
+        log.warning("digest not sent: the owner bot is not wired")
+        return "undelivered"
+    outcome: digest.SendOutcome = "undelivered"
+    try:
+        outcome = await digest.send(speak, now=now)
+    finally:
+        if outcome == "undelivered":
+            _retry_digest(scheduler, now)
+    return outcome
+
+
+def digest_due(now: datetime) -> bool:
+    """Past today's DIGEST_TIME and still inside REVIEW_HOURS (DIGEST_TIME's
+    own window, 06 §1.6): a digest the worker missed — down at 09:00, or the
+    owner's Telegram unreachable then — is still worth sending."""
+    local = now.astimezone(settings.tz)
+    start, end = settings.review_hours_parsed
+    return settings.digest_time_parsed <= local.time() < end and local.time() >= start
+
+
+async def _catch_up_digest(now: datetime, scheduler: AsyncIOScheduler | None) -> None:
+    """Today's digest when it is due and not sent yet (``digest_due``)."""
+    if not digest_due(now):
+        return
+    try:
+        async with session_scope() as session:
+            sent = await digest.sent_today(session, now)
+        if not sent and _run_now(scheduler, "digest", now):
+            log.info("catch-up: today's digest was not sent; sending it")
+    except Exception as exc:
+        log.error("catch-up of the digest failed", extra={"error": type(exc).__name__})
 
 
 # --- backups -------------------------------------------------------------------------
@@ -836,10 +1088,38 @@ async def backup_job(*, now: datetime | None = None) -> backup.BackupResult:
     return result
 
 
-async def restore_drill_job() -> restore_drill.DrillResult | None:
-    """Weekly: restore the newest backup into a scratch database (06 §4.4)."""
+async def source_precision_job(*, now: datetime | None = None) -> dict[str, Any]:
+    """Weekly, Sunday 04:00 (05 §B.2): every source's 30-day precision, its
+    ``auto_push`` flipped both ways (never on while the owner forbids it)
+    and a source below 20 % over 30 pushes paused for a week (06 §4.2,
+    ``source_low_precision``: the health sweep tells it). The week's flips are
+    told to the owner at once outside QUIET_HOURS, else by the first health
+    sweep after them (``erp_feeds.tell_flips``); the digest names both."""
+    now = now or datetime.now(settings.tz)
+    run = await erp_feeds.source_precision_job(session_scope, now)
+    await _tell_flips(now, _seams.notify)
+    return run.as_dict()
+
+
+async def _tell_flips(now: datetime, notify: health.OwnerNotify) -> None:
+    """The precision job's flips to the owner (``erp_feeds.tell_flips``):
+    never a failure of the job that asks."""
+    try:
+        await erp_feeds.tell_flips(session_scope, notify, now=now)
+    except Exception as exc:
+        log.error("auto_push flips not told", extra={"error": type(exc).__name__})
+
+
+async def restore_drill_job(
+    *, now: datetime | None = None
+) -> restore_drill.DrillResult | None:
+    """Weekly: restore the newest backup into a scratch database (06 §4.4).
+    Its beat carries ``proved_at`` — the last run that restored and matched
+    — across the skips, so health can say backups went unproved
+    (``health.drill_stale``) whatever the last run's word."""
     if not settings.restore_drill_enabled:
         return None
+    now = now or datetime.now(settings.tz)
     newest = await backup.newest_backup()
     expected: dict[str, int] | None = None
     async with session_scope() as session:
@@ -849,12 +1129,22 @@ async def restore_drill_job() -> restore_drill.DrillResult | None:
         if newest is not None and detail.get("path") == str(newest):
             counts = detail.get("counts")
             expected = dict(counts) if isinstance(counts, dict) else None
+        drilled = rows.get(health.RESTORE_DRILL_COMPONENT)
+        proved = health.drill_proved_at(
+            health.component_of(health.RESTORE_DRILL_COMPONENT, drilled, now=now)
+            if drilled is not None
+            else None
+        )
     result = await restore_drill.run(expected=expected)
     if result.skipped in ("no_backup", "busy"):
         # Nothing to prove yet / another process is proving it and beats.
         return result
+    beat = result.detail()
+    if result.ok and result.skipped is None:
+        proved = now
+    beat["proved_at"] = proved.isoformat() if proved is not None else None
     async with session_scope() as session:
-        await health.beat(session, health.RESTORE_DRILL_COMPONENT, detail=result.detail())
+        await health.beat(session, health.RESTORE_DRILL_COMPONENT, detail=beat, now=now)
     log.info(
         "restore drill finished",
         extra={"ok": result.ok, "skipped": result.skipped, "seconds": result.seconds},
@@ -906,10 +1196,12 @@ async def catch_up(
     and one spanning 03:00 that night's outcomes walks (the next delta does
     not make them). Through ``scheduler`` the job is moved to now rather than
     called here. Every branch is guarded: a startup path that can raise is a
-    crash loop under ``restart: unless-stopped``. (The digest's catch-up is
-    T-35's.)"""
+    crash loop under ``restart: unless-stopped``. Today's digest too, when
+    DIGEST_TIME went by unsent (``digest_due``)."""
     now = now or datetime.now(settings.tz)
     await _catch_up_outcomes(now, scheduler)
+    await _catch_up_digest(now, scheduler)
+    await _catch_up_drill(now, scheduler)
     if not settings.backup_age_recipient:
         return
     try:
@@ -924,6 +1216,28 @@ async def catch_up(
                 await backup_job(now=now)
         except Exception as exc:
             log.error("catch-up backup failed", extra={"error": type(exc).__name__})
+
+
+async def _catch_up_drill(now: datetime, scheduler: AsyncIOScheduler | None) -> None:
+    """The weekly restore drill when backups have gone unproved longer than
+    ``health.DRILL_STALE`` (a restart across its Sunday 05:00 is past the
+    misfire grace): handed to the scheduler, never run here — it restores a
+    whole database."""
+    if scheduler is None or not settings.restore_drill_enabled:
+        return
+    if not settings.backup_age_recipient:
+        return
+    try:
+        async with session_scope() as session:
+            status = await health.gather(session, now=now)
+        if health.drill_stale(status) is not None and _run_now(
+            scheduler, "restore_drill", now
+        ):
+            log.info("catch-up: backups unproved for over a week; running the drill")
+    except Exception as exc:
+        log.error(
+            "catch-up of the restore drill failed", extra={"error": type(exc).__name__}
+        )
 
 
 async def _catch_up_outcomes(now: datetime, scheduler: AsyncIOScheduler | None) -> None:
@@ -1067,11 +1381,18 @@ async def _wait(stop: asyncio.Event, delay: timedelta) -> bool:
     return True
 
 
-async def wait_for_leadership(leader: Leadership, stop: asyncio.Event) -> bool:
+async def wait_for_leadership(
+    leader: Leadership, stop: asyncio.Event, *, blind_runs: bool = True
+) -> bool:
     """Return True once this process may schedule, False if stopped first.
-    A database that cannot be asked is no other leader (the lock lives in
-    it): the worker then runs, so health_job can say «Baza javob
-    bermayapti», and :func:`keep_leadership` takes the lock later."""
+    At process start (``blind_runs``) a database that cannot be asked is no
+    other leader (the lock lives in it): the worker then runs, so health_job
+    can say «Baza javob bermayapti», and :func:`keep_leadership` takes the
+    lock later. A worker that paused because another one took the lock
+    (``blind_runs=False``) asks again instead: one failed connect while it
+    stands by is no proof the other is gone — resumed beside the live leader,
+    both would schedule, and the resume fires every job that came due within
+    the hour's misfire grace (seam review wave 4)."""
     told = False
     while not stop.is_set():
         try:
@@ -1080,6 +1401,14 @@ async def wait_for_leadership(leader: Leadership, stop: asyncio.Event) -> bool:
                     log.info("scheduler lock taken: this worker now schedules")
                 return True
         except Exception as exc:
+            if not blind_runs:
+                log.warning(
+                    "scheduler lock not asked; staying paused",
+                    extra={"error": type(exc).__name__},
+                )
+                if await _wait(stop, LEADER_RETRY):
+                    return False
+                continue
             log.warning(
                 "scheduler lock not asked; running without it for now",
                 extra={"error": type(exc).__name__},
@@ -1098,7 +1427,11 @@ async def keep_leadership(
 ) -> None:
     """Until ``stop``: every ``LEADER_CHECK`` make sure the lock is still
     this process's. Lost to another process (this one's connection went and
-    the other took it), the scheduler pauses until it is ours again."""
+    the other took it), the scheduler pauses until it is ours again — and
+    only an answered ``acquire`` gives it back (``blind_runs=False``). Taken
+    back, the leader does what a new leader does (:func:`take_over`): the
+    other worker may have died with its runs ``running`` and its Sunday jobs
+    unmade."""
     while not await _wait(stop, LEADER_CHECK):
         try:
             if await leader.acquire():
@@ -1108,10 +1441,33 @@ async def keep_leadership(
             continue
         log.error("scheduler lock held by another worker: pausing this one")
         scheduler.pause()
-        if not await wait_for_leadership(leader, stop):
+        if not await wait_for_leadership(leader, stop, blind_runs=False):
             return
+        await reclaim_dead_runs()
         scheduler.resume()
         log.info("scheduler resumed")
+        await take_over(scheduler)
+
+
+async def reclaim_dead_runs() -> None:
+    """:func:`reclaim_runs`, guarded: a startup or a resume never raises."""
+    try:
+        await reclaim_runs()
+    except Exception as exc:
+        log.warning("dead runs not reclaimed", extra={"error": type(exc).__name__})
+
+
+async def take_over(scheduler: AsyncIOScheduler) -> None:
+    """What a leader does once it schedules, after the dead leader's runs are
+    closed (:func:`reclaim_dead_runs`, before the scheduler runs or resumes):
+    the missed jobs handed to the scheduler (:func:`catch_up`). The first
+    start and a resume after a pause alike (seam review wave 4: a resumed
+    leader left a dead standby's ``running`` erp_sync row holding the
+    source's slot ~2 h 30 and its missed backup or digest unmade)."""
+    try:
+        await catch_up(scheduler=scheduler)
+    except Exception as exc:
+        log.error("catch-up failed", extra={"error": type(exc).__name__})
 
 
 # --- the process ---------------------------------------------------------------------
@@ -1139,10 +1495,12 @@ async def backup_now(*, now: datetime | None = None) -> int:
     good manual run clears ``backup_failed`` (the runbook's «verify: backup
     beat ok=true»). 0 when the file was written, else 1 (``make update``
     stops)."""
+    bot = connect_owner_bot()
     wire()
     try:
         result = await backup_job(now=now)
     finally:
+        await disconnect_owner_bot(bot)
         await engine.dispose()
     # The JSON log line is what the operator reads (create_backup logs the
     # file and its size, or the failure).
@@ -1155,20 +1513,19 @@ async def backup_now(*, now: datetime | None = None) -> int:
 
 async def run() -> None:
     setup_logging("worker")
+    bot = connect_owner_bot()
     wire()
     stop = asyncio.Event()
     installed = install_stop_signals(stop)
     leader = Leadership()
     if not await wait_for_leadership(leader, stop):
         await leader.release()
+        await disconnect_owner_bot(bot)
         await engine.dispose()
         remove_stop_signals(installed)
         log.info("worker stopped before it led")
         return
-    try:
-        await reclaim_runs()
-    except Exception as exc:
-        log.warning("dead runs not reclaimed", extra={"error": type(exc).__name__})
+    await reclaim_dead_runs()
     try:
         crons = await source_crons()
     except Exception as exc:
@@ -1181,6 +1538,10 @@ async def run() -> None:
     scheduler.add_listener(
         functools.partial(on_job_event, loop=asyncio.get_running_loop()),
         EVENT_JOB_EXECUTED | EVENT_JOB_ERROR,
+    )
+    scheduler.add_listener(
+        functools.partial(on_job_skipped, loop=asyncio.get_running_loop()),
+        EVENT_JOB_MAX_INSTANCES,
     )
     scheduler.start()
     listener = asyncio.ensure_future(listen_for_wakes(scheduler, stop))
@@ -1201,10 +1562,7 @@ async def run() -> None:
         await heartbeat_job(scheduler)
     except Exception as exc:
         log.error("startup heartbeat failed", extra={"error": type(exc).__name__})
-    try:
-        await catch_up(scheduler=scheduler)
-    except Exception as exc:
-        log.error("startup catch-up failed", extra={"error": type(exc).__name__})
+    await take_over(scheduler)
     try:
         await keep_leadership(leader, scheduler, stop)
     finally:
@@ -1215,6 +1573,7 @@ async def run() -> None:
         if _shared.fetcher is not None:
             await _shared.fetcher.aclose()
         await leader.release()
+        await disconnect_owner_bot(bot)
         await engine.dispose()
         remove_stop_signals(installed)
         log.info("worker stopped")

@@ -27,6 +27,7 @@ import sqlalchemy as sa
 from jsonschema import Draft202012Validator
 
 from clientscrapper.collectors.base import Observation as Seen
+from clientscrapper.config import settings
 from clientscrapper.db import enums as e
 from clientscrapper.db.models import (
     Company,
@@ -893,8 +894,9 @@ async def auto_push(session) -> AsyncIterator[None]:
 
 
 async def test_a_hot_candidate_of_an_auto_push_source_is_approved_as_the_source(
-    session, auto_push
+    session, auto_push, monkeypatch
 ):
+    monkeypatch.setattr(settings, "auto_approve", True)
     seen = post(
         "Guangzhoudan 25 kub mato kerak",
         person_telegram="namuna_auto",
@@ -912,6 +914,36 @@ async def test_a_hot_candidate_of_an_auto_push_source_is_approved_as_the_source(
         68,
         "auto:telegram_monitor",
         NOW,
+    )
+
+
+async def test_an_earned_auto_push_approves_nothing_until_the_owner_turns_it_on(
+    session, auto_push, monkeypatch
+):
+    """07 T-39 / 06 open question 2: the precision job earns ``auto_push``;
+    while ``AUTO_APPROVE`` is off the hot candidate still goes to the owner's
+    review — no ``auto:`` approval, nothing due for the push job."""
+    monkeypatch.setattr(settings, "auto_approve", False)
+    seen = post(
+        "Guangzhoudan 25 kub mato kerak",
+        person_telegram="namuna_auto",
+        phones=["+998900000031"],
+    )
+    await store(session, seen)
+    await session.commit()
+    await companies.resolve_batch(now=NOW)
+    report = await candidates.score_batch(now=NOW)
+    assert ("to_approved" in report.as_dict(), report.as_dict()["to_review"]) == (
+        False,
+        1,
+    )
+    cand = await the_candidate(session)
+    assert (cand.state, cand.score, cand.approved_by) == ("review", 68, None)
+    assert candidates.auto_approves(True) is False
+    monkeypatch.setattr(settings, "auto_approve", True)
+    assert (candidates.auto_approves(True), candidates.auto_approves(False)) == (
+        True,
+        False,
     )
 
 

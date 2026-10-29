@@ -170,6 +170,11 @@ FALLBACK_OF: Final = "fallback_of"
 # and failed the same way again, the answer is final.
 DOUBLED: Final = "doubled"
 NUDGED: Final = "nudged"
+# The key of a batch job's request that says when its user text was built:
+# what the answer knows of the company is what stood then (T-30: a verdict is
+# stamped with it, never with the collect's clock — evidence that arrived
+# while the batch ran is in no bundle). ``enqueue`` writes it with the text.
+ASKED_AT: Final = "asked_at"
 
 # What ``collect_batch`` found: the batch read and its jobs settled, still
 # running, or not readable now (the API failed the read or the results
@@ -235,11 +240,30 @@ class Landed:
     company_id: uuid.UUID | None
     evidence_ids: tuple[int, ...]
     validated: Validated
+    # When the question's text was built (``asked_at``); None: unknown.
+    asked_at: datetime | None = None
+
+
+def asked_at(job: ModelJob) -> datetime:
+    """When ``job``'s user text was built: the request's ``ASKED_AT``, else
+    the job's own creation (a job enqueued before the key existed)."""
+    raw = (job.request or {}).get(ASKED_AT)
+    if isinstance(raw, str):
+        try:
+            at = datetime.fromisoformat(raw)
+        except ValueError:
+            at = None
+        if at is not None and at.tzinfo is not None:
+            return at
+    return job.created_at
 
 
 Checker = Callable[[Any], Validated]
 MakeChecker = Callable[[AsyncSession, ModelJob], Awaitable[Checker]]
 Effects = Callable[[AsyncSession, Landed, datetime], Awaitable[None]]
+# The night's selection of a kind: enqueues the jobs the submit after it
+# sends (T-30: the companies a company_verdict is due for); returns how many.
+Selector = Callable[[Callable[[], AsyncSession], datetime], Awaitable[int]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -248,13 +272,16 @@ class BatchKind:
     reads what the validators need (the evidence excerpts) and returns the
     answer → ``Validated`` function both lanes use; None stores the answer as
     it validated against the schema. ``apply(session, landed, now)`` writes
-    the effects in the job's transaction."""
+    the effects in the job's transaction. ``select(session_factory, now)``,
+    when set, is the night's selection: ``model_batch_submit_job`` runs it
+    right before the submit, so what it enqueues goes out the same night."""
 
     schema: type[BaseModel]
     system: str
     prompt_version: int | None = None
     checker: MakeChecker | None = None
     apply: Effects | None = None
+    select: Selector | None = None
 
 
 KINDS: dict[Operation, BatchKind] = {}
@@ -324,9 +351,14 @@ def _record(
     user: Pseudonymised,
     doubled: bool = False,
     nudged: bool = False,
+    asked_at: str | None = None,
 ) -> dict[str, Any]:
     route = BATCH_ROUTES[op]
-    extra = {key: True for key, on in ((DOUBLED, doubled), (NUDGED, nudged)) if on}
+    extra: dict[str, Any] = {
+        key: True for key, on in ((DOUBLED, doubled), (NUDGED, nudged)) if on
+    }
+    if asked_at is not None:
+        extra[ASKED_AT] = asked_at
     return extraction.request_record(
         op,
         model=model,
@@ -408,7 +440,9 @@ async def enqueue(
     waiting = None if company_id is None else await _pending_for(session, op, company_id)
     if waiting is not None:
         waiting.model = model
-        waiting.request = _record(op, kind, model=model, user=user)
+        waiting.request = _record(
+            op, kind, model=model, user=user, asked_at=now.isoformat()
+        )
         waiting.pseudonyms = dict(user.reverse) or None
         waiting.evidence_ids = list(evidence_ids)
         await session.flush()
@@ -422,7 +456,7 @@ async def enqueue(
         attempts=0,
         company_id=company_id,
         evidence_ids=list(evidence_ids),
-        request=_record(op, kind, model=model, user=user),
+        request=_record(op, kind, model=model, user=user, asked_at=now.isoformat()),
         pseudonyms=dict(user.reverse) or None,
         created_at=now,
     )
@@ -460,6 +494,7 @@ class LaneReport:
     taken: int = 0
     given_up: int = 0
     waiting: int = 0
+    selected: int = 0
     errors: int = 0
     batch_ids: list[str] = field(default_factory=list)
     error: Exception | None = field(default=None, repr=False)
@@ -720,8 +755,15 @@ async def _submit_op(
     for p in chosen:
         job = p.job
         job.model = model
+        built = (job.request or {}).get(ASKED_AT)
         job.request = _record(
-            op, kind, model=model, user=p.user, doubled=p.doubled, nudged=p.nudged
+            op,
+            kind,
+            model=model,
+            user=p.user,
+            doubled=p.doubled,
+            nudged=p.nudged,
+            asked_at=built if isinstance(built, str) else None,
         )
         job.batch_id = batch_id
         job.status = "submitted"
@@ -893,6 +935,7 @@ async def _apply_batch_answer(
         company_id=job.company_id,
         evidence_ids=tuple(job.evidence_ids or ()),
         validated=checked,
+        asked_at=asked_at(job),
     )
     if not await _effects(session, kind, landed, now):
         job.status = "failed"
@@ -1244,6 +1287,8 @@ async def _take(
         company_id=job.company_id,
         evidence_ids=tuple(job.evidence_ids or ()),
         validated=result.validated,
+        # The fallback asks the batch job's own text: what stood when it was built.
+        asked_at=asked_at(job),
     )
     if not await _effects(session, kind, landed, now):
         await session.execute(
@@ -1308,6 +1353,29 @@ async def take_fallbacks(
     return report
 
 
+# --- 1b. the night's selection ----------------------------------------------------------
+
+
+async def select_nightly(
+    session_factory: SessionFactory = SessionLocal,
+    *,
+    now: datetime,
+    report: LaneReport | None = None,
+) -> LaneReport:
+    """Each registered kind's ``select`` (the jobs the night's submit sends).
+    A selection that raises is passed over (``report.noted``): the night's
+    submit still sends what waits."""
+    report = report or LaneReport()
+    for op, kind in list(KINDS.items()):
+        if kind.select is None:
+            continue
+        try:
+            report.selected += await kind.select(session_factory, now)
+        except Exception as exc:
+            report.noted(exc, "batch selection failed", op=op)
+    return report
+
+
 # --- the jobs ---------------------------------------------------------------------
 
 
@@ -1337,12 +1405,13 @@ def _finish(report: LaneReport) -> dict[str, int]:
 
 async def model_batch_submit_job(*, now: datetime | None = None) -> dict[str, int]:
     """The worker's ``model_batch_submit`` slot (23:30, 04 §0): the stuck
-    batches given up, the night's batch sent, then the fallbacks handed to
-    the instant lane until the day ends (``FALLBACK_UNTIL``). Counts only are
-    logged (06 §4.5)."""
+    batches given up, the night's selection enqueued (``select_nightly``),
+    the night's batch sent, then the fallbacks handed to the instant lane
+    until the day ends (``FALLBACK_UNTIL``). Counts only are logged (06 §4.5)."""
     start = now or _wall()
     report = LaneReport()
     await _step(give_up_stuck(now=start, report=report), report, "give_up_stuck")
+    await _step(select_nightly(now=start, report=report), report, "select_nightly")
     await _step(submit_batch(now=start, report=report), report, "submit_batch")
     await _step(
         take_fallbacks(
@@ -1371,6 +1440,7 @@ async def model_batch_collect_job(*, now: datetime | None = None) -> dict[str, i
 
 
 __all__ = [
+    "ASKED_AT",
     "ATTEMPTS_MAX",
     "BATCH_MAX",
     "BATCH_ROUTES",
@@ -1384,6 +1454,8 @@ __all__ = [
     "BatchKind",
     "Landed",
     "LaneReport",
+    "Selector",
+    "asked_at",
     "collect",
     "collect_batch",
     "enqueue",
@@ -1392,6 +1464,7 @@ __all__ = [
     "model_batch_collect_job",
     "model_batch_submit_job",
     "register",
+    "select_nightly",
     "submit_batch",
     "take_fallbacks",
 ]

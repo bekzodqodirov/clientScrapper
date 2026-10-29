@@ -20,7 +20,10 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 APP_SERVICES = ("worker", "userbot", "bot")
-SERVICES = {"db", "init", *APP_SERVICES, "searxng"}
+# smoke (T-35): make smoke's live tests, under its own profile like searxng —
+# the VPS has no dev venv and the app image ships neither pytest nor tests/
+# (07 §1.12; 06 §3.1 lists the other six).
+SERVICES = {"db", "init", *APP_SERVICES, "searxng", "smoke"}
 
 
 def _services() -> dict[str, dict[str, Any]]:
@@ -79,6 +82,15 @@ def test_the_database_is_capped_waited_on_and_kept():
     assert db["mem_limit"] and db["oom_score_adj"] < 0
     assert "pg_isready" in " ".join(db["healthcheck"]["test"])
     assert db["volumes"] == ["db_data:/var/lib/postgresql/data"]
+
+
+def test_postgres_ends_a_session_left_idle_in_a_transaction():
+    """A forgotten `make psql` holding FOR UPDATE would stop the card job for
+    ever (seam review wave 4): the server ends a session idle in a
+    transaction after 15 minutes — longer than any model or Telegram call an
+    app transaction waits on."""
+    command = _services()["db"]["command"]
+    assert "idle_in_transaction_session_timeout=15min" in command
 
 
 def test_init_migrates_once_as_the_app_user():

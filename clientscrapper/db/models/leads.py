@@ -66,6 +66,10 @@ class LeadCandidate(Base):
     rejected_at: Mapped[datetime | None] = mapped_column(sa.DateTime(timezone=True))
     pushed_at: Mapped[datetime | None] = mapped_column(sa.DateTime(timezone=True))
     last_scored_at: Mapped[datetime | None] = mapped_column(sa.DateTime(timezone=True))
+    # An auto-approved candidate's push refusals (04 §7 item 14): it has no
+    # owner review row to carry them (0003, T-21; /lidlar holat lists them).
+    push_note: Mapped[str | None] = mapped_column(sa.Text)
+    push_noted_at: Mapped[datetime | None] = mapped_column(sa.DateTime(timezone=True))
     created_at: Mapped[datetime] = created_at_column()
     updated_at: Mapped[datetime] = updated_at_column()
 
@@ -97,6 +101,9 @@ class LeadCandidate(Base):
             "state NOT IN ('scored', 'review', 'approved', 'pushed') "
             "OR score IS NOT NULL",
             name="ck_lead_candidates_scored",
+        ),
+        sa.CheckConstraint(
+            "length(push_note) <= 500", name="ck_lead_candidates_push_note"
         ),
         # No ck_lead_candidates_suppressed: a CHECK spanning suppressed_by, an
         # ON DELETE SET NULL column, made every retirement of a suppression row
@@ -155,6 +162,9 @@ class LeadReview(Base):
     by_telegram_id: Mapped[int | None] = mapped_column(sa.BigInteger)
     note: Mapped[str | None] = mapped_column(sa.Text)
     expires_at: Mapped[datetime | None] = mapped_column(sa.DateTime(timezone=True))
+    # ⏭ Keyinroq: when the card is asked again as a fresh message (0003,
+    # T-21; 06 §1.3 «ertaga qayta soʻrayman»). NULL = not put off.
+    remind_at: Mapped[datetime | None] = mapped_column(sa.DateTime(timezone=True))
     created_at: Mapped[datetime] = created_at_column()
 
     __table_args__ = (
@@ -191,6 +201,11 @@ class LeadReview(Base):
             postgresql_where=sa.text("state = 'asked'"),
         ),
         sa.Index("ix_lead_reviews_candidate", "candidate_id"),
+        sa.Index(
+            "ix_lead_reviews_remind",
+            "remind_at",
+            postgresql_where=sa.text("state = 'asked' AND remind_at IS NOT NULL"),
+        ),
     )
 
 

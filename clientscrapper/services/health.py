@@ -87,7 +87,7 @@ from clientscrapper.db.models import (
     UsageLog,
 )
 from clientscrapper.db.session import session_scope
-from clientscrapper.services import backup, costs, crontab
+from clientscrapper.services import backup, costs, crontab, smoke
 
 log = logging.getLogger(__name__)
 
@@ -109,6 +109,8 @@ _VARIANT = re.compile(r"[a-z][a-z0-9_]{0,30}")
 # cost_cap with the same prefix, so the two share one memory.
 ALERT_KIND: Final = costs.ALERT_KIND
 RECOVERED_KIND: Final = "recovered:"
+# A told-first key its own job could not deliver (costs.UNDELIVERED_KIND).
+UNDELIVERED_KIND: Final = costs.UNDELIVERED_KIND
 
 Severity = Literal["critical", "warning"]
 
@@ -134,6 +136,7 @@ PROBLEM_KEYS: Final = (
     costs.SPEND_HIGH_KEY,
     "no_signals_24h",
     "push_failing",
+    "push_rejected",
     "push_unconfirmed",
     "feed_contract",
     "suppression_shrunk",
@@ -166,7 +169,11 @@ SUPPRESSION_STALE_CRITICAL_AFTER: Final = timedelta(hours=6)
 # repeat window and announces their recovery (06 §4.2). Not flood_breaker:
 # the reader that trips it must not be the one to report it (06 §4.3 — the
 # worker watches the userbot), so the sweep says it first.
-TOLD_FIRST_ELSEWHERE: Final = frozenset({costs.COST_CAP_KEY, "push_404", "erp_redirect"})
+# push_rejected (an ERP 4xx other than 404 on a push, 05 §B.1 «owner alert»)
+# is told at once by crm_push the same way.
+TOLD_FIRST_ELSEWHERE: Final = frozenset(
+    {costs.COST_CAP_KEY, "push_404", "erp_redirect", "push_rejected"}
+)
 # 04 §8: the spend alerts are said once per Tashkent business day, not every
 # ALERT_REPEAT_HOURS — cost_cap holds all day once it is reached, and the
 # monthly cap all month.
@@ -175,9 +182,13 @@ DAILY_KEYS: Final = frozenset({costs.COST_CAP_KEY, costs.SPEND_HIGH_KEY})
 REPEAT_OVERRIDES: Final[Mapping[str, timedelta]] = {
     "source_low_precision": timedelta(days=7),
 }
-# Keys whose repeat window runs per subject (a source), not per key: the
-# ledger row's ``ref`` is ``<key>:<subject>``.
-PER_SUBJECT_KEYS: Final = frozenset({"source_low_precision"})
+# Keys whose repeat window runs per subject, not per key: the ledger row's
+# ``ref`` is ``<key>:<subject>``. job_failing's subjects are its items — a
+# scheduler job (``job:<id>``), a collector cadence (``run:<key>[.<variant>]``)
+# and the resolver backlog — so one failing item never hides another for
+# ALERT_REPEAT_HOURS: above all the health sweep's own streak, which only
+# the bot's watchdog can say (``sweep_failing``).
+PER_SUBJECT_KEYS: Final = frozenset({"source_low_precision", "job_failing"})
 # Raised and cleared by the module that sees them (raise_problem): the event
 # is that module's, so is the moment it is over.
 REPORTED_KEYS: Final = frozenset(
@@ -187,6 +198,7 @@ REPORTED_KEYS: Final = frozenset(
         "suppression_shrunk",  # full pull (T-09)
         "feed_contract",  # any feed call: detail.code (T-09/T-10)
         "push_unconfirmed",  # reconcile_unconfirmed after healthy walks (T-10)
+        "push_rejected",  # crm_push on a 4xx; the next push the ERP takes clears it
         "anthropic_failing",  # the instant lane's failure streak (T-15)
         "pii_leak",  # validators (T-15)
         "ig_token_expired",  # Graph 190 (T-26)
@@ -235,6 +247,8 @@ FAILING_LOOKBACK: Final = timedelta(days=100)
 # The resolver takes ≤ 200 observations every 2 minutes (04 §0, 6,000 an
 # hour): one still 'new' after this long means it is not working them off.
 RESOLVE_BACKLOG_AGE: Final = timedelta(hours=6)
+# job_failing's subject for that backlog line (PER_SUBJECT_KEYS).
+RESOLVE_BACKLOG_SUBJECT: Final = "resolve_backlog"
 # Lines of a list inside one problem (collector_blocked, collector_silent …).
 MAX_LINES: Final = 10
 
@@ -415,6 +429,8 @@ def size_label(size: int | None) -> str:
         return "?"
     if size >= _GB:
         return f"{size / _GB:.1f} GB"
+    if size < _MB:
+        return "<1 MB"
     return f"{size // _MB} MB"
 
 
@@ -440,6 +456,9 @@ class BackupInfo:
     error: str | None = None
     # Did *this* file reach Telegram (06 §1.4 «Telegramga yetdi»).
     sent: bool = False
+    # The oldest backup still on disk: how long there has been one to prove
+    # (``drill_stale``'s grace before the first drill).
+    oldest_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -460,6 +479,14 @@ class SourceState:
     # The row's last write: the clock of a source that has neither run nor
     # been skipped since it was enabled (enabling it is a write).
     updated_at: datetime | None = None
+    # /holat's per-source numbers (06 §1.4, 05 §B.2): the precision job's
+    # 30-day precision and pushes, its auto_push, and the companies minted
+    # from the evidence of the source's runs started since Tashkent midnight
+    # (the resolver counts each on its run, companies.count_minted).
+    precision_30d: Decimal | None = None
+    pushes_30d: int = 0
+    auto_push: bool = False
+    new_companies_today: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -623,9 +650,9 @@ def _parse_iso(value: Any) -> datetime | None:
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=settings.tz)
 
 
-def flag_set(value: Any) -> bool:
-    """Is a ``runtime_flags`` switch on? Absent, null and false are off."""
-    return value not in (None, False)
+# Is a ``runtime_flags`` switch on? (one home: ``costs.flag_set``, which the
+# pause every paid call reads lives beside.)
+flag_set = costs.flag_set
 
 
 def flood_of(value: Any) -> tuple[datetime | None, int | None]:
@@ -657,8 +684,10 @@ def set_suppression_probe(probe: SuppressionProbe | None) -> None:
 
 async def _backup_info(rows: Mapping[str, Heartbeat], now: datetime) -> BackupInfo:
     configured = bool(settings.backup_age_recipient)
-    path = await backup.newest_backup()
+    current = await asyncio.to_thread(backup.current_backups)
+    path = current[-1] if current else None
     created_at = backup.backup_stamp(path) if path is not None else None
+    oldest_at = backup.backup_stamp(current[0]) if current else None
     size: int | None = None
     if path is not None:
         try:
@@ -679,6 +708,7 @@ async def _backup_info(rows: Mapping[str, Heartbeat], now: datetime) -> BackupIn
         ok=ok,
         error=str(detail["error"])[:200] if ok is False and detail.get("error") else None,
         sent=about_this_file and detail.get("sent") is True,
+        oldest_at=oldest_at,
     )
 
 
@@ -760,13 +790,21 @@ async def reported_problems(session: AsyncSession, now: datetime) -> dict[str, R
     return found
 
 
-async def _sources(session: AsyncSession) -> tuple[SourceState, ...]:
+async def _sources(session: AsyncSession, now: datetime) -> tuple[SourceState, ...]:
+    # A smoke test's row is ``skipped`` too, but the scheduler never fired the
+    # source: it must not restart a silent collector's clock (services/smoke).
     found = await session.execute(
         sa.select(CollectorRun.source_key, sa.func.max(CollectorRun.started_at))
-        .where(CollectorRun.status == "skipped")
+        .where(CollectorRun.status == "skipped", smoke.not_smoke())
         .group_by(CollectorRun.source_key)
     )
     skipped: dict[str, datetime] = {str(key): at for key, at in found.all()}
+    today = await session.execute(
+        sa.select(CollectorRun.source_key, sa.func.sum(CollectorRun.new_companies))
+        .where(CollectorRun.started_at >= costs.day_start(now))
+        .group_by(CollectorRun.source_key)
+    )
+    new_today: dict[str, int] = {str(key): int(n or 0) for key, n in today.all()}
     rows = await session.scalars(
         sa.select(Source).order_by(Source.key).execution_options(populate_existing=True)
     )
@@ -782,6 +820,10 @@ async def _sources(session: AsyncSession) -> tuple[SourceState, ...]:
             last_run_at=row.last_run_at,
             last_skipped_at=skipped.get(row.key),
             updated_at=row.updated_at,
+            precision_30d=row.precision_30d,
+            pushes_30d=row.pushes_30d,
+            auto_push=row.auto_push,
+            new_companies_today=new_today.get(row.key, 0),
         )
         for row in rows
     )
@@ -1001,7 +1043,7 @@ async def gather(
             < now - REVIEW_BACKLOG_AGE,
         )
     )
-    sources = await _sources(session)
+    sources = await _sources(session, now)
     erp = next((s for s in sources if s.key == ERP_SOURCE), None)
     erp_config = await session.scalar(
         sa.select(Source.config["suppression"]).where(Source.key == ERP_SOURCE)
@@ -1124,6 +1166,16 @@ def erp_breaker_text(key: str, detail: str = "") -> str:
             "boshlanishi kerak; <code>make reload</code>; /yoq crm"
         )
     raise ValueError(f"{key!r} is not an ERP breaker key")
+
+
+def push_rejected_text(status: int | None) -> str:
+    """push_rejected's line (05 §B.1): a 4xx other than 404 on a push — the
+    ERP door answers the agent only 200 / 404 / 503, so it is a proxy or a
+    wrong ``CRM_BASE_URL``. crm_push says it first, the sweep repeats it."""
+    return (
+        f"⚠️ ERP pushni rad etdi (HTTP {status or '4xx'}): <code>.env</code> dagi "
+        "CRM_BASE_URL va ERP oldidagi proksini tekshiring; lid koʻrib chiqishga qaytdi"
+    )
 
 
 def blocked_sources(status: Status) -> list[SourceState]:
@@ -1276,6 +1328,157 @@ def _streak(component: Component) -> int:
     return failures if isinstance(failures, int) else 0
 
 
+# A short-interval job whose skipped runs span this long is hung (its streak
+# of STILL_RUNNING carries ``every``, ``worker.on_job_skipped``).
+JOB_STUCK_AFTER: Final = timedelta(minutes=15)
+
+
+# A job that runs once a day or less often is said on its first raise: three
+# Sundays of a weekly job (source_precision) is two weeks of a source never
+# re-judged (seam review wave 4).
+JOB_DAILY: Final = timedelta(days=1)
+
+
+def job_failing_streak(job: Component) -> int | None:
+    """The job's failing streak once it counts as job_failing, else None.
+    Raises: ``JOB_FAILING_STREAK`` in a row — one for a job whose period
+    (``every`` in its beat, ``worker.job_period``) is a day or more. Skipped
+    runs of a short-interval job (``error`` = ``STILL_RUNNING``, ``every``
+    its interval): as many as span ``JOB_STUCK_AFTER`` and at least
+    ``JOB_FAILING_STREAK`` — a 2-minute job hung on a lock is said after 16
+    minutes, a 15-minute one after three skips."""
+    runs = _streak(job)
+    if runs < 1:
+        return None
+    raw = job.detail.get("every")
+    every = (
+        raw if isinstance(raw, int) and not isinstance(raw, bool) and raw > 0 else None
+    )
+    if job.detail.get("error") == STILL_RUNNING:
+        if runs < JOB_FAILING_STREAK:
+            return None
+        if every is not None and runs * every < JOB_STUCK_AFTER.total_seconds():
+            return None
+        return runs
+    if every is not None and every >= JOB_DAILY.total_seconds():
+        return runs
+    return runs if runs >= JOB_FAILING_STREAK else None
+
+
+# The sweep's own scheduler id: when it is the job that keeps raising, it
+# cannot say so itself (06 §4.3), so the bot's watchdog reads its beat.
+HEALTH_JOB: Final = "health"
+# The error a ``job:health`` beat carries for a run the scheduler skipped
+# because the previous one never ended (APScheduler's max_instances=1): a
+# hung sweep raises nothing, so the worker counts each skip as a failed run
+# (``worker.on_job_skipped``) and the watchdog sees the streak.
+STILL_RUNNING: Final = "still_running"
+
+
+# The weekly drill (06 §4.4) proves a backup restores: no proof for longer
+# than a week and a day — a drill that skipped for want of the key, one a
+# restart across its Sunday missed — means the backups go unverified while
+# /holat says nothing (seam review wave 4).
+DRILL_STALE: Final = timedelta(days=8)
+DRILL_NO_KEY_UZ: Final = (
+    "⛔ Zaxirani tiklash sinovi qilinmayapti: serverda kalit fayli yoʻq "
+    "(<code>secrets/backup-key.txt</code>) — zaxiralar tekshirilmayapti; "
+    "kalitni oʻzingizdagi nusxadan qaytaring"
+)
+
+
+def drill_proved_at(drill: Component | None) -> datetime | None:
+    """When a drill last restored a backup and matched it: ``proved_at`` in
+    its beat (carried across skips, ``worker.restore_drill_job``), or — a
+    beat from before it carried one — the beat's own time when it was a
+    proof (ok, not skipped)."""
+    if drill is None:
+        return None
+    raw = drill.detail.get("proved_at")
+    if isinstance(raw, str):
+        try:
+            return datetime.fromisoformat(raw)
+        except ValueError:
+            return None
+    proof = drill.detail.get("ok") is True and drill.detail.get("skipped") is None
+    return drill.last_seen_at if proof else None
+
+
+def drill_stale(status: Status) -> timedelta | None:
+    """How long the backups have gone unproved, once that is longer than
+    ``DRILL_STALE`` (None otherwise): since the last proof, or — never
+    proved — since the oldest backup still on disk (the grace before the
+    first Sunday). Only while the drill is on and backups are configured."""
+    info = status.backup
+    if not settings.restore_drill_enabled or not info.configured:
+        return None
+    since = drill_proved_at(status.restore_drill) or info.oldest_at
+    if since is None:
+        return None
+    age = status.now - since
+    return age if age > DRILL_STALE else None
+
+
+def job_subject(job_id: str) -> str:
+    """job_failing's subject for one scheduler job (``PER_SUBJECT_KEYS``)."""
+    return JOB_PREFIX + job_id
+
+
+def failing_job_line(job: Component, runs: int) -> str:
+    """job_failing's line for one scheduler job (the sweep and the watchdog
+    say it in these words)."""
+    if job.detail.get("error") == STILL_RUNNING:
+        return (
+            f"⚠️ <code>{escape(job.name)}</code> ishi tugamayapti: oxirgi {runs} ta "
+            "navbati oʻtkazib yuborildi — <code>make worker</code> loglari"
+        )
+    return (
+        f"⚠️ <code>{escape(job.name)}</code> ishi oxirgi {runs} marta xato bilan "
+        f"tugadi ({escape(job.detail.get('error') or '?')}) — "
+        "<code>make worker</code> loglari"
+    )
+
+
+def sweep_failing(status: Status) -> Problem | None:
+    """job_failing for the health sweep alone: its ``job:health`` beat says it
+    raised — or was skipped while a hung run held its place — ``JOB_FAILING_
+    STREAK`` times or more in a row (the worker is up — a dead worker is
+    worker_silent). The bot's watchdog says it, since a sweep that crashes
+    never reaches its own judgement; its subject is the sweep's own, so an
+    unrelated failing job said earlier never holds it back."""
+    job = status.jobs.get(HEALTH_JOB)
+    if job is None or not worker_fresh(status):
+        return None
+    runs = _streak(job)
+    if runs < JOB_FAILING_STREAK:
+        return None
+    line = failing_job_line(job, runs)
+    return Problem("job_failing", "warning", line, ((job_subject(HEALTH_JOB), line),))
+
+
+def status_from_beats(rows: Mapping[str, Heartbeat], now: datetime) -> Status:
+    """What the heartbeats alone say — the processes and the jobs — for a
+    reader whose ``gather`` failed with the database up (the watchdog): its
+    worker_silent and :func:`sweep_failing` hold on it; nothing else is
+    judged from it."""
+    return Status(
+        now=now,
+        db_ok=True,
+        disk_free_bytes=None,
+        disk_total_bytes=None,
+        disk_low=False,
+        backup=BackupInfo(configured=True),
+        components={
+            name: component_of(name, rows.get(name), now=now) for name in COMPONENTS
+        },
+        jobs={
+            key[len(JOB_PREFIX) :]: component_of(key[len(JOB_PREFIX) :], row, now=now)
+            for key, row in rows.items()
+            if key.startswith(JOB_PREFIX)
+        },
+    )
+
+
 def failing_jobs(status: Status) -> list[tuple[Component, int]]:
     """06 §4.2 job_failing, the scheduler half: a ``job:<id>`` whose last
     ``JOB_FAILING_STREAK`` runs or more raised (``failures`` in its beat)."""
@@ -1284,7 +1487,7 @@ def failing_jobs(status: Status) -> list[tuple[Component, int]]:
     return [
         (job, n)
         for _, job in sorted(status.jobs.items())
-        if (n := _streak(job)) >= JOB_FAILING_STREAK
+        if (n := job_failing_streak(job)) is not None
     ]
 
 
@@ -1439,6 +1642,14 @@ def problems(status: Status) -> list[Problem]:
             "⛔ Zaxirani tiklash sinovi oʻtmadi — zaxiralar ishonchsiz "
             f"(<code>{escape(error)}</code>)",
         )
+    elif drill is not None and drill.detail.get("skipped") == "no_key":
+        add("restore_drill_failed", DRILL_NO_KEY_UZ)
+    elif (unproved := drill_stale(status)) is not None:
+        add(
+            "restore_drill_failed",
+            f"⛔ Zaxirani tiklash sinovi {unproved.days} kundan beri oʻtmadi — "
+            "zaxiralar tekshirilmayapti; <code>make worker</code> loglari",
+        )
     sup = status.suppression
     if sup is not None and not sup.fresh:
         add(
@@ -1498,28 +1709,38 @@ def problems(status: Status) -> list[Problem]:
     ]
     if silent:
         add("collector_silent", _lines(silent))
-    failing = [
-        f"⚠️ <code>{escape(job.name)}</code> ishi oxirgi {n} marta xato bilan "
-        f"tugadi ({escape(job.detail.get('error') or '?')}) — "
-        "<code>make worker</code> loglari"
+    # One subject per item (PER_SUBJECT_KEYS): each is said on its own clock.
+    failing: list[tuple[str, str]] = [
+        (job_subject(job.name), failing_job_line(job, n))
         for job, n in failing_jobs(status)
     ]
     failing += [
-        f"⚠️ {escape(source.title_uz)}"
-        f"{' · ' + escape(run.variant) if run.variant else ''}: oxirgi {run.runs} ta "
-        f"ishga tushirish xato bilan tugadi ({escape(run.error)}) — "
-        "<code>make worker</code> loglari; /manbalar"
+        (
+            f"run:{run.source_key}{'.' + run.variant if run.variant else ''}",
+            f"⚠️ {escape(source.title_uz)}"
+            f"{' · ' + escape(run.variant) if run.variant else ''}: oxirgi {run.runs} ta "
+            f"ishga tushirish xato bilan tugadi ({escape(run.error)}) — "
+            "<code>make worker</code> loglari; /manbalar",
+        )
         for source, run in failing_collectors(status)
     ]
     waited = resolve_backlog(status)
     if waited is not None:
         failing.append(
-            f"⚠️ {status.queues.observations_new} ta topilma navbatda kutmoqda (eng "
-            f"eskisi {age_label(waited)}) — saralash (resolve) ishlamayapti; "
-            "<code>make worker</code> loglari"
+            (
+                RESOLVE_BACKLOG_SUBJECT,
+                f"⚠️ {status.queues.observations_new} ta topilma navbatda kutmoqda "
+                f"(eng eskisi {age_label(waited)}) — saralash (resolve) ishlamayapti; "
+                "<code>make worker</code> loglari",
+            )
         )
     if failing:
-        add("job_failing", _lines(failing))
+        found["job_failing"] = Problem(
+            "job_failing",
+            "warning",
+            _lines([line for _, line in failing]),
+            tuple(failing),
+        )
     for alert in costs.spend_alerts(
         status.spend,
         daily_cap=settings.daily_cost_cap_usd,
@@ -1545,6 +1766,16 @@ def problems(status: Status) -> list[Problem]:
             "push_failing",
             f"⚠️ ERP javob bermayapti ({status.push_failing_streak} ta push "
             "muvaffaqiyatsiz)",
+        )
+    if "push_rejected" in rep:
+        status_code = rep["push_rejected"].detail.get("status")
+        add(
+            "push_rejected",
+            push_rejected_text(
+                status_code
+                if isinstance(status_code, int) and not isinstance(status_code, bool)
+                else None
+            ),
         )
     if "push_unconfirmed" in rep:
         add(
@@ -1632,25 +1863,52 @@ def problems(status: Status) -> list[Problem]:
     return [found[k] for k in PROBLEM_KEYS if k in found]
 
 
-def _low_precision_lines(reported: Reported) -> tuple[tuple[str, str], ...]:
-    """(source key, its line) per auto-paused source (T-36 raises
+@dataclass(frozen=True, slots=True)
+class LowPrecision:
+    """One source the weekly precision job paused (06 §4.2
+    ``source_low_precision``): its key, title and whole percent, as raised."""
+
+    key: str
+    title: str
+    pct: str
+
+
+def _low_precision_items(reported: Reported) -> tuple[LowPrecision, ...]:
+    """The paused sources of the open row (T-36 raises
     ``detail={"sources": [{"key", "title", "pct"}, …]}``)."""
     sources = reported.detail.get("sources")
     items = sources if isinstance(sources, list) else [reported.detail]
-    lines: list[tuple[str, str]] = []
+    found: list[LowPrecision] = []
     for item in items:
         if not isinstance(item, Mapping):
             continue
-        key = str(item.get("key") or item.get("title") or "?")
-        title = escape(item.get("title") or item.get("key") or "?")
-        pct = escape(item.get("pct", "?"))
-        lines.append(
-            (
-                key,
-                f"⚠️ {title} aniqligi {pct}% — bir haftaga toʻxtatildi "
-                "(/manbalar bilan yoqiladi)",
+        found.append(
+            LowPrecision(
+                key=str(item.get("key") or item.get("title") or "?"),
+                title=str(item.get("title") or item.get("key") or "?"),
+                pct=str(item.get("pct", "?")),
             )
         )
+    return tuple(found)
+
+
+def low_precision_sources(status: Status) -> tuple[LowPrecision, ...]:
+    """The sources a low precision holds paused now — the alert's subjects,
+    and the digest's own line for each (06 §1.8): one reading of the row."""
+    reported = status.reported.get("source_low_precision")
+    return () if reported is None else _low_precision_items(reported)
+
+
+def _low_precision_lines(reported: Reported) -> tuple[tuple[str, str], ...]:
+    """(source key, its line) per auto-paused source."""
+    lines = [
+        (
+            item.key,
+            f"⚠️ {escape(item.title)} aniqligi {escape(item.pct)}% — bir haftaga "
+            "toʻxtatildi (/manbalar bilan yoqiladi)",
+        )
+        for item in _low_precision_items(reported)
+    ]
     return tuple(lines) or (
         ("?", "⚠️ Manba aniqligi past — bir haftaga toʻxtatildi (/manbalar)"),
     )
@@ -1683,6 +1941,7 @@ _RECOVERY: Final[Mapping[str, str]] = {
     costs.SPEND_HIGH_KEY: "✅ Xarajat yana chegara ichida — tiklandi",
     "no_signals_24h": "✅ Telegramdan yana signal kelyapti — tiklandi",
     "push_failing": "✅ ERP yana javob beryapti — tiklandi",
+    "push_rejected": "✅ ERP pushlarni yana qabul qilyapti — tiklandi",
     "push_unconfirmed": "✅ Hamma push ERPda koʻrindi — tiklandi",
     "feed_contract": "✅ ERP feed yana kutilgan shaklda — tiklandi",
     "suppression_shrunk": "✅ ERP roʻyxati qisqarmadi — tiklandi",
@@ -1694,7 +1953,7 @@ _RECOVERY: Final[Mapping[str, str]] = {
     "backup_unconfigured": "✅ Zaxira sozlandi — tiklandi",
     "backup_stale": "✅ Zaxira yana yangi — tiklandi",
     "ig_token_expired": "✅ Instagram tokeni yangilandi — tiklandi",
-    "source_low_precision": "✅ Manbalar aniqligi yana yaxshi — tiklandi",
+    "source_low_precision": "✅ Past aniqlik pauzasi tugadi — tiklandi",
     "evidence_over_cap": "✅ Dalil papkasi chegara ichida — tiklandi",
 }
 
@@ -1772,8 +2031,30 @@ def _repeat(key: str) -> timedelta:
     return REPEAT_OVERRIDES.get(key, timedelta(hours=settings.alert_repeat_hours))
 
 
+def _undelivered(last: Mapping[str, datetime], key: str, now: datetime) -> bool:
+    """The key's own teller gave up on this episode: an ``undelivered:<key>``
+    row newer than the key's last recovery and inside its repeat window (a
+    ``DAILY_KEYS`` key: this Tashkent day) — an older one is another
+    episode's."""
+    at = last.get(UNDELIVERED_KIND + key)
+    if at is None:
+        return False
+    cleared = last.get(RECOVERED_KIND + key)
+    if cleared is not None and cleared >= at:
+        return False
+    if key in DAILY_KEYS:
+        return at >= costs.day_start(now)
+    return now - at <= _repeat(key)
+
+
 def _alert_due(last: Mapping[str, datetime], key: str, now: datetime) -> bool:
-    if key in TOLD_FIRST_ELSEWHERE and not _told(last, key):
+    # Said first by its own job — unless that job could not deliver it: then
+    # the sweep says it, or nobody ever would (06 §4.2).
+    if (
+        key in TOLD_FIRST_ELSEWHERE
+        and not _told(last, key)
+        and not _undelivered(last, key, now)
+    ):
         return False
     alerted = last.get(ALERT_KIND + key)
     if alerted is None:
@@ -1819,6 +2100,7 @@ def _narrowed(problem: Problem, subjects: tuple[tuple[str, str], ...]) -> Proble
 async def _ledger(session: AsyncSession, keys: Iterable[str]) -> dict[str, datetime]:
     wanted = list(keys)
     kinds = [ALERT_KIND + k for k in wanted] + [RECOVERED_KIND + k for k in wanted]
+    kinds += [UNDELIVERED_KIND + k for k in wanted if k in TOLD_FIRST_ELSEWHERE]
     rows = await session.execute(
         sa.select(ReminderLog.kind, sa.func.max(ReminderLog.sent_at))
         .where(ReminderLog.kind.in_(kinds))

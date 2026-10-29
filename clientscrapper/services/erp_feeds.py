@@ -28,6 +28,10 @@ each row means and does is ``services/outcomes``'s. ``reconcile_unconfirmed``
 is the 48-hour rule's detection (02 §2.10 rule 5; the re-push and the
 review are ``crm_push.reconcile_job``'s, inside the push window), and
 ``source_precision`` the per-source numbers 04 §7's auto-push reads.
+``source_precision_job`` (weekly, T-36) is the one writer of
+``sources.auto_push``: ``auto_push_due`` flips it both ways at 15 pushes and
+60 %, never ON while the owner's ``config.auto_push_forbidden`` stands, and
+``low_precision`` pauses a source for a week (06 §4.2).
 
 ``suppression_fresh`` is THE home of feed freshness (``FULL_MAX_AGE_H``,
 ``DELTA_MAX_AGE_H``, and during the «Boshqa» fallback the XLSX import's
@@ -53,9 +57,11 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import html
 import logging
 import re
-from collections.abc import AsyncGenerator, Mapping, Sequence
+from collections.abc import AsyncGenerator, Callable, Iterable, Mapping, Sequence
+from contextlib import AbstractAsyncContextManager
 from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from decimal import ROUND_HALF_EVEN, Decimal, InvalidOperation
@@ -1783,6 +1789,375 @@ async def refresh_precision(session: AsyncSession, now: datetime) -> list[Precis
     return moved
 
 
+# --- the weekly precision job (05 §B.2, 06 §4.2, T-36) ---------------------------------
+
+# 05 §B.2 / 02 §2.1: auto-push is earned by volume AND quality.
+AUTO_PUSH_MIN_PUSHES: Final = 15
+AUTO_PUSH_MIN_PRECISION: Final = Decimal("0.60")
+# 06 §4.2 source_low_precision: «pushes_30d ≥ 30 and precision_30d < 0.20 →
+# sources.paused_until = +7 d».
+LOW_PRECISION_MIN_PUSHES: Final = 30
+LOW_PRECISION_BELOW: Final = Decimal("0.20")
+LOW_PRECISION_PAUSE: Final = timedelta(days=7)
+LOW_PRECISION_REASON: Final = "low_precision"
+LOW_PRECISION_PROBLEM: Final = "source_low_precision"
+PRECISION_WRITER: Final = "worker:source_precision"
+# The owner's «never auto-push this source» (06 §1.2 ``src:<key>:a``): set by
+# services/owner.forbid_auto_push, read here, cleared by nobody.
+AUTO_PUSH_FORBIDDEN: Final = "auto_push_forbidden"
+# The last run's auto_push flips, for the digest's line (06 §1.8: «a flip of
+# auto_push is its own line»): a runtime flag, never sources.config — a
+# collector writes its cursors there from a copy it read before this job ran.
+FLIPS_FLAG: Final = "precision_flips"
+
+
+def forbidden_of(config: Any) -> bool:
+    """The owner forbade auto-push for this source (``config`` = the row's)."""
+    return isinstance(config, dict) and config.get(AUTO_PUSH_FORBIDDEN) is True
+
+
+def auto_push_due(numbers: Precision, *, forbidden: bool) -> bool:
+    """05 §B.2: ``pushes_30d ≥ 15 AND precision_30d ≥ 0.60`` — and never while
+    the owner forbids it. A source nothing was judged for has no precision
+    and is never due."""
+    precision = numbers.precision_30d
+    return (
+        not forbidden
+        and precision is not None
+        and numbers.pushes >= AUTO_PUSH_MIN_PUSHES
+        and precision >= AUTO_PUSH_MIN_PRECISION
+    )
+
+
+def low_precision(numbers: Precision) -> bool:
+    """06 §4.2: enough pushes to judge, and fewer than one in five good."""
+    precision = numbers.precision_30d
+    return (
+        precision is not None
+        and numbers.pushes >= LOW_PRECISION_MIN_PUSHES
+        and precision < LOW_PRECISION_BELOW
+    )
+
+
+def percent(precision: Decimal) -> int:
+    """A precision as the whole percent the owner reads («aniqlik 59%»)."""
+    return int(precision * 100)
+
+
+@dataclass(frozen=True, slots=True)
+class PrecisionFlip:
+    """One ``auto_push`` the job turned on or off."""
+
+    key: str
+    title: str
+    on: bool
+    pct: int | None
+    pushes: int
+
+    def as_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(slots=True)
+class PrecisionRun:
+    """What one weekly run did."""
+
+    at: datetime
+    sources: int = 0
+    flips: list[PrecisionFlip] = field(default_factory=list)
+    # The sources paused for a week by the low-precision rule, by key.
+    paused: list[str] = field(default_factory=list)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "sources": self.sources,
+            "flips": [f.as_dict() for f in self.flips],
+            "paused": list(self.paused),
+        }
+
+
+async def apply_precision(session: AsyncSession, now: datetime) -> PrecisionRun:
+    """The weekly run in the caller's transaction (05 §B.2, 06 §4.2): every
+    source's 30-day numbers refreshed, ``auto_push`` flipped both ways by
+    ``auto_push_due`` — never ON while ``config.auto_push_forbidden`` (the
+    turn-on UPDATE re-reads the flag under the row's lock, so a forbid that
+    commits first wins) — and a source whose precision fell below 20 % over
+    ≥ 30 pushes paused for a week (``source_low_precision``, raised with
+    the list, cleared when none is). The rows are locked in key order, the
+    order ``owner.forbid_auto_push``'s single-row lock cannot cross."""
+    rows = (
+        await session.scalars(
+            sa.select(Source)
+            .order_by(Source.key)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+    ).all()
+    await refresh_precision(session, now)
+    numbers = await _precision_numbers(session, now)
+    run = PrecisionRun(at=now, sources=len(rows))
+    low: list[dict[str, Any]] = []
+    for row in rows:
+        mine = numbers.get(row.key, Precision(row.key))
+        due = auto_push_due(mine, forbidden=forbidden_of(row.config))
+        pct = None if mine.precision_30d is None else percent(mine.precision_30d)
+        if due != row.auto_push:
+            guard = Source.key == row.key
+            if due:
+                guard = sa.and_(guard, sa.not_(_forbidden_sql()))
+            flipped = await session.execute(
+                sa.update(Source).where(guard).values(auto_push=due).returning(Source.key)
+            )
+            if flipped.first() is not None:
+                run.flips.append(
+                    PrecisionFlip(row.key, row.title_uz, due, pct, mine.pushes)
+                )
+        if row.enabled and low_precision(mine) and pct is not None:
+            # A switched-off source runs nothing to pause, and switching it
+            # back on is the owner's own say (owner.toggle_source).
+            until = now + LOW_PRECISION_PAUSE
+            if row.paused_until is None or row.paused_until < until:
+                await session.execute(
+                    sa.update(Source)
+                    .where(Source.key == row.key)
+                    .values(paused_until=until, paused_reason=LOW_PRECISION_REASON)
+                )
+            run.paused.append(row.key)
+            low.append({"key": row.key, "title": row.title_uz, "pct": str(pct)})
+    if low:
+        await health.raise_problem(
+            session,
+            LOW_PRECISION_PROBLEM,
+            now=now,
+            by=PRECISION_WRITER,
+            detail={"sources": low},
+            until=now + LOW_PRECISION_PAUSE,
+        )
+    else:
+        await health.clear_problem(session, LOW_PRECISION_PROBLEM)
+    await _store_flips(session, run)
+    return run
+
+
+async def end_low_precision_pause(
+    session: AsyncSession, key: str, *, now: datetime
+) -> None:
+    """The owner switched a paused source back on (``owner.toggle_source``):
+    its line leaves the open ``source_low_precision`` problem, which is
+    cleared with its last line — the alert names only what is still paused."""
+    open_ = (await health.reported_problems(session, now)).get(LOW_PRECISION_PROBLEM)
+    if open_ is None:
+        return
+    listed = open_.detail.get("sources")
+    if not isinstance(listed, list):
+        return
+    kept = [i for i in listed if not (isinstance(i, Mapping) and i.get("key") == key)]
+    if len(kept) == len(listed):
+        return
+    if not kept:
+        await health.clear_problem(session, LOW_PRECISION_PROBLEM)
+        return
+    await health.raise_problem(
+        session,
+        LOW_PRECISION_PROBLEM,
+        now=now,
+        by=PRECISION_WRITER,
+        detail={"sources": kept},
+        until=open_.until,
+    )
+
+
+def _forbidden_sql() -> sa.ColumnElement[bool]:
+    """``forbidden_of`` as SQL, for the turn-on UPDATE's own guard: the JSON
+    ``true`` only (containment, never a cast — a hand-edited ``"yes"`` reads
+    as not forbidden here as in Python, and cannot make the job raise)."""
+    return Source.config.contains({AUTO_PUSH_FORBIDDEN: True}).is_(sa.true())
+
+
+async def _store_flips(session: AsyncSession, run: PrecisionRun) -> None:
+    """The run's flips under ``FLIPS_FLAG`` (replaced each week; a run with
+    none says so, so a stale week is never read as this one)."""
+    value = {"at": run.at.isoformat(), "flips": [f.as_dict() for f in run.flips]}
+    stmt = pg_insert(RuntimeFlag).values(
+        key=FLIPS_FLAG, value=value, updated_by=PRECISION_WRITER
+    )
+    await session.execute(
+        stmt.on_conflict_do_update(
+            index_elements=[RuntimeFlag.key],
+            set_={"value": stmt.excluded.value, "updated_by": stmt.excluded.updated_by},
+        )
+    )
+
+
+def _flips_of(value: Any) -> list[PrecisionFlip]:
+    """The flips a stored ``FLIPS_FLAG`` value lists."""
+    found: list[PrecisionFlip] = []
+    items = value.get("flips") if isinstance(value, dict) else None
+    for item in items if isinstance(items, list) else []:
+        if isinstance(item, dict):
+            found.append(
+                PrecisionFlip(
+                    key=str(item.get("key")),
+                    title=str(item.get("title")),
+                    on=item.get("on") is True,
+                    pct=item.get("pct") if isinstance(item.get("pct"), int) else None,
+                    pushes=int(item.get("pushes") or 0),
+                )
+            )
+    return found
+
+
+async def precision_flips(
+    session: AsyncSession, *, since: datetime
+) -> list[PrecisionFlip]:
+    """The flips of the last run when it ran at or after ``since`` — the
+    digest's «a flip of auto_push is its own line» (T-35 reads it)."""
+    row = await session.get(RuntimeFlag, FLIPS_FLAG, populate_existing=True)
+    if row is None or not isinstance(row.value, dict):
+        return []
+    try:
+        at = datetime.fromisoformat(str(row.value.get("at")))
+    except ValueError:
+        return []
+    if at < since:
+        return []
+    return _flips_of(row.value)
+
+
+# --- telling the owner a flip (06 §1.8, §4.3) -------------------------------------------
+
+# A week's flips are told once, through the owner seam, at the first chance
+# outside QUIET_HOURS (06 §4.3: a warning waits for them to end — the job
+# runs at Sunday 04:00, so the first health sweep after 08:00 says them);
+# the digest names them as well (06 §1.8 «a flip of auto_push is its own
+# line»). The claim is the flag's own ``told_at``: a new week's value has
+# none, an undelivered alert gives it back.
+FLIPS_TOLD: Final = "told_at"
+FLIPS_HEAD_UZ: Final = "🔁 Haftalik aniqlik hisobi — avtomatik push oʻzgardi:"
+# auto_push earned while AUTO_APPROVE is off approves nothing yet
+# (candidates.auto_approves): said, so «yoqildi» is never read as «sent
+# without your card».
+FLIPS_NOT_LIVE_UZ: Final = (
+    "  AUTO_APPROVE oʻchiq — bu manbalarning kartalari hali ham sizga keladi"
+)
+
+
+def flip_line(title: str, *, on: bool, pct: int | None, pushes: int | None) -> str:
+    """One flip as the owner reads it (the digest's line and the alert's,
+    one home): the title HTML-escaped, the job's numbers when it made it."""
+    word = "yoqildi" if on else "oʻchirildi"
+    numbers = (
+        f" — aniqlik {pct}% ({pushes} push)"
+        if pct is not None and pushes is not None
+        else ""
+    )
+    return f"🔁 Avtomatik push {word}: {html.escape(title, quote=False)}{numbers}"
+
+
+def flips_not_live(ons: Iterable[bool], *, auto_approve: bool) -> bool:
+    """A flip turned a source's ``auto_push`` on while ``AUTO_APPROVE`` is
+    off: its cards still reach the owner (``candidates.auto_approves``), and
+    every place that says the flip says that too (``FLIPS_NOT_LIVE_UZ``: the
+    alert and the digest, one rule)."""
+    return not auto_approve and any(ons)
+
+
+def flips_alert(flips: Sequence[PrecisionFlip], *, auto_approve: bool) -> str:
+    """The owner's message for a week's flips."""
+    lines = [FLIPS_HEAD_UZ]
+    lines += [
+        "  " + flip_line(f.title, on=f.on, pct=f.pct, pushes=f.pushes) for f in flips
+    ]
+    if flips_not_live((f.on for f in flips), auto_approve=auto_approve):
+        lines.append(FLIPS_NOT_LIVE_UZ)
+    return "\n".join(lines)
+
+
+def _untold() -> sa.ColumnElement[bool]:
+    """The stored week has flips and nobody has told them yet."""
+    flips = RuntimeFlag.value["flips"]
+    listed = sa.case(
+        (sa.func.jsonb_typeof(flips) == "array", sa.func.jsonb_array_length(flips)),
+        else_=0,
+    )
+    return sa.and_(
+        RuntimeFlag.key == FLIPS_FLAG,
+        sa.not_(RuntimeFlag.value.has_key(FLIPS_TOLD)),
+        listed > 0,
+    )
+
+
+async def tell_flips(
+    session_factory: SessionFactory,
+    notify: Callable[[str], Any],
+    *,
+    now: datetime,
+) -> bool:
+    """Tell the owner the last run's ``auto_push`` flips, once, outside
+    QUIET_HOURS: claimed (``told_at``, committed) before ``notify`` and given
+    back unless it reported the message delivered. True when told."""
+    if health.in_quiet_hours(now):
+        return False
+    stamp = sa.func.jsonb_build_object(FLIPS_TOLD, now.isoformat())
+    async with session_factory() as session:
+        claimed = await session.scalar(
+            sa.update(RuntimeFlag)
+            .where(_untold())
+            .values(value=sa.type_coerce(RuntimeFlag.value.op("||")(stamp), JSONB))
+            .returning(RuntimeFlag.value)
+        )
+        await session.commit()
+    flips = _flips_of(claimed)
+    if not flips or not isinstance(claimed, dict):
+        return False
+    delivered = False
+    try:
+        delivered = bool(
+            await notify(flips_alert(flips, auto_approve=settings.auto_approve))
+        )
+    finally:
+        if not delivered:
+            async with session_factory() as session:
+                await session.execute(
+                    sa.update(RuntimeFlag)
+                    .where(
+                        RuntimeFlag.key == FLIPS_FLAG,
+                        RuntimeFlag.value["at"].astext == str(claimed.get("at")),
+                    )
+                    .values(
+                        value=sa.type_coerce(
+                            RuntimeFlag.value.op("-")(sa.literal(FLIPS_TOLD)), JSONB
+                        )
+                    )
+                )
+                await session.commit()
+    if delivered:
+        log.info("auto_push flips told", extra={"flips": len(flips)})
+    return delivered
+
+
+SessionFactory = Callable[[], AbstractAsyncContextManager[AsyncSession]]
+
+
+async def source_precision_job(
+    session_factory: SessionFactory, now: datetime
+) -> PrecisionRun:
+    """The weekly ``source_precision`` slot (Sunday 04:00, after the Sunday
+    ``quarter`` walk at 03:20): ``apply_precision`` in one committed
+    transaction."""
+    async with session_factory() as session:
+        run = await apply_precision(session, now)
+        await session.commit()
+    log.info(
+        "source precision: %d sources, %d flips, %d paused",
+        run.sources,
+        len(run.flips),
+        len(run.paused),
+        extra={"job": "source_precision"},
+    )
+    return run
+
+
 # --- what a failure writes ------------------------------------------------------------
 
 
@@ -1879,12 +2254,19 @@ async def _clear_feed_contract(session: AsyncSession, feed: FeedName) -> None:
 
 
 __all__ = [
+    "AUTO_PUSH_FORBIDDEN",
+    "AUTO_PUSH_MIN_PRECISION",
+    "AUTO_PUSH_MIN_PUSHES",
     "CATCH_UP_AFTER",
     "DELTA_MAX_AGE_H",
     "ERP_KEY_HEADERS",
     "FEED_RULE",
+    "FLIPS_TOLD",
     "FULL_DUE_AFTER",
     "FULL_MAX_AGE_H",
+    "LOW_PRECISION_BELOW",
+    "LOW_PRECISION_MIN_PUSHES",
+    "LOW_PRECISION_PAUSE",
     "MAX_PAGES",
     "NIGHTLY_MAX_AGE",
     "OUTCOMES_LIMIT",
@@ -1904,25 +2286,38 @@ __all__ = [
     "OutcomesPage",
     "OutcomesReport",
     "Precision",
+    "PrecisionFlip",
+    "PrecisionRun",
     "ReconcileReport",
     "SuppressionConfig",
     "SuppressionPage",
     "SyncReport",
+    "apply_precision",
+    "auto_push_due",
+    "end_low_precision_pause",
     "feeds_configured",
     "fetch_pages",
+    "flip_line",
+    "flips_alert",
     "fmt_since",
+    "forbidden_of",
     "freshness",
     "hash_tail",
+    "low_precision",
     "outcomes_config",
     "parse_entry",
     "parse_outcome",
+    "percent",
+    "precision_flips",
     "reconcile_unconfirmed",
     "refresh_precision",
     "refuse_pii",
     "salt_id",
     "source_precision",
+    "source_precision_job",
     "suppression_fresh",
     "sync_outcomes",
     "sync_suppression",
+    "tell_flips",
     "walk_params",
 ]

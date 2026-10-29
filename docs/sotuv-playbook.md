@@ -80,6 +80,7 @@ Routing in LogisticsERP: use existing routing rules by m³ range — C and D (co
 ### 2.5 What it MUST NOT contain
 
 - Any price figure before goods + density + origin city are known (quote only the *range* 110–320 $/m³ and only if asked).
+- **No price before density.** Until the goods, their density and the origin city are known, no figure, tariff, per-m³ rate, discount or "arzon" claim — in the first message, in the follow-ups and on the phone. The density question (or the volume question that leads to it) comes first.
 - "Bojsiz/без пошлин", "eng tez/самая быстрая", "100% kafolat/гарантия", "muammosiz/без проблем".
 - References to their customs declarations, import volumes, STIR, tax status, or anything from non-public datasets ("we see you imported 40 t last quarter" is forbidden — it signals surveillance and risks personal-data complaints).
 - Links, images, price lists, PDFs, voice notes, forwarded posts (spam signals; also Telegram flags link-heavy first messages).
@@ -88,9 +89,11 @@ Routing in LogisticsERP: use existing routing rules by m³ range — C and D (co
 
 ### 2.6 Opt-out line (mandatory, last sentence)
 
-- UZ Latin: `Agar qiziq bo'lmasa, "yo'q" deb yozing — boshqa yozmayman.`
+- UZ Latin: `Agar qiziq boʻlmasa, "yoʻq" deb yozing — boshqa yozmayman.`
 - UZ Cyrillic: `Агар қизиқ бўлмаса, «йўқ» деб ёзинг — бошқа ёзмайман.`
 - RU: `Если неактуально — напишите «нет», больше не побеспокою.`
+
+These three sentences live once in the agent's code (`clientscrapper/services/redlines.py` `OPTOUT_UZ`, `OPTOUT_UZ_CYRL`, `OPTOUT_RU`): the card's opener, the opener prompt and the redline gate read them from there, spelled with ʻ/ʼ (04 Open question 9, answer a). The gate refuses a machine-written first message that does not END with one of them (an Uzbek message may close with the Latin or the Cyrillic Uzbek line); a quote mark, an apostrophe or a dash written differently is the same sentence.
 
 Any "yo'q / нет / не надо / stop" → `do_not_contact = true` the same day, acknowledged with one line ("Tushunarli, rahmat." / "Понял, спасибо.") and no further contact.
 
@@ -116,13 +119,68 @@ Explicit no; DNC flag; reported/blocked; wrong person or B2C; company closed; th
 
 Placeholders: `[Ism]/[Имя]` contact, `[Men]` manager name, `[tovar]` goods, `[manba]` public source (OLX, Uzum, ko'rgazma, katalog).
 
+### 3.0 The first message the agent suggests (the card's «✍️ Taklif», the ERP note's «NIMA DEYISH»)
+
+The agent never sends anything. For a lead it puts ONE suggested first message on the manager's card and in the ERP note; the manager reads it, edits it and sends it from their own account. A hot lead gets a draft written for that company (the model is asked with the company name, the segment, up to three goods, the public source and its date, and the skeleton below — never a person's name or phone); every other lead, and every draft the gate refuses, gets the segment's template below with the source and the goods filled in.
+
+The agent's gate (`clientscrapper/services/redlines.py`, 04 §4.5) is stricter than §2.4: a machine-written message carries **no digit except 2018**, no day count or delivery time ("kun", "hafta", "tez", "bir oyda", "за месяц"), no price, tariff, per-m³, percentage ("foiz", "процент") or discount word and no "arzon"/"дешевле"/"недорого" claim, no guarantee ("kafolat", "100%", "bojsiz"), no customs, declaration, tax or STIR word, no link, bare domain ("gsrlogistics.uz", "wa.me/…") or handle, no competitor's name, and it ends with the opt-out line of §2.6. The templates are the §3.1 messages with those taken out; the manager adds "15–25 kun" or a container's timing by hand when it helps. `[Men]` is the manager's name and `[Ism]` the contact's (the card shows the contact; the agent never writes a person's name into the text). `{salom}` is ", [Ism]" when a contact person is known, `{manba}` the source ("OLX", "Telegram guruh", "koʻrgazma"…; in Russian "на OLX", "в группе Telegram"…), `{tovar}` the goods — in a Russian template with the words around them (" по товару «mato»"), which drop out when no goods can be named ("…ваш опт."); an Uzbek one then says "tovar".
+
+The manager card shows the whole message. The ERP note has less room: when it must shorten «NIMA DEYISH», it drops whole sentences from the middle and marks the gap with "…" — the greeting stays first and the last two sentences (the question and the opt-out line) always stay.
+
+The code's copy (`clientscrapper/services/playbook.py` `TEMPLATES`) is the one the agent uses; `tests/fixtures/uz_corpus.py` holds a reference copy and `tests/test_redlines.py` checks every one, filled, through the gate. A change here is a change there.
+
+**A.** UZ Latin:
+```
+Assalomu alaykum{salom}. Men [Men], GSR Logistics (Toshkent), 2018-yildan Xitoydan yuk olib kelamiz. {manba}da {tovar} optom savdongizni koʻrib yozyapman. Yukni Yiwu va Guangzhoudagi oʻz punktlarimizda qabul qilib oʻlchaymiz va fotohisobot yuboramiz. Oyiga taxminan necha kub olasiz? Agar qiziq boʻlmasa, "yoʻq" deb yozing — boshqa yozmayman.
+```
+RU:
+```
+Здравствуйте{salom}. Я [Men], GSR Logistics (Ташкент), с 2018 года возим грузы из Китая. Пишу, потому что увидел {manba} ваш опт{tovar}. Принимаем груз на своих пунктах в Иу и Гуанчжоу, замеряем и присылаем фотоотчёт. Сколько кубов в месяц обычно везёте? Если неактуально — напишите «нет», больше не побеспокою.
+```
+
+**B.** UZ Latin:
+```
+Assalomu alaykum{salom}. Men [Men], GSR Logistics. {manba}dagi doʻkoningizni koʻrdim — {tovar} Xitoydan keladi shekilli. Xitoydagi saytlardan xarid qilib beramiz, tovarni Xitoyda tekshirib foto yuboramiz, hujjatlarni sertifikat va buxgalteriyaga mos qilib tayyorlaymiz. Keyingi partiya qachon va taxminan necha kub yoki kilogramm? Agar qiziq boʻlmasa, "yoʻq" deb yozing — boshqa yozmayman.
+```
+RU:
+```
+Здравствуйте{salom}. Я [Men], GSR Logistics. Увидел ваш магазин {manba} — похоже, {tovar} идёт из Китая. Закупаем товар на китайских площадках, проверяем его в Китае и присылаем фото, документы готовим так, чтобы они подходили для сертификации и бухгалтерии. Когда следующая партия и сколько примерно кубов или килограммов? Если неактуально — напишите «нет», больше не побеспокою.
+```
+
+**C.** UZ Latin:
+```
+Assalomu alaykum{salom}. Men [Men], GSR Logistics (Toshkent). {manba}da {tovar} boʻyicha korxonangizni koʻrdim. Xitoydan uskuna va xomashyoni konteynerda olib kelamiz, zavodda yukni tekshirib foto beramiz, hujjatlarni oʻzimiz tayyorlaymiz. Yaqin oylarda rejalashtirilgan xarid bormi? Agar qiziq boʻlmasa, "yoʻq" deb yozing — boshqa yozmayman.
+```
+RU:
+```
+Здравствуйте{salom}. Я [Men], GSR Logistics (Ташкент). Увидел {manba} ваше предприятие{tovar}. Везём оборудование и сырьё из Китая в контейнерах, принимаем груз на заводе с фотоотчётом, документы оформляем сами. Есть ли закупка в ближайшие месяцы? Если неактуально — напишите «нет», больше не побеспокою.
+```
+
+**D.** UZ Latin:
+```
+Assalomu alaykum{salom}. Men [Men], GSR Logistics. {manba}da {tovar} boʻyicha optom savdongizni koʻrdim. Ogʻir yuk uchun toʻliq fura yoki konteyner hisobini yonma-yon koʻrsatamiz, Yiwu va Guangzhouda qabul qilib foto yuboramiz. Mavsumda Xorgosda navbat boʻladi — joyni oldindan band qilamiz. Odatda toʻliq furami yoki yigʻma? Agar qiziq boʻlmasa, "yoʻq" deb yozing — boshqa yozmayman.
+```
+RU:
+```
+Здравствуйте{salom}. Я [Men], GSR Logistics. Увидел {manba} ваш опт{tovar}. Для тяжёлого груза считаем рядом два варианта — полная фура и контейнер, приёмка и фото в Иу и Гуанчжоу. В сезон на Хоргосе очереди — бронируем место заранее. Вы обычно везёте полной фурой или сборным? Если неактуально — напишите «нет», больше не побеспокою.
+```
+
+**E.** UZ Latin:
+```
+Assalomu alaykum{salom}. Men [Men], GSR Logistics. {manba}da {tovar} boʻyicha faoliyatingizni koʻrdim. Guangzhouda oʻz qabul punktimiz bor: har bir joyni sanab, nozik tovarni tekshirib foto yuboramiz, hujjatlarni oʻzimiz rasmiylashtiramiz. Avtomobil va elektromobil importi ham bor. Oyiga taxminan necha kub yoki kilogramm olasiz? Agar qiziq boʻlmasa, "yoʻq" deb yozing — boshqa yozmayman.
+```
+RU:
+```
+Здравствуйте{salom}. Я [Men], GSR Logistics. Увидел {manba} вашу работу{tovar}. У нас свой пункт приёма в Гуанчжоу: пересчитываем места, проверяем хрупкое и присылаем фото, документы делаем сами. Есть и импорт авто и электромобилей. Сколько кубов или килограммов в месяц обычно везёте? Если неактуально — напишите «нет», больше не побеспокою.
+```
+
 ### 3.1 Telegram first messages — per segment (UZ Latin / UZ Cyrillic / RU)
 
 **A. Bazaar wholesale traders**
 
 UZ Latin:
 ```
-Assalomu alaykum, [Ism] aka. Men [Men], GSR Logistics (Toshkent), 2018-yildan Xitoydan yuk olib kelamiz. [manba]da [tovar] optom savdongizni ko'rib yozyapman. Yukni Yiwu va Guangzhoudagi o'z punktlarimizda qabul qilib o'lchaymiz, fotohisobot yuboramiz, narx zichlik bo'yicha kubga yoziladi, Toshkentgacha 15–25 kun. Oyiga taxminan necha kub olasiz? Agar qiziq bo'lmasa, "yo'q" deb yozing — boshqa yozmayman.
+Assalomu alaykum, [Ism] aka. Men [Men], GSR Logistics (Toshkent), 2018-yildan Xitoydan yuk olib kelamiz. [manba]da [tovar] optom savdongizni koʻrib yozyapman. Yukni Yiwu va Guangzhoudagi oʻz punktlarimizda qabul qilib oʻlchaymiz, fotohisobot yuboramiz, narx zichlik boʻyicha kubga yoziladi, Toshkentgacha 15–25 kun. Oyiga taxminan necha kub olasiz? Agar qiziq boʻlmasa, "yoʻq" deb yozing — boshqa yozmayman.
 ```
 UZ Cyrillic:
 ```
@@ -137,7 +195,7 @@ RU:
 
 UZ Latin:
 ```
-Assalomu alaykum, [Ism]. Men [Men], GSR Logistics. [Uzum/Instagram]dagi [do'kon] do'koningizni ko'rdim — [tovar] Xitoydan keladi shekilli. Biz 1688/Taobao/Alibaba dan xarid qilib beramiz (3% komissiya), Xitoyda tovarni tekshirib foto yuboramiz, GTD va invoyslarni sertifikat/buxgalteriyaga mos qilib rasmiylashtiramiz, yig'ma yuk 15–25 kun, shoshilinch bo'lsa avia. Keyingi partiya qachon va taxminan necha kub yoki kg? Agar qiziq bo'lmasa, "yo'q" deb yozing — boshqa yozmayman.
+Assalomu alaykum, [Ism]. Men [Men], GSR Logistics. [Uzum/Instagram]dagi [doʻkon] doʻkoningizni koʻrdim — [tovar] Xitoydan keladi shekilli. Biz 1688/Taobao/Alibaba dan xarid qilib beramiz (3% komissiya), Xitoyda tovarni tekshirib foto yuboramiz, GTD va invoyslarni sertifikat/buxgalteriyaga mos qilib rasmiylashtiramiz, yigʻma yuk 15–25 kun, shoshilinch boʻlsa avia. Keyingi partiya qachon va taxminan necha kub yoki kg? Agar qiziq boʻlmasa, "yoʻq" deb yozing — boshqa yozmayman.
 ```
 UZ Cyrillic:
 ```
@@ -152,7 +210,7 @@ RU:
 
 UZ Latin:
 ```
-Assalomu alaykum, [Ism]. Men [Men], GSR Logistics (Toshkent). [manba]da [korxona] [tovar] ishlab chiqarishini ko'rdim. Xitoydan uskuna va xomashyoni 20/40 fut konteynerda 20–35 kunda olib kelamiz, TN VED kodini tekshiramiz (PKM-352 ro'yxatiga kirish-kirmasligini ham), GTD ni o'zimiz rasmiylashtiramiz, zavodda yukni tekshirib foto beramiz. Yaqin oylarda rejalashtirilgan xarid bormi? Agar qiziq bo'lmasa, "yo'q" deb yozing — boshqa yozmayman.
+Assalomu alaykum, [Ism]. Men [Men], GSR Logistics (Toshkent). [manba]da [korxona] [tovar] ishlab chiqarishini koʻrdim. Xitoydan uskuna va xomashyoni 20/40 fut konteynerda 20–35 kunda olib kelamiz, TN VED kodini tekshiramiz (PKM-352 roʻyxatiga kirish-kirmasligini ham), GTD ni oʻzimiz rasmiylashtiramiz, zavodda yukni tekshirib foto beramiz. Yaqin oylarda rejalashtirilgan xarid bormi? Agar qiziq boʻlmasa, "yoʻq" deb yozing — boshqa yozmayman.
 ```
 UZ Cyrillic:
 ```
@@ -167,7 +225,7 @@ RU:
 
 UZ Latin:
 ```
-Assalomu alaykum, [Ism] aka. Men [Men], GSR Logistics. [manba]da [tovar] bo'yicha optom savdongizni ko'rdim. Og'ir yuk (plitka, santexnika, furnitura, mebel) uchun to'liq fura yoki konteyner hisob-kitobini yonma-yon ko'rsatamiz, zichlik bo'yicha tarif yozma, Yiwu/Guangzhouda qabul va foto, 15–25 kun fura, 20–35 kun konteyner. Sentabr–noyabr va Yangi yil oldi Xorgosda navbat bo'ladi — oldindan joy band qilamiz. Odatda to'liq furami yoki yig'ma? Agar qiziq bo'lmasa, "yo'q" deb yozing — boshqa yozmayman.
+Assalomu alaykum, [Ism] aka. Men [Men], GSR Logistics. [manba]da [tovar] boʻyicha optom savdongizni koʻrdim. Ogʻir yuk (plitka, santexnika, furnitura, mebel) uchun toʻliq fura yoki konteyner hisob-kitobini yonma-yon koʻrsatamiz, zichlik boʻyicha tarif yozma, Yiwu/Guangzhouda qabul va foto, 15–25 kun fura, 20–35 kun konteyner. Sentabr–noyabr va Yangi yil oldi Xorgosda navbat boʻladi — oldindan joy band qilamiz. Odatda toʻliq furami yoki yigʻma? Agar qiziq boʻlmasa, "yoʻq" deb yozing — boshqa yozmayman.
 ```
 UZ Cyrillic:
 ```
@@ -182,7 +240,7 @@ RU:
 
 UZ Latin:
 ```
-Assalomu alaykum, [Ism]. Men [Men], GSR Logistics. [manba]da [tovar] bo'yicha faoliyatingizni ko'rdim. Guangzhouda o'z qabul punktimiz bor: har bir joyni sanab, nozik tovarni tekshirib foto yuboramiz, xohlasangiz sug'urta rasmiylashtiramiz, GTD ni o'zimiz qilamiz; yig'ma 15–25 kun, shoshilinch ehtiyot qism avia 9–12 $/kg. Avtomobil/elektromobil importi ham bor. Oyiga taxminan necha kub yoki kg olasiz? Agar qiziq bo'lmasa, "yo'q" deb yozing — boshqa yozmayman.
+Assalomu alaykum, [Ism]. Men [Men], GSR Logistics. [manba]da [tovar] boʻyicha faoliyatingizni koʻrdim. Guangzhouda oʻz qabul punktimiz bor: har bir joyni sanab, nozik tovarni tekshirib foto yuboramiz, xohlasangiz sugʻurta rasmiylashtiramiz, GTD ni oʻzimiz qilamiz; yigʻma 15–25 kun, shoshilinch ehtiyot qism avia 9–12 $/kg. Avtomobil/elektromobil importi ham bor. Oyiga taxminan necha kub yoki kg olasiz? Agar qiziq boʻlmasa, "yoʻq" deb yozing — boshqa yozmayman.
 ```
 UZ Cyrillic:
 ```
@@ -197,7 +255,7 @@ RU:
 
 UZ Latin:
 ```
-Assalomu alaykum, [Ism] aka. Men [Men], GSR Logistics. [manba]da [shahar]dagi [tovar] savdongizni ko'rdim. Vodiyga boradigan yuk uchun Kashg'ar (喀什)da ham qabul punktimiz bor, Yiwu/Guangzhoudan ham yig'amiz; bir nechta yetkazib beruvchidan bitta furaga jamlaymiz, tarif zichlik bo'yicha yozma, 15–25 kun. Yangi yil oldi Irkeshtam/Xorgos yopilish kunlarini oldindan aytamiz. Yuk Toshkentgami yoki to'g'ri [shahar]gami, oyiga necha kub? Agar qiziq bo'lmasa, "yo'q" deb yozing — boshqa yozmayman.
+Assalomu alaykum, [Ism] aka. Men [Men], GSR Logistics. [manba]da [shahar]dagi [tovar] savdongizni koʻrdim. Vodiyga boradigan yuk uchun Kashgʻar (喀什)da ham qabul punktimiz bor, Yiwu/Guangzhoudan ham yigʻamiz; bir nechta yetkazib beruvchidan bitta furaga jamlaymiz, tarif zichlik boʻyicha yozma, 15–25 kun. Yangi yil oldi Irkeshtam/Xorgos yopilish kunlarini oldindan aytamiz. Yuk Toshkentgami yoki toʻgʻri [shahar]gami, oyiga necha kub? Agar qiziq boʻlmasa, "yoʻq" deb yozing — boshqa yozmayman.
 ```
 UZ Cyrillic:
 ```

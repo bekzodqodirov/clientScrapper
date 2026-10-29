@@ -484,6 +484,7 @@ async def test_the_owner_s_dnc_writes_every_key_and_suppresses(session):
         telegram_channel="namuna_kanal",
         instagram="namuna.shop",
         website_domain="namuna.example.uz",
+        stir="300000031",
     )
     lead = await contact(
         session, owner, phone(31), telegram_username="namuna_bir", instagram="namuna_ig"
@@ -508,6 +509,8 @@ async def test_the_owner_s_dnc_writes_every_key_and_suppresses(session):
         ("dnc", "tg_username", "namuna_kanal", "owner_bot"),
         ("dnc", "instagram", "namuna.shop", "owner_bot"),
         ("dnc", "domain", "namuna.example.uz", "owner_bot"),
+        # The STIR is a DNC key too (seam review wave 4).
+        ("dnc", "stir", "300000031", "owner_bot"),
     ]
     assert first == rows[0].id
     assert (cand.state, cand.suppressed_by) == ("suppressed", first)

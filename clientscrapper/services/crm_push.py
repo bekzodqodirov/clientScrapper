@@ -64,6 +64,7 @@ from clientscrapper.services import (
     companies,
     costs,
     erp_feeds,
+    health,
     outcomes,
     push_gate,
 )
@@ -79,6 +80,7 @@ from clientscrapper.services.pseudonyms import (
 )
 from clientscrapper.services.push_gate import Refusal, text_len
 from clientscrapper.services.retry import with_backoff
+from clientscrapper.services.signals import VolumeReading
 from clientscrapper.services.text import well_formed
 
 log = logging.getLogger(__name__)
@@ -257,6 +259,40 @@ def clip_words(text: str, max_units: int) -> str:
     return js_trim(cut).rstrip(",.;:·—-") + ELLIPSIS
 
 
+# A sentence ends at «.», «!», «?» or «…» before a space.
+_SENTENCE_BREAK: Final = re.compile(r"(?<=[.!?…])\s+")
+
+
+def fit_opener(text: str, max_units: int) -> str:
+    """An opener within ``max_units`` UTF-16 units that still ends the way
+    every opener must (04 §4.5): its last sentence — the opt-out line — and
+    the question before it are kept whole; then whole sentences from the
+    start, in order, while they fit; the sentences dropped between are one
+    «…». Never a sentence cut in the middle. ``text`` whole when it fits;
+    cut by words (``clip_words``) only when not even its last sentence does.
+    Pure."""
+    text = collapse(text)
+    if text_len(text) <= max_units:
+        return text
+    parts = _SENTENCE_BREAK.split(text)
+    closing, body = [parts[-1]], parts[:-1]
+    gap = text_len(ELLIPSIS) + 1
+
+    def size(items: Sequence[str]) -> int:
+        return text_len(" ".join(items))
+
+    if body and body[-1].endswith("?") and size([body[-1], *closing]) + gap <= max_units:
+        closing.insert(0, body.pop())
+    if size(closing) + gap > max_units:
+        return clip_words(text, max_units)
+    head: list[str] = []
+    for sentence in body:
+        if size([*head, sentence, *closing]) + gap > max_units:
+            break
+        head.append(sentence)
+    return " ".join([*head, ELLIPSIS, *closing])
+
+
 def _clip_points(text: str, max_points: int) -> str:
     """The same at a code-point budget (the seller's push preview)."""
     if len(text) <= max_points:
@@ -393,10 +429,14 @@ def _day(at: datetime) -> str:
     return at.astimezone(settings.tz).strftime("%d.%m.%Y")
 
 
-def _url_line(s: SignalEvidence) -> str:
-    """The URL is never cut: one over URL_MAX is named by its evidence id."""
+def url_line(s: SignalEvidence) -> str:
+    """The URL is never cut: one over URL_MAX is named by its evidence id
+    (the note's and the owner card's 🔗 line, one rule)."""
     url = clean(s.url) or ""
     return url if url and text_len(url) <= URL_MAX else f"evidence #{s.evidence_id}"
+
+
+_url_line = url_line
 
 
 def nega_topildi(c: CandidateView) -> str:
@@ -429,44 +469,80 @@ def firma_of(c: CandidateView) -> str | None:
     return clip_words(name, COMPANY_MAX)
 
 
-def _origin(c: CandidateView) -> str | None:
-    for key, word in (("cn_origin", "ha"), ("cn_sector_prior", "ehtimol")):
+# Whether the goods come from China, as the note and the owner card say it:
+# a cited China origin is «ha», a China-dominant sector «ehtimol».
+CHINA_WORDS: Final = (("cn_origin", "ha"), ("cn_sector_prior", "ehtimol"))
+
+
+def china_signal(c: CandidateView) -> tuple[SignalEvidence, str] | None:
+    """The signal that says China and its word (``CHINA_WORDS``), or None."""
+    for key, word in CHINA_WORDS:
         found = next((s for s in c.signals if s.key == key), None)
-        if found is None:
-            continue
-        hint = verified_quote(found, known=known_names(c))
-        if hint:
-            return f"Xitoy: {word} («{_clip_points(hint, ORIGIN_HINT_MAX)}»)"
-        return f"Xitoy: {word}"
+        if found is not None:
+            return found, word
     return None
+
+
+def _origin(c: CandidateView) -> str | None:
+    said = china_signal(c)
+    if said is None:
+        return None
+    found, word = said
+    hint = verified_quote(found, known=known_names(c))
+    if hint:
+        return f"Xitoy: {word} («{_clip_points(hint, ORIGIN_HINT_MAX)}»)"
+    return f"Xitoy: {word}"
 
 
 def _goods(c: CandidateView) -> list[str]:
     return [g for g in (clean(x) for x in c.goods[:GOODS_MAX]) if g]
 
 
+def stated_m3(c: CandidateView) -> Decimal | None:
+    """The stated volume a note or card names, when one was stated."""
+    return c.stated_m3 if c.stated_m3 is not None and c.stated_m3 > 0 else None
+
+
+def estimate_words(reading: VolumeReading) -> str:
+    """«taxminan 15 kub (5 tonna)»: the agent's conversion first (the ERP's
+    textVolume routes by the number right before the first «kub»), the
+    poster's own words after it — never the guillemets of a stated volume."""
+    return f"taxminan {fmt_number(reading.m3)} kub ({clean(reading.quote)})"
+
+
+def band_of(c: CandidateView) -> str | None:
+    """The volume band said when nothing was stated: the company's band (a
+    ``BAND_HAJM`` key), or «container» when the band is unknown and a
+    container signal stands; None when there is no band to say."""
+    band = c.volume_band
+    if band not in BAND_HAJM and any(s.key == "vol_container" for s in c.signals):
+        band = "container"
+    return band if band in BAND_HAJM else None
+
+
 def _hajm(c: CandidateView, *, per_month: bool) -> str | None:
     words: str | None = None
-    if c.stated_m3 is not None and c.stated_m3 > 0:
-        words = f"{fmt_number(c.stated_m3)} kub"
+    stated = stated_m3(c)
+    if stated is not None:
+        words = f"{fmt_number(stated)} kub"
+    elif c.estimated_m3 is not None:
+        words = estimate_words(c.estimated_m3)
     else:
-        band = c.volume_band
-        if band not in BAND_HAJM and any(s.key == "vol_container" for s in c.signals):
-            band = "container"
-        words = BAND_HAJM.get(band)
+        band = band_of(c)
+        words = BAND_HAJM[band] if band is not None else None
     if words is None:
         return None
     month = clean(c.per_month) if per_month else None
     return f"HAJM: {words}" + (f" · {month}" if month else "")
 
 
-def _ball(c: CandidateView, *, detail: bool) -> str:
-    line = f"BALL: {c.score}/100"
-    if not detail:
-        return line
+def ball_parts(c: CandidateView) -> list[str]:
+    """The score's breakdown in the owner's words — «hajm 30», «Xitoy 20» …
+    and «minus N» when negatives counted; empty without a breakdown (the
+    note's BALL section and the owner card's 🧮 line, one rule)."""
     groups = c.breakdown.get("groups")
     if not isinstance(groups, Mapping):
-        return line
+        return []
 
     def used(name: str) -> str:
         group = groups.get(name)
@@ -492,6 +568,14 @@ def _ball(c: CandidateView, *, detail: bool) -> str:
         )
         if total:
             parts.append(f"minus {fmt_number(abs(total))}")
+    return parts
+
+
+def _ball(c: CandidateView, *, detail: bool) -> str:
+    line = f"BALL: {c.score}/100"
+    parts = ball_parts(c) if detail else []
+    if not parts:
+        return line
     return f"{line} ({', '.join(parts)})"
 
 
@@ -553,8 +637,9 @@ def render_note(c: CandidateView, *, level: int = 0) -> str:
         sections.append(masul)
     opener = clean(c.opener)
     if opener and "opener" not in drop:
+        # Shortened, the opener keeps its question and its opt-out line.
         limit = OPENER_SHORT if "opener_short" in drop else OPENER_MAX
-        sections.append("NIMA DEYISH: " + clip_words(opener, limit))
+        sections.append("NIMA DEYISH: " + fit_opener(opener, limit))
     sections.append(_ball(c, detail="ball_detail" not in drop))
     return "\n".join(sections)
 
@@ -801,7 +886,10 @@ BREAKER_ERRORS: Final[Mapping[str, erp_feeds.BreakerKey]] = {
     "http_404": "push_404",
     "http_3xx": "erp_redirect",
 }
-REJECTED_ALERT_KEY: Final = "push_rejected"
+# 06 §4.2 push_rejected: raised here on a 4xx other than 404 and told at once
+# (TOLD_FIRST_ELSEWHERE), cleared by the next push the ERP takes — so a tell
+# Telegram did not deliver is said by the health sweep, and its recovery too.
+REJECTED_PROBLEM: Final = "push_rejected"
 # Answers true of every push at this moment (05 §B.1): the job ends its run on
 # them. A 4xx other than 404 is a proxy or a wrong CRM_BASE_URL — the ERP door
 # answers the agent only 200 / 404 / 503 — so the candidate it hit goes back
@@ -809,11 +897,9 @@ REJECTED_ALERT_KEY: Final = "push_rejected"
 STOP_ERRORS: Final[Mapping[str, str]] = {**BREAKER_ERRORS, "http_4xx": "rejected"}
 
 
-def synthetic_marked(candidate: LeadCandidate) -> bool:
-    """``score_breakdown.gates.test`` — make push-test's company (05 §B.1)."""
-    breakdown = candidate.score_breakdown or {}
-    gates = breakdown.get("gates") if isinstance(breakdown, Mapping) else None
-    return isinstance(gates, Mapping) and gates.get("test") is True
+# ``score_breakdown.gates.test`` — make push-test's company (05 §B.1); one
+# home with its SQL twin in services/candidates.
+synthetic_marked = candidates.synthetic_marked
 
 
 async def _lock_push(session: AsyncSession, push_log_id: int) -> PushLog | None:
@@ -1021,7 +1107,8 @@ async def _record(
     row = await _lock_push(session, push_log_id)
     assert row is not None
     prior = await _lock_push(session, repush_of) if repush_of is not None else None
-    if row.status in ("sending", "unknown"):
+    moved = row.status in ("sending", "unknown")
+    if moved:
         row.status = answer.status
         row.http_status = answer.http_status
         row.error = answer.error
@@ -1043,16 +1130,30 @@ async def _record(
                 refusal = Refusal(6, "attempts_spent")
             if refusal is not None:
                 await push_gate.record_refusals(session, candidate, [refusal], now=now)
+    if moved:
+        # The ✅ card follows the push even when this answer lands just
+        # before a /toxtat longer than reviews.PUSH_FOOTER_WINDOW.
+        await outcomes.footer_moved(session, [candidate_id])
     if breaker is not None:
         await erp_feeds.trip_breaker(
             session, breaker, status=answer.http_status or 0, now=now, by="push"
         )
+    if answer.error == "http_4xx":
+        await health.raise_problem(
+            session,
+            REJECTED_PROBLEM,
+            now=now,
+            by="push",
+            detail={"status": answer.http_status},
+        )
+    elif answer.status == "sent":
+        await health.clear_problem(session, REJECTED_PROBLEM)
     await session.commit()
     if breaker is not None:
         await erp_feeds.tell_breaker(breaker, status=answer.http_status or 0, now=now)
     elif answer.error == "http_4xx":
         await costs.tell_once(
-            REJECTED_ALERT_KEY, rejected_text(answer.http_status), now=now
+            REJECTED_PROBLEM, rejected_text(answer.http_status), now=now
         )
     log.info(
         "push %s",
@@ -1075,13 +1176,9 @@ async def _record(
 
 
 def rejected_text(status: int | None) -> str:
-    """The owner's line for a 4xx other than 404 (05 §B.1): the ERP door
-    answers the agent only 200 / 404 / 503, so it is a proxy or a wrong
-    ``CRM_BASE_URL``."""
-    return (
-        f"⚠️ ERP pushni rad etdi (HTTP {status or '4xx'}): <code>.env</code> dagi "
-        "CRM_BASE_URL va ERP oldidagi proksini tekshiring; lid koʻrib chiqishga qaytdi"
-    )
+    """The owner's line for a 4xx other than 404 (05 §B.1) — health's, the
+    one home of its words (push_rejected)."""
+    return health.push_rejected_text(status)
 
 
 # --- crm_push_job (every minute inside the window) -----------------------------------
@@ -1160,13 +1257,12 @@ async def due_candidates(session: AsyncSession, *, limit: int) -> list[uuid.UUID
         )
         .exists()
     )
-    synthetic = LeadCandidate.score_breakdown["gates"]["test"].as_boolean()
     rows = await session.scalars(
         sa.select(LeadCandidate.id)
         .where(
             LeadCandidate.state == "approved",
             ~busy,
-            sa.func.coalesce(synthetic, sa.false()).is_(False),
+            ~candidates.synthetic_sql(),
         )
         .order_by(
             LeadCandidate.score.desc().nulls_last(),
@@ -1222,6 +1318,7 @@ async def crm_push_job(
     try:
         for candidate_id in ids:
             moment = now or datetime.now(settings.tz)
+            await opener_first(session_factory, candidate_id, now=moment)
             try:
                 async with session_factory() as session:
                     result = await push_one(session, candidate_id, now=moment, erp=client)
@@ -1250,6 +1347,32 @@ async def crm_push_job(
     if report.sent or report.unknown or report.failed or report.errors:
         log.info("crm_push_job", extra={"counts": report.as_dict()})
     return report
+
+
+async def opener_first(
+    session_factory: SessionFactory, candidate_id: uuid.UUID, *, now: datetime
+) -> None:
+    """The note's «NIMA DEYISH» before the claim (T-30 → T-28): a candidate
+    approved and pushed before ``verdict_job``'s next run (every 10 min) had
+    no opener and reached the ERP without one. Here a candidate with none
+    gets the playbook template — free, no model call (``paid=False``; the
+    draft stays ``verdict_job``'s, a stored one stands) — in a transaction of
+    its own, so no lock is held into the push. Not while ``/toxtat`` holds
+    (the push refuses anyway); a failure is a log line and the push goes on
+    without the section, as before."""
+    from clientscrapper.services import openers  # it imports this module
+
+    try:
+        async with session_factory() as session:
+            if await costs.global_pause(session):
+                return
+            await openers.ensure_opener(session, candidate_id, now=now, paid=False)
+            await session.commit()
+    except Exception as exc:
+        log.error(
+            "crm_push: opener not made",
+            extra={"candidate_id": str(candidate_id), "error": type(exc).__name__},
+        )
 
 
 async def crm_push_slot() -> dict[str, Any]:
@@ -1586,8 +1709,12 @@ __all__ = [
     "PushPayload",
     "PushResult",
     "ReconcileJobReport",
+    "ball_parts",
+    "band_of",
     "build_payload",
     "canonical_sha256",
+    "china_signal",
+    "cited",
     "clean",
     "clip_words",
     "collapse",
@@ -1596,9 +1723,11 @@ __all__ = [
     "due_candidates",
     "endpoint_for",
     "external_id_for",
+    "fit_opener",
     "js_trim",
     "landed_note",
     "last_attempt",
+    "opener_first",
     "push_one",
     "push_tekshir_confirm",
     "push_tekshir_view",
@@ -1610,5 +1739,7 @@ __all__ = [
     "render_push_check",
     "resendable",
     "settle_crashed",
+    "stated_m3",
     "text_volume",
+    "url_line",
 ]

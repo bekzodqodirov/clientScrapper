@@ -35,6 +35,7 @@ from clientscrapper.services import (
     erp_feeds,
     health,
     model_jobs,
+    retention,
 )
 from clientscrapper.worker import main as worker
 
@@ -106,9 +107,19 @@ BUILT = {
     "model_batch_collect",
     # T-18: the scorer.
     "score",
+    # T-21: the review cards (and their expiry sweep).
+    "review_cards",
     # T-28: the push and its reconcile.
     "crm_push",
     "reconcile",
+    # T-35: the owner's morning digest.
+    "digest",
+    # T-30: the instant verdicts and the openers (services/verdict).
+    "verdict",
+    # T-31: retention (services/retention, 02 §4).
+    "retention",
+    # T-36: the weekly precision job (05 §B.2).
+    "source_precision",
 }
 # The ERP slots and the ErpSync variant each runs (03 §3, 05 §B.2).
 ERP_VARIANTS = {
@@ -251,6 +262,20 @@ def test_the_push_and_reconcile_slots_are_crm_push_s_jobs():
     ):
         job = scheduler.get_job(job_id)
         assert job is not None and job.func is func
+
+
+def test_the_retention_slot_is_retention_s_job_at_04_15_tashkent():
+    """T-31 fills the slot T-08 left (02 §4: daily 04:15 Tashkent)."""
+    [slot] = [s for s in worker.job_table() if s.id == "retention"]
+    assert (slot.job, slot.triggers, slot.wakes_on) == (
+        retention.retention_job,
+        ("15 4 * * *",),
+        None,
+    )
+    job = worker.build_scheduler().get_job("retention")
+    assert job is not None and job.func is retention.retention_job
+    fire = job.trigger.get_next_fire_time(None, NOW)
+    assert (fire.hour, fire.minute, fire.utcoffset()) == (4, 15, timedelta(hours=5))
 
 
 class _Moved:
@@ -448,6 +473,7 @@ def _with_job(slot: worker.JobSlot) -> worker.JobSlot:
 def _isolated(monkeypatch, tmp_path):
     monkeypatch.setattr(settings, "backup_dir", str(tmp_path / "backups"))
     monkeypatch.setattr(worker._deadman, "last", None)
+    monkeypatch.setattr(worker._deadman, "seen", None)
     worker._offline_alerted_at.clear()
     yield
     worker.set_owner_notifier(None)
@@ -478,9 +504,16 @@ async def test_heartbeat_beats_the_worker_and_pings_the_dead_man(session, monkey
     monkeypatch.setattr(settings, "deadman_ping_url", "https://hc.example.uz/ping/namuna")
     scheduler = worker.build_scheduler()
     await worker.heartbeat_job(scheduler, transport=transport)
+    row = (await health.beats(session))["worker"]
+    # The first beat goes out before any ping: nothing to say about it yet.
+    assert row.detail == {"jobs": len(BUILT)}
     await worker.heartbeat_job(scheduler, transport=transport)  # within 5 minutes
     row = (await health.beats(session))["worker"]
-    assert row.detail == {"jobs": len(BUILT)}
+    # The ping the monitor observed is carried in the next beat (the digest
+    # and /holat read it there).
+    assert row.detail["jobs"] == len(BUILT)
+    assert row.detail["deadman"]["ok"] is True
+    assert row.detail["deadman"]["status"] == 200
     assert seen == ["https://hc.example.uz/ping/namuna"]
     monkeypatch.setattr(worker._deadman, "last", worker._deadman.last - 301)
     await worker.heartbeat_job(scheduler, transport=transport)
@@ -513,7 +546,14 @@ async def test_a_job_outcome_is_its_job_heartbeat(session):
         await asyncio.wrap_future(future)
     rows = await health.beats(session)
     assert rows["job:health"].detail == {"ok": True, "error": None, "failures": 0}
-    assert rows["job:backup"].detail == {"ok": False, "error": "OSError", "failures": 1}
+    # A raise carries the job's period: the nightly backup's is a day, so
+    # health says it on this first raise (health.job_failing_streak).
+    assert rows["job:backup"].detail == {
+        "ok": False,
+        "error": "OSError",
+        "failures": 1,
+        "every": 86400,
+    }
     await health.beat(session, "job:retired_job", now=NOW)
     await session.commit()
     assert await worker.prune_job_heartbeats(["job:health", "job:backup"]) == 1
@@ -569,6 +609,47 @@ async def test_a_job_s_beat_counts_the_raises_in_a_row(session):
     assert beat.detail["failures"] == 1
 
 
+# Wave 4's jobs (T-21, T-30, T-35, T-36, T-31): each is a built slot whose
+# runs beat job:<id>, so 06 §4.2's job_failing names it by its own subject
+# and the digest's «Tizim» line counts it — the same as the jobs before them.
+WAVE4_JOBS = ("review_cards", "verdict", "source_precision", "digest", "retention")
+
+
+def test_wave_4_s_jobs_are_built_slots_of_their_tasks():
+    table = {s.id: s for s in worker.job_table()}
+    assert {job: table[job].task for job in WAVE4_JOBS} == {
+        "review_cards": "T-21",
+        "verdict": "T-30",
+        "source_precision": "T-36",
+        "digest": "T-35",
+        "retention": "T-31",
+    }
+    assert all(table[job].job is not None for job in WAVE4_JOBS)
+    registered = {j.id for j in worker.build_scheduler().get_jobs()}
+    assert set(WAVE4_JOBS) <= registered
+
+
+@pytest.mark.parametrize("job_id", WAVE4_JOBS)
+async def test_a_wave_4_job_that_raises_every_run_is_its_own_job_failing_line(
+    session, monkeypatch, job_id
+):
+    from clientscrapper.services import digest
+
+    monkeypatch.setattr(settings, "backup_age_recipient", "")
+    await _fresh(session)
+    for _ in range(health.JOB_FAILING_STREAK):
+        await worker.record_job_event(job_id, ok=False, error="RuntimeError")
+    status = await health.gather(session, now=NOW)
+    [failing] = [p for p in health.problems(status) if p.key == "job_failing"]
+    assert [subject for subject, _ in failing.subjects] == [health.job_subject(job_id)]
+    assert f"<code>{job_id}</code> ishi oxirgi 3 marta xato bilan tugadi" in (
+        failing.text
+    )
+    view = (await digest.load(session, now=NOW)).view
+    assert view.problems >= 1
+    assert "Tizim: hammasi joyida" not in digest.render_digest(view)
+
+
 async def _fresh(session, now=NOW):
     for name in health.COMPONENTS:
         await health.beat(session, name, detail={"enabled": True}, now=now)
@@ -608,7 +689,8 @@ async def test_a_collector_that_fails_every_run_is_told(session, monkeypatch):
     monkeypatch.setattr(settings, "collectors_enabled", True)
     source = await session.get(m.Source, "hh_vacancies")
     assert source is not None
-    was = (source.enabled, source.cron)
+    # The run moves last_run_at too: put back with the rest (07 §1.0).
+    was = (source.enabled, source.cron, source.last_run_at)
     source.enabled, source.cron = True, "20 */4 * * *"
     await session.commit()
     try:
@@ -631,7 +713,7 @@ async def test_a_collector_that_fails_every_run_is_told(session, monkeypatch):
     finally:
         source = await session.get(m.Source, "hh_vacancies", populate_existing=True)
         assert source is not None
-        source.enabled, source.cron = was
+        source.enabled, source.cron, source.last_run_at = was
         await session.commit()
         if worker._shared.fetcher is not None:
             await worker._shared.fetcher.aclose()
@@ -807,6 +889,64 @@ async def test_catch_up_runs_a_missed_backup(monkeypatch):
     assert calls == [NOW]
 
 
+async def test_the_drill_beat_carries_its_last_proof_across_skips(session, monkeypatch):
+    """Seam review wave 4: a drill skipped for want of the key beat ok=True
+    every Sunday and health never looked past the last word — the proof's
+    moment rides on every beat now, and the no-key skip is said."""
+    from clientscrapper.services import restore_drill
+
+    results = iter(
+        [
+            restore_drill.DrillResult(ok=True, counts={"companies": 2}),
+            restore_drill.DrillResult(ok=True, skipped="no_key"),
+        ]
+    )
+
+    async def fake_run(**kw):
+        return next(results)
+
+    monkeypatch.setattr(restore_drill, "run", fake_run)
+    await worker.restore_drill_job(now=NOW)
+    week = NOW + timedelta(days=7)
+    await worker.restore_drill_job(now=week)
+    detail = (await health.beats(session))["restore_drill"].detail
+    assert (detail["skipped"], detail["proved_at"]) == ("no_key", NOW.isoformat())
+    status = await health.gather(session, now=week, disk=(10**12, 10**12))
+    [problem] = [p for p in health.problems(status) if p.key == "restore_drill_failed"]
+    assert problem.text == health.DRILL_NO_KEY_UZ
+
+
+async def test_catch_up_hands_an_overdue_drill_to_its_scheduler_job(session, monkeypatch):
+    """A restart across Sunday 05:00 is past the misfire grace: backups
+    unproved for over DRILL_STALE get the drill at the next start."""
+    monkeypatch.setattr(settings, "backup_age_recipient", "age1namuna")
+    scheduler, _ = _scheduler_with("restore_drill")
+    scheduler.start(paused=True)
+    moment = datetime.now(TZ)
+    try:
+        for proved, moved in ((timedelta(days=2), False), (timedelta(days=9), True)):
+            await health.beat(
+                session,
+                "restore_drill",
+                detail={
+                    "ok": True,
+                    "skipped": None,
+                    "proved_at": (moment - proved).isoformat(),
+                },
+                now=moment,
+            )
+            await session.commit()
+            job = scheduler.get_job("restore_drill")
+            assert job is not None
+            job.modify(next_run_time=moment + timedelta(days=3))
+            await worker.catch_up(now=moment, scheduler=scheduler)
+            job = scheduler.get_job("restore_drill")
+            assert job is not None
+            assert (job.next_run_time <= moment + timedelta(seconds=1)) is moved
+    finally:
+        scheduler.shutdown(wait=False)
+
+
 async def test_a_busy_drill_writes_no_beat(session, monkeypatch):
     from clientscrapper.services import restore_drill
 
@@ -978,6 +1118,124 @@ async def test_a_worker_that_loses_the_lock_pauses_its_scheduler(session, monkey
         stop.set()
         await mine.release()
         await theirs.release()
+
+
+class _Paused:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def pause(self) -> None:
+        self.calls.append("pause")
+
+    def resume(self) -> None:
+        self.calls.append("resume")
+
+
+async def test_a_leader_that_takes_the_lock_back_does_a_new_leaders_work(
+    session, monkeypatch
+):
+    """Seam review wave 4: A paused for B (a database blip), B is killed.
+    A's resume closes B's ``running`` runs (they held the source's slot
+    ~2 h 30, every ERP cadence ``already_running``) before the scheduler
+    runs, and hands B's missed jobs to the scheduler (``catch_up``)."""
+    monkeypatch.setattr(worker, "LEADER_CHECK", timedelta(milliseconds=50))
+    monkeypatch.setattr(worker, "LEADER_RETRY", timedelta(milliseconds=50))
+    order: list[str] = []
+    real_reclaim = worker.reclaim_runs
+
+    async def reclaim(*args, **kw):
+        order.append("reclaim")
+        return await real_reclaim(*args, **kw)
+
+    async def catch_up(**kw):
+        order.append("catch_up")
+
+    monkeypatch.setattr(worker, "reclaim_runs", reclaim)
+    monkeypatch.setattr(worker, "catch_up", catch_up)
+    scheduler = _Paused()
+    real_resume = scheduler.resume
+    scheduler.resume = lambda: (order.append("resume"), real_resume())[1]  # type: ignore[method-assign]
+    mine, theirs = worker.Leadership(), worker.Leadership()
+    stop = asyncio.Event()
+    try:
+        assert await theirs.acquire()
+        keeping = asyncio.ensure_future(worker.keep_leadership(mine, scheduler, stop))
+        await asyncio.sleep(0.3)
+        assert scheduler.calls == ["pause"]
+        session.add(
+            m.CollectorRun(
+                source_key="erp_sync",
+                status="running",
+                started_at=NOW,
+                meta={"variant": "delta"},
+            )
+        )
+        await session.commit()
+        await theirs.release()  # B is gone, its run still «running»
+        await asyncio.sleep(0.4)
+        assert order == ["reclaim", "resume", "catch_up"]
+        [run] = await session.scalars(
+            sa.select(m.CollectorRun).execution_options(populate_existing=True)
+        )
+        assert (run.status, run.error) == ("failed", "abandoned")
+    finally:
+        stop.set()
+        await asyncio.wait_for(keeping, 5)
+        await mine.release()
+        await theirs.release()
+
+
+async def test_a_paused_worker_does_not_resume_on_a_failed_lock_check(
+    session, monkeypatch
+):
+    """One connect error while standing by is no proof the other worker is
+    gone (the «cannot be asked → run» rule is the process start's): the
+    paused worker asks again, and stays paused while the other holds it."""
+    monkeypatch.setattr(worker, "LEADER_CHECK", timedelta(milliseconds=50))
+    monkeypatch.setattr(worker, "LEADER_RETRY", timedelta(milliseconds=50))
+
+    async def nothing(**kw):
+        return None
+
+    monkeypatch.setattr(worker, "catch_up", nothing)
+    mine, theirs = worker.Leadership(), worker.Leadership()
+    scheduler = _Paused()
+    stop = asyncio.Event()
+    real_acquire = worker.Leadership.acquire
+    blips = {"left": 0}
+
+    async def acquire(self):
+        if self is mine and blips["left"]:
+            blips["left"] -= 1
+            raise OSError("connection refused")
+        return await real_acquire(self)
+
+    monkeypatch.setattr(worker.Leadership, "acquire", acquire)
+    try:
+        assert await theirs.acquire()
+        keeping = asyncio.ensure_future(worker.keep_leadership(mine, scheduler, stop))
+        await asyncio.sleep(0.3)
+        assert scheduler.calls == ["pause"]
+        blips["left"] = 1
+        await asyncio.sleep(0.4)
+        assert blips["left"] == 0  # the blip was met
+        assert scheduler.calls == ["pause"]  # and nothing resumed
+        assert await theirs.held()
+    finally:
+        stop.set()
+        await asyncio.wait_for(keeping, 5)
+        await mine.release()
+        await theirs.release()
+
+
+async def test_an_app_connection_waits_on_a_lock_at_most_lock_timeout(session):
+    """A job blocked on a row lock raises after LOCK_TIMEOUT instead of
+    hanging while max_instances=1 refuses every later run (seam review wave
+    4); the skips meanwhile are health's (job_failing_streak)."""
+    from clientscrapper.db import session as db_session
+
+    assert db_session.LOCK_TIMEOUT == "300s"
+    assert await session.scalar(sa.text("SHOW lock_timeout")) == "5min"
 
 
 async def test_the_new_leader_closes_a_dead_workers_runs_only(session):

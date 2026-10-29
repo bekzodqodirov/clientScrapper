@@ -677,7 +677,7 @@ class PushPayload(BaseModel, frozen=True):
     phone: str              # E.164 from contacts.phone; the ERP keeps the last 9
     note: str               # render_note(); ≤ NOTE_MAX
     utm_source: str = UTM_SOURCE
-    kub: str | None         # a STATED volume only, as a plain number string ("2", "25"); omitted for a band (its words go in the HAJM section, BAND_HAJM), when unknown and when < 1
+    kub: str | None         # a STATED volume only, as a plain number string ("2", "25"); omitted for a band (its words go in the HAJM section, BAND_HAJM), for an amount the agent converted (a weight, 1 t ≈ 3 m³, or a half truck ≈ 40 — signals.estimated, seam review wave 4), when unknown and when < 1
     firma: str | None       # display_name + legal_form → leads.company on a created lead (≤ 200), and a note line + pair
     stir: str | None
     telegram: str | None    # '@company' or the decision maker's handle only with legal_basis
@@ -737,7 +737,7 @@ paragraph on the lenta.
 NEGA TOPILDI: {source_title_uz} · {published_dd.mm.yyyy} · «{quote ≤ 140}»          ← the first 159 code points must stand alone (the seller's push)
 {evidence_url}
 NIMA OLIB KELADI: {goods joined ', '} · Xitoy: {ha|ehtimol} ({origin_hint})
-HAJM: {stated «2 kub» | BAND_HAJM: taxminan 1 kubdan 3 kubgacha / taxminan 3 kubdan 10 kubgacha / konteyner (taxminan 28 kub) / fura (taxminan 80 kub)} · {per_month if known}
+HAJM: {stated «2 kub» | converted «taxminan 15 kub (5 tonna)» | BAND_HAJM: taxminan 1 kubdan 3 kubgacha / taxminan 3 kubdan 10 kubgacha / konteyner (taxminan 28 kub) / fura (taxminan 80 kub)} · {per_month if known}
 KOMPANIYA: {legal_name} · STIR {stir|—} · {city} · {registry_status_uz} · {sector}
   Masʼul: {full_name} ({role})                                                      ← only tier=person with legal_basis; the line is dropped when the name or role carries a phone, handle or messenger id, and item 11 refuses a note that carries one (E2E 2026-10-29)
 NIMA DEYISH: {opener ≤ 220, from 04 or the segment template in docs/sotuv-playbook.md §3}
@@ -1061,7 +1061,7 @@ for that source. `auto_push = pushes_30d ≥ 15 AND precision_30d ≥ 0.60`, fli
 (Sunday 04:00) — **except that the job never turns `auto_push` on while the owner has forbidden it**
 (`/manbalar` → `src:<key>:a` sets `config.auto_push_forbidden=true`, 06 §1.2): the UPDATE reads
 `SET auto_push = (pushes_30d >= 15 AND precision_30d >= 0.60) AND NOT coalesce(config->>'auto_push_forbidden','false')::bool`.
-A flip is one digest line. `/holat` prints the three numbers per source.
+A flip is one digest line. `/holat` prints the three numbers per source. As built (seam review wave 4): a flip whose line the digest's length cut dropped is not remembered as told (`digest.told`), so the next digest says it.
 
 ### B.3 Fallback while the `agent` door is not deployed
 

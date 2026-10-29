@@ -400,8 +400,8 @@ async def add(
 def dnc_entries(company: Company, *contacts: Contact | None) -> list[Entry]:
     """06 §1.3 🔒: the lead contact's phone tail, username and Instagram —
     and the card's own contact's, when that is another (the poster whose
-    handle the card shows, 9.1) — and the company's channel, Instagram and
-    domain; each the stored key. An anonymised contact is known by nothing
+    handle the card shows, 9.1) — and the company's channel, Instagram,
+    domain and STIR; each the stored key. An anonymised contact is known by nothing
     (``build_keys``' rule): its kept switchboard number is not the person."""
     found: list[Entry] = []
     for contact in contacts:
@@ -419,6 +419,10 @@ def dnc_entries(company: Company, *contacts: Contact | None) -> list[Entry]:
         found.append(Entry("dnc", "instagram", company.instagram))
     if company.website_domain:
         found.append(Entry("dnc", "domain", company.website_domain))
+    # And the STIR (CLAUDE.md's DNC keys; seam review wave 4): after a
+    # contact purge or an anonymisation the firm may be known by it alone.
+    if company.stir and (stir := keys.stir_key(company.stir)) is not None:
+        found.append(Entry("dnc", "stir", stir))
     unique = list(dict.fromkeys(f for f in found if _fits(f.key)))
     return unique
 
@@ -473,16 +477,22 @@ _HANDLE_FORM: Final = re.compile(
 )
 
 
+class ForeignPhone(ValueError):
+    """``/dnc`` with a number outside Uzbekistan: its tail-9 may be an Uzbek
+    number's (``+7 999 123 45 67`` → ``991234567``), so it is not keyed."""
+
+
 def dnc_command_entry(arg: str) -> Entry:
-    """``/dnc <phone|@user>`` (06 §1.2): a phone → its tail, else a Telegram
-    handle written as one (``@name``, ``t.me/name``) — a bare word is
-    neither. ValueError for anything else."""
+    """``/dnc <phone|@user>`` (06 §1.2: ``+998… | tail-9 | @user``): an
+    Uzbek phone → its tail, else a Telegram handle written as one (``@name``,
+    ``t.me/name``) — a bare word is neither. ``ForeignPhone`` for another
+    country's number, ValueError for anything else."""
     text = arg.strip()
-    phone = normalise.phone_e164(text)
+    phone = normalise.make_phone(text)
     if phone is not None:
-        tail = keys.phone_tail(phone)
-        if tail is not None:
-            return Entry("dnc", "phone_tail", tail)
+        if phone.country != "UZ":
+            raise ForeignPhone(phone.e164)
+        return Entry("dnc", "phone_tail", phone.tail)
     if _HANDLE_FORM.match(text):
         handle = normalise.telegram_key(text)
         if handle is not None:
@@ -603,6 +613,7 @@ __all__ = [
     "ContactKeys",
     "DncResult",
     "Entry",
+    "ForeignPhone",
     "Hit",
     "Key",
     "add",

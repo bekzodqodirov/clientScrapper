@@ -46,6 +46,10 @@ PRICE_ERROR = (
 TIME_ERROR = "vaqt «SS:DD» koʻrinishida boʻlsin, masalan 09:00"
 RANGE_ERROR = "oraliq «SS:DD-SS:DD» koʻrinishida boʻlsin, masalan 09:30-17:30"
 DAYS_ERROR = "kunlar 1–7 (dushanba=1) boʻlsin: «1-6» yoki «1,2,3,4,5»"
+DIGEST_HOURS_ERROR = (
+    "DIGEST_TIME REVIEW_HOURS ichida va QUIET_HOURS dan tashqarida boʻlsin "
+    "(masalan 09:00) — dayjest egasini tunda bezovta qilmasin"
+)
 IDS_ERROR = "Telegram id raqamlari vergul bilan: «111111111,222222222»"
 
 
@@ -181,6 +185,15 @@ class Settings(BaseSettings):
     push_window: str = "09:30-17:30"
     push_days: str = "1-6"
     test_phone: str = ""
+    # 01 §7 decision 5a: the ERP stage names that mean «a price was given»,
+    # «;»-separated fragments matched in the lead's current stage name (case
+    # and spacing ignored); every won stage counts as well. Approximate.
+    quote_stage_names: str = "narx"
+    # 07 T-39 / 06 open question 2: true lets a hot candidate of a source whose
+    # auto_push the weekly precision job turned on skip the owner's card
+    # (approved_by='auto:<source>'); false = every hot candidate reaches the
+    # owner and auto_push is only a number in /manbalar (candidates.auto_approves).
+    auto_approve: bool = False
 
     # --- Owner bot cadence --------------------------------------------------
     review_hours: str = "09:00-18:00"
@@ -230,6 +243,18 @@ class Settings(BaseSettings):
                 if isinstance(value, str) and value.lstrip().startswith("#"):
                     raise ValueError(COMMENT_VALUE_ERROR.format(key=str(key).upper()))
         return data
+
+    @model_validator(mode="after")
+    def _digest_inside_the_day(self) -> Settings:
+        """06 §1.6: DIGEST_TIME inside REVIEW_HOURS and outside QUIET_HOURS —
+        the digest goes out while cards are sent, never in the owner's night
+        (``digest_due`` reads REVIEW_HOURS alone; seam review wave 4)."""
+        digest = self.digest_time_parsed
+        if not within(digest, *self.review_hours_parsed) or within(
+            digest, *self.quiet_hours_parsed
+        ):
+            raise ValueError(DIGEST_HOURS_ERROR)
+        return self
 
     @field_validator("log_level", mode="before")
     @classmethod
@@ -323,6 +348,13 @@ class Settings(BaseSettings):
     @property
     def push_days_parsed(self) -> frozenset[int]:
         return parse_days(self.push_days)
+
+    @property
+    def quote_stage_names_parsed(self) -> tuple[str, ...]:
+        """The fragments, each lower-cased with its spaces collapsed (the
+        ERP's own normalisation of a label, 05 §A.7); blanks dropped."""
+        parts = (" ".join(p.split()).lower() for p in self.quote_stage_names.split(";"))
+        return tuple(p for p in parts if p)
 
 
 def _config_error_text(exc: ValidationError) -> str:

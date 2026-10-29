@@ -270,10 +270,10 @@ def test_upgrade_creates_the_02_counts(scratch):
     assert _scalars(engine, "SELECT extname FROM pg_extension WHERE extname = 'pg_trgm'")
     assert _scalars(engine, "SELECT count(*) FROM sources") == [23]
     assert _scalars(engine, "SELECT count(*) FROM scoring_weights") == [26]
-    # 0002_erp_contract (T-10, 02 §5) is head: two columns and the narrowed
-    # index on top of 0001's 25 tables.
+    # 0003_review_flow (T-21) is head, on 0002_erp_contract (T-10, 02 §5):
+    # columns and indexes on top of 0001's 25 tables, no new table.
     assert _scalars(engine, "SELECT version_num FROM alembic_version") == [
-        "0002_erp_contract"
+        "0003_review_flow"
     ]
 
 

@@ -12,7 +12,7 @@ COMPOSE := docker compose
 switch = $(if $(filter-out 0 1,$(strip $($(1)))),$(error $(1)=$($(1)): use $(1)=1 (on) or $(1)=0 (off)),$(filter 1,$(strip $($(1)))))
 .PHONY: help env doctor up update down reload logs ps psql migrate revision downgrade \
         bot worker userbot userbot-login backup backup-key backup-key-show restore \
-        import-clients erp-sync push-test purge install test lint fmt typecheck check db-test hooks smoke
+        import-clients erp-sync push-test mvp-report purge install test lint fmt typecheck check db-test hooks smoke smoke-cron
 
 help: ## Show this help
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -112,6 +112,10 @@ restore: ## Restore a backup: make restore FILE=/data/backups/clientscrapper-…
 		--identity /app/secrets/backup-key.txt $(if $(call switch,DRY),--dry-run,) $(if $(call switch,FORCE),--force,)
 
 # --- Data -------------------------------------------------------------------
+# Every one-off `run` below is --no-deps: an app service depends on init
+# (`chown -R` over the evidence, `alembic upgrade head`), which only
+# `make up`/`make update`/`make migrate` may run — after the backup, with the
+# old processes stopped (tests/test_makefile.py, seam review wave 4).
 # The file goes into the server's data/imports/ first (mounted as /data); a
 # bare FILE name is looked for there, a name with a «/» is passed as given. A
 # dry run by default. ACCEPT_FEWER=1 lets one export with fewer rows than the
@@ -119,7 +123,7 @@ restore: ## Restore a backup: make restore FILE=/data/backups/clientscrapper-…
 # «1» switches a flag on (``switch``), so ACCEPT_FEWER=0 is off.
 import-clients: ## Load the ERP client export as suppression: make import-clients FILE=clients.xlsx [APPLY=1] [ACCEPT_FEWER=1]
 	@test -n "$(FILE)" || (echo "usage: make import-clients FILE=clients.xlsx (in data/imports/) [APPLY=1] [ACCEPT_FEWER=1]" && exit 1)
-	$(COMPOSE) run --rm worker python -m clientscrapper.tools.import_clients \
+	$(COMPOSE) run --rm --no-deps worker python -m clientscrapper.tools.import_clients \
 		"$(if $(findstring /,$(FILE)),$(FILE),/data/imports/$(FILE))" \
 		$(if $(call switch,APPLY),--apply,) $(if $(call switch,ACCEPT_FEWER),--accept-fewer,)
 
@@ -129,17 +133,25 @@ import-clients: ## Load the ERP client export as suppression: make import-client
 ERP_WALKS := full delta outcomes quarter year
 erp_walk = $(if $(and $(filter $(ERP_WALKS),$(WALK)),$(filter 1,$(words $(WALK)))),$(strip $(WALK)),$(error WALK=$(WALK): use one of $(ERP_WALKS)))
 erp-sync: ## One ERP feed walk: make erp-sync WALK=full|delta|outcomes|quarter|year [ACCEPT_SHRINK=1]
-	$(COMPOSE) run --rm worker python -m clientscrapper.tools.erp_sync --$(erp_walk) \
+	$(COMPOSE) run --rm --no-deps worker python -m clientscrapper.tools.erp_sync --$(erp_walk) \
 		$(if $(call switch,ACCEPT_SHRINK),--accept-shrink,)
 
 push-test: ## Push one visibly synthetic lead to the ERP (05 §B.1)
-	$(COMPOSE) run --rm worker python -m clientscrapper.tools.push_test
+	$(COMPOSE) run --rm --no-deps worker python -m clientscrapper.tools.push_test
 
-purge: ## Forget a subject: make purge COMPANY=<uuid> | PHONE=<tail9> | TG_USER=<id> [APPLY=1]
-	@test -n "$(COMPANY)$(PHONE)$(TG_USER)" || (echo "usage: make purge COMPANY=<uuid> | PHONE=<tail9> | TG_USER=<id> [APPLY=1]" && exit 1)
-	$(COMPOSE) run --rm worker python -m clientscrapper.tools.purge \
+# 07 §3.2: the four MVP numbers (read-only); START = the pilot's first day,
+# default the day of the first push.
+mvp-report: ## The pilot's MVP numbers: make mvp-report [START=YYYY-MM-DD]
+	$(COMPOSE) run --rm --no-deps worker python -m clientscrapper.tools.mvp_report \
+		$(if $(strip $(START)),--start "$(strip $(START))",)
+
+purge: ## Forget a subject: make purge COMPANY=<uuid> | PHONE=<tail9> | TG_USER=<id> | TG_HANDLE=@<username> [REASON=legal_request|dnc|b2c|owner] [APPLY=1]
+	@test -n "$(COMPANY)$(PHONE)$(TG_USER)$(TG_HANDLE)" || (echo "usage: make purge COMPANY=<uuid> | PHONE=<tail9> | TG_USER=<id> | TG_HANDLE=@<username> [REASON=legal_request|dnc|b2c|owner] [APPLY=1]" && exit 1)
+	$(COMPOSE) run --rm --no-deps worker python -m clientscrapper.tools.purge \
 		$(if $(COMPANY),--company "$(COMPANY)",) $(if $(PHONE),--phone "$(PHONE)",) \
-		$(if $(TG_USER),--tg-user "$(TG_USER)",) $(if $(call switch,APPLY),--apply,)
+		$(if $(TG_USER),--tg-user "$(TG_USER)",) $(if $(TG_HANDLE),--tg-handle "$(TG_HANDLE)",) \
+		$(if $(REASON),--reason "$(REASON)",) \
+		$(if $(call switch,APPLY),--apply,)
 
 # --- Local development ------------------------------------------------------
 install: ## Install dev dependencies into the active virtualenv
@@ -183,5 +195,23 @@ hooks: ## Install the pre-push gate (scripts/pre-push.sh)
 	@test -x scripts/pre-push.sh || (echo "scripts/pre-push.sh yoʻq yoki bajariladigan emas" && exit 1)
 	ln -sf ../../scripts/pre-push.sh "$$(git rev-parse --git-path hooks)/pre-push"
 
-smoke: ## Live smoke tests, one real request per collector (VPS only)
-	LIVE=1 pytest -q -m live tests/live
+# The live tests run in the compose `smoke` service (the app image plus pytest
+# and tests/, 07 §1.12): the VPS has no dev venv and the app image ships
+# neither. Weekly: every live test but the `quarterly` ones; FULL=1: all of
+# them (the 1st of Jan/Apr/Jul/Oct). The outcomes land in collector_runs for
+# the next morning's digest («Tekshiruv: ✓ N / ✗ M / oʻtkazildi K»).
+SMOKE_MARK = $(if $(call switch,FULL),live,live and not quarterly)
+smoke: ## Live smoke tests, one real request per collector, VPS only (FULL=1: the quarterly full run)
+	$(COMPOSE) --profile smoke run --rm --no-deps --build $(if $(call switch,FULL),-e CS_SMOKE_FULL=1,) smoke \
+		python -m pytest -q -rs -p no:cacheprovider -m "$(SMOKE_MARK)" tests/live
+
+# The host's crontab lines for this checkout (07 §1.12: Sunday 05:00 weekly,
+# quarterly on the 1st; the full run half an hour later so a Sunday 1st does
+# not run twice at once), in Tashkent time whatever the host's zone is (an
+# Ubuntu VPS runs cron in UTC): each line fires hourly and runs only when
+# `date` in SMOKE_TZ says it is the hour. `%` is escaped as cron needs.
+# Printed, not installed: docs/SMOKE.md.
+SMOKE_TZ ?= Asia/Tashkent
+smoke-cron: ## Print the VPS crontab lines for make smoke (weekly and quarterly, Tashkent time)
+	@echo '0 * * * * [ "$$(TZ=$(SMOKE_TZ) date +\%u\%H)" = 705 ] && cd $(CURDIR) && make smoke >> $(CURDIR)/data/smoke.log 2>&1'
+	@echo '30 * * * * case "$$(TZ=$(SMOKE_TZ) date +\%m\%d\%H)" in 010105|040105|070105|100105) cd $(CURDIR) && make smoke FULL=1 >> $(CURDIR)/data/smoke.log 2>&1;; esac'

@@ -116,6 +116,10 @@ async def need_database() -> None:
 @pytest.fixture
 async def session() -> AsyncIterator[AsyncSession]:
     """An AsyncSession on a database whose owner data was just wiped."""
+    if os.environ.get("LIVE") == "1":
+        # make smoke runs against the server's own database (07 §1.12): this
+        # fixture's TRUNCATE would wipe it. A live test never takes it.
+        pytest.fail("the session fixture wipes the database; not under LIVE=1")
     await need_database()
     async with SessionLocal() as s:
         await s.execute(sa.text(truncate_statement()))
