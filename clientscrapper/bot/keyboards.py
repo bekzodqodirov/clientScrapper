@@ -252,6 +252,11 @@ def push_check_keyboard(push_log_id: int) -> InlineKeyboardMarkup:
     return _confirm(cb.push_check, push_log_id, "🔁 Qayta yubor")
 
 
+def purge_keyboard(purge_log_id: int) -> InlineKeyboardMarkup:
+    """``/unut``'s plan card: delete for good (pg:y) or cancel (pg:n)."""
+    return _confirm(cb.purge_plan, purge_log_id, "🗑 Oʻchir")
+
+
 # --- the fence's samples (06 §1.5) ------------------------------------------------------
 
 _BIG: Final = 2**63 - 1
@@ -292,6 +297,7 @@ KEYBOARD_SAMPLES: Final[
     (import_keyboard, {"plan_id": _PLAN}),
     (dnc_keyboard, {"plan_id": _PLAN}),
     (push_check_keyboard, {"push_log_id": _BIG}),
+    (purge_keyboard, {"purge_log_id": _BIG}),
 ]
 
 
@@ -307,6 +313,7 @@ __all__ = [
     "manager_keyboard",
     "merge_keyboard",
     "pages_of",
+    "purge_keyboard",
     "push_check_keyboard",
     "resume_keyboard",
     "review_keyboard",

@@ -95,6 +95,10 @@ OWNER_TEXT_MODULES = (
     # notes (lead_reviews.note, shown in /lidlar).
     "services/gates.py",
     "services/push_gate.py",
+    # 06 §5.4 (T-31): the purge plan and result the bot sends and make purge
+    # prints.
+    "services/purge.py",
+    "tools/purge.py",
 )
 # Modules whose raise messages reach the owner (see the docstring).
 OWNER_RAISE_MODULES = frozenset({"config.py"})

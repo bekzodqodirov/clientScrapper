@@ -9,7 +9,9 @@ an id of ``MANAGER_TELEGRAM_IDS``; only private chats are served at all.
 **Plans.** ``/import`` and ``/dnc`` keep what they would write for 10
 minutes under a random id the confirm button carries (06 §1.2: «plan kept
 in memory 10 min (restart = send again)»). A random id, not a counter: after
-a restart an old button must not name a new plan.
+a restart an old button must not name a new plan. ``/unut``'s plan is kept
+the same way under its ``purge_log`` id (the button is ``pg:<purge_log_id>``,
+06 §1.5): the log row holds only a hash, so the subject lives here.
 """
 
 from __future__ import annotations
@@ -78,12 +80,16 @@ class Plans:
     rng: random.Random = field(default_factory=random.SystemRandom)
     _items: dict[int, tuple[str, datetime, Any]] = field(default_factory=dict)
 
-    def put(self, kind: str, value: Any, *, now: datetime) -> int:
+    def put(
+        self, kind: str, value: Any, *, now: datetime, plan_id: int | None = None
+    ) -> int:
+        """Keep ``value`` under a fresh random id — or under ``plan_id``, an id
+        the database already gave the plan (``/unut``'s ``purge_log`` row)."""
         self._sweep(now)
-        while True:
-            plan_id = self.rng.randint(1, PLAN_ID_MAX)
-            if plan_id not in self._items:
-                break
+        while plan_id is None:
+            drawn = self.rng.randint(1, PLAN_ID_MAX)
+            if drawn not in self._items:
+                plan_id = drawn
         self._items[plan_id] = (kind, now, value)
         return plan_id
 

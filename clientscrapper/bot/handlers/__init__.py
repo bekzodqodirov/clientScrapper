@@ -63,6 +63,7 @@ HANDLERS: Final[Mapping[str, Mapping[str | None, TapHandler]]] = MappingProxyTyp
         "im": {"y": admin.on_import, "n": admin.on_import},
         "dn": {"y": admin.on_dnc, "n": admin.on_dnc},
         "pt": {"y": admin.on_push_check, "n": admin.on_push_check},
+        "pg": {"y": admin.on_purge, "n": admin.on_purge},
     }
 )
 # The buttons a manager may press (06 §1.1).

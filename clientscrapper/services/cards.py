@@ -817,6 +817,20 @@ def render_company(card: CompanyCard, *, state_words: Mapping[str, str]) -> str:
     return "\n".join(lines)
 
 
+async def live_roots(session: AsyncSession, query: str) -> list[uuid.UUID]:
+    """``find_company_ids``' hits as the roots that hold them now, each once,
+    a purged company left out (``/unut``: what a key names today)."""
+    roots: list[uuid.UUID] = []
+    for company_id in await find_company_ids(session, query):
+        found = await session.get(Company, company_id)
+        if found is None:
+            continue
+        root = await companies.root_company(session, found)
+        if root.state != "purged" and root.id not in roots:
+            roots.append(root.id)
+    return roots
+
+
 async def company_card(
     session: AsyncSession, company_id: uuid.UUID, *, now: datetime
 ) -> CompanyCard | None:
@@ -872,17 +886,12 @@ def parse_uuid(text: str) -> uuid.UUID | None:
         return None
 
 
-async def search(
-    session: AsyncSession,
-    query: str,
-    *,
-    now: datetime,
-    limit: int = companies.NAME_MATCHES,
-) -> list[CompanyCard]:
-    """``/qidir``'s lookup (06 §1.2), read-only: a uuid (a company or a
-    candidate), a phone or tail-9, an ``@username``/``t.me`` link, a STIR, a
-    domain, else a trigram name match (≤ ``limit``). A bare nine-digit
-    number is tried as a STIR and as a tail. Roots only, each once."""
+async def find_company_ids(session: AsyncSession, query: str) -> list[uuid.UUID]:
+    """What ``/qidir`` and ``/unut`` look a typed key up by (06 §1.2),
+    read-only, in the order found: a uuid (a company or a candidate), a phone
+    or tail-9, an ``@username``/``t.me`` link, a STIR, a domain, else a
+    trigram name match. A bare nine-digit number is tried as a STIR and as a
+    tail. Not yet roots, not yet unique."""
     text = query.strip()
     found: list[uuid.UUID] = []
     if (as_id := parse_uuid(text)) is not None:
@@ -927,8 +936,20 @@ async def search(
             )
         if not found and tail is None and stir is None and handle is None:
             found += [cid for cid, _ in await companies.find_companies(session, text)]
+    return found
+
+
+async def search(
+    session: AsyncSession,
+    query: str,
+    *,
+    now: datetime,
+    limit: int = companies.NAME_MATCHES,
+) -> list[CompanyCard]:
+    """``/qidir``'s lookup (06 §1.2), read-only: ``find_company_ids``' hits
+    as company cards (≤ ``limit``), roots only, each once."""
     cards: list[CompanyCard] = []
-    for company_id in found:
+    for company_id in await find_company_ids(session, query):
         card = await company_card(session, company_id, now=now)
         if card is not None and card.company_id not in {c.company_id for c in cards}:
             cards.append(card)
@@ -1141,8 +1162,10 @@ __all__ = [
     "card_layout",
     "claim_owner_review",
     "company_card",
+    "find_company_ids",
     "lidlar_holat",
     "live_review",
+    "live_roots",
     "mark_asked",
     "merge_targets",
     "money",

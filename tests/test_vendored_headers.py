@@ -154,6 +154,8 @@ REQUIRED_NOW = (
     "clientscrapper/bot/handlers/status.py",
     "clientscrapper/bot/handlers/admin.py",
     "clientscrapper/bot/handlers/manager.py",
+    # T-31
+    "clientscrapper/services/purge.py",
 )
 
 SCANNED_SUFFIXES = {".py", ".yml", ".yaml", ".ini", ".toml", ".cfg", ".sh", ".mako"}
