@@ -57,7 +57,7 @@ from clientscrapper.db.models import (
     Suppression,
 )
 from clientscrapper.db.session import engine, session_scope
-from clientscrapper.services import cards, chats, crm_push, health, owner, scoring
+from clientscrapper.services import cards, chats, crm_push, health, owner, purge, scoring
 from tests import gate_fixtures
 from tests.fake_bot import FakeSession, added_to_group, document, fake_bot, message, tap
 from tests.fixtures.candidate_views import EXCERPT
@@ -835,6 +835,73 @@ async def test_unut_cancel_and_a_forgotten_plan_delete_nothing(w):
         assert found is not None and found.state != "purged"
         assert await s.get(LeadCandidate, cand.id) is not None
         assert await s.scalar(sa.select(sa.func.count(Suppression.id))) == 0
+
+
+async def test_unut_finishes_a_purge_that_stopped_part_way(w, monkeypatch):
+    """Group 1 committed, group 2 failed: the owner is told how to finish, a
+    re-tap says the plan did not finish, and /unut plans the firm again by
+    the keys it still has — until nothing is left."""
+    async with w.db() as s:
+        cand = await lead(s, nn=63, name="Namuna Yarim Savdo", stir="300000063")
+        company_id = cand.company_id
+    await w.say("/unut 300000063")
+    [yes, _no] = w.buttons()
+    real = purge._people
+
+    async def broken(*args: Any, **kw: Any) -> dict[str, int]:
+        raise RuntimeError("db blip in group 2")
+
+    monkeypatch.setattr(purge, "_people", broken)
+    await w.press(yes)
+    assert w.last() == t("unut.failed", id=str(company_id))
+    monkeypatch.setattr(purge, "_people", real)
+    async with w.db() as s:
+        row = await s.scalar(sa.select(PurgeLog))
+        assert row is not None and row.error == "failed:RuntimeError"
+        firm = await s.get(Company, company_id, populate_existing=True)
+        assert firm is not None and firm.state == "purged"
+        left = await s.scalar(
+            sa.select(sa.func.count())
+            .select_from(Contact)
+            .where(Contact.company_id == company_id)
+        )
+        assert left == 1
+    await w.press(yes)
+    assert w.last() == t("unut.unfinished")
+    for query in ("300000063", "+998 90 000 00 63", str(company_id)):
+        await w.say(f"/unut {query}")
+        assert t("unut.subject", id=str(company_id)) in w.last().splitlines()
+        assert len(w.buttons()) == 2
+    [yes, _no] = w.buttons()
+    await w.press(yes)
+    assert w.last().splitlines()[0] == "✅ Oʻchirildi · huquqiy soʻrov"
+    await w.say("/unut 300000063")
+    assert w.last() == t("unut.none", query="300000063")
+
+
+async def test_unut_a_second_tap_closes_nothing_the_first_one_runs(w):
+    """✅ twice (or ✅ then ❌): the first tap holds the plan; the second, which
+    finds none in memory, must not close the row as expired under it."""
+    async with w.db() as s:
+        cand = await lead(s, nn=64, name="Namuna Ikki Bosish")
+        company_id = cand.company_id
+    await w.say(f"/unut {company_id}")
+    [yes, no] = w.buttons()
+    ref = cb.parse(yes)
+    assert ref is not None and ref.ref is not None
+    # The first tap took the plan and has not claimed its row yet.
+    planned = w.deps.plans.take("purge", ref.ref, now=NOW)
+    assert planned is not None
+    for second in (yes, no):
+        await w.press(second)
+        assert w.last() == t("unut.running")
+    async with w.db() as s:
+        row = await s.scalar(sa.select(PurgeLog))
+        assert row is not None and (row.error, row.executed_at) == (None, None)
+        result = await purge.execute(s, planned, requested_by=f"owner:{OWNER}", now=NOW)
+    assert result.executed["companies"] == 1
+    await w.press(yes)
+    assert w.last() == t("unut.done")
 
 
 async def test_unut_asks_for_one_company_when_a_key_names_several(w):
