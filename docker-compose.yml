@@ -78,6 +78,12 @@ services:
   smoke:
     <<: *app
     build: { context: ., target: smoke }
+    # The db only: never init, whose run is `chown -R` over the evidence and
+    # `alembic upgrade head` on the live database — a Sunday cron after a
+    # `git pull` with no `make update` would migrate it under the old
+    # worker, bot and userbot, with no backup first (`make smoke` also runs
+    # with --no-deps; seam review wave 4).
+    depends_on: { db: { condition: service_healthy } }
     profiles: ["smoke"]
     restart: "no"
     mem_limit: 768m

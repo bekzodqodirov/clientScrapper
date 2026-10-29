@@ -439,11 +439,11 @@ needs_make = pytest.mark.skipif(shutil.which("make") is None, reason="no make")
 def test_make_smoke_runs_the_live_tests_in_the_smoke_service():
     weekly = " ".join(make_n("smoke").stdout.split())
     assert weekly == (
-        "docker compose --profile smoke run --rm --build smoke \\ python -m pytest -q "
+        "docker compose --profile smoke run --rm --no-deps --build smoke \\ python -m pytest -q "
         '-rs -p no:cacheprovider -m "live and not quarterly" tests/live'
     )
     full = " ".join(make_n("smoke", "FULL=1").stdout.split())
-    assert "run --rm --build -e CS_SMOKE_FULL=1 smoke" in full
+    assert "run --rm --no-deps --build -e CS_SMOKE_FULL=1 smoke" in full
     assert full.endswith('-m "live" tests/live')
     refused = make_n("smoke", "FULL=yes")
     assert refused.returncode != 0 and "FULL=yes: use FULL=1" in refused.stderr

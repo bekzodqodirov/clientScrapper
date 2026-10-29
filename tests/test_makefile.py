@@ -271,3 +271,36 @@ def test_mvp_report_passes_the_start_only_when_given():
     assert 'clientscrapper.tools.mvp_report \\\n\t--start "2026-11-02"' in out
     bare = dry_run("mvp-report")
     assert "clientscrapper.tools.mvp_report" in bare and "--start" not in bare
+
+
+# The run targets that need init — the migration itself (migrate, downgrade)
+# and the one-time reader login before `make up` — and nothing else.
+INIT_RUNS = frozenset({"migrate", "downgrade", "userbot-login"})
+
+
+def test_a_one_off_run_never_re_runs_init():
+    """Seam review wave 4: `docker compose run` starts a service's
+    depends_on, and every app service depends on init — `chown -R` over the
+    evidence and `alembic upgrade head` on the live database. `make smoke`
+    (the Sunday cron) after a `git pull` with no `make update` migrated the
+    database under the old worker, bot and userbot, with no backup first;
+    import-clients, erp-sync, push-test, mvp-report and purge did the same.
+    Every `$(COMPOSE) run` recipe but INIT_RUNS carries --no-deps, and the
+    smoke service depends on the db alone."""
+    target = None
+    runs: dict[str, list[str]] = {}
+    for line in (ROOT / "Makefile").read_text().splitlines():
+        if line and not line[0].isspace() and ":" in line and not line.startswith("#"):
+            target = line.split(":", 1)[0].strip()
+        elif line.startswith("\t") and "run --rm" in line and target is not None:
+            runs.setdefault(target, []).append(line)
+    assert {"smoke", "purge", "import-clients", "erp-sync", "push-test"} <= set(runs)
+    missing = sorted(
+        t
+        for t, lines in runs.items()
+        if t not in INIT_RUNS and not all("--no-deps" in x for x in lines)
+    )
+    assert missing == []
+    compose = (ROOT / "docker-compose.yml").read_text()
+    smoke = compose.split("\n  smoke:\n", 1)[1].split("\n  searxng:", 1)[0]
+    assert "depends_on: { db: { condition: service_healthy } }" in smoke

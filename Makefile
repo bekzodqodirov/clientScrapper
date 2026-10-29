@@ -112,6 +112,10 @@ restore: ## Restore a backup: make restore FILE=/data/backups/clientscrapper-…
 		--identity /app/secrets/backup-key.txt $(if $(call switch,DRY),--dry-run,) $(if $(call switch,FORCE),--force,)
 
 # --- Data -------------------------------------------------------------------
+# Every one-off `run` below is --no-deps: an app service depends on init
+# (`chown -R` over the evidence, `alembic upgrade head`), which only
+# `make up`/`make update`/`make migrate` may run — after the backup, with the
+# old processes stopped (tests/test_makefile.py, seam review wave 4).
 # The file goes into the server's data/imports/ first (mounted as /data); a
 # bare FILE name is looked for there, a name with a «/» is passed as given. A
 # dry run by default. ACCEPT_FEWER=1 lets one export with fewer rows than the
@@ -119,7 +123,7 @@ restore: ## Restore a backup: make restore FILE=/data/backups/clientscrapper-…
 # «1» switches a flag on (``switch``), so ACCEPT_FEWER=0 is off.
 import-clients: ## Load the ERP client export as suppression: make import-clients FILE=clients.xlsx [APPLY=1] [ACCEPT_FEWER=1]
 	@test -n "$(FILE)" || (echo "usage: make import-clients FILE=clients.xlsx (in data/imports/) [APPLY=1] [ACCEPT_FEWER=1]" && exit 1)
-	$(COMPOSE) run --rm worker python -m clientscrapper.tools.import_clients \
+	$(COMPOSE) run --rm --no-deps worker python -m clientscrapper.tools.import_clients \
 		"$(if $(findstring /,$(FILE)),$(FILE),/data/imports/$(FILE))" \
 		$(if $(call switch,APPLY),--apply,) $(if $(call switch,ACCEPT_FEWER),--accept-fewer,)
 
@@ -129,21 +133,21 @@ import-clients: ## Load the ERP client export as suppression: make import-client
 ERP_WALKS := full delta outcomes quarter year
 erp_walk = $(if $(and $(filter $(ERP_WALKS),$(WALK)),$(filter 1,$(words $(WALK)))),$(strip $(WALK)),$(error WALK=$(WALK): use one of $(ERP_WALKS)))
 erp-sync: ## One ERP feed walk: make erp-sync WALK=full|delta|outcomes|quarter|year [ACCEPT_SHRINK=1]
-	$(COMPOSE) run --rm worker python -m clientscrapper.tools.erp_sync --$(erp_walk) \
+	$(COMPOSE) run --rm --no-deps worker python -m clientscrapper.tools.erp_sync --$(erp_walk) \
 		$(if $(call switch,ACCEPT_SHRINK),--accept-shrink,)
 
 push-test: ## Push one visibly synthetic lead to the ERP (05 §B.1)
-	$(COMPOSE) run --rm worker python -m clientscrapper.tools.push_test
+	$(COMPOSE) run --rm --no-deps worker python -m clientscrapper.tools.push_test
 
 # 07 §3.2: the four MVP numbers (read-only); START = the pilot's first day,
 # default the day of the first push.
 mvp-report: ## The pilot's MVP numbers: make mvp-report [START=YYYY-MM-DD]
-	$(COMPOSE) run --rm worker python -m clientscrapper.tools.mvp_report \
+	$(COMPOSE) run --rm --no-deps worker python -m clientscrapper.tools.mvp_report \
 		$(if $(strip $(START)),--start "$(strip $(START))",)
 
 purge: ## Forget a subject: make purge COMPANY=<uuid> | PHONE=<tail9> | TG_USER=<id> [REASON=legal_request|dnc|b2c|owner] [APPLY=1]
 	@test -n "$(COMPANY)$(PHONE)$(TG_USER)" || (echo "usage: make purge COMPANY=<uuid> | PHONE=<tail9> | TG_USER=<id> [REASON=legal_request|dnc|b2c|owner] [APPLY=1]" && exit 1)
-	$(COMPOSE) run --rm worker python -m clientscrapper.tools.purge \
+	$(COMPOSE) run --rm --no-deps worker python -m clientscrapper.tools.purge \
 		$(if $(COMPANY),--company "$(COMPANY)",) $(if $(PHONE),--phone "$(PHONE)",) \
 		$(if $(TG_USER),--tg-user "$(TG_USER)",) $(if $(REASON),--reason "$(REASON)",) \
 		$(if $(call switch,APPLY),--apply,)
@@ -197,7 +201,7 @@ hooks: ## Install the pre-push gate (scripts/pre-push.sh)
 # the next morning's digest («Tekshiruv: ✓ N / ✗ M / oʻtkazildi K»).
 SMOKE_MARK = $(if $(call switch,FULL),live,live and not quarterly)
 smoke: ## Live smoke tests, one real request per collector, VPS only (FULL=1: the quarterly full run)
-	$(COMPOSE) --profile smoke run --rm --build $(if $(call switch,FULL),-e CS_SMOKE_FULL=1,) smoke \
+	$(COMPOSE) --profile smoke run --rm --no-deps --build $(if $(call switch,FULL),-e CS_SMOKE_FULL=1,) smoke \
 		python -m pytest -q -rs -p no:cacheprovider -m "$(SMOKE_MARK)" tests/live
 
 # The host's crontab lines for this checkout (07 §1.12: Sunday 05:00 weekly,
