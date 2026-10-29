@@ -63,16 +63,15 @@ async def qidir(message: Message, deps: Deps) -> None:
 
 
 async def on_answer(tap: Tap) -> None:
-    """📞 🙅 ❌ ⏭ on the manager's own card."""
+    """📞 🙅 ❌ ⏭ on the manager's own card. Whose card it is, is
+    ``reviews.answer``'s question (``Refused("not_yours")``), asked under the
+    candidate's lock; this only turns away a card that no longer waits."""
     review_id = tap.data.ref
     assert review_id is not None
     async with tap.deps.session_factory() as session:
         review = await cards.live_review(session, review_id)
     if review is None or review.kind != "manager":
         await toast(tap.query, t("stale_card"), alert=True)
-        return
-    if review.by_telegram_id != tap.user_id:
-        await toast(tap.query, t("not_yours"), alert=True)
         return
     action = tap.data.action
     if action is None or action not in cb.MANAGER_ANSWERS:
