@@ -752,6 +752,8 @@ managers` — enforced by one wrapper `bot/deliver.py::to_person(bot, telegram_i
 the allowlist, and an AST test that no other module in `bot/` calls `bot.send_*` directly. No
 SMS, e-mail or telephony dependency exists in `requirements.txt` (test).
 
+As built (seam review wave 4): the fenced Bot API set is read off aiogram — every `TelegramMethod` with `chat_id`, `user_id` or `business_connection_id` among its fields, reads (`get_*`) and `leave_chat` aside — so a method a release adds (`send_checklist`, `send_gift`, `set_message_reaction`, …) is refused outside `to_person` the day it is installed; the hand list stays as the floor it must hold. The type shortcuts whose caller picks the destination — a required `chat_id`/`user_id` (`Message.copy_to`, `forward`, `send_copy`, `Chat.ban`, …) and a join request's `*_pm` answers — are refused outside `deliver.py` in `bot/` too: the routers admit only the owner and the managers, and these answer neither.
+
 ### 5.4 Retention and purge
 
 Retention is 02 §4 (`retention_job` 04:15, steps R1–R7 including R4b — a Google Places phone

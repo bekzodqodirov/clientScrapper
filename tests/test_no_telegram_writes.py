@@ -12,7 +12,8 @@ still may not use Telethon's write methods.
 
 The aiogram side and the other channels are fenced here too: the owner bot
 sends through one wrapper, ``bot/deliver.py::to_person``, which checks the
-owner/manager allowlist; nothing else in the package may call a Bot API send,
+owner/manager allowlist; nothing else in the package may call a Bot API send
+(the set read off aiogram), a shortcut that picks its own chat (bot/ too),
 import a mail/SMS/telephony client, or name a messenger API host.
 
 Source-shape tests: they parse the package and fail on a shape, not on
@@ -166,38 +167,73 @@ DOWNLOAD_CALLS = frozenset(
 
 # --- the aiogram side (06 §5.3) ------------------------------------------------
 
-# Bot API methods that put something into a chat. They may be called only in
-# bot/deliver.py, by to_person or a helper reached only from it, which checks
-# that the chat is the owner's or an allow-listed manager's.
-BOT_SEND_CALLS = {
-    "send_message",
-    "send_photo",
-    "send_document",
-    "send_video",
-    "send_audio",
-    "send_voice",
-    "send_animation",
-    "send_sticker",
-    "send_media_group",
-    "send_location",
-    "send_venue",
-    "send_contact",
-    "send_poll",
-    "send_dice",
-    "send_video_note",
-    "send_chat_action",
-    "send_paid_media",
-    "send_invoice",
-    "send_game",
-    "copy_message",
-    "copy_messages",
-    "forward_message",
-    "forward_messages",
-    "edit_message_text",
-    "edit_message_caption",
-    "edit_message_media",
-    "edit_message_reply_markup",
-}
+# Bot API methods that put something into a chat or act on a person. They may
+# be called only in bot/deliver.py, by to_person or a helper reached only from
+# it, which checks that the chat is the owner's or an allow-listed manager's.
+# The set is read off aiogram (``addressed_methods``), so a method a release
+# adds is fenced the day it is installed; this list is the floor it must hold.
+LISTED_SEND_CALLS = frozenset(
+    {
+        "send_message",
+        "send_photo",
+        "send_document",
+        "send_video",
+        "send_audio",
+        "send_voice",
+        "send_animation",
+        "send_sticker",
+        "send_media_group",
+        "send_location",
+        "send_venue",
+        "send_contact",
+        "send_poll",
+        "send_dice",
+        "send_video_note",
+        "send_chat_action",
+        "send_paid_media",
+        "send_invoice",
+        "send_game",
+        "copy_message",
+        "copy_messages",
+        "forward_message",
+        "forward_messages",
+        "edit_message_text",
+        "edit_message_caption",
+        "edit_message_media",
+        "edit_message_reply_markup",
+    }
+)
+# Addressed but reaching nobody: a read, and the bot leaving a chat a stranger
+# added it to (bot/handlers, 06 §1.1) — it puts nothing in front of anyone.
+ADDRESSED_FIELDS = frozenset({"chat_id", "user_id", "business_connection_id"})
+REACHES_NOBODY = frozenset({"leave_chat"})
+
+
+def addressed_methods() -> frozenset[str]:
+    """Every Bot API method aiogram builds with a chat, a user or a business
+    connection among its fields, by the name ``Bot`` calls it, minus the reads
+    (``get_*``) and ``REACHES_NOBODY`` (seam review wave 4: the hand list
+    missed send_checklist, send_gift, send_message_draft, set_message_reaction,
+    pin_chat_message, approve_chat_join_request and a hundred more)."""
+    import aiogram.methods
+    from aiogram.methods.base import TelegramMethod
+
+    found = set()
+    for name in dir(aiogram.methods):
+        cls = getattr(aiogram.methods, name)
+        if not (
+            isinstance(cls, type)
+            and issubclass(cls, TelegramMethod)
+            and ADDRESSED_FIELDS & set(cls.model_fields)
+        ):
+            continue
+        snake = re.sub(r"(?<!^)(?=[A-Z])", "_", name).lower()
+        if not snake.startswith("get_") and snake not in REACHES_NOBODY:
+            found.add(snake)
+    return frozenset(found)
+
+
+BOT_SEND_CALLS = addressed_methods() | LISTED_SEND_CALLS
 DELIVER = "bot/deliver.py"
 DELIVER_ROOT = "to_person"
 # The same sends as aiogram method objects (bot(SendMessage(chat_id=…))),
@@ -210,6 +246,39 @@ BOT_METHOD_OBJECTS = frozenset(
 # bot/ the routers admit only the owner and the managers (06 §1.1); anywhere
 # else a module holding aiogram objects has no business answering anyone.
 REPLY_SHORTCUTS = re.compile(r"(answer|reply)(_\w+)?|edit_text|edit_caption|send_copy")
+
+
+def destination_shortcuts() -> frozenset[str]:
+    """The aiogram type shortcuts whose CALLER chooses who receives them, read
+    off aiogram: a required ``chat_id`` or ``user_id`` (``Message.copy_to``,
+    ``forward``, ``send_copy``; ``Chat.ban``, ``promote``, …; reads aside) and a
+    join request's ``*_pm`` answers, which go to the person who asked — a
+    stranger. Refused outside deliver.py in bot/ too (seam review wave 4): the
+    routers admit only the owner and the managers, and these answer neither."""
+    import inspect
+
+    import aiogram.types
+    from aiogram.types.base import TelegramObject
+
+    found = set()
+    for name in dir(aiogram.types):
+        cls = getattr(aiogram.types, name)
+        if not (isinstance(cls, type) and issubclass(cls, TelegramObject)):
+            continue
+        for attr, fn in inspect.getmembers(cls, inspect.isfunction):
+            if attr.startswith(("_", "get_", "model_")):
+                continue
+            params = inspect.signature(fn).parameters
+            chooses = any(
+                p in params and params[p].default is inspect.Parameter.empty
+                for p in ("chat_id", "user_id")
+            )
+            if chooses or attr.endswith("_pm"):
+                found.add(attr)
+    return frozenset(found)
+
+
+DESTINATION_SHORTCUTS = destination_shortcuts()
 
 # --- other channels ---------------------------------------------------------------
 
@@ -803,8 +872,9 @@ def _bot_send_sites(tree: ast.Module) -> list[tuple[ast.Call, str]]:
 
 
 def _send_offences(path_rel: str, tree: ast.Module, module: str = "") -> list[str]:
-    """Bot API sends outside to_person, aiogram method objects outside
-    deliver.py, and reply shortcuts in an aiogram module outside bot/."""
+    """Bot API sends outside to_person, aiogram method objects and the
+    shortcuts that choose their own destination outside deliver.py, and reply
+    shortcuts in an aiogram module outside bot/."""
     owner = owners(tree)
     offending = []
     for call, name in _bot_send_sites(tree):
@@ -822,6 +892,20 @@ def _send_offences(path_rel: str, tree: ast.Module, module: str = "") -> list[st
         offending.append("<module>: imports aiogram.methods")
     if path_rel != DELIVER:
         offending += _method_object_offences(tree, module)
+        aliases = module_aliases(tree, module=module)
+        for node in ast.walk(tree):
+            if not (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr in DESTINATION_SHORTCUTS
+            ):
+                continue
+            # ``outcomes.promote(…)`` is a module's function, not a shortcut.
+            through = resolve_attribute(node.func, aliases)
+            if through is None or is_under(through[0], ["aiogram"]):
+                function = owner.get(id(node))
+                where = function.name if function else "<module>"
+                offending.append(f"{where}: {node.func.attr}")
     holds_aiogram = any(is_under(m, ["aiogram"]) for m in imported)
     if holds_aiogram and not path_rel.startswith("bot/"):
         for node in ast.walk(tree):
@@ -1144,3 +1228,61 @@ def test_the_method_object_names_are_aiogram_s():
 
     assert set(BOT_METHOD_OBJECTS) <= set(dir(aiogram.methods))
     assert {"SendMessage", "CopyMessage", "EditMessageText"} <= BOT_METHOD_OBJECTS
+
+
+def test_the_send_set_is_read_off_aiogram():
+    """The fenced methods are aiogram's own, by the name Bot calls them, and
+    hold the hand list and the ones it missed (seam review wave 4)."""
+    import aiogram
+
+    assert {n for n in BOT_SEND_CALLS if not hasattr(aiogram.Bot, n)} == set()
+    assert LISTED_SEND_CALLS <= BOT_SEND_CALLS
+    missed = {
+        "send_checklist",
+        "send_gift",
+        "send_message_draft",
+        "set_message_reaction",
+        "pin_chat_message",
+        "approve_chat_join_request",
+        "ban_chat_member",
+    }
+    assert missed & set(dir(aiogram.Bot)) <= BOT_SEND_CALLS
+    assert {"send_message", "set_message_reaction"} <= BOT_SEND_CALLS
+    # A read reaches nobody, and the bot may leave a stranger's group.
+    assert not {"get_chat", "get_me", "leave_chat", "set_my_commands"} & BOT_SEND_CALLS
+    assert {"copy_to", "forward", "send_copy", "answer_pm"} <= DESTINATION_SHORTCUTS
+    assert not {"answer", "reply", "edit_text", "get_member"} & DESTINATION_SHORTCUTS
+
+
+def test_a_shortcut_that_picks_its_chat_is_refused_in_bot_too():
+    """``message.answer`` goes back to the owner or manager the router let in;
+    ``copy_to``/``forward``/``send_copy`` go wherever the caller says, and a
+    join request's ``answer_pm`` to whoever asked — never from bot/."""
+
+    def tree(source: str) -> ast.Module:
+        return ast.parse(source)
+
+    handler = (
+        "from aiogram.types import ChatJoinRequest, Message\n"
+        "from clientscrapper.services import outcomes\n"
+        "async def card(message: Message, prospect: int):\n"
+        "    await message.answer('ok')\n"
+        "    await message.copy_to(prospect)\n"
+        "    await message.forward(chat_id=prospect)\n"
+        "async def joined(request: ChatJoinRequest):\n"
+        "    await request.answer_pm('salom')\n"
+        "async def push(session, ids):\n"
+        "    await outcomes.promote(session, ids)\n"
+    )
+    assert _send_offences("bot/handlers/review.py", tree(handler)) == [
+        "card: copy_to",
+        "card: forward",
+        "joined: answer_pm",
+    ]
+    # A bot method the hand list never named is a send all the same.
+    gift = "async def thanks(bot, chat):\n    await bot.send_gift(chat_id=chat)\n"
+    assert _send_offences("bot/handlers/review.py", tree(gift)) == ["thanks: send_gift"]
+    reaction = "async def seen(bot, c, m):\n    await bot.set_message_reaction(c, m)\n"
+    assert _send_offences("services/review.py", tree(reaction)) == [
+        "seen: set_message_reaction"
+    ]
