@@ -232,10 +232,15 @@ async def on_purge(tap: Tap) -> None:
     planned = tap.deps.plans.take(PLAN_PURGE, purge_log_id, now=now)
     yes = tap.data.action == "y"
     if not isinstance(planned, purge.PurgePlan) or not yes:
+        # A plan this process no longer holds (a restart, ten minutes gone)
+        # closes as expired; a row executed or closed already says so.
         why = PURGE_CANCELLED if planned is not None else PURGE_EXPIRED
         async with tap.deps.session_factory() as session:
-            await purge.abandon(session, purge_log_id, why=why)
-        said = "unut.cancelled" if why == PURGE_CANCELLED else "unut.expired"
+            closed = await purge.abandon(session, purge_log_id, why=why)
+        if not closed:
+            said = "unut.closed"
+        else:
+            said = "unut.cancelled" if why == PURGE_CANCELLED else "unut.expired"
         await edit(tap.query, t(said))
         return
     try:

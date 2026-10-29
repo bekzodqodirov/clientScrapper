@@ -39,7 +39,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="purge", description="forget a subject")
     which = parser.add_mutually_exclusive_group(required=True)
     which.add_argument("--company", type=uuid.UUID, help="a company uuid")
-    which.add_argument("--phone", help="a phone's last nine digits")
+    which.add_argument("--phone", help="the last nine digits of a phone")
     which.add_argument("--tg-user", type=int, help="a Telegram user id")
     parser.add_argument(
         "--reason", choices=purge.OWNER_REASONS, default=purge.DEFAULT_REASON

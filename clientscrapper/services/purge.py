@@ -292,7 +292,10 @@ async def collect(
     messages = (
         await session.execute(
             sa.select(
-                Interaction.id, Interaction.evidence_id, Interaction.sender_username
+                Interaction.id,
+                Interaction.evidence_id,
+                Interaction.sender_id,
+                Interaction.sender_username,
             )
             .where(
                 sa.or_(
@@ -418,7 +421,12 @@ async def collect(
     if reason in SUPPRESSING:
         for root in roots:
             keys |= set(await suppression_service.keys_for(session, root, secret=""))
-        keys |= {("tg_user_id", str(t)) for t in tg}
+        # The senders of the messages that go: the subject's own, and the
+        # poster of every message its observations came from (a next post by
+        # that poster must not card the firm again, 06 §5.4). A channel's
+        # negative peer id is no user id.
+        senders = {*tg, *(m.sender_id for m in messages if m.sender_id)}
+        keys |= {("tg_user_id", str(t)) for t in senders if t > 0}
         keys |= {
             ("tg_username", m.sender_username) for m in messages if m.sender_username
         }
