@@ -784,6 +784,8 @@ cannot be re-created by the next observation. The plan card shows counts, never 
 `/unut` and `tools/purge.py` share the same two functions; execution requires the explicit
 `pg:<id>:y` tap or `--apply`.
 
+As built (seam review wave 4): the cards a purged lead left in the owner's and the managers' chats are closed too — they named the company, its phone, its person and its quotes, and the purge deletes their `lead_reviews` rows. Group 1 writes where each card is (`purge_log.executed.cards`: `[chat id, message id]`, our own chats only) in the transaction of the delete; `purge.close_purged_cards` edits each to «🗑 Bu lid maʼlumotlari oʻchirildi.» with no buttons and forgets it — at once after the `/unut` confirm, and from `review_cards_job` every run (even under `/toxtat`: an edit is silent and takes data out of a chat), so a `make purge` without a bot, or a card Telegram refused, is closed by the worker; pointers older than 14 days after the plan are dropped unasked. A card's message is our own; its text is the only copy of the lead the agent leaves.
+
 ### 5.5 Suppression precedence and overrides
 
 `services/suppression.is_suppressed()` (02 §2.8) orders hits by

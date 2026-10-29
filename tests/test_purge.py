@@ -19,7 +19,7 @@ import json
 import os
 import uuid
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -1143,3 +1143,108 @@ async def test_make_purge_reads_a_phone_as_written_and_answers_in_uzbek(
     assert await count(session, m.Contact, m.Contact.company_id == w.root.id) == 0
     for state, text in purge_tool.REFUSED_TEXTS.items():
         assert "Oʻchirilmadi" in text, state
+
+
+# --- the cards a purged lead left in the chats (seam review wave 4) ---------------
+
+
+@dataclass
+class Editor:
+    """``reviews.CardSender``'s edit, recorded; Telegram refuses ``refuse``."""
+
+    refuse: set[int]
+    edits: list[tuple[int, int, str, Any]]
+
+    async def edit(self, chat: int, message: int, text: str, layout: Any, _: int) -> bool:
+        if chat in self.refuse:
+            return False
+        self.edits.append((chat, message, text, layout))
+        return True
+
+
+async def _carded(session, root: Path) -> tuple[World, purge.PurgePlan]:
+    w = await subject(session, root)
+    cands = w.rows["candidates"]
+    for cand, chat, msg in (
+        (cands["open"], 7001, 11),
+        (cands["pushed"], 7003, 12),
+        (cands["control"], 7002, 13),
+    ):
+        session.add(
+            m.LeadReview(
+                candidate_id=cand.id,
+                kind="manager",
+                state="asked",
+                card_chat_id=chat,
+                card_message_id=msg,
+                asked_at=now(),
+                expires_at=now(),
+            )
+        )
+    # An answered card shows its lead all the same.
+    declined = await session.scalar(
+        sa.select(m.LeadReview).where(m.LeadReview.candidate_id == cands["rejected"].id)
+    )
+    declined.card_chat_id, declined.card_message_id = 7004, 14
+    await session.commit()
+    plan = await purge.plan_company(session, w.root.id)
+    await purge.record(session, plan, requested_by="owner:1001")
+    await session.commit()
+    await purge.execute(session, plan, requested_by="owner:1001", now=now(), root=root)
+    return w, plan
+
+
+async def _executed(session, plan: purge.PurgePlan) -> dict[str, Any]:
+    row = await fresh(session, m.PurgeLog, plan.purge_log_id)
+    return dict(row.executed or {})
+
+
+async def test_a_purged_leads_cards_lose_its_data_in_the_chats(session, root):
+    """The cards named the company, its phone and its quotes; the purge
+    deleted their rows. Each is edited to the purged text with no buttons —
+    the control firm's never — and one Telegram refused stays listed."""
+    _, plan = await _carded(session, root)
+    held = await _executed(session, plan)
+    assert sorted(held[purge.CARDS_KEY]) == [[7001, 11], [7003, 12], [7004, 14]]
+    assert held["companies"] > 0  # the counts are written beside them
+
+    editor = Editor(refuse={7003}, edits=[])
+    assert await purge.close_purged_cards(SessionLocal, editor, now=now()) == 2
+    assert sorted(editor.edits) == [
+        (7001, 11, purge.PURGED_CARD_UZ, None),
+        (7004, 14, purge.PURGED_CARD_UZ, None),
+    ]
+    left = await _executed(session, plan)
+    assert left[purge.CARDS_KEY] == [[7003, 12]]
+    assert left["companies"] == held["companies"]
+
+    again = Editor(refuse=set(), edits=[])
+    assert await purge.close_purged_cards(SessionLocal, again, now=now()) == 1
+    assert again.edits == [(7003, 12, purge.PURGED_CARD_UZ, None)]
+    assert purge.CARDS_KEY not in await _executed(session, plan)
+
+
+async def test_a_card_telegram_never_took_is_forgotten_after_the_window(session, root):
+    _, plan = await _carded(session, root)
+    editor = Editor(refuse=set(), edits=[])
+    later = now() + purge.CARDS_WINDOW + timedelta(hours=1)
+    assert await purge.close_purged_cards(SessionLocal, editor, now=later) == 0
+    assert editor.edits == []
+    assert purge.CARDS_KEY not in await _executed(session, plan)
+
+
+async def test_the_card_job_closes_purged_cards_even_while_paused(session, root):
+    from clientscrapper.services import owner, reviews
+
+    _, plan = await _carded(session, root)
+    await owner.pause(session, by="owner:1001", reason=None, now=now())
+    await session.commit()
+    editor = Editor(refuse=set(), edits=[])
+    report = await reviews.run_cards(editor, now=now())  # type: ignore[arg-type]
+    assert report.held == "paused"
+    assert report.purged == 3
+    assert {(c, msg) for c, msg, _, _ in editor.edits} == {
+        (7001, 11),
+        (7003, 12),
+        (7004, 14),
+    }

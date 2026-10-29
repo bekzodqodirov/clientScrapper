@@ -132,6 +132,7 @@ from clientscrapper.services import (
     normalise,
     openers,
     owner,
+    purge,
     push_gate,
     scoring,
     signals,
@@ -1774,6 +1775,7 @@ class CardsReport:
     stale: int = 0
     pending: int = 0
     stripped: int = 0
+    purged: int = 0
     footers: int = 0
     refreshed: int = 0
     resent: int = 0
@@ -1791,6 +1793,7 @@ class CardsReport:
             "stale": self.stale,
             "pending": self.pending,
             "stripped": self.stripped,
+            "purged": self.purged,
             "footers": self.footers,
             "refreshed": self.refreshed,
             "resent": self.resent,
@@ -1820,6 +1823,10 @@ async def run_cards(
         await session.commit()
     report.expired, report.stale = len(expired), len(stale)
     report.closed = [*expired, *stale]
+    if sender is not None:
+        # A purged lead's cards lose its data even under /toxtat: an edit is
+        # silent and takes something out of a chat, never puts a card in.
+        report.purged = await purge.close_purged_cards(session_factory, sender, now=now)
     if paused:
         report.held = "paused"
         return report

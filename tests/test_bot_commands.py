@@ -963,6 +963,36 @@ async def test_unut_plans_by_counts_then_purges_after_its_confirm(w):
         assert w.last() == t("unut.none", query=query)
 
 
+async def test_unut_takes_the_lead_off_the_cards_it_left_in_the_chat(w):
+    """The owner's card named the company, its phone and its quotes: after
+    the purge its message says only that the lead was deleted, with no
+    buttons (seam review wave 4)."""
+    async with w.db() as s:
+        cand = await lead(s, 62, name="Namuna Karta Savdo", stir="300000062")
+        s.add(
+            LeadReview(
+                candidate_id=cand.id,
+                kind="owner",
+                state="asked",
+                card_chat_id=OWNER,
+                card_message_id=4242,
+                asked_at=NOW,
+                expires_at=NOW + timedelta(hours=72),
+            )
+        )
+    await w.say("/unut +998 90 000 00 62")
+    [yes, _] = w.buttons()
+    await w.press(yes)
+    [closed] = [m for m in w.fake.named("EditMessageText") if m.get("message_id") == 4242]
+    assert (closed["chat_id"], closed["text"]) == (OWNER, purge.PURGED_CARD_UZ)
+    assert not closed.get("reply_markup")
+    async with w.db() as s:
+        row = await s.scalar(
+            sa.select(PurgeLog).execution_options(populate_existing=True)
+        )
+        assert row is not None and purge.CARDS_KEY not in (row.executed or {})
+
+
 async def test_unut_cancel_and_a_forgotten_plan_delete_nothing(w):
     async with w.db() as s:
         cand = await lead(s, name="Namuna Bekor Savdo")

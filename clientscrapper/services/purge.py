@@ -68,14 +68,15 @@ from __future__ import annotations
 import hashlib
 import logging
 import uuid
-from collections.abc import Collection, Sequence
+from collections.abc import Callable, Collection, Sequence
+from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Final
+from typing import TYPE_CHECKING, Any, Final
 
 import sqlalchemy as sa
-from sqlalchemy.dialects.postgresql import ARRAY
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
@@ -103,6 +104,9 @@ from clientscrapper.services import signals as signal_service
 from clientscrapper.services import suppression as suppression_service
 from clientscrapper.services.suppression import Entry, Key
 
+if TYPE_CHECKING:
+    from clientscrapper.services.reviews import CardSender
+
 log = logging.getLogger(__name__)
 
 PURGED_NAME: Final = "[oʻchirilgan]"
@@ -123,6 +127,18 @@ FAILED_PREFIX: Final = "failed:"
 JOB_PURGED: Final = "purged"
 LIVE_JOB_STATUSES: Final = ("pending", "submitted")
 SHEET_TOMBSTONE: Final = "tombstone"
+# A purged lead's cards (seam review wave 4): the messages the owner and the
+# managers were sent named the company, its phone, its person and its quotes,
+# and the purge deleted their rows. Group 1 writes where they are into the
+# log row (``executed.cards``: [chat id, message id] — our own chats, no
+# subject data) in the same transaction as the delete; ``close_purged_cards``
+# edits each to this text with no buttons, at once from the bot and from the
+# card job after, and forgets each one it closed. Telegram is asked for
+# ``CARDS_WINDOW`` after the plan, then the pointers are dropped.
+PURGED_CARD_UZ: Final = "🗑 Bu lid maʼlumotlari oʻchirildi."
+CARDS_KEY: Final = "cards"
+CARDS_WINDOW: Final = timedelta(days=14)
+CARDS_LIMIT: Final = 50
 
 # The order of the counts on the plan card and in the log.
 COUNT_KEYS: Final = (
@@ -754,6 +770,70 @@ async def _gone(session: AsyncSession, stmt: Any) -> int:
     return int(getattr(result, "rowcount", 0) or 0)
 
 
+async def _merge_executed(
+    session: AsyncSession, purge_log_id: int, part: dict[str, Any], **values: Any
+) -> None:
+    """``executed || part``: the counts and the card pointers are written by
+    different steps, and neither may drop the other's."""
+    merged = sa.func.coalesce(PurgeLog.executed, sa.cast({}, JSONB)).op("||")(
+        sa.cast(part, JSONB)
+    )
+    await session.execute(
+        sa.update(PurgeLog)
+        .where(PurgeLog.id == purge_log_id)
+        .values(executed=merged, **values)
+    )
+
+
+async def close_purged_cards(
+    session_factory: Callable[[], AbstractAsyncContextManager[AsyncSession]],
+    sender: CardSender,
+    *,
+    now: datetime,
+) -> int:
+    """Edit every card a purge left in a chat to ``PURGED_CARD_UZ`` with no
+    buttons and forget it; a card Telegram would not edit stays listed and
+    is asked again next time, until ``CARDS_WINDOW`` after the plan (then
+    the pointers go). Returns the cards closed."""
+    async with session_factory() as session:
+        rows = (
+            await session.execute(
+                sa.select(PurgeLog.id, PurgeLog.planned_at, PurgeLog.executed[CARDS_KEY])
+                .where(PurgeLog.executed.has_key(CARDS_KEY))
+                .order_by(PurgeLog.id)
+                .limit(CARDS_LIMIT)
+            )
+        ).all()
+    closed = 0
+    for purge_log_id, planned_at, pointers in rows:
+        left: list[list[int]] = []
+        if planned_at >= now - CARDS_WINDOW:
+            for chat_id, message_id in pointers or []:
+                if await sender.edit(
+                    int(chat_id), int(message_id), PURGED_CARD_UZ, None, 0
+                ):
+                    closed += 1
+                else:
+                    left.append([int(chat_id), int(message_id)])
+        kept = (
+            PurgeLog.executed.op("-")(CARDS_KEY)
+            if not left
+            else sa.func.jsonb_set(
+                PurgeLog.executed,
+                sa.literal(["cards"], ARRAY(sa.Text)),
+                sa.cast(left, JSONB),
+            )
+        )
+        async with session_factory() as session:
+            await session.execute(
+                sa.update(PurgeLog)
+                .where(PurgeLog.id == purge_log_id)
+                .values(executed=kept)
+            )
+            await session.commit()
+    return closed
+
+
 async def _end_candidate(
     session: AsyncSession, candidate_id: uuid.UUID, *, row_id: int | None, now: datetime
 ) -> bool:
@@ -821,6 +901,21 @@ async def _stop(
         if await _end_candidate(session, candidate_id, row_id=row_id, now=now):
             ended += 1
     every = [*scope.deleted, *scope.kept]
+    shown = (
+        await session.execute(
+            sa.select(LeadReview.card_chat_id, LeadReview.card_message_id)
+            .where(
+                LeadReview.candidate_id.in_(every),
+                LeadReview.card_chat_id.is_not(None),
+                LeadReview.card_message_id.is_not(None),
+            )
+            .order_by(LeadReview.id)
+        )
+    ).all()
+    if shown and plan.purge_log_id is not None:
+        await _merge_executed(
+            session, plan.purge_log_id, {CARDS_KEY: [[c, m] for c, m in shown]}
+        )
     reviews = await _gone(
         session, sa.delete(LeadReview).where(LeadReview.candidate_id.in_(every))
     )
@@ -1058,14 +1153,12 @@ async def execute(
         raise
     removed = evidence.unlink_raw(files, root=root)
     executed = {key: int(done.get(key, 0)) for key in COUNT_KEYS}
-    await session.execute(
-        sa.update(PurgeLog)
-        .where(PurgeLog.id == purge_log_id)
-        .values(
-            executed={**executed, "files_removed": removed},
-            executed_at=now,
-            error=None,
-        )
+    await _merge_executed(
+        session,
+        purge_log_id,
+        {**executed, "files_removed": removed},
+        executed_at=now,
+        error=None,
     )
     await session.commit()
     log.info("purge executed", extra={"purge_log_id": purge_log_id, "counts": executed})
@@ -1130,16 +1223,20 @@ def result_lines(result: PurgeResult, *, reason: str) -> list[str]:
 
 
 __all__ = [
+    "CARDS_KEY",
+    "CARDS_WINDOW",
     "COUNT_KEYS",
     "DEFAULT_REASON",
     "LEFTOVER_KEYS",
     "OWNER_REASONS",
+    "PURGED_CARD_UZ",
     "PURGED_NAME",
     "PurgePlan",
     "PurgeRefused",
     "PurgeResult",
     "Scope",
     "abandon",
+    "close_purged_cards",
     "collect",
     "count_lines",
     "execute",

@@ -29,6 +29,7 @@ from aiogram.types import Document, Message
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from clientscrapper.bot import keyboards, pages
+from clientscrapper.bot.cards_out import BotCards
 from clientscrapper.bot.handlers.common import (
     Deps,
     Tap,
@@ -290,6 +291,12 @@ async def on_purge(tap: Tap) -> None:
         await edit(tap.query, t("unut.failed", id=str(planned.company_ids[0])))
         return
     await edit(tap.query, pages.purge_result_text(result, reason=planned.reason))
+    if tap.query.bot is not None:
+        # The purged lead's cards lose its data now; what Telegram refuses
+        # the card job asks again (purge.close_purged_cards).
+        await purge.close_purged_cards(
+            tap.deps.session_factory, BotCards(tap.query.bot), now=now
+        )
 
 
 # --- /dnc -------------------------------------------------------------------------------
