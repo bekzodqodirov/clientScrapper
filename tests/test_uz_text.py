@@ -402,6 +402,14 @@ def test_rendered_cards_notes_and_digest_follow_the_rules(module, function, task
         assert len(rendered) == 2 * (7 + 1) + 3
         assert [t for t in rendered if problems(t, rendered=True)] == []
         return
+    if function == "render_digest":
+        from clientscrapper.services import digest
+        from tests.fixtures import digest_views
+
+        rendered = [digest.render_digest(make()) for make in digest_views.VIEWS]
+        assert len(rendered) == 3
+        assert [t for t in rendered if problems(t, rendered=True)] == []
+        return
     # The renderers take views a later task defines; that task feeds its
     # golden fixtures through problems(rendered=True) here.
     pytest.fail(f"{module} exists: add its fixture views to this test ({task})")

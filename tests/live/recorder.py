@@ -36,7 +36,7 @@ def outcome_of(report: pytest.TestReport) -> smoke.Outcome:
     return "failed"
 
 
-@dataclass
+@dataclass(eq=False)
 class SmokeRecorder:
     NAME: ClassVar[str] = "clientscrapper-smoke-recorder"
 

@@ -93,7 +93,8 @@ ERP_WINDOW: Final = timedelta(days=30)
 # never need the clip).
 MESSAGE_MAX: Final = 4096
 # Lines of one list inside the digest (sources, labels, names).
-MAX_SOURCES: Final = 12
+MAX_SOURCES: Final = 10
+MAX_FLIPS: Final = 5
 MAX_NAMES: Final = 5
 MAX_LABELS: Final = 6
 NAME_MAX: Final = 40
@@ -302,9 +303,11 @@ def _source_lines(sources: Sequence[SourceRow], flips: Sequence[Flip]) -> list[s
             )
         if len(sources) > MAX_SOURCES:
             lines.append(f"  … yana {len(sources) - MAX_SOURCES} ta")
-    for flip in flips[:MAX_SOURCES]:
+    for flip in flips[:MAX_FLIPS]:
         word = "yoqildi" if flip.on else "oʻchirildi"
         lines.append(f"🔁 Avtomatik push {word}: {esc(_clip(flip.title, NAME_MAX))}")
+    if len(flips) > MAX_FLIPS:
+        lines.append(f"🔁 … yana {len(flips) - MAX_FLIPS} ta oʻzgarish — /manbalar")
     return lines
 
 
@@ -355,12 +358,16 @@ def render_digest(view: DigestView) -> str:
     value escaped. Lines with nothing to say are omitted."""
     y = view.yesterday
     q = view.queue
+    oldest = (
+        f" (eng eskisi {_age(q.review_oldest_at, view.now)})"
+        if q.review and q.review_oldest_at is not None
+        else ""
+    )
     lines = [
         f"☀️ {view.day:%d.%m.%Y} — Qidiruv agenti",
         f"Kecha: topildi {y.found} · ball olgan {y.scored} · karta {y.asked} · "
         f"tasdiq {y.approved} · CRMʼga {y.pushed}/{view.push_cap} · rad {y.rejected}",
-        f"Navbat: koʻrib chiqish {q.review} (eng eskisi "
-        f"{_age(q.review_oldest_at, view.now)}) · boyitish {q.enriching} · "
+        f"Navbat: koʻrib chiqish {q.review}{oldest} · boyitish {q.enriching} · "
         f"kutish {q.hold} · menejerda {q.handoff_open}",
     ]
     if view.review_cap and y.asked >= view.review_cap and view.waiting_cards:
@@ -401,7 +408,22 @@ def render_digest(view: DigestView) -> str:
     lines += _deadman_line(view.deadman)
     if view.waiting_cards:
         lines.append(f"Sizni {view.waiting_cards} ta karta kutmoqda → /lidlar")
-    return "\n".join(lines)
+    return fit(lines)
+
+
+def fit(lines: Sequence[str], limit: int = MESSAGE_MAX) -> str:
+    """The lines joined, within ``limit``: the lists are capped so a digest
+    fits, and should one not, whole lines from the end of the middle give way
+    (each line is its own balanced HTML, so a cut never breaks a tag) — the
+    first and the last line («Sizni … kutmoqda») stay."""
+    text = "\n".join(lines)
+    if len(text) <= limit:
+        return text
+    kept = list(lines)
+    gap = "  …"
+    while len(kept) > 2 and len("\n".join([*kept[:-1], gap, kept[-1]])) > limit:
+        del kept[-2]
+    return "\n".join([*kept[:-1], gap, kept[-1]])[:limit]
 
 
 # --- loading ----------------------------------------------------------------------
@@ -830,6 +852,7 @@ __all__ = [
     "Yesterday",
     "day_ref",
     "erp_line",
+    "fit",
     "load",
     "render_digest",
     "send",
