@@ -823,8 +823,15 @@ async def live_roots(session: AsyncSession, query: str) -> list[uuid.UUID]:
     (``purge.subject_root``), each once — ``/unut``'s lookup. A purged company
     is left out unless a purge of it stopped part-way (``purge.unfinished``:
     its rows are still there), so ``/unut`` can finish that job."""
+    roots, _ = await purge_roots(session, query)
+    return roots
+
+
+async def purge_roots(session: AsyncSession, query: str) -> tuple[list[uuid.UUID], bool]:
+    """``live_roots`` and whether the name match alone found them (``lookup``)."""
+    hits, by_name = await lookup(session, query)
     roots: list[uuid.UUID] = []
-    for company_id in await find_company_ids(session, query):
+    for company_id in hits:
         found = await session.get(Company, company_id)
         if found is None:
             continue
@@ -834,7 +841,7 @@ async def live_roots(session: AsyncSession, query: str) -> list[uuid.UUID]:
         if root.state == "purged" and not await purge.unfinished(session, root.id):
             continue
         roots.append(root.id)
-    return roots
+    return roots, by_name
 
 
 async def company_card(
@@ -898,6 +905,14 @@ async def find_company_ids(session: AsyncSession, query: str) -> list[uuid.UUID]
     or tail-9, an ``@username``/``t.me`` link, a STIR, a domain, else a
     trigram name match. A bare nine-digit number is tried as a STIR and as a
     tail. Not yet roots, not yet unique."""
+    found, _ = await lookup(session, query)
+    return found
+
+
+async def lookup(session: AsyncSession, query: str) -> tuple[list[uuid.UUID], bool]:
+    """``find_company_ids``' hits and whether they came from the name match
+    alone (no exact key answered): a guess, which ``/unut`` says on its plan
+    card before anything is deleted for good."""
     text = query.strip()
     found: list[uuid.UUID] = []
     if (as_id := parse_uuid(text)) is not None:
@@ -954,7 +969,8 @@ async def find_company_ids(session: AsyncSession, query: str) -> list[uuid.UUID]
             )
         if not found and tail is None and stir is None and handle is None:
             found += [cid for cid, _ in await companies.find_companies(session, text)]
-    return found
+            return found, True
+    return found, False
 
 
 async def search(
@@ -1184,12 +1200,14 @@ __all__ = [
     "lidlar_holat",
     "live_review",
     "live_roots",
+    "lookup",
     "mark_asked",
     "merge_targets",
     "money",
     "parse_uuid",
     "pending_owner_count",
     "phone_shown",
+    "purge_roots",
     "render_company",
     "render_holat",
     "render_manager",

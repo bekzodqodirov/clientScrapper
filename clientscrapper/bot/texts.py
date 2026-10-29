@@ -164,6 +164,10 @@ UZ: Final[Mapping[str, str]] = MappingProxyType(
         ),
         "unut.subject": "Kompaniya: <code>{id}</code> (nomi: /qidir {id})",
         "unut.ask": "Oʻchiraymi? Buni qaytarib boʻlmaydi.",
+        "unut.by_name": (
+            "⚠️ Nom boʻyicha topildi — avval /qidir {id} bilan "
+            "shu kompaniya ekanini tekshiring."
+        ),
         "unut.expired": "Reja eskirgan — /unut ni qaytadan yuboring.",
         "unut.cancelled": "Bekor qilindi — hech narsa oʻchirilmadi.",
         "unut.done": "Bu reja allaqachon bajarilgan.",

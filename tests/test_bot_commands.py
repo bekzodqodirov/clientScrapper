@@ -904,6 +904,23 @@ async def test_unut_a_second_tap_closes_nothing_the_first_one_runs(w):
     assert w.last() == t("unut.done")
 
 
+async def test_unut_says_when_only_the_name_matched(w):
+    """A fuzzy name hit is a guess, and the legal rows a purge writes are
+    never removed: the card asks for a /qidir look first. An exact key's
+    card carries no such line."""
+    async with w.db() as s:
+        cand = await lead(s, nn=65, name="Namuna Yagona Tekstil", stir="300000065")
+        company_id = cand.company_id
+    warning = t("unut.by_name", id=str(company_id))
+    await w.say("/unut Namuna Yagona Tekstil")
+    lines = w.last().splitlines()
+    assert warning in lines and lines[-1] == t("unut.ask")
+    assert "Namuna Yagona" not in w.last()
+    await w.say("/unut 300000065")
+    assert warning not in w.last().splitlines()
+    assert t("unut.subject", id=str(company_id)) in w.last().splitlines()
+
+
 async def test_unut_asks_for_one_company_when_a_key_names_several(w):
     async with w.db() as s:
         first = await gate_fixtures.firm(s, "Namuna Bir Savdo")

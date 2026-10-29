@@ -208,7 +208,7 @@ async def unut(message: Message, deps: Deps) -> None:
         await reply(message, t("unut.how"))
         return
     async with deps.session_factory() as session:
-        found = await cards.live_roots(session, arg)
+        found, by_name = await cards.purge_roots(session, arg)
         if len(found) == 1:
             plan = await purge.plan_company(session, found[0], reason=PURGE_REASON)
             purge_log_id = await purge.record(session, plan, requested_by=_owner(message))
@@ -221,7 +221,7 @@ async def unut(message: Message, deps: Deps) -> None:
         return
     deps.plans.put(PLAN_PURGE, plan, now=deps.clock(), plan_id=purge_log_id)
     keyboard = None if plan.empty else keyboards.purge_keyboard(purge_log_id)
-    await reply(message, pages.purge_plan_text(plan), keyboard=keyboard)
+    await reply(message, pages.purge_plan_text(plan, by_name=by_name), keyboard=keyboard)
 
 
 # What a tap on a plan that will not run (again) says, by its log row

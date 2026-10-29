@@ -204,11 +204,15 @@ def dnc_preview_text(key: str, names: Sequence[str]) -> str:
     return t("dnc.preview", key=esc(key), companies=companies)
 
 
-def purge_plan_text(plan: purge.PurgePlan) -> str:
+def purge_plan_text(plan: purge.PurgePlan, *, by_name: bool = False) -> str:
     """``/unut``'s plan card (06 §5.4): the counts and the company's uuid —
-    never a name; the confirm question last."""
+    never a name; the confirm question last. A company the name match alone
+    found is a guess (``cards.lookup``): the card says so, since the legal
+    rows a purge writes are never removed (06 §5.5)."""
     lines = [esc(line) for line in purge.plan_lines(plan)]
     lines += [t("unut.subject", id=str(c)) for c in plan.company_ids]
+    if by_name and not plan.empty:
+        lines += [t("unut.by_name", id=str(c)) for c in plan.company_ids]
     if not plan.empty:
         lines.append(t("unut.ask"))
     return "\n".join(lines)
