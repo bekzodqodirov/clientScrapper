@@ -54,7 +54,7 @@ from clientscrapper.services.normalise import to_observation_json
 from clientscrapper.services.usage import Priced
 from tests.ast_tools import PACKAGE, imported_modules, tree_of
 from tests.fakes import ALLOW_ALL, FakeClock, Site, fetcher_for
-from tests.gate_fixtures import NOW, contact, firm, phone, seq, signal
+from tests.gate_fixtures import NOW, candidate, contact, firm, phone, seq, signal
 
 FIXTURES = Path(__file__).parent / "fixtures"
 SITES = FIXTURES / "company_sites"
@@ -247,6 +247,42 @@ async def test_s1_a_site_phone_makes_it_hot_and_the_chain_stops(
     # No model step in E0–E6: nothing reached the model (and so nothing
     # unpseudonymised could).
     assert model_api.requests == []
+
+
+async def test_a_hot_candidate_gate_1_sent_here_walks_on_until_the_site_makes_it_b2b(
+    session, tmp_path
+):
+    """Gate 1 routes a hot candidate with no B2B evidence to enrichment (T-24
+    carried): it has its phone and its score, so S1 must not end the walk
+    while gate 1's hold is what decides the card — the site's legal form is
+    what the walk is for."""
+    company = await firm(
+        session, "Namuna Uch", legal_form=None, website_domain="namuna-tekstil.example.uz"
+    )
+    lead = await contact(session, company, phone(60))
+    await signal(session, company)
+    await signal(session, company, "cn_origin")
+    cand = await candidate(
+        session, company, state="scored", lead=lead, last_scored_at=None
+    )
+    await session.commit()
+    await candidates.score_batch(now=NOW)
+    cand = await reload(session, cand)
+    assert (cand.state, cand.tier) == ("enriching", "hot")
+    assert cand.score_breakdown["gates"]["is_b2b"] == "fail:not_b2b"
+    routes = {
+        f"{SITE}/": site_page("site_landing"),
+        f"{SITE}/kontakty": site_page("site_contacts"),
+    }
+    async with world(tmp_path, routes) as w:
+        await w.run(cand.next_enrich_at)
+    cand = await reload(session, cand)
+    company = await reload(session, company)
+    assert company.legal_form == "MChJ"
+    assert ("E2", "ok") in steps(cand)
+    assert cand.state == "review"
+    assert cand.score_breakdown["gates"]["is_b2b"] == "pass:legal_form"
+    assert w.urls()[:2] == [f"{SITE}/robots.txt", f"{SITE}/"]
 
 
 # --- the schedule and S4 ---------------------------------------------------------------

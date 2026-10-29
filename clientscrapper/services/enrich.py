@@ -720,8 +720,15 @@ async def standing(
     session_factory: SessionFactory, candidate_id: uuid.UUID, *, now: datetime
 ) -> Standing:
     """The live score and the gates now, read without a lock: S1 (a usable
-    phone and ≥ 60) or S2 (the company excluded or suppressed, or a gate
-    that would exclude or suppress it)."""
+    phone and ≥ 60, and no card waiting on gate 1) or S2 (the company
+    excluded or suppressed, or a gate that would exclude or suppress it).
+
+    A hot candidate that gate 1 sent here (``candidates.gated_walk``: «not
+    yet B2B», 04 §6 «may become B2B after enrichment») already has its phone
+    and its score — S1 at once would end every attempt before a page is
+    read, and the site's legal form or the registry's hit that would make it
+    B2B would never be fetched. While gate 1's hold is what decides its card
+    (``waits_for_b2b``), S1 does not stop the walk."""
     async with session_factory() as session:
         candidate = await session.get(LeadCandidate, candidate_id)
         if candidate is None:
@@ -737,14 +744,24 @@ async def standing(
         result = await candidates.live_score(session, candidate, now=now)
         if result is None:
             return Standing(0, False, "S2")
-        failure = (await gates.evaluate(session, candidate.company_id, now=now)).decide(
-            card=False
-        )
+        gate = await gates.evaluate(session, candidate.company_id, now=now)
+        failure = gate.decide(card=False)
         if failure is not None and failure.decision in ("excluded", "suppressed"):
             return Standing(result.total, result.usable_phone, "S2")
-        if result.usable_phone and result.total >= scoring.HOT_MIN:
+        if (
+            result.usable_phone
+            and result.total >= scoring.HOT_MIN
+            and not waits_for_b2b(gate)
+        ):
             return Standing(result.total, result.usable_phone, "S1")
         return Standing(result.total, result.usable_phone, None)
+
+
+def waits_for_b2b(gate: gates.GateResult) -> bool:
+    """Gate 1's «not yet B2B» hold is what decides the candidate's card —
+    the one failure enrichment may cure (04 §6 gate 1)."""
+    first = gate.decide(card=True)
+    return first is not None and first.gate == "is_b2b" and first.decision == "hold"
 
 
 # --- the steps ----------------------------------------------------------------------
