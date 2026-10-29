@@ -175,3 +175,7 @@ def test_every_make_target_the_ops_runbook_names_exists():
     assert named - targets() == set()
     assert {t for t, _, _ in table()} <= named
     assert "mvp-report" in named
+    # Wave 4's operator commands (T-31's purge, T-35's smoke) and the smoke
+    # runbook the go-live checklist sends the operator to.
+    assert {"purge", "smoke", "smoke-cron", "push-test"} <= named
+    assert "docs/SMOKE.md" in text

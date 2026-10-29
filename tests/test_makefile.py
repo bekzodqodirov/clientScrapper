@@ -252,6 +252,14 @@ def test_a_switch_is_on_only_at_1(target, switches):
         assert f"{name}=yes: use {name}=1 (on) or {name}=0 (off)" in done.stderr
 
 
+def test_make_purge_passes_the_reason_through():
+    """T-31's ``--reason`` (legal_request by default, as /unut): ``REASON=owner``
+    is how docs/OPS.md frees the push-test's synthetic phone."""
+    assert "--reason" not in dry_run("purge", "PHONE=901234567")
+    line = dry_run("purge", "PHONE=901234567", "REASON=owner").replace("\\", " ")
+    assert '--reason "owner"' in " ".join(line.split())
+
+
 def test_skip_doctor_skips_only_at_1():
     assert "tools.doctor" in dry_run("up", "SKIP_DOCTOR=0")
     assert "tools.doctor" in dry_run("up")

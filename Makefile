@@ -141,11 +141,12 @@ mvp-report: ## The pilot's MVP numbers: make mvp-report [START=YYYY-MM-DD]
 	$(COMPOSE) run --rm worker python -m clientscrapper.tools.mvp_report \
 		$(if $(strip $(START)),--start "$(strip $(START))",)
 
-purge: ## Forget a subject: make purge COMPANY=<uuid> | PHONE=<tail9> | TG_USER=<id> [APPLY=1]
-	@test -n "$(COMPANY)$(PHONE)$(TG_USER)" || (echo "usage: make purge COMPANY=<uuid> | PHONE=<tail9> | TG_USER=<id> [APPLY=1]" && exit 1)
+purge: ## Forget a subject: make purge COMPANY=<uuid> | PHONE=<tail9> | TG_USER=<id> [REASON=legal_request|dnc|b2c|owner] [APPLY=1]
+	@test -n "$(COMPANY)$(PHONE)$(TG_USER)" || (echo "usage: make purge COMPANY=<uuid> | PHONE=<tail9> | TG_USER=<id> [REASON=legal_request|dnc|b2c|owner] [APPLY=1]" && exit 1)
 	$(COMPOSE) run --rm worker python -m clientscrapper.tools.purge \
 		$(if $(COMPANY),--company "$(COMPANY)",) $(if $(PHONE),--phone "$(PHONE)",) \
-		$(if $(TG_USER),--tg-user "$(TG_USER)",) $(if $(call switch,APPLY),--apply,)
+		$(if $(TG_USER),--tg-user "$(TG_USER)",) $(if $(REASON),--reason "$(REASON)",) \
+		$(if $(call switch,APPLY),--apply,)
 
 # --- Local development ------------------------------------------------------
 install: ## Install dev dependencies into the active virtualenv

@@ -28,6 +28,8 @@ Telegram accounts, 10:00–17:00 Tashkent (`docs/sotuv-playbook.md`).
 | `make erp-sync WALK=full\|delta\|outcomes\|quarter\|year [ACCEPT_SHRINK=1]` | one ERP feed walk by hand (exit 3 = skipped) |
 | `make push-test` | pushes one visibly synthetic lead to the ERP |
 | `make mvp-report [START=YYYY-MM-DD]` | the pilot's four MVP numbers (§4 below) |
+| `make purge COMPANY=… \| PHONE=… \| TG_USER=… [REASON=…] [APPLY=1]` | forget a subject (06 §5.4): the plan's counts first, nothing changes without `APPLY=1`; `REASON` is `legal_request` (the default, as `/unut`), `dnc`, `b2c` or `owner` |
+| `make smoke [FULL=1]` / `make smoke-cron` | the live smoke tests, VPS only (`docs/SMOKE.md`) / print the two crontab lines that run them |
 | `make update` | backup (must succeed) → pull → rebuild → prune |
 | `make test` | ruff + mypy + pytest (needs Postgres: `make db-test` prints the line) |
 
@@ -61,6 +63,8 @@ Telegram accounts, 10:00–17:00 Tashkent (`docs/sotuv-playbook.md`).
    month in `costs.ask`); Apify prepaid ≤ $20. The code-side cap is `DAILY_COST_CAP_USD` ($10).
 9. `DEADMAN_PING_URL` configured and a test alert received on the owner's phone; `make backup`
    run once by hand and the file seen in Telegram; `make restore FILE=… DRY=1` on that file.
+   The smoke cron installed once (`docs/SMOKE.md`: `make -s smoke-cron` into the crontab); the
+   digest says nothing about smoke before its first run, so `crontab -l` is the check.
 10. Legal: pd.gov.uz registration filed (owner); `docs/huquqiy-memo.md` §4 signed off; managers
     briefed on `docs/sotuv-playbook.md` §2 (own account, 10:00–17:00, opt-out line, press
     «📞 Bogʻlandim» or move the stage after the first message — decision 6a).
@@ -80,6 +84,7 @@ The bot names every problem with its remedy (06 §4.2); `/holat` lists the open 
 | Disk full | `disk_low` | `du -sh data/evidence data/backups`; `docker system df`; `make backup` must still work; lower `EVIDENCE_MAX_GB`; `docker image prune -f`; never delete backups newer than 3 days | free ≥ 2 × `DISK_MIN_FREE_GB` |
 | Duplicate pushes suspected | a manager reports two leads for one company | Read `push_log` for the company ordered by `sent_at`: one `sent` per month per company is correct, two months with new signals are correct by design, two `sent` in one month are impossible (`ux_push_log_delivered`). Two leads in the ERP came through two doors (`other` fallback + `agent`): delete the `manba=other` route and ask the manager to join them. One lead with «🔁 Qayta yozdi» but no «🆕» is the ERP's orphan after a 503 half-way — not a duplicate | `push_log` matches `outcomes`; `push_unconfirmed` clear |
 | Worker silent | `worker_silent` | `make worker` → traceback; usually a migration or a job failing at start; roll back = `git checkout <prev>` + `make up` + `make restore` only if a migration broke data | heartbeat fresh; `/holat` |
+| `make push-test` refused after a purge | `make push-test` answers a suppression refusal | The TEST company was purged with `legal_request` (or `dnc`): its synthetic phone is now suppressed for good, so every later push-test refuses. Purge the TEST company with `REASON=owner` instead — the purged holder frees the synthetic STIR and domain and the next push-test mints a fresh one | `make push-test` 200 |
 | Backup failed | `backup_failed` | `make backup` by hand → the error: pg_dump major version (rebuild the image), disk, missing recipient | `backup` beat `ok=true`, the file in Telegram |
 | «Qayta qilinmasin» renamed in the dictionary | a seller says a «never again» lead came back, or no new `lost` rows for weeks | A rename never rewrites old leads, but new losses under the new spelling are not in `agent_no_contact_reasons` and arrive with `no_contact=false`. **Boshqaruv → Sozlamalar → `agent_no_contact_reasons`**: add the new spelling (`;`), keep the old one; then `make erp-sync WALK=full` | the next full pull holds the new losses as `kind='lost'` |
 | Feed shrank | `suppression_shrunk` | Nothing was deleted. Check the ERP: a client export change, a renamed `agent_no_contact_reasons` label, a retired class of tails? Fix the cause, then `make erp-sync WALK=full ACCEPT_SHRINK=1` once | the full pull's count ≥ 90 % of the previous one |
