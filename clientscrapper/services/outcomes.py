@@ -487,6 +487,22 @@ async def promote(session: AsyncSession, pushes: Sequence[Delivery]) -> int:
             )
         )
     ).all()
+    # The lock order (services/candidates: companies before lead_candidates):
+    # the candidates' companies first, in id order — the resolver and
+    # signals.emit hold a company and then mark its candidate stale, and this
+    # transaction goes on to write the companies (apply_effects' _flags).
+    await session.execute(
+        sa.select(Company.id)
+        .where(
+            Company.id.in_(
+                sa.select(LeadCandidate.company_id).where(
+                    LeadCandidate.id.in_([row[1] for row in promoted])
+                )
+            )
+        )
+        .order_by(Company.id)
+        .with_for_update(key_share=True)
+    )
     for _, candidate_id, external_id, sent_at in promoted:
         await session.execute(
             sa.update(LeadCandidate)

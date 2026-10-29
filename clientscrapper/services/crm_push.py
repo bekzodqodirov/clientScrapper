@@ -855,16 +855,22 @@ async def push_one(
     company is rolled back with it); a marked company is never pushed by
     anybody else — the job, a rule-5 re-push, ``/push tekshir``."""
     source = settings.crm_push_source
-    # Lock order: the push_log row before the candidate — outcomes.promote's
-    # and _record's order; the other way round, the unknown walk promoting
-    # the row a re-push supersedes deadlocks with it.
+    # Lock order: the push_log row, the company, the candidate — the row
+    # before the candidate is outcomes.promote's and _record's order (the
+    # other way round, the unknown walk promoting the row a re-push
+    # supersedes deadlocks with it); the company before the candidate is the
+    # resolver's and emit's (push_gate.lock_for_push).
     prior = await _lock_push(session, repush_of) if repush_of is not None else None
+    company_id = await push_gate.lock_company_of(session, candidate_id)
     candidate: LeadCandidate | None = await session.scalar(
         sa.select(LeadCandidate)
         .where(LeadCandidate.id == candidate_id)
         .with_for_update()
         .execution_options(populate_existing=True)
     )
+    if candidate is not None and candidate.company_id != company_id:
+        # A merge moved it between the read and the locks: the next run asks.
+        candidate = None
     if candidate is None:
         await session.rollback()
         return PushResult.refused(Refusal(1, "not_approved"))

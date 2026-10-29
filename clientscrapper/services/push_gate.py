@@ -686,6 +686,50 @@ async def lock_candidate(
     return found
 
 
+# How often a candidate a merge moved between the read and the locks is read
+# again before the push gives up for this run.
+LOCK_TRIES: Final = 3
+
+
+async def lock_for_push(
+    session: AsyncSession, candidate_id: uuid.UUID
+) -> LeadCandidate | None:
+    """The candidate ``FOR UPDATE`` after its company ``FOR NO KEY UPDATE`` —
+    the lock order of ``services/candidates`` (companies before
+    lead_candidates). The push transaction may write the company (gate 4's
+    ``state='client'`` on a client hit, ``record_refusals``), and a writer
+    that holds the company (the resolver, ``signals.emit``) marks its
+    candidate stale next: taken the other way round, the two deadlock. A
+    candidate a merge moved between the read and the locks is read again;
+    None = no candidate, or one that kept moving (the next run asks)."""
+    for _ in range(LOCK_TRIES):
+        company_id = await lock_company_of(session, candidate_id)
+        if company_id is None:
+            return None
+        candidate = await lock_candidate(session, candidate_id)
+        if candidate is None or candidate.company_id == company_id:
+            return candidate
+    return None
+
+
+async def lock_company_of(
+    session: AsyncSession, candidate_id: uuid.UUID
+) -> uuid.UUID | None:
+    """The candidate's company ``FOR NO KEY UPDATE`` (``lock_for_push``'s
+    first step), and its id; None = no such candidate. The candidate itself is
+    read without a lock: the caller takes it next and compares."""
+    company_id: uuid.UUID | None = await session.scalar(
+        sa.select(LeadCandidate.company_id).where(LeadCandidate.id == candidate_id)
+    )
+    if company_id is not None:
+        await session.execute(
+            sa.select(Company.id)
+            .where(Company.id == company_id)
+            .with_for_update(key_share=True)
+        )
+    return company_id
+
+
 async def _note_row(session: AsyncSession, candidate: LeadCandidate) -> LeadReview | None:
     """The owner review row a refusal is written on: the live card, else the
     newest answered one. An auto-approved candidate never had a card, and no
@@ -787,7 +831,7 @@ async def claim(
     push-test``'s synthetic company, which has no score (item 13, 05 §B.1);
     ``record=False`` returns the refusals without writing them (the same
     tool rolls its synthetic company back instead)."""
-    candidate = await lock_candidate(session, candidate_id)
+    candidate = await lock_for_push(session, candidate_id)
     if candidate is None:
         return ClaimResult(refusals=(Refusal(1, "not_approved"),))
     prior = await session.get(PushLog, repush_of) if repush_of is not None else None
@@ -829,6 +873,7 @@ async def claim(
 
 __all__ = [
     "ATTEMPT_DELAYS",
+    "LOCK_TRIES",
     "MAX_ATTEMPTS",
     "MIN_SCORE",
     "NOTE_MAX",
@@ -844,6 +889,8 @@ __all__ = [
     "external_id_for",
     "lead_contact",
     "lock_candidate",
+    "lock_company_of",
+    "lock_for_push",
     "noted",
     "owner_word",
     "payload_problems",

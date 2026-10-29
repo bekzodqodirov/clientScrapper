@@ -12,6 +12,7 @@ the fake's modes for every answer the door can give. Synthetic data only
 
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
 from collections.abc import AsyncIterator
@@ -1268,6 +1269,115 @@ async def test_push_refused_when_suppressed_or_stale(world):
     assert world.fake.posted == []
     assert (await world.candidate(other)).state == "approved"
     assert await owner_note(world.session, other) is None  # no card: no row made
+
+
+async def lock_waiters() -> int:
+    """Backends of this database waiting on a lock, read on a pool connection
+    of its own (``pg_stat_activity``'s snapshot freezes inside a transaction)."""
+    async with SessionLocal() as probe:
+        found = await probe.scalar(
+            sa.text(
+                "SELECT count(*) FROM pg_stat_activity "
+                "WHERE datname = current_database() AND wait_event_type = 'Lock'"
+            )
+        )
+    return int(found or 0)
+
+
+async def test_a_client_hit_at_push_takes_the_company_before_the_candidate(world):
+    """The lock order (services/candidates: companies before lead_candidates)
+    holds on the push path: a writer that holds the company — the resolver,
+    signals.emit — marks its candidate stale next, and the push transaction
+    that writes gate 4's companies.state='client' (item 14) waits for the
+    company before it takes the candidate. Taken the other way round, the
+    two deadlock and one of them is aborted."""
+    cand = await world.lead()
+    hit = await gate_fixtures.row(world.session, "client", "phone_tail", tail(61))
+    await world.session.commit()
+    async with SessionLocal() as writer, writer.begin():
+        await writer.execute(
+            sa.select(Company.id)
+            .where(Company.id == cand.company_id)
+            .with_for_update(key_share=True)
+        )
+        push = asyncio.ensure_future(world.push(cand))
+        for _ in range(100):
+            if await lock_waiters() or push.done():
+                break
+            await asyncio.sleep(0.05)
+        assert not push.done()  # it waits on the company the writer holds
+        # The writer's next step, signals.mark_stale: the candidate is free.
+        await asyncio.wait_for(
+            writer.execute(
+                sa.update(LeadCandidate)
+                .where(LeadCandidate.id == cand.id)
+                .values(last_scored_at=None)
+            ),
+            5,
+        )
+    result = await asyncio.wait_for(push, 10)
+    assert result.codes == ["suppressed"]
+    c = await world.candidate(cand)
+    assert (c.state, c.suppressed_by) == ("suppressed", hit.id)
+    state = await world.session.scalar(
+        sa.select(Company.state)
+        .where(Company.id == cand.company_id)
+        .execution_options(populate_existing=True)
+    )
+    assert state == "client" and world.fake.posted == []
+
+
+async def test_a_promoted_push_takes_the_company_before_the_candidate(world):
+    """outcomes.promote keeps the same lock order: the walk that promotes an
+    unknown push to sent (its candidate approved → pushed) and makes the
+    company a client (the ERP won the lead) waits for the company a writer
+    holds before it takes the candidate, so the writer's mark_stale goes
+    through instead of deadlocking."""
+    cand = await world.lead()
+    eid = eid_of(cand)
+    world.fake.modes[eid] = "slow"
+    erp = ErpClient(
+        BASE, KEY, transport=world.fake.timeout_transport(0.05), sleep=no_sleep
+    )
+    assert (await world.push(cand, erp=erp)).status == "unknown"
+    world.fake.release(eid)
+    await world.fake.drain()
+    [lead] = world.fake.leads.values()
+    world.fake.win(lead.id)
+    async with SessionLocal() as writer, writer.begin():
+        await writer.execute(
+            sa.select(Company.id)
+            .where(Company.id == cand.company_id)
+            .with_for_update(key_share=True)
+        )
+        walk = asyncio.ensure_future(
+            crm_push.reconcile_job(
+                SessionLocal, world.erp, now=NOW + timedelta(minutes=10)
+            )
+        )
+        for _ in range(100):
+            if await lock_waiters() or walk.done():
+                break
+            await asyncio.sleep(0.05)
+        assert not walk.done()  # it waits on the company the writer holds
+        await asyncio.wait_for(
+            writer.execute(
+                sa.update(LeadCandidate)
+                .where(LeadCandidate.id == cand.id)
+                .values(last_scored_at=None)
+            ),
+            5,
+        )
+    report = await asyncio.wait_for(walk, 10)
+    assert report.walk is not None and report.walk["promoted"] == 1
+    c = await world.candidate(cand)
+    assert (c.state, c.external_id) == ("pushed", eid)
+    state = await world.session.scalar(
+        sa.select(Company.state)
+        .where(Company.id == cand.company_id)
+        .execution_options(populate_existing=True)
+    )
+    assert state == "client"
 
 
 async def fallback(world: World, monkeypatch: pytest.MonkeyPatch) -> ErpClient:
