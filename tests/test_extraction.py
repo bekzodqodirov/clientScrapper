@@ -495,6 +495,25 @@ def test_04_4_1_routes():
     }
 
 
+async def test_an_operation_routed_to_the_batch_lane_is_never_asked_instant(
+    session, model_api
+):
+    """04 §4.1: company_verdict is the batch lane's (half price, model_jobs);
+    its instant answer is a fallback on the verdict operation, never a full
+    price call on its own budget line."""
+    with pytest.raises(ValueError, match="batch lane"):
+        await extraction.call(
+            session,
+            op="company_verdict",
+            schema=ImportSignal,
+            system=CLASSIFY_SYSTEM,
+            user=USER,
+            now=NOW,
+        )
+    assert model_api.requests == []
+    assert await jobs(session) == [] and await ledger(session) == []
+
+
 def test_the_system_prompt_passes_the_mask_fence():
     """extraction.call checks the system block too: the frozen prompt must
     carry no «@word», no phone shape and no word after «Instagram»."""

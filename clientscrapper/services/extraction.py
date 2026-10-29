@@ -562,10 +562,15 @@ async def call[S: BaseModel](
     Never raises for the model's sake: a refusal, a budget
     refusal or an API failure comes back as ``error``. Raises
     ``UnmaskedPayload`` — before anything is written or sent — when the
-    request still carries a phone, a handle or an e-mail."""
+    request still carries a phone, a handle or an e-mail, and ``ValueError``
+    for an operation 04 §4.1 routes to the batch lane: that one is asked
+    through ``model_jobs.enqueue`` at half the price, and its instant answer
+    is a fallback on its own instant operation (``model_jobs.FALLBACK_OP``)."""
     if not isinstance(user, Pseudonymised):
         raise TypeError("user must be a Pseudonymised text (06 §5.2)")
     route = ROUTES[op]
+    if route.lane != "instant":
+        raise ValueError(f"{op} goes to the {route.lane} lane (04 §4.1)")
     model = model or model_for(op)
     tokens = max_tokens or route.max_tokens
     effort = effort or route.effort
