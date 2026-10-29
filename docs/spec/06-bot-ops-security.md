@@ -788,6 +788,8 @@ As built (seam review wave 4): the cards a purged lead left in the owner's and t
 
 As built (seam review wave 4): `/unut @username` (and `make purge TG_HANDLE=@…`) for a person the agent keeps under no contact by that name plans `purge.plan_handle` instead of answering «nothing found»: a `tg_user` plan over every id the username was seen on (`interactions.sender_username`, an intent post's `handles.tg_user_id`), with the username as a key of its own; a username named only by posts (a channel poster) plans those posts. Every purge also takes the intent posts whose `handles` name the subject's ids or username, wherever they resolved. A username that matches a company's contact still plans that company.
 
+As built (seam review wave 4): the `model_jobs` a purge clears are also every request about another company whose reverse map names the subject — `pseudonyms` holding one of its phones (by tail, under a `<PHONE_n>` token, as first written) or one of its usernames or Telegram ids (under `<TG_n>`): a reply that quoted the number, a dealer list. `<NAME_n>` values are not matched (a given name is not the subject's alone); the masked request itself carries no raw value.
+
 ### 5.5 Suppression precedence and overrides
 
 `services/suppression.is_suppressed()` (02 §2.8) orders hits by

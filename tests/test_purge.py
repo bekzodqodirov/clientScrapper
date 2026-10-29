@@ -107,7 +107,7 @@ def job(status: str, company: m.Company | None, **kw: Any) -> m.ModelJob:
         status=status,
         company_id=company.id if company is not None else None,
         request={"messages": "<PHONE_1>"},
-        pseudonyms={"<PHONE_1>": phone(42)},
+        pseudonyms=kw.pop("pseudonyms", {"<PHONE_1>": phone(42)}),
         result={"kind": "intent_post"} if status == "applied" else None,
         **kw,
     )
@@ -208,7 +208,23 @@ async def subject(session, root: Path) -> World:
         "pending": job("pending", firm),
         "fallback": job("fallback", firm),
         "by_evidence": job("applied", None, evidence_ids=[r["ev_msg"].id]),
-        "control": job("applied", control, applied_at=now()),
+        "control": job(
+            "applied",
+            control,
+            applied_at=now(),
+            pseudonyms={"<PHONE_1>": phone(49), "<TG_1>": "namuna_boshqa"},
+        ),
+        # Another company's request that quoted the subject: its reverse map
+        # holds their number as written and their handle (seam review wave 4).
+        "naming_phone": job(
+            "applied", control, applied_at=now(), pseudonyms={"<PHONE_1>": "90 000 00 41"}
+        ),
+        "naming_handle": job(
+            "applied", control, applied_at=now(), pseudonyms={"<TG_1>": "@Namuna_Boss"}
+        ),
+        "naming_id": job(
+            "applied", control, applied_at=now(), pseudonyms={"<TG_2>": str(SUBJECT_TG)}
+        ),
     }
     session.add_all(r["jobs"].values())
     session.add(
@@ -319,7 +335,7 @@ EXPECTED = {
     "signals": 2,
     "evidence": 4,
     "files": 2,
-    "model_jobs": 4,
+    "model_jobs": 7,
     "aliases": 1,
     "company_ids": 1,
     "candidates": 2,
@@ -549,7 +565,8 @@ async def test_the_people_data_goes_and_the_control_firm_s_stays(session, root):
     assert await count(session, m.CompanyAlias) == 0
     assert set(await session.scalars(sa.select(m.CompanyId.id_value))) == {"n49"}
     jobs = {k: await fresh(session, m.ModelJob, v.id) for k, v in r["jobs"].items()}
-    for name in ("applied", "pending", "fallback", "by_evidence"):
+    naming = ("naming_phone", "naming_handle", "naming_id")
+    for name in ("applied", "pending", "fallback", "by_evidence", *naming):
         found = jobs[name]
         assert (found.request, found.pseudonyms, found.result) == (None, None, None)
     assert (jobs["applied"].status, jobs["applied"].error) == ("applied", None)

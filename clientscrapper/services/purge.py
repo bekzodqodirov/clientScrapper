@@ -100,6 +100,7 @@ from clientscrapper.db.models import (
 )
 from clientscrapper.db.models import Evidence as EvidenceRow
 from clientscrapper.services import candidates, companies, evidence, normalise, push_gate
+from clientscrapper.services import keys as keys_service
 from clientscrapper.services import signals as signal_service
 from clientscrapper.services import suppression as suppression_service
 from clientscrapper.services.suppression import Entry, Key
@@ -293,6 +294,29 @@ def _key_fits(key: Key) -> bool:
     return suppression_service.KEY_MIN <= len(key[1]) <= suppression_service.KEY_MAX
 
 
+def _pseudonyms_name(
+    tails: Collection[str], usernames: Collection[str], ids: Collection[str]
+) -> sa.ColumnElement[bool]:
+    """A job whose reverse map (``model_jobs.pseudonyms``, token → value as
+    first written) holds one of the subject's phones (by tail, under a
+    ``<PHONE_n>`` token), usernames or Telegram ids (under ``<TG_n>``)."""
+    pairs = sa.func.jsonb_each_text(ModelJob.pseudonyms).table_valued("key", "value")
+    phone = sa.and_(
+        pairs.c.key.like("<PHONE\\_%"),
+        sa.func.cs_phone_tail(pairs.c.value).in_(sorted(tails)),
+    )
+    handle = sa.and_(
+        pairs.c.key.like("<TG\\_%"),
+        sa.or_(
+            sa.func.cs_username_key(pairs.c.value).in_(sorted(usernames)),
+            pairs.c.value.in_(sorted(ids)),
+        ),
+    )
+    return sa.exists(
+        sa.select(sa.literal(1)).select_from(pairs).where(sa.or_(phone, handle))
+    )
+
+
 async def collect(
     session: AsyncSession,
     company_ids: Collection[uuid.UUID],
@@ -438,6 +462,32 @@ async def collect(
     job_match: list[sa.ColumnElement[bool]] = [ModelJob.company_id.in_(members)]
     if alone:
         job_match.append(ModelJob.evidence_ids.overlap(alone))
+    # A request about another company that held the subject's phone or
+    # handle (a reply quoting it, a dealer list): its reverse map holds them
+    # raw (seam review wave 4), so it goes with them.
+    held = (
+        await session.execute(
+            sa.select(Contact.phone, Contact.telegram_username).where(
+                Contact.company_id.in_(members)
+            )
+        )
+    ).all()
+    tails = {t for phone, _ in held if phone and (t := keys_service.phone_tail(phone))}
+    tails |= {key for kind, key in own_keys if kind == "phone_tail"}
+    usernames = {u for _, u in held if u}
+    usernames |= {m.sender_username for m in messages if m.sender_username}
+    usernames |= {key for kind, key in own_keys if kind == "tg_username"}
+    usernames |= set(
+        await _ids(
+            session,
+            sa.select(Company.telegram_channel).where(
+                Company.id.in_(members), Company.telegram_channel.is_not(None)
+            ),
+        )
+    )
+    ids = {str(t) for t in tg} | {str(m.sender_id) for m in messages if m.sender_id}
+    if tails or usernames or ids:
+        job_match.append(_pseudonyms_name(tails, usernames, ids))
     jobs = await _ids(
         session,
         sa.select(ModelJob.id)
