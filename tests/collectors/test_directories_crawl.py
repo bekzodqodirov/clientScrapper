@@ -28,6 +28,7 @@ from clientscrapper.collectors.runner import run_collector
 from clientscrapper.db.models import CollectorRun, Evidence, Heartbeat, Source
 from clientscrapper.db.models import Observation as ObservationRow
 from clientscrapper.db.session import SessionLocal
+from clientscrapper.services import evidence as evidence_store
 from tests.collectors.directories_pages import page, robots
 from tests.fakes import FakeClock, Site, fetcher_for
 
@@ -472,13 +473,29 @@ async def test_an_unchanged_list_page_is_parsed_from_the_stored_copy(
     session, rows, tmp_path
 ):
     """A conditional GET answered 304 hands back the stored body: the plan
-    reads it as the page, never as a refusal."""
+    reads it as the page, never as a refusal. The crawl itself files no list
+    page (a kept row is its own evidence, ``own_evidence``), so the stored
+    copy here is put in place by hand — another process's (an enrichment
+    fetch, a SERP hit's page) is what a live 304 would answer against."""
     for key in ("directories_yellowpages", "directories_glotr"):
         await switch(key, enabled=False)
     clock = FakeClock(THURSDAY)
     web = Web(clock)
     body = page("goldenpages_rubric_106080_p1").body
     tag = '"namuna-106080"'
+    url = "https://www.goldenpages.uz/rubrics/?Id=106080"
+    async with SessionLocal() as own:
+        await evidence_store.store(
+            own,
+            source_key="directories_goldenpages",
+            url=url,
+            body=body,
+            content_type="text/html",
+            fetched_at=THURSDAY - timedelta(days=7),
+            meta={"etag": tag},
+            root=tmp_path,
+        )
+        await own.commit()
 
     def china_rubric(request: httpx.Request) -> httpx.Response:
         if Web.query(request) != {"Id": "106080"}:
@@ -488,13 +505,14 @@ async def test_an_unchanged_list_page_is_parsed_from_the_stored_copy(
         return httpx.Response(200, headers={**HTML, "etag": tag}, content=body)
 
     web.site.add("https://www.goldenpages.uz/rubrics/", china_rubric)
-    await run(web, clock, tmp_path)
-    second = await run(web, clock, tmp_path)
-    gold = second.meta["subsources"]["goldenpages"]
+    report = await run(web, clock, tmp_path)
+    gold = report.meta["subsources"]["goldenpages"]
     assert any(s.request.headers.get("if-none-match") == tag for s in web.site.seen)
     assert "304" not in gold["list_status"]
-    assert gold["pages"] == 2 and gold["known"] == 28
-    assert second.meta["unchanged"] >= 1
+    assert gold["pages"] == 2 and report.meta["unchanged"] == 1
+    # The eight companies of the 304 page were read off the stored copy.
+    by_source = await observations(session)
+    assert len(by_source["directories_goldenpages"]) == 28
 
 
 def timeout(request: httpx.Request) -> httpx.Response:
@@ -600,3 +618,46 @@ async def test_a_page_the_parser_cannot_read_costs_that_page(session, rows, tmp_
     by_source = await observations(session)
     refs = {o["source_ref"] for o in by_source["directories_goldenpages"]}
     assert "goldenpages:85641" in refs and len(refs) == 20
+
+
+async def test_a_kept_list_row_cites_its_own_evidence_with_its_own_excerpt(
+    session, rows, tmp_path
+):
+    """A list page is one body for twenty companies, and an evidence row has
+    one excerpt: the quote a lead card verifies (02 §2.6) must be found in the
+    row's OWN words. Every kept list row is its own evidence (the runner's
+    canonical body), at the page's URL with the row named in the fragment."""
+    clock = FakeClock(THURSDAY)
+    web = Web(clock)
+    report = await run(web, clock, tmp_path)
+    assert report.status == "ok", report
+    kept = (
+        await session.execute(
+            sa.select(ObservationRow, Evidence)
+            .join(Evidence, Evidence.id == ObservationRow.evidence_id)
+            .where(ObservationRow.parsed["source_ref"].astext.like("%:%"))
+        )
+    ).all()
+    list_rows = [
+        (o, e)
+        for o, e in kept
+        if not e.url.startswith(
+            (
+                "https://www.goldenpages.uz/company/",
+                "https://top.uz/company/",
+                "https://www.yellowpages.uz/kompaniya/",
+                "https://glotr.uz/showcase/",
+            )
+        )
+    ]
+    assert len(list_rows) >= 60
+    for obs, evidence in list_rows:
+        ref = obs.parsed["source_ref"]
+        assert evidence.excerpt == (obs.parsed["text"]["excerpt"] or None), ref
+        assert evidence.source_ref == ref
+        assert evidence.url.endswith(f"#{ref}") and obs.parsed["url"] == evidence.url
+    # One evidence row per company: none is shared between two list rows.
+    assert len({e.id for _, e in list_rows}) == len(list_rows)
+    # A card is still cited at the card's own URL.
+    card = next(e for o, e in kept if o.parsed["source_ref"] == "goldenpages:85641")
+    assert card.url == "https://www.goldenpages.uz/company/?Id=85641"

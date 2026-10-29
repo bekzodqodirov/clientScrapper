@@ -50,9 +50,12 @@ company's own evidence, whose excerpt a lead card's quote must be found in
 payload rows) and the row is held by the category filter or a competitor's:
 the row is then the observation, and no request is spent. A card the site
 does not answer (a 404, glotr's soft 404, robots) falls back to the list
-row's own observation where it has one. A stop on a budget, a deadline or a
-breaker keeps what was found, the list rows of the cards not reached
-included.
+row's own observation where it has one. A kept list row is its own evidence
+(``own_evidence``: the runner's canonical body, filed at the page's URL with
+the row in the fragment, ``row_url``), never the page's: an evidence row has
+one excerpt, and a lead card's quote must be found in the row's own words.
+A stop on a budget, a deadline or a breaker keeps what was found, the list
+rows of the cards not reached included.
 
 **One bad request costs that request** (the T-22 review): a list page or a
 card that fails in transport once the Fetcher's retries are spent
@@ -74,12 +77,14 @@ lookups open a short session of their own.
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 from collections import Counter
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any, Final, Literal
+from urllib.parse import quote, urldefrag
 
 import sqlalchemy as sa
 
@@ -510,10 +515,26 @@ class Directories(Collector):
     def _keep_row(self, entry: Entry, stats: dict[str, Any]) -> None:
         if entry.observation is None:
             return
-        self.found.append(entry.observation)
+        self.found.append(own_evidence(entry.observation))
         stats["rows"] += 1
         if entry.observation.attrs.get("hold"):
             stats["held_rows"] += 1
+
+
+def row_url(url: str, ref: str) -> str:
+    """The list page's URL with the row named in the fragment (never sent to
+    the site): the address a kept list row's own evidence is filed under."""
+    return f"{urldefrag(url).url}#{quote(ref, safe=':')}"
+
+
+def own_evidence(obs: Observation) -> Observation:
+    """A kept list row as its own evidence (the runner's canonical body,
+    ``raw_sha256=""``), at ``row_url``. A list page is one body for twenty
+    companies and an evidence row has one excerpt — its first member's — so a
+    lead card's quote, which must be found in ``evidence.excerpt`` (02 §2.6),
+    would cite another firm's words; and a page filed under its own URL would
+    be the stored copy a conditional GET of that page validates against."""
+    return dataclasses.replace(obs, url=row_url(obs.url, obs.source_ref), raw_sha256="")
 
 
 __all__ = [
@@ -528,6 +549,8 @@ __all__ = [
     "crawl_mode",
     "known_refs",
     "needs_card",
+    "own_evidence",
+    "row_url",
     "seeds_for",
     "skip_reason",
     "stop_reason",
