@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from collections import Counter
 from datetime import datetime, timedelta
+from itertools import pairwise
 from urllib.parse import parse_qs
 from zoneinfo import ZoneInfo
 
@@ -438,3 +439,56 @@ async def test_a_page_budget_stop_keeps_the_rows_of_the_cards_not_reached(
     assert "directories" not in by_source  # top.uz was never reached
     run_row = await session.get(CollectorRun, report.run_id)
     assert run_row is not None and run_row.pages == 4
+
+
+async def test_glotr_s_full_crawl_reads_page_one_and_never_meets_robots(
+    session, rows, tmp_path
+):
+    """4 November, night 4: glotr alone. Its pager prints ?page=2, which
+    robots.txt refuses; the plan never builds the request, so the Fetcher has
+    nothing to refuse."""
+    clock = FakeClock(datetime(2026, 11, 4, 23, 0, tzinfo=TASHKENT))
+    web = Web(clock)
+    report = await run(web, clock, tmp_path, variant="full")
+    assert report.meta["full_night"] == ["glotr"]
+    assert report.meta["skipped_robots"] == 0
+    lists = [u for u in web.urls("glotr.uz") if "/showcase/" not in u]
+    assert lists == [
+        "https://glotr.uz/robots.txt",
+        "https://glotr.uz/oborudovanie/",
+        "https://glotr.uz/oborudovanie-v-tashkente/",
+        "https://glotr.uz/mebel/",
+        "https://glotr.uz/sanoat-uskunalari/",
+    ]
+    # Crawl-delay: 10 is honoured: no two glotr requests closer than 10 s.
+    times = [s.at for s in web.site.seen if s.request.url.host == "glotr.uz"]
+    assert all(b - a >= 10 for a, b in pairwise(times[1:]))
+
+
+async def test_an_unchanged_list_page_is_parsed_from_the_stored_copy(
+    session, rows, tmp_path
+):
+    """A conditional GET answered 304 hands back the stored body: the plan
+    reads it as the page, never as a refusal."""
+    for key in ("directories_yellowpages", "directories_glotr"):
+        await switch(key, enabled=False)
+    clock = FakeClock(THURSDAY)
+    web = Web(clock)
+    body = page("goldenpages_rubric_106080_p1").body
+    tag = '"namuna-106080"'
+
+    def china_rubric(request: httpx.Request) -> httpx.Response:
+        if Web.query(request) != {"Id": "106080"}:
+            return web.rubrics(request)
+        if request.headers.get("if-none-match") == tag:
+            return httpx.Response(304, headers={"etag": tag})
+        return httpx.Response(200, headers={**HTML, "etag": tag}, content=body)
+
+    web.site.add("https://www.goldenpages.uz/rubrics/", china_rubric)
+    await run(web, clock, tmp_path)
+    second = await run(web, clock, tmp_path)
+    gold = second.meta["subsources"]["goldenpages"]
+    assert any(s.request.headers.get("if-none-match") == tag for s in web.site.seen)
+    assert "304" not in gold["list_status"]
+    assert gold["pages"] == 2 and gold["known"] == 28
+    assert second.meta["unchanged"] >= 1
