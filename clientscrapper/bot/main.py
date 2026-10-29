@@ -36,7 +36,12 @@ from typing import Any, Final
 
 from aiogram import Bot, Dispatcher
 from aiogram.exceptions import TelegramAPIError
-from aiogram.types import BotCommand, BotCommandScopeChat, BotCommandScopeDefault
+from aiogram.types import (
+    BotCommand,
+    BotCommandScopeChat,
+    BotCommandScopeDefault,
+    Message,
+)
 from aiogram.types.error_event import ErrorEvent
 from sqlalchemy import exc as sa_exc
 
@@ -58,6 +63,17 @@ log = logging.getLogger(__name__)
 BEAT_EVERY: Final = timedelta(minutes=1)
 WATCHDOG_EVERY: Final = timedelta(minutes=5)
 GET_ME_ATTEMPTS: Final = 5
+# «The database does not answer»: the connection-level failures only. A
+# statement a healthy database refused (an IntegrityError, a DataError) is an
+# ordinary error, never «database down».
+DB_DOWN: Final = (
+    sa_exc.OperationalError,
+    sa_exc.InterfaceError,
+    sa_exc.DisconnectionError,
+    sa_exc.TimeoutError,
+    OSError,
+    TimeoutError,
+)
 # What the watchdog speaks for; every other key is the worker's sweep's.
 WATCHED: Final = frozenset({"worker_silent", "db_down"})
 UNWATCHED: Final = frozenset(health.PROBLEM_KEYS) - WATCHED
@@ -82,12 +98,19 @@ def build_dispatcher(deps: Deps | None = None) -> Dispatcher:
             "unhandled error in an update",
             extra={"error": type(event.exception).__name__},
         )
-        down = isinstance(event.exception, sa_exc.DBAPIError | OSError | TimeoutError)
+        down = isinstance(event.exception, DB_DOWN)
         text = t("db_down" if down else "error")
         update = event.update
+        query = update.callback_query
         try:
-            if update.callback_query is not None:
-                await update.callback_query.answer(text, show_alert=True)
+            if query is not None:
+                try:
+                    await query.answer(text, show_alert=True)
+                except TelegramAPIError:
+                    # Already answered (a slow tap answers first): the
+                    # message the button sits on says it instead.
+                    if isinstance(query.message, Message):
+                        await query.message.answer(text, parse_mode=None)
             elif update.message is not None:
                 await update.message.answer(text, parse_mode=None)
         except Exception:

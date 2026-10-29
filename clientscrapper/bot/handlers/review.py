@@ -124,20 +124,20 @@ async def lidlar_holat(message: Message, deps: Deps) -> None:
 # --- the card's buttons --------------------------------------------------------------
 
 
-async def _live(tap: Tap) -> bool:
-    """The card still waits for its answer and is the owner's."""
+async def on_answer(tap: Tap) -> None:
+    """✅ ✖️ ⏭ 🔒 🙍 🚚 ✏️ 👤 and 🔀's target: the review flow's (T-21) —
+    on a live owner card, and only a letter that card's layout carries."""
     review_id = tap.data.ref
-    if review_id is None:
-        return False
+    assert review_id is not None
     async with tap.deps.session_factory() as session:
         review = await cards.live_review(session, review_id)
-    return review is not None and review.kind == "owner"
-
-
-async def on_answer(tap: Tap) -> None:
-    """✅ ✖️ ⏭ 🔒 🙍 🚚 ✏️ 👤 and 🔀's target: the review flow's (T-21)."""
-    if not await _live(tap):
-        await toast(tap.query, t("stale_card"), alert=True)
+        if review is None or review.kind != "owner":
+            await toast(tap.query, t("stale_card"), alert=True)
+            return
+        layout = await cards.card_layout(session, review)
+    letter = "m" if tap.data.kind == "mg" else tap.data.action
+    if letter not in keyboards.layout_actions(layout):
+        await toast(tap.query, t("stale_button"))
         return
     answer = tap.deps.review_answer
     if answer is None:

@@ -177,6 +177,36 @@ def test_a_handoff_flag_with_a_phone_is_the_normal_card():
     assert card.text == OWNER_CARD
 
 
+def test_a_handoff_row_whose_phone_is_not_usable_is_the_handoff_card():
+    # A short or foreign number (04 §1.1): ✅ would be refused by the push
+    # gate's item 4, so the card offers the manager instead.
+    rv = review(handoff=True, handoff_username="namuna_tekstil", phone_usable=False)
+    card = cards.render_review(rv)
+    assert card.text == HANDOFF_CARD
+    assert card.keyboard == "handoff"
+    # The same phone without the handoff flag is the ordinary card.
+    assert cards.render_review(replace(rv, handoff=False)).keyboard == "review"
+
+
+def test_the_shared_phone_warning_is_the_review_cards_alone():
+    rv = review(
+        handoff=True,
+        handoff_username="namuna_tekstil",
+        phone_usable=False,
+        shared_phone=True,
+    )
+    assert cards.render_review(rv).text == HANDOFF_CARD
+
+
+def test_a_card_over_3500_characters_is_refused(monkeypatch):
+    monkeypatch.setattr(cards, "CARD_MAX", len(OWNER_CARD) - 1)
+    with pytest.raises(CardRefused) as refused:
+        cards.render_review(review())
+    assert refused.value.code == "too_long"
+    monkeypatch.setattr(cards, "CARD_MAX", len(OWNER_CARD))
+    assert cards.render_review(review()).text == OWNER_CARD
+
+
 def test_a_shared_phone_adds_its_warning_line():
     lines = cards.render_review(review(shared_phone=True)).text.splitlines()
     assert lines[5] == "⚠️ Raqam 3+ firmada uchraydi"

@@ -585,13 +585,17 @@ def points_allowed(weight: Weight, points: int) -> bool:
 async def owner_edit(
     session: AsyncSession, key: str, points: int, *, by: str, now: datetime
 ) -> WeightEdit:
-    """02 §2.7's ``/vazn key points``: copy the active version into
-    ``version + 1`` with the one change, ``proposed_by`` and ``approved_by``
-    the owner, and approve it (``activate_version`` validates it: an owner's
-    edit may move a key more than ±30 %). Raises KeyError for a key the
-    active version does not hold and VersionRefused when the points do not
-    fit the group (``points_allowed``) or the version fails validation.
-    Does not commit."""
+    """02 §2.7's ``/vazn key points``: copy the active version into the next
+    free version number with the one change, ``proposed_by`` and
+    ``approved_by`` the owner, and approve it (``activate_version``
+    validates it: an owner's edit may move a key more than ±30 %). The next
+    free number is above every stored version, approved or not: a proposal
+    waiting for approval (T-40's ``fit_weights``) keeps its rows, and the
+    owner's edit — newer — supersedes it (that proposal can no longer be
+    approved: ``not_newer_than``). Raises KeyError for a key the active
+    version does not hold and VersionRefused when the points do not fit the
+    group (``points_allowed``) or the version fails validation. Does not
+    commit."""
     if not by.startswith(OWNER_PREFIX):
         raise ValueError("an owner edit is proposed by owner:<id>")
     await session.execute(
@@ -604,7 +608,8 @@ async def owner_edit(
     if key not in active.rows:
         raise KeyError(key)
     weight = active.rows[key]
-    target = current + 1
+    top = await session.scalar(sa.select(sa.func.max(ScoringWeight.version)))
+    target = max(current, top or 0) + 1
     if not points_allowed(weight, points):
         raise VersionRefused(target, [f"points:{key}"])
     rows = (

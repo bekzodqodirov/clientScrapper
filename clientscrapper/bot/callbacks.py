@@ -20,8 +20,10 @@ colon-separated, prefix first, with one-letter answer codes:
     pt:<push_log_id>:<y|n>    /push tekshir's confirm
 
 ``parse`` matches each pattern with ``re.fullmatch`` — ``re.match`` with
-``^…$`` would also take a trailing newline («rv:1:p\\n») — and never
-guesses: None is «Bu tugma eskirgan». ``tests/test_bot_callbacks.py`` builds
+``^…$`` would also take a trailing newline («rv:1:p\\n») — over ASCII
+digits only (``[0-9]``: ``\\d`` would take «rv:１:p», a fullwidth one), refuses
+a ref its column cannot hold (a ``chat_monitors.id`` is an ``integer``), and
+never guesses: None is «Bu tugma eskirgan». ``tests/test_bot_callbacks.py`` builds
 every keyboard of ``bot/keyboards.KEYBOARD_SAMPLES`` and demands each button
 parse, fit 64 bytes and reach a handler (fullprompt #937: an unparsed
 button is answered by nobody and spins for 15 seconds).
@@ -43,25 +45,30 @@ Kind = Literal[
 CALLBACK_DATA_MAX: Final = 64
 # A bigint (review, purge log, push log ids are bigint identities).
 BIGINT_MAX: Final = 2**63 - 1
+# chat_monitors.id is an integer identity (02 §2.12).
+INT_MAX: Final = 2**31 - 1
 
 _UUID: Final = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
 _GRAMMAR: Final[Mapping[Kind, re.Pattern[str]]] = MappingProxyType(
     {
-        "rv": re.compile(r"rv:(?P<ref>\d{1,19}):(?P<action>[pdlxmbcehok])"),
-        "mg": re.compile(rf"mg:(?P<ref>\d{{1,19}}):(?P<target>{_UUID})"),
-        "mh": re.compile(r"mh:(?P<ref>\d{1,19}):(?P<action>[cnxwl])"),
+        "rv": re.compile(r"rv:(?P<ref>[0-9]{1,19}):(?P<action>[pdlxmbcehok])"),
+        "mg": re.compile(rf"mg:(?P<ref>[0-9]{{1,19}}):(?P<target>{_UUID})"),
+        "mh": re.compile(r"mh:(?P<ref>[0-9]{1,19}):(?P<action>[cnxwl])"),
         "src": re.compile(r"src:(?P<target>[a-z][a-z0-9_]{2,40}):(?P<action>[tia])"),
-        "srcp": re.compile(r"src:p:(?P<page>\d{1,3})"),
-        "ch": re.compile(r"ch:t:(?P<ref>\d{1,10})"),
-        "chp": re.compile(r"ch:p:(?P<page>\d{1,3})"),
+        "srcp": re.compile(r"src:p:(?P<page>[0-9]{1,3})"),
+        "ch": re.compile(r"ch:t:(?P<ref>[0-9]{1,10})"),
+        "chp": re.compile(r"ch:p:(?P<page>[0-9]{1,3})"),
         "chnoop": re.compile(r"ch:noop"),
         "ps": re.compile(r"ps:(?P<action>[ync])"),
-        "im": re.compile(r"im:(?P<ref>\d{1,10}):(?P<action>[yn])"),
-        "pg": re.compile(r"pg:(?P<ref>\d{1,19}):(?P<action>[yn])"),
-        "dn": re.compile(r"dn:(?P<ref>\d{1,10}):(?P<action>[yn])"),
-        "pt": re.compile(r"pt:(?P<ref>\d{1,19}):(?P<action>[yn])"),
+        "im": re.compile(r"im:(?P<ref>[0-9]{1,10}):(?P<action>[yn])"),
+        "pg": re.compile(r"pg:(?P<ref>[0-9]{1,19}):(?P<action>[yn])"),
+        "dn": re.compile(r"dn:(?P<ref>[0-9]{1,10}):(?P<action>[yn])"),
+        "pt": re.compile(r"pt:(?P<ref>[0-9]{1,19}):(?P<action>[yn])"),
     }
 )
+
+# The column a kind's ref names, when it is narrower than a bigint.
+_REF_MAX: Final[Mapping[Kind, int]] = MappingProxyType({"ch": INT_MAX})
 
 # The owner card's letters and the answers they are (02 §2.9 lead_reviews.answer);
 # o/k/m are the card's own menus, not answers.
@@ -108,7 +115,7 @@ def parse(data: str) -> Callback | None:
             continue
         groups = found.groupdict()
         ref = int(groups["ref"]) if groups.get("ref") is not None else None
-        if ref is not None and ref > BIGINT_MAX:
+        if ref is not None and ref > _REF_MAX.get(kind, BIGINT_MAX):
             return None
         page = int(groups["page"]) if groups.get("page") is not None else None
         return Callback(
@@ -185,6 +192,7 @@ def _checked(data: str) -> str:
 __all__ = [
     "CALLBACK_DATA_MAX",
     "CHATS_NOOP",
+    "INT_MAX",
     "MANAGER_ANSWERS",
     "REVIEW_ANSWERS",
     "REVIEW_MENUS",

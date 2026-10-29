@@ -22,6 +22,10 @@ UZ: Final[Mapping[str, str]] = MappingProxyType(
         "stale_button": "Bu tugma eskirgan",
         "stale_card": "Bu karta eskirgan — /lidlar",
         "not_yours": "Bu karta sizga tegishli emas",
+        "forwarded": (
+            "↪️ Uzatilgan xabardagi buyruqni bajarmayman — buyruqni oʻzingiz "
+            "yozing (/yordam)."
+        ),
         "db_down": "⛔ Baza javob bermayapti — birozdan keyin qaytadan urinib koʻring.",
         "start_owner": (
             "Salom! Men mijoz qidiruvchi agentning botiman. Buyruqlar roʻyxati: /yordam"
@@ -112,7 +116,11 @@ UZ: Final[Mapping[str, str]] = MappingProxyType(
         # --- /chats ------------------------------------------------------------
         "chats.title": "💬 Telegram chatlar ({page}/{pages}) · {total} ta",
         "chats.empty": "Hali chat yoʻq. Qoʻshish: /chats qoʻsh @username",
-        "chats.line": "{state} {icon} {title} · {hits} signal (7 kun) / {seen} xabar",
+        # seen_count counts every message ever read (02 §2.12): no 7-day count
+        # is stored, so the line says «jami».
+        "chats.line": (
+            "{state} {icon} {title} · {hits} signal (7 kun) / jami {seen} xabar"
+        ),
         "chats.on": "✅ {title} oʻqiladi",
         "chats.off": "❌ {title} endi oʻqilmaydi (chatdan chiqilmaydi)",
         "chats.never_read": "Shaxsiy yoki GSR chatini oʻqib boʻlmaydi",
@@ -154,6 +162,10 @@ UZ: Final[Mapping[str, str]] = MappingProxyType(
         "qidir.none": "Hech narsa topilmadi: «{query}»",
         # --- /dnc --------------------------------------------------------------
         "dnc.how": "Telefon yoki @username kerak: /dnc +998901234567 yoki /dnc @username",
+        "dnc.foreign": (
+            "Faqat Oʻzbekiston raqami (+998…) yoki @username: boshqa davlat raqamining "
+            "oxirgi 9 raqami oʻzbek raqamiga toʻgʻri kelib qolishi mumkin."
+        ),
         "dnc.preview": "🔒 DNC: {key}\n{companies}\nYozaymi?",
         "dnc.no_company": "Bu kalit hech qaysi kompaniyada yoʻq.",
         "dnc.company": "Kompaniya: {name}",

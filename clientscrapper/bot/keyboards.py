@@ -55,7 +55,8 @@ def review_keyboard(
 ) -> InlineKeyboardMarkup:
     """Row 1 ✅/✖️ (the handoff variant: 👤 Menejerga/✖️), row 2 🔀/🔒/⏭,
     row 3 ⋯ Boshqa — which opens 🙍 B2C, 🚚 Kargo/raqobatchi, ✏️ Telefon and
-    ◀️ Orqaga in its place."""
+    ◀️ Orqaga in its place. The handoff card has no phone row to correct, so
+    its fold carries no ✏️."""
     if layout == "manager":
         return manager_keyboard(review_id)
     first = (
@@ -72,19 +73,33 @@ def review_keyboard(
         ],
     ]
     if expanded:
+        last = [_button("◀️ Orqaga", cb.review(review_id, "k"))]
+        if layout != "handoff":
+            last.insert(0, _button("✏️ Telefon", cb.review(review_id, "e")))
         rows += [
             [
                 _button("🙍 B2C", cb.review(review_id, "b")),
                 _button("🚚 Kargo/raqobatchi", cb.review(review_id, "c")),
             ],
-            [
-                _button("✏️ Telefon", cb.review(review_id, "e")),
-                _button("◀️ Orqaga", cb.review(review_id, "k")),
-            ],
+            last,
         ]
     else:
         rows.append([_button("⋯ Boshqa", cb.review(review_id, "o"))])
     return _markup(rows)
+
+
+def layout_actions(layout: CardLayout) -> frozenset[str]:
+    """The ``rv:`` letters a card's own keyboard carries, folded and open: a
+    press of any other letter on that card (✅ on the handoff card, 👤 on the
+    normal one) is a button the card never had."""
+    found: set[str] = set()
+    for expanded in (False, True):
+        for row in review_keyboard(1, layout, expanded=expanded).inline_keyboard:
+            for button in row:
+                data = cb.parse(button.callback_data or "")
+                if data is not None and data.kind == "rv" and data.action:
+                    found.add(data.action)
+    return frozenset(found)
 
 
 def merge_keyboard(
@@ -267,7 +282,7 @@ KEYBOARD_SAMPLES: Final[
     (
         chats_keyboard,
         {
-            "rows": [ChatButton(9_999_999_999, "Optom bozor " * 4, "group", True)],
+            "rows": [ChatButton(cb.INT_MAX, "Optom bozor " * 4, "group", True)],
             "page": 998,
             "pages": 999,
         },
@@ -288,6 +303,7 @@ __all__ = [
     "chats_keyboard",
     "dnc_keyboard",
     "import_keyboard",
+    "layout_actions",
     "manager_keyboard",
     "merge_keyboard",
     "pages_of",

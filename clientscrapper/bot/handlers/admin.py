@@ -36,6 +36,7 @@ from clientscrapper.db.models import Company
 from clientscrapper.services import (
     cards,
     client_import,
+    companies,
     crm_push,
     owner,
     scoring,
@@ -167,22 +168,22 @@ async def import_command(message: Message, deps: Deps) -> None:
 async def on_import(tap: Tap) -> None:
     plan_id = tap.data.ref
     assert plan_id is not None
+    # Answered first: a large file's write may outlast the ~15 s a button
+    # waits for its answer; the outcome is the edited message.
+    await toast(tap.query)
     now = tap.deps.clock()
     planned = tap.deps.plans.take(PLAN_IMPORT, plan_id, now=now)
     if not isinstance(planned, ImportPlanned):
         await edit(tap.query, t("import.expired"))
-        await toast(tap.query)
         return
     if tap.data.action != "y":
         await edit(tap.query, t("import.cancelled"))
-        await toast(tap.query)
         return
     async with tap.deps.session_factory() as session:
         applied = await client_import.apply_import(
             session, planned.plan, now=now, accept_fewer=planned.accept_fewer
         )
     await edit(tap.query, esc(client_import.applied_line(applied)))
-    await toast(tap.query)
 
 
 # --- /unut (T-31) ---------------------------------------------------------------------
@@ -215,6 +216,9 @@ async def dnc(message: Message, deps: Deps) -> None:
     arg = args_of(message)
     try:
         item = suppression.dnc_command_entry(arg)
+    except suppression.ForeignPhone:
+        await reply(message, t("dnc.foreign"))
+        return
     except ValueError:
         await reply(message, t("dnc.how"))
         return
@@ -223,11 +227,11 @@ async def dnc(message: Message, deps: Deps) -> None:
         held = await suppression.is_suppressed(
             session, [(item.key_type, item.key)], now=now
         )
-        names = [
-            name
-            for company_id in await suppression.holders(session, item)
-            if (name := await _name(session, company_id)) is not None
-        ]
+        names: list[str] = []
+        for company_id in await suppression.holders(session, item):
+            name = await _name(session, company_id)
+            if name is not None and name not in names:
+                names.append(name)
     if held is not None and held.permanent:
         await reply(message, _exists_text(held))
         return
@@ -241,8 +245,12 @@ async def dnc(message: Message, deps: Deps) -> None:
 
 
 async def _name(session: AsyncSession, company_id: uuid.UUID) -> str | None:
+    """The name the owner knows the company by: its root's (a merged
+    company's key sits on the root it went into)."""
     found = await session.get(Company, company_id)
-    return found.display_name if found is not None else None
+    if found is None:
+        return None
+    return (await companies.root_company(session, found)).display_name
 
 
 async def on_dnc(tap: Tap) -> None:
@@ -349,19 +357,20 @@ async def push(message: Message, deps: Deps) -> None:
 async def on_push_check(tap: Tap) -> None:
     push_log_id = tap.data.ref
     assert push_log_id is not None
+    # Answered first: the re-push may take the ERP's whole retry ladder,
+    # longer than the ~15 s a button waits; the outcome is the edited message.
+    await toast(tap.query)
     if tap.data.action != "y":
         await edit(tap.query, t("push.cancelled"))
-        await toast(tap.query)
         return
-    erp = tap.deps.erp()
-    if erp is None:
-        await edit(tap.query, t("push.no_erp"))
-        await toast(tap.query)
-        return
-    async with tap.deps.session_factory() as session:
-        result = await crm_push.push_tekshir_confirm(
-            session, push_log_id, now=tap.deps.clock(), erp=erp
-        )
+    async with tap.deps.erp() as erp:
+        if erp is None:
+            await edit(tap.query, t("push.no_erp"))
+            return
+        async with tap.deps.session_factory() as session:
+            result = await crm_push.push_tekshir_confirm(
+                session, push_log_id, now=tap.deps.clock(), erp=erp
+            )
     if result.status == "sent":
         text = t("push.sent", attempt=result.attempt)
     elif result.status == "unknown":
@@ -372,7 +381,6 @@ async def on_push_check(tap: Tap) -> None:
         why = "; ".join(r.text for r in result.refusals) or "—"
         text = t("push.refused", why=esc(why))
     await edit(tap.query, text)
-    await toast(tap.query)
 
 
 # --- /stir ------------------------------------------------------------------------------

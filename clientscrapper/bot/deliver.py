@@ -21,6 +21,7 @@ message. A message is clipped to Telegram's 4,096 characters.
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Final
@@ -44,12 +45,32 @@ class NotAllowed(Exception):
     """A chat outside the owner/manager allowlist: nothing was sent."""
 
 
+# The bot's own markup: ``<b>``, ``<i>``, ``<code>`` and entities (``&lt;``).
+_TAG: Final = re.compile(r"<(/?)([a-z]+)[^<>]*>")
+# Room kept for the closing tags a cut leaves open.
+_CLOSE_ROOM: Final = 32
+
+
 def clip(text: str) -> str:
-    return (
-        text
-        if len(text) <= TELEGRAM_MESSAGE_MAX
-        else text[: TELEGRAM_MESSAGE_MAX - 1] + "…"
-    )
+    """``text`` within Telegram's 4,096 characters, still valid HTML: the
+    cut never falls inside a tag or an entity, and the tags it leaves open
+    are closed after the «…» — a broken tag would make Telegram refuse the
+    HTML, and the plain-text retry would show the raw tags."""
+    if len(text) <= TELEGRAM_MESSAGE_MAX:
+        return text
+    cut = text[: TELEGRAM_MESSAGE_MAX - 1 - _CLOSE_ROOM]
+    if cut.rfind("<") > cut.rfind(">"):
+        cut = cut[: cut.rfind("<")]
+    if cut.rfind("&") > cut.rfind(";"):
+        cut = cut[: cut.rfind("&")]
+    open_tags: list[str] = []
+    for match in _TAG.finditer(cut):
+        closing, name = match.group(1), match.group(2)
+        if not closing:
+            open_tags.append(name)
+        elif name in open_tags:
+            del open_tags[len(open_tags) - 1 - open_tags[::-1].index(name)]
+    return cut + "…" + "".join(f"</{name}>" for name in reversed(open_tags))
 
 
 def make_bot(token: str | None = None) -> Bot:

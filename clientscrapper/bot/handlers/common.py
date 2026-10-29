@@ -16,17 +16,19 @@ from __future__ import annotations
 
 import logging
 import random
-from collections.abc import Awaitable, Callable
-from contextlib import AbstractAsyncContextManager
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any, Final
 
 from aiogram.enums import ChatType
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from clientscrapper.bot.callbacks import Callback
+from clientscrapper.bot.deliver import clip
 from clientscrapper.config import settings
 from clientscrapper.db.session import session_scope
 from clientscrapper.services import erp_feeds
@@ -44,11 +46,27 @@ def _now() -> datetime:
     return datetime.now(settings.tz)
 
 
-def _erp() -> ErpClient | None:
-    """The ERP client for ``/push tekshir``; None without the agent key."""
+ErpFactory = Callable[[], AbstractAsyncContextManager[ErpClient | None]]
+
+
+@asynccontextmanager
+async def _erp() -> AsyncIterator[ErpClient | None]:
+    """The ERP client for ``/push tekshir``, closed after the tap; None
+    without the agent key or with a ``CRM_BASE_URL`` the client refuses
+    (``keys.erp_base_refusal``: the key is never sent in clear)."""
     if not settings.crm_agent_key:
-        return None
-    return erp_feeds.client_from_settings()
+        yield None
+        return
+    try:
+        client = erp_feeds.client_from_settings()
+    except ValueError as exc:
+        log.warning("no ERP client", extra={"error": str(exc)})
+        yield None
+        return
+    try:
+        yield client
+    finally:
+        await client.aclose()
 
 
 @dataclass(slots=True)
@@ -88,7 +106,7 @@ class Deps:
 
     session_factory: SessionFactory = session_scope
     clock: Callable[[], datetime] = _now
-    erp: Callable[[], ErpClient | None] = _erp
+    erp: ErpFactory = _erp
     plans: Plans = field(default_factory=Plans)
     # The answer of a review button (T-21's services/reviews): None = not
     # wired, the tap is answered «not ready» and nothing changes.
@@ -141,17 +159,24 @@ async def reply(
     message: Message, text: str, *, keyboard: InlineKeyboardMarkup | None = None
 ) -> Message | None:
     """Answer the chat the command came from (the routers admitted only the
-    owner or a manager): HTML, then plain text; None when nothing went out."""
+    owner or a manager), clipped to Telegram's 4,096 characters: HTML, then —
+    only when Telegram refused the HTML — plain text; None when nothing went
+    out. A network failure is not retried: Telegram may have taken the
+    message, and a second copy is worse than none."""
+    text = clip(text)
     for parse_mode in ("HTML", None):
         try:
             return await message.answer(
                 text, reply_markup=keyboard, parse_mode=parse_mode
             )
-        except Exception as exc:
+        except TelegramBadRequest as exc:
             log.warning(
-                "reply not sent",
+                "reply refused",
                 extra={"error": type(exc).__name__, "plain": parse_mode is None},
             )
+        except Exception as exc:
+            log.warning("reply not sent", extra={"error": type(exc).__name__})
+            return None
     return None
 
 
@@ -163,17 +188,21 @@ async def edit(
     message = query.message
     if not isinstance(message, Message):
         return False
+    text = clip(text)
     for parse_mode in ("HTML", None):
         try:
             await message.edit_text(text, reply_markup=keyboard, parse_mode=parse_mode)
             return True
-        except Exception as exc:
+        except TelegramBadRequest as exc:
             if "message is not modified" in str(exc):
                 return True
             log.warning(
-                "edit not applied",
+                "edit refused",
                 extra={"error": type(exc).__name__, "plain": parse_mode is None},
             )
+        except Exception as exc:
+            log.warning("edit not applied", extra={"error": type(exc).__name__})
+            return False
     return False
 
 
@@ -213,6 +242,7 @@ def args_of(message: Message) -> str:
 __all__ = [
     "PLAN_TTL",
     "Deps",
+    "ErpFactory",
     "Plans",
     "SessionFactory",
     "Tap",

@@ -20,6 +20,7 @@ to the Uzbek text rules (07 §1.11).
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import uuid
 from collections.abc import AsyncIterator, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
@@ -44,6 +45,7 @@ from clientscrapper.config import settings
 from clientscrapper.db.models import (
     ChatMonitor,
     Company,
+    Contact,
     Evidence,
     LeadCandidate,
     LeadReview,
@@ -434,6 +436,34 @@ async def test_a_card_telegram_refused_waits_and_the_cards_out_stay_asked(w):
         assert (out.state, waits.state) == ("asked", "pending")
 
 
+async def test_a_handoff_row_with_an_unusable_phone_gets_the_manager_card(w):
+    """gates.no_phone and a lead phone that is not usable (here: shared on
+    3+ firms) → «📨 Faqat Telegram» and [👤 Menejerga], never ✅."""
+    async with w.db() as s:
+        cand = await lead(s)
+        await s.execute(
+            sa.update(Contact)
+            .where(Contact.id == cand.contact_id)
+            .values(shared_phone=True, telegram_username="namuna_tg")
+        )
+        cand.score_breakdown = {"gates": {"no_phone": True}}
+        review = await pending_card(s, cand)
+    await w.say("/lidlar")
+    [card] = _owner_cards(w)
+    lines = card.splitlines()
+    assert lines[4] == "📨 Faqat Telegram: @namuna_tg"
+    assert not any(line.startswith(("📞", "⚠️")) for line in lines)
+    assert w.buttons()[:2] == [cb.review(review.id, "h"), cb.review(review.id, "d")]
+    async with w.db() as s:
+        row = await s.get(LeadReview, review.id, populate_existing=True)
+        assert row is not None
+        assert row.card_hash == cards.card_hash(card, "handoff")
+    # The card's own layout answers its buttons: ⋯ keeps 👤, never ✅.
+    await w.press(cb.review(review.id, "o"))
+    assert cb.review(review.id, "h") in w.buttons()
+    assert cb.review(review.id, "p") not in w.buttons()
+
+
 async def test_two_lidlar_at_once_send_a_card_once(session, configured):
     """A double tap (or review_cards_job beside /lidlar): each card is
     claimed, so the second run takes the next one or nothing."""
@@ -563,7 +593,7 @@ async def test_chats_lists_toggles_and_queues(w):
         await s.flush()
         group_id, private_id = group.id, private.id
     await w.say("/chats")
-    assert "✅ 👥 Namuna optom guruh · 0 signal (7 kun) / 40 xabar" in w.last()
+    assert "✅ 👥 Namuna optom guruh · 0 signal (7 kun) / jami 40 xabar" in w.last()
     await w.press(cb.chat_toggle(group_id))
     assert w.fake.answers() == [t("chats.off", title="Namuna optom guruh")]
     async with w.db() as s:
@@ -836,7 +866,7 @@ async def test_push_tekshir_supersedes_and_repushes_as_the_next_attempt(erp):
     cand = await erp.lead()
     first = await erp.push(cand)
     assert first.status == "sent"
-    w = world(session_scope, erp=lambda: erp.erp)
+    w = world(session_scope, erp=lambda: contextlib.nullcontext(erp.erp))
     await w.say(f"/push tekshir {first.external_id}")
     view = w.last()
     assert "Urinish: 1 · holat: yuborildi · HTTP 200" in view

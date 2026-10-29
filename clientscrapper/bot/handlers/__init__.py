@@ -3,7 +3,8 @@ built from (06 §1.5).
 
 Routers, in registration order:
 
-* ``owner`` — ``OWNER_TELEGRAM_ID``'s private chat: every command and button;
+* ``owner`` — ``OWNER_TELEGRAM_ID``'s private chat: every command and button
+  (a forwarded message runs nothing: its words are someone else's);
 * ``manager`` — an id of ``MANAGER_TELEGRAM_IDS``, private chat: ``/start``,
   ``/yordam``, ``/qidir`` and ``mh:*`` on the manager's own cards;
 * ``reject`` — everything else: answers nothing, logs ``rejected_update``
@@ -123,6 +124,12 @@ async def manager_tap(query: CallbackQuery, deps: Deps) -> None:
     await dispatch(query, deps, kinds=MANAGER_KINDS)
 
 
+async def forwarded(message: Message) -> None:
+    """A forwarded message is someone else's words: a command in it is not
+    run (a forwarded «/toxtat» or «/vazn …» would take effect unconfirmed)."""
+    await reply(message, t("forwarded"))
+
+
 async def owner_text(message: Message) -> None:
     """Anything that is not a command: the list of commands."""
     await reply(message, t("help_owner"))
@@ -142,6 +149,7 @@ def build_owner_router() -> Router:
     router.callback_query.filter(
         _user_filter(is_owner), F.message.chat.type == ChatType.PRIVATE
     )
+    router.message.register(forwarded, F.forward_origin)
     for name, handler in OWNER_COMMANDS.items():
         router.message.register(handler, Command(name))
     router.message.register(owner_text)
@@ -155,6 +163,7 @@ def build_manager_router() -> Router:
     router.callback_query.filter(
         _user_filter(is_manager), F.message.chat.type == ChatType.PRIVATE
     )
+    router.message.register(forwarded, F.forward_origin)
     for name, handler in MANAGER_COMMANDS.items():
         router.message.register(handler, Command(name))
     router.message.register(manager_text)
