@@ -5,7 +5,8 @@ recorded as ``(name, fields)`` and answered with the object Telegram would
 return — a ``Message`` for a send or an edit, ``True`` for an answer, the bot
 user for ``getMe``, a ``File`` and its bytes for a download. ``fail`` queues
 an exception for the next call of a method (``TelegramBadRequest`` to prove
-the plain-text retry, a network error for ``getMe``'s backoff).
+the plain-text retry, a network error for ``getMe``'s backoff) — or for the
+calls after the next ``after`` ones went through.
 
 ``owner_message`` / ``tap`` / ``added_to_group`` build the updates a test
 feeds the dispatcher (``dp.feed_update``), bound to the bot like the ones
@@ -35,11 +36,16 @@ class FakeSession(BaseSession):
     def __init__(self) -> None:
         super().__init__()
         self.calls: list[tuple[str, dict[str, Any]]] = []
-        self.failures: dict[str, list[Exception]] = {}
+        # None = a call that goes through (``fail(…, after=n)``).
+        self.failures: dict[str, list[Exception | None]] = {}
         self.files: dict[str, bytes] = {}
 
-    def fail(self, method: str, error: Exception, times: int = 1) -> None:
-        self.failures.setdefault(method, []).extend([error] * times)
+    def fail(
+        self, method: str, error: Exception, times: int = 1, *, after: int = 0
+    ) -> None:
+        queued = self.failures.setdefault(method, [])
+        queued.extend([None] * after)
+        queued.extend([error] * times)
 
     async def close(self) -> None:
         return None
@@ -52,7 +58,9 @@ class FakeSession(BaseSession):
         self.calls.append((name, fields))
         queued = self.failures.get(name)
         if queued:
-            raise queued.pop(0)
+            failure = queued.pop(0)
+            if failure is not None:
+                raise failure
         if name in {
             "SendMessage",
             "SendDocument",

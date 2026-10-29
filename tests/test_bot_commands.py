@@ -19,6 +19,7 @@ to the Uzbek text rules (07 §1.11).
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from collections.abc import AsyncIterator, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
@@ -324,6 +325,133 @@ async def test_lidlar_does_not_show_a_card_its_gate_now_refuses(w):
     async with w.db() as s:
         found = await s.get(LeadCandidate, cand.id, populate_existing=True)
         assert found is not None and found.state == "hold"
+
+
+async def _quoteless(s: AsyncSession, nn: int, *, score: int) -> LeadCandidate:
+    """A review candidate with a phone and no signal: no quote to cite."""
+    firm = await gate_fixtures.firm(s)
+    contact = await gate_fixtures.contact(s, firm, phone(nn))
+    return await gate_fixtures.candidate(
+        s, firm, state="review", lead=contact, score=score
+    )
+
+
+def _owner_cards(w: World) -> list[str]:
+    return [x for x in w.fake.texts() if x.startswith("🆕 ")]
+
+
+async def test_a_card_that_cannot_be_shown_leaves_the_queue(w, monkeypatch):
+    """Two top-scored cards with no citable quote must not hold the burst for
+    ever: they are set aside (held 7 days) and the good card goes out."""
+    monkeypatch.setattr(settings, "review_burst_max", 2)
+    async with w.db() as s:
+        bad = [await _quoteless(s, nn, score=95) for nn in (11, 12)]
+        for b in bad:
+            await pending_card(s, b)
+        good = await lead(s, 61)
+        good_card = await pending_card(s, good)
+    await w.say("/lidlar")
+    [card] = _owner_cards(w)
+    assert "📞 +998 90 000 00 61 (mobil)" in card
+    assert w.fake.texts()[-1] == t("lidlar.skipped", n=2)
+    async with w.db() as s:
+        row = await s.get(LeadReview, good_card.id, populate_existing=True)
+        assert row is not None and row.state == "asked"
+        for b in bad:
+            held = await s.get(LeadCandidate, b.id, populate_existing=True)
+            assert held is not None
+            assert (held.state, held.hold_until) == ("hold", NOW + timedelta(days=7))
+    await w.say("/lidlar")
+    assert w.fake.texts() == [t("lidlar.none")]
+
+
+async def test_a_card_whose_signals_expired_is_set_aside(w):
+    async with w.db() as s:
+        cand = await lead(s)
+        review = await pending_card(s, cand)
+        await s.execute(sa.update(Signal).values(expires_at=NOW - timedelta(days=1)))
+    await w.say("/lidlar")
+    assert w.fake.texts() == [t("lidlar.skipped", n=1)]
+    async with w.db() as s:
+        found = await s.get(LeadCandidate, cand.id, populate_existing=True)
+        row = await s.get(LeadReview, review.id, populate_existing=True)
+        assert found is not None and row is not None
+        assert (found.state, row.state) == ("hold", "pending")
+    await w.say("/lidlar")
+    assert w.fake.texts() == [t("lidlar.none")]
+
+
+async def test_lidlar_sends_the_best_owner_cards_first_within_the_burst(w, monkeypatch):
+    monkeypatch.setattr(settings, "review_burst_max", 2)
+    async with w.db() as s:
+        for nn, score in ((51, 50), (52, 90), (53, 70), (55, 70)):
+            cand = await lead(s, nn)
+            cand.score = score
+            await pending_card(s, cand)
+        # A manager's card on a review candidate is never the owner's.
+        other = await lead(s, 54)
+        other.score = 99
+        manager_card = await pending_card(
+            s, other, kind="manager", by_telegram_id=MANAGER
+        )
+        await s.flush()
+    await w.say("/lidlar")
+    sent = _owner_cards(w)
+    assert [line for x in sent for line in x.splitlines() if line.startswith("📞")] == [
+        "📞 +998 90 000 00 52 (mobil)",
+        "📞 +998 90 000 00 53 (mobil)",
+    ]
+    assert w.fake.texts()[-1] == t("lidlar.more", n=2)
+    assert w.fake.chats() == {OWNER}
+    async with w.db() as s:
+        row = await s.get(LeadReview, manager_card.id, populate_existing=True)
+        assert row is not None and row.state == "pending"
+    await w.say("/lidlar")
+    assert [x.splitlines()[0] for x in _owner_cards(w)] == [
+        "🆕 Nomzod · 70/100 · Segment yoʻq",
+        "🆕 Nomzod · 50/100 · Segment yoʻq",
+    ]
+    assert "📞 +998 90 000 00 55 (mobil)" in _owner_cards(w)[0]
+
+
+async def test_a_card_telegram_refused_waits_and_the_cards_out_stay_asked(w):
+    async with w.db() as s:
+        first = await lead(s, 61)
+        first.score = 90
+        first_card = await pending_card(s, first)
+        second = await lead(s, 62)
+        second_card = await pending_card(s, second)
+    refused = TelegramBadRequest(
+        method=SendMessage(chat_id=OWNER, text="x"), message="Bad Request"
+    )
+    w.fake.fail("SendMessage", refused, times=2, after=1)
+    await w.say("/lidlar")
+    assert w.fake.texts()[-2:] == [t("lidlar.send_failed"), t("lidlar.more", n=1)]
+    async with w.db() as s:
+        out = await s.get(LeadReview, first_card.id, populate_existing=True)
+        waits = await s.get(LeadReview, second_card.id, populate_existing=True)
+        assert out is not None and waits is not None
+        assert (out.state, waits.state) == ("asked", "pending")
+
+
+async def test_two_lidlar_at_once_send_a_card_once(session, configured):
+    """A double tap (or review_cards_job beside /lidlar): each card is
+    claimed, so the second run takes the next one or nothing."""
+    cand = await lead(session, 61)
+    review = await pending_card(session, cand)
+    await session.commit()
+    w = world(session_scope)
+    w.fake.clear()
+    await asyncio.gather(
+        w.dp.feed_update(w.bot, message(w.bot, "/lidlar", user_id=OWNER)),
+        w.dp.feed_update(w.bot, message(w.bot, "/lidlar", user_id=OWNER)),
+    )
+    w.check()
+    assert len(_owner_cards(w)) == 1
+    row = await session.get(LeadReview, review.id, populate_existing=True)
+    assert row is not None and row.state == "asked"
+    [card] = [m for m in w.fake.named("SendMessage") if m["text"].startswith("🆕 ")]
+    assert row.card_hash == cards.card_hash(card["text"], "review")
 
 
 async def test_lidlar_holat_counts_the_states(w):

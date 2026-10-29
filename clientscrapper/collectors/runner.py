@@ -77,7 +77,7 @@ from clientscrapper.collectors.base import (
     Supplied,
 )
 from clientscrapper.config import settings
-from clientscrapper.db.models import CollectorRun, Evidence, RuntimeFlag, Source
+from clientscrapper.db.models import CollectorRun, Evidence, Source
 from clientscrapper.db.models import Observation as ObservationRow
 from clientscrapper.db.session import SessionLocal
 from clientscrapper.services import costs, health
@@ -276,9 +276,9 @@ class _Group:
 
 
 async def global_pause(session: AsyncSession) -> bool:
-    """``policy.paused()``: ``/toxtat`` set ``runtime_flags('paused')``."""
-    row = await session.get(RuntimeFlag, "paused", populate_existing=True)
-    return row is not None and health.flag_set(row.value)
+    """``policy.paused()``: ``/toxtat`` set ``runtime_flags('paused')``
+    (``costs.global_pause``, the flag's one reading)."""
+    return await costs.global_pause(session)
 
 
 async def skip_reason(session: AsyncSession, source: Source, now: datetime) -> str | None:

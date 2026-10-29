@@ -2,21 +2,27 @@
 """``/lidlar`` and the review card's buttons (06 §1.2, §1.3).
 
 ``/lidlar`` sends the next ≤ ``REVIEW_BURST_MAX`` pending owner cards now —
-the owner asked, so ``REVIEW_HOURS`` and ``QUIET_HOURS`` do not apply; the
-global pause does (``/toxtat``: no card until ``/yoq``) — in
+the owner asked, so ``REVIEW_HOURS``, ``QUIET_HOURS`` and the daily cap do
+not apply; the global pause does (``/toxtat``: no card until ``/yoq``) — in
 06 §1.6's order, each rendered by ``services/cards`` with the gates
-evaluated at that moment. A card the gates now refuse is not shown: its
-candidate takes the score job's own walk out of ``review``
-(``cards.reroute``). A card goes out first and is marked ``asked`` after
-(``mark_asked``: the message, its hash, ``expires_at``), so a card Telegram
-did not take stays ``pending``.
+evaluated at that moment. Each card is claimed first
+(``cards.claim_owner_review``: ``FOR UPDATE … SKIP LOCKED``), so a double
+tap or ``review_cards_job`` running meanwhile never sends it twice; it goes
+out, then is marked ``asked`` (``mark_asked``: the message, its hash,
+``expires_at``) and committed — a card Telegram did not take stays
+``pending``. A card that cannot be shown (a gate now fails, its quote is no
+longer citable, a handoff with nobody to write to …) is not shown and
+leaves the queue (``cards.set_aside``): left in ``review`` it would head
+every later ``/lidlar`` and keep the good cards behind it.
 
 The buttons: ⋯ / ◀️ swap the keyboard in place, 🔀 lists ≤ 5 merge targets
 (the resolver's own ``suggest_merge_targets``). The answers themselves —
 ✅ ✖️ ⏭ 🔒 🙍 🚚 ✏️ 👤 and a chosen merge target — are the review flow's
 (T-21, ``services/reviews``): until it is wired (``Deps.review_answer``) a
-tap is answered «not ready» and nothing changes. A tap on a card that no
-longer waits (answered, expired) is «Bu karta eskirgan — /lidlar».
+tap is answered «not ready» and nothing changes. A letter the card's layout
+does not carry (✅ on the handoff card, 👤 on the normal one) is «Bu tugma
+eskirgan». A tap on a card that no longer waits (answered, expired) is «Bu
+karta eskirgan — /lidlar».
 """
 
 from __future__ import annotations
@@ -44,28 +50,38 @@ async def lidlar(message: Message, command: CommandObject, deps: Deps) -> None:
         return
     now = deps.clock()
     sent = skipped = 0
+    handled: set[int] = set()
     async with deps.session_factory() as session:
         if await owner.paused(session):
             # 06 §1.2 /toxtat: «… no push, no card …» until /yoq.
             await reply(message, t("lidlar.paused"))
             return
-        ids = await cards.next_owner_reviews(session, limit=settings.review_burst_max)
-        for review_id in ids:
+        while sent < settings.review_burst_max:
+            review_id = await cards.claim_owner_review(session, skip=handled)
+            if review_id is None:
+                break
+            handled.add(review_id)
             view = await cards.review_view(session, review_id, now=now)
             if view is None:
+                await session.rollback()
                 skipped += 1
                 continue
             try:
                 card = cards.render_review(view)
             except cards.CardRefused as refused:
+                # The claim ends before the candidate is locked: the push
+                # gate takes the company and the candidate first, then may
+                # write this review row (its refusal note).
+                await session.rollback()
                 skipped += 1
-                if refused.code == "gate":
-                    await cards.reroute(
-                        session, view.candidate.candidate_id, view.gate, now=now
-                    )
-                log.info(
-                    "card not shown", extra={"review_id": review_id, "code": refused.code}
+                await cards.set_aside(
+                    session,
+                    view.candidate.candidate_id,
+                    refused.code,
+                    view.gate,
+                    now=now,
                 )
+                await session.commit()
                 continue
             out = await reply(
                 message,
@@ -73,9 +89,10 @@ async def lidlar(message: Message, command: CommandObject, deps: Deps) -> None:
                 keyboard=keyboards.review_keyboard(review_id, card.keyboard),
             )
             if out is None:
+                await session.rollback()
                 await reply(message, t("lidlar.send_failed"))
                 break
-            await cards.mark_asked(
+            marked = await cards.mark_asked(
                 session,
                 review_id,
                 chat_id=out.chat.id,
@@ -84,6 +101,9 @@ async def lidlar(message: Message, command: CommandObject, deps: Deps) -> None:
                 now=now,
             )
             await session.commit()
+            if not marked:
+                # The claim makes this impossible; said, never hidden.
+                log.error("claimed card not pending", extra={"review_id": review_id})
             sent += 1
         waiting = await cards.pending_owner_count(session)
     if sent == 0 and skipped == 0:

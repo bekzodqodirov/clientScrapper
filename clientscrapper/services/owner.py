@@ -47,7 +47,7 @@ from clientscrapper.db.models import (
 )
 from clientscrapper.services import companies, costs, erp_feeds, keys
 
-PAUSE_FLAG: Final = "paused"
+PAUSE_FLAG: Final = costs.PAUSE_FLAG
 REASON_MAX: Final = 200
 AUTO_PUSH_FORBIDDEN: Final = "auto_push_forbidden"
 # 06 §1.2: «last 5 collector_runs».

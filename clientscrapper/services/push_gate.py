@@ -412,12 +412,19 @@ async def lead_contact(session: AsyncSession, candidate: LeadCandidate) -> Conta
 
     def rank(c: Contact) -> tuple[bool, bool, bool]:
         return (
-            not scoring.usable_phone(_view(c)),
+            not usable_lead_phone(c),
             c.anonymised_at is not None,
             c.phone_kind != "mobile",
         )
 
     return sorted(rows, key=rank)[0]
+
+
+def usable_lead_phone(contact: Contact | None) -> bool:
+    """04 §1.1's usable phone (``scoring.usable_phone``) on a stored
+    contact: what ``lead_contact`` ranks first, and what tells the owner
+    card's handoff variant from the ✅ one (``services/cards``)."""
+    return contact is not None and scoring.usable_phone(_view(contact))
 
 
 def _view(c: Contact) -> scoring.ContactView:
@@ -914,5 +921,6 @@ __all__ = [
     "record_refusals",
     "stated_m3",
     "text_len",
+    "usable_lead_phone",
     "window_opens",
 ]

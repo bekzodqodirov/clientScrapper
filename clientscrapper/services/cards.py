@@ -28,15 +28,17 @@ value from the database is escaped here.
 * ``render_company`` — ``/qidir``'s company card (06 §1.2).
 
 The loaders (``review_view``, ``search``, …) read what a renderer needs
-through the services that own it; ``next_owner_reviews`` / ``mark_asked``
-are ``/lidlar``'s half of the card's life (``pending → asked``).
+through the services that own it; ``claim_owner_review`` / ``mark_asked``
+are ``/lidlar``'s half of the card's life (``pending → asked``), and
+``set_aside`` takes a card that cannot be shown out of the queue.
 """
 
 from __future__ import annotations
 
 import hashlib
+import logging
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -69,6 +71,8 @@ from clientscrapper.services import (
 from clientscrapper.services.candidates import CandidateView, SignalEvidence
 from clientscrapper.services.gates import GateResult
 from clientscrapper.services.suppression import Hit
+
+log = logging.getLogger(__name__)
 
 # 06 §1.3: «whole card ≤ 3,500 chars»; the quote ≤ 140 (the note's own cut).
 CARD_MAX: Final = 3500
@@ -272,6 +276,20 @@ class ReviewView:
     handoff: bool = False
     # The contact a manager would write to (the handoff variant's line).
     handoff_username: str | None = None
+    # The lead phone is usable (04 §1.1, ``push_gate.usable_lead_phone``);
+    # None = judged by its presence alone. A handoff row whose only phone is
+    # not usable (short, foreign) is still the handoff card: ✅ would be
+    # refused by the push gate's item 4.
+    phone_usable: bool | None = None
+
+    @property
+    def handoff_card(self) -> bool:
+        usable = (
+            self.phone_usable
+            if self.phone_usable is not None
+            else self.candidate.phone is not None
+        )
+        return self.handoff and not usable
 
 
 def _contact_line(rv: ReviewView) -> str:
@@ -296,7 +314,7 @@ def _contact_line(rv: ReviewView) -> str:
 def render_review(rv: ReviewView) -> Card:
     """06 §1.3's card. Raises ``CardRefused``."""
     c = rv.candidate
-    if rv.handoff and c.phone is None:
+    if rv.handoff_card:
         if not rv.handoff_username:
             raise CardRefused("no_username")
         contact = f"📨 Faqat Telegram: @{esc(rv.handoff_username)}"
@@ -436,38 +454,70 @@ async def review_view(
         handoff_username=(
             await _handoff_username(session, candidate) if handoff else None
         ),
+        phone_usable=push_gate.usable_lead_phone(lead),
     )
 
 
 async def card_layout(session: AsyncSession, review: LeadReview) -> CardLayout:
     """The keyboard a card was drawn with: a manager card's; the handoff
-    variant's when the candidate has no phone and carries
-    ``gates.no_phone`` (``render_review``'s own rule); else the review's."""
+    variant's when the candidate carries ``gates.no_phone`` and no usable
+    lead phone (``ReviewView.handoff_card``, ``render_review``'s own rule);
+    else the review's."""
     if review.kind == "manager":
         return "manager"
     candidate = await session.get(LeadCandidate, review.candidate_id)
     if candidate is None:
         return "review"
     lead = await push_gate.lead_contact(session, candidate)
-    phoneless = lead is None or lead.phone is None
-    if phoneless and candidates.is_handoff(candidate.score_breakdown):
+    if candidates.is_handoff(candidate.score_breakdown) and not (
+        push_gate.usable_lead_phone(lead)
+    ):
         return "handoff"
     return "review"
 
 
-async def reroute(
-    session: AsyncSession, candidate_id: uuid.UUID, gate: GateResult, *, now: datetime
+# 02 §2.9: an owner card nobody answered holds its candidate 7 days; a card
+# that cannot be shown at all is held as long, then re-scored like any hold.
+CARD_REFUSED_HOLD: Final = timedelta(days=7)
+
+
+async def set_aside(
+    session: AsyncSession,
+    candidate_id: uuid.UUID,
+    code: str,
+    gate: GateResult | None,
+    *,
+    now: datetime,
 ) -> tuple[str, ...]:
-    """A card whose gate failed since its candidate was routed: the score
-    job's own walk (``candidates.rescore`` + ``apply_score`` with the gate),
-    so the candidate leaves ``review`` the way it would have entered it."""
-    candidate = await session.get(LeadCandidate, candidate_id, populate_existing=True)
+    """A card ``render_review`` refused leaves the queue — left in
+    ``review`` it would head every ``/lidlar`` (score desc) and keep the good
+    cards behind it for ever. First the score job's own walk
+    (``candidates.rescore`` + ``apply_score`` with the gate the card was
+    judged by): a failed gate, or a ``review`` row without a usable phone,
+    leaves ``review`` the way it would have entered it. A refusal that walk
+    does not move — a quote no longer citable (its signals expired), a
+    handoff with nobody to write to, a card too long — holds the candidate
+    ``CARD_REFUSED_HOLD``. The company and the candidate are locked in the
+    push gate's order (companies before lead_candidates, ``lock_for_push``);
+    the caller holds no review row (the claim ended before). The walk, or
+    ``()`` when the candidate is gone or has left ``review`` meanwhile."""
+    candidate = await push_gate.lock_for_push(session, candidate_id)
     if candidate is None or candidate.state != "review":
         return ()
     result = await candidates.rescore(session, candidate, now=now)
-    return await candidates.apply_score(
+    walk = await candidates.apply_score(
         session, candidate, result, now=now, auto_push=False, gate=gate
     )
+    if candidate.state == "review":
+        await candidates.transition(
+            session, candidate, "hold", now=now, hold_until=now + CARD_REFUSED_HOLD
+        )
+        walk = (*walk, "hold")
+    log.info(
+        "card set aside",
+        extra={"candidate_id": str(candidate_id), "code": code, "walk": list(walk)},
+    )
+    return walk
 
 
 def _owner_pending() -> sa.ColumnElement[bool]:
@@ -478,21 +528,34 @@ def _owner_pending() -> sa.ColumnElement[bool]:
     )
 
 
-async def next_owner_reviews(session: AsyncSession, *, limit: int) -> list[int]:
-    """``pending`` owner cards of candidates in ``review``, in 06 §1.6's
-    burst order: score desc, then the oldest card first."""
-    rows = await session.scalars(
+async def claim_owner_review(
+    session: AsyncSession, *, skip: Collection[int] = ()
+) -> int | None:
+    """The next ``pending`` owner card of a candidate in ``review``, in 06
+    §1.6's burst order (score desc, then the oldest card first), claimed for
+    the caller's transaction: ``FOR UPDATE OF lead_reviews SKIP LOCKED``. A
+    second ``/lidlar`` (a double tap) or ``review_cards_job`` running
+    meanwhile takes the next card, never this one, so a card goes out once;
+    the claim ends with the transaction (the commit after ``mark_asked``, or
+    a rollback when Telegram did not take the card). ``skip``: the cards
+    this run has handled already. None when nothing waits."""
+    stmt = (
         sa.select(LeadReview.id)
         .join(LeadCandidate, LeadCandidate.id == LeadReview.candidate_id)
         .where(_owner_pending())
-        .order_by(
+    )
+    if skip:
+        stmt = stmt.where(LeadReview.id.not_in(sorted(skip)))
+    found: int | None = await session.scalar(
+        stmt.order_by(
             LeadCandidate.score.desc().nulls_last(),
             LeadReview.created_at,
             LeadReview.id,
         )
-        .limit(limit)
+        .limit(1)
+        .with_for_update(of=LeadReview, skip_locked=True)
     )
-    return list(rows)
+    return found
 
 
 async def pending_owner_count(session: AsyncSession) -> int:
@@ -1018,6 +1081,7 @@ __all__ = [
     "BAND_UZ",
     "CARD_GATES",
     "CARD_MAX",
+    "CARD_REFUSED_HOLD",
     "ERP_FIRST_UZ",
     "NO_PRICE_UZ",
     "OUTCOME_UZ",
@@ -1034,13 +1098,13 @@ __all__ = [
     "ReviewView",
     "card_hash",
     "card_layout",
+    "claim_owner_review",
     "company_card",
     "lidlar_holat",
     "live_review",
     "mark_asked",
     "merge_targets",
     "money",
-    "next_owner_reviews",
     "parse_uuid",
     "pending_owner_count",
     "phone_shown",
@@ -1049,9 +1113,9 @@ __all__ = [
     "render_manager",
     "render_review",
     "render_xarajat",
-    "reroute",
     "review_view",
     "search",
     "segment_label",
+    "set_aside",
     "volume_label",
 ]

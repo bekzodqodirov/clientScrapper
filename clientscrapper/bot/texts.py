@@ -57,7 +57,8 @@ UZ: Final[Mapping[str, str]] = MappingProxyType(
         "lidlar.none": "Hozircha koʻrib chiqiladigan karta yoʻq.",
         "lidlar.more": "Navbatda yana {n} ta",
         "lidlar.skipped": (
-            "{n} ta karta koʻrsatilmadi (darvozadan oʻtmadi yoki dalil yoʻq)."
+            "{n} ta karta koʻrsatilmadi (darvozadan oʻtmadi yoki dalil yoʻq) "
+            "va navbatdan olindi."
         ),
         "lidlar.holat_title": "📋 Nomzodlar holati",
         "lidlar.holat_line": "{state}: {n}",
