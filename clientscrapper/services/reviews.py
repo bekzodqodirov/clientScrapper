@@ -428,6 +428,25 @@ async def _push(
     by: int,
     now: datetime,
 ) -> tuple[str, int | None]:
+    # 04 §7 item 13 at the tap: the card's score was read when it was asked
+    # (or put off a week ago), and a ✅ the push can only refuse would send
+    # the candidate back to a new card offering ✅ again. Re-scored under
+    # the tap's locks: under 60 it is held instead (the card's own route,
+    # cards.set_aside's), and the card says so.
+    live = await candidates.rescore(session, candidate, now=now)
+    if live.total < scoring.HOT_MIN:
+        if not await close_card(
+            session, review.id, REFUSED_NOTE + "score_low", states=("asked",)
+        ):
+            raise Refused("stale")
+        await candidates.transition(
+            session,
+            candidate,
+            "hold",
+            now=now,
+            hold_until=now + cards.CARD_REFUSED_HOLD,
+        )
+        return cards.footer("score_low", score=live.total), None
     lead = await push_gate.lead_contact(session, candidate)
     try:
         await candidates.transition(

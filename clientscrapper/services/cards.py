@@ -72,6 +72,7 @@ from clientscrapper.services import (
     push_gate,
     redlines,
     schemas,
+    scoring,
     suppression,
     validators,
 )
@@ -334,6 +335,8 @@ class ReviewView:
     verdict_reasons: tuple[str, ...] = ()
     verdict_small: bool = False
     verdict_refused: bool = False
+    # The company scored now (``candidates.live_score``); None = not known.
+    live_score: int | None = None
 
     @property
     def handoff_card(self) -> bool:
@@ -379,6 +382,20 @@ def verdict_lines(rv: ReviewView) -> list[str]:
     return lines
 
 
+def _score_fell(rv: ReviewView) -> bool:
+    """04 §7 item 13 before the owner is asked: a card whose live total is
+    under 60 is not shown — its ✅ could only be refused at the push and the
+    candidate sent back to a new card that offers ✅ again (the «Ball
+    tushdi» loop). ``set_aside`` routes it (``hold`` for
+    ``CARD_REFUSED_HOLD``, then the score job by its tier). A card a push
+    refusal sent back («⚠️ Ball tushdi» on line 2) is still shown — it is
+    how the owner learns his ✅ did not go — and its ✅ is the tap's own
+    check (``reviews._push``)."""
+    if rv.live_score is None or rv.live_score >= scoring.HOT_MIN:
+        return False
+    return not refusal_note(rv.note)
+
+
 def render_review(rv: ReviewView, *, answered: bool = False) -> Card:
     """06 §1.3's card. Raises ``CardRefused``.
 
@@ -387,6 +404,8 @@ def render_review(rv: ReviewView, *, answered: bool = False) -> Card:
     gate line (it was the gates' word when the card was asked — after a push
     gate 6 reads the push itself) and no refusal note."""
     c = rv.candidate
+    if not answered and _score_fell(rv):
+        raise CardRefused("score_low")
     if rv.handoff_card:
         if not rv.handoff_username:
             raise CardRefused("no_username")
@@ -486,6 +505,7 @@ FOOTER_UZ: Final[Mapping[str, str]] = {
     "push_sent": "✅ CRMʼga yuborildi {time}",
     "push_unknown": "⏳ CRM javobi nomaʼlum — tekshirilmoqda",
     "push_failed": "⚠️ CRM javob bermadi — qayta soʻrayman",
+    "score_low": "⚠️ Ball tushdi ({score}/100) — CRMʼga yuborilmadi, 7 kun kutiladi",
     "decline": "✖️ Rad etildi",
     "merge": "🔀 Birlashtirildi → {target}",
     "dnc": "🔒 DNC — boshqa koʻrsatilmaydi",
@@ -626,6 +646,7 @@ async def review_view(
     verdict = company.verdict if company is not None else None
     reasons = verdict.get("reasons") if isinstance(verdict, dict) else None
     refused = verdict is None and await verdict_service.refused_today(session, now=now)
+    live = await candidates.live_score(session, candidate, now=now)
     return ReviewView(
         review_id=review.id,
         candidate=view,
@@ -644,6 +665,7 @@ async def review_view(
         verdict_reasons=tuple(str(r) for r in reasons or () if isinstance(r, str)),
         verdict_small=validators.verdict_small(verdict),
         verdict_refused=refused,
+        live_score=live.total if live is not None else None,
     )
 
 

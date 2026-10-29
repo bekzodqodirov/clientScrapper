@@ -25,6 +25,7 @@ from clientscrapper.db.models import (
     Interaction,
     LeadReview,
     ReminderLog,
+    Signal,
     Suppression,
 )
 from clientscrapper.services import (
@@ -677,6 +678,87 @@ async def test_a_push_answered_before_a_long_pause_moves_the_footer_after_it(
     assert report.footers == 1
     [(_, message, text, _, _)] = sender.edits
     assert (message, text.splitlines()[-1]) == (814, "✅ CRMʼga yuborildi 11:00")
+
+
+async def fall_below_hot(session, cand) -> None:
+    """The company loses its origin signal: its live total drops under 60
+    while the candidate's stored score still says 72 (a review row is
+    re-scored on a new signal, never on plain decay)."""
+    await session.execute(
+        sa.delete(Signal).where(
+            Signal.company_id == cand.company_id, Signal.key == "cn_origin"
+        )
+    )
+    await session.commit()
+    live = await candidates.live_score(session, cand, now=NOW)
+    assert live is not None and live.total < 60, live
+
+
+async def test_a_push_tap_on_a_card_whose_score_fell_holds_it_and_says_so(session, setup):
+    """04 §7 item 13 at the tap (seam review: the «Ball tushdi» ping-pong —
+    a ✅ the push could only refuse sent the candidate back to a new card
+    offering ✅ again, three presses four cards). Under 60 at the tap: held
+    for CARD_REFUSED_HOLD, the card closed with the score on its footer, no
+    new card."""
+    cand = await lead(session)
+    review = await card(session, cand, state="asked")
+    await session.commit()
+    await fall_below_hot(session, cand)
+    done = await tapped(session, review, "push")
+    live = (await fresh(session, cand)).score
+    assert live is not None and live < 60
+    assert done.footer == cards.footer("score_low", score=live)
+    found = await fresh(session, cand)
+    assert (found.state, found.hold_until, found.approved_by) == (
+        "hold",
+        NOW + cards.CARD_REFUSED_HOLD,
+        None,
+    )
+    row = await fresh(session, review)
+    assert (row.state, row.note) == ("expired", "refused:score_low")
+    await reviews.ensure_pending(session, now=NOW)
+    await session.commit()
+    assert [r.id for r in await reviews_of(session, cand)] == [review.id]
+
+
+async def test_a_card_whose_live_score_fell_is_not_sent(session, setup):
+    """Before the owner is asked: a pending card whose live total is under
+    60 leaves the queue (cards.set_aside: hold, then the score job by its
+    tier) instead of offering a ✅ the push would refuse."""
+    cand = await lead(session)
+    await card(session, cand)
+    await session.commit()
+    await fall_below_hot(session, cand)
+    sender = FakeSender()
+    burst = await reviews.send_owner_cards(session, sender, now=NOW, limit=5)
+    assert (burst.sent, burst.skipped) == (0, 1)
+    assert sender.sent == []
+    found = await fresh(session, cand)
+    assert (found.state, found.hold_until) == ("hold", NOW + cards.CARD_REFUSED_HOLD)
+    assert found.score is not None and found.score < 60
+
+
+async def test_a_ball_tushdi_card_is_still_shown_and_its_push_holds(session, setup):
+    """A card a push refusal sent back says why on line 2 (04 §7 item 13):
+    it is shown even under 60 — it is how the owner learns his ✅ did not
+    go — and its ✅ holds the candidate instead of bouncing again."""
+    cand = await lead(session, state="approved")
+    await session.commit()
+    await fall_below_hot(session, cand)
+    locked = await push_gate.lock_for_push(session, cand.id)
+    assert locked is not None
+    await push_gate.record_refusals(session, locked, [Refusal(13, "score_low")], now=NOW)
+    await session.commit()
+    sender = FakeSender()
+    burst = await reviews.send_owner_cards(session, sender, now=NOW, limit=5)
+    assert burst.sent == 1
+    [(_, text, layout, review_id)] = sender.sent
+    assert layout == "review"
+    assert text.splitlines()[1] == "⚠️ Ball tushdi"
+    [review] = [r for r in await reviews_of(session, cand) if r.id == review_id]
+    done = await tapped(session, review, "push")
+    assert done.footer is not None and done.footer.startswith("⚠️ Ball tushdi (")
+    assert (await fresh(session, cand)).state == "hold"
 
 
 async def test_an_approved_candidates_refusal_comes_back_as_a_new_card(session, setup):

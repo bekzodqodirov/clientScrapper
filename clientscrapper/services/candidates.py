@@ -707,11 +707,8 @@ async def rescore(
     if company is None:
         raise LookupError(f"company {candidate.company_id} is gone")
     weights = weights or await scoring.load_weights(session)
-    if families is None:
-        families = await source_families(session)
-    signal_views, contact_views = await scoring.views_for(session, company)
-    result = scoring.score(
-        signal_views, contact_views, source_families=families, weights=weights, now=now
+    result = await _score_company(
+        session, company, now=now, weights=weights, families=families
     )
     candidate.score = result.total
     candidate.tier = result.tier
@@ -722,6 +719,39 @@ async def rescore(
     company.best_score = max(company.best_score or 0, result.total)
     await session.flush()
     return result
+
+
+async def _score_company(
+    session: AsyncSession,
+    company: Company,
+    *,
+    now: datetime,
+    weights: scoring.WeightSet,
+    families: Mapping[str, str] | None,
+) -> ScoreResult:
+    if families is None:
+        families = await source_families(session)
+    signal_views, contact_views = await scoring.views_for(session, company)
+    return scoring.score(
+        signal_views, contact_views, source_families=families, weights=weights, now=now
+    )
+
+
+async def live_score(
+    session: AsyncSession, candidate: LeadCandidate, *, now: datetime
+) -> ScoreResult | None:
+    """``candidate``'s company scored now and written nowhere — no lock, no
+    write: what an owner card is judged by before it is shown (04 §7 item
+    13's measure read before the owner is asked, not only at the push;
+    ``cards.render_review``'s ``score_low``). A ``review`` row keeps its
+    score between signals (score_job re-scores it on a new signal, never on
+    plain decay), so the stored total of a card put off for a week is not
+    the live one. None when the company is gone."""
+    company = await session.get(Company, candidate.company_id)
+    if company is None:
+        return None
+    weights = await scoring.load_weights(session)
+    return await _score_company(session, company, now=now, weights=weights, families=None)
 
 
 async def source_families(session: AsyncSession) -> dict[str, str]:
