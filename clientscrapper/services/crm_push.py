@@ -63,6 +63,8 @@ from clientscrapper.services import candidates, costs, erp_feeds, outcomes, push
 from clientscrapper.services.candidates import CandidateView, SignalEvidence
 from clientscrapper.services.erp_feeds import ErpClient, ErpHttpError
 from clientscrapper.services.gates import REGISTRY_UZ
+from clientscrapper.services.normalise import person_names
+from clientscrapper.services.pseudonyms import TOKEN_RE, TOKEN_TRACE_RE, pseudonymise
 from clientscrapper.services.push_gate import Refusal, text_len
 from clientscrapper.services.retry import with_backoff
 from clientscrapper.services.text import well_formed
@@ -143,7 +145,7 @@ TEXT_VOLUME_RE: Final = re.compile(
 )
 MEASURE_MAX: Final = Decimal(100000)
 # 04 §7 item 11: what a value may not carry (a pseudonym never restored).
-_PSEUDONYM: Final = re.compile(r"<(?:PHONE|TG|IG|NAME|EMAIL)_|<ID>")
+_PSEUDONYM: Final = TOKEN_TRACE_RE
 # What a quote may not carry beyond keywords' Uzbek phone, handle and e-mail
 # shapes (05 §B.1: no phone or handle beyond what the body already carries):
 # a number with a «+» and seven digits or more (+7, +86 …), ten digits or
@@ -297,11 +299,28 @@ SOURCE_TITLE_UZ: Final[Mapping[str, str]] = {
 }
 
 
-def _quotable(text: str) -> bool:
+def names_a_person(text: str, *, known: Sequence[str] = ()) -> bool:
+    """A person's name in ``text``, found as the pseudonymiser finds one (04
+    §4.2 — its one home, ``pseudonyms.pseudonymise(names=…)``): the names
+    the caller knows (``known``, any case, any apostrophe, with the endings
+    people write — «Akmalga» is Akmal) and the person names the text itself
+    states (``normalise.person_names``) written as a name is written, with a
+    capital: «umid qilamiz» is a hope, «Umid» a person."""
+    stated = [w for w in person_names(text) if w[:1].isupper()]
+    names = [n for n in (*known, *stated) if n]
+    if not names:
+        return False
+    masked = pseudonymise(text, names=names).text
+    return any(m.group(1) == "NAME" for m in TOKEN_RE.finditer(masked))
+
+
+def _quotable(text: str, *, known: Sequence[str] = ()) -> bool:
     """A quote the note may carry (05 §B.1): no phone (Uzbek or foreign), no
     Telegram, Instagram or messenger handle, no e-mail, no pseudonym — the
-    body carries the one phone and the company's own handles — and no price
-    figure (the note template's «no price figures»)."""
+    body carries the one phone and the company's own handles — no price
+    figure (the note template's «no price figures»), and no person's name
+    (04 §7 item 11: the person appears only on the «Masʼul» line, and only
+    with a legal basis; ``names_a_person``)."""
     return not (
         PHONE_RE.search(text)
         or _INTL_PHONE.search(text)
@@ -312,6 +331,7 @@ def _quotable(text: str) -> bool:
         or EMAIL_RE.search(text)
         or PRICE_RE.search(text)
         or _PSEUDONYM.search(text)
+        or names_a_person(text, known=known)
     )
 
 
@@ -321,16 +341,22 @@ def _shown(text: str) -> str:
     return collapse(safe(text))
 
 
-def verified_quote(s: SignalEvidence) -> str | None:
+def known_names(c: CandidateView) -> tuple[str, ...]:
+    """The person names the view knows: its decision maker's."""
+    return (c.person.full_name,) if c.person is not None else ()
+
+
+def verified_quote(s: SignalEvidence, *, known: Sequence[str] = ()) -> str | None:
     """The signal's quote as the note prints it (whitespace collapsed), when
     it is a verbatim substring of its evidence excerpt (02 §2.6) and
-    quotable; else None."""
+    quotable (``known``: the person names a quote must not carry beside the
+    ones it states); else None."""
     if not s.quote:
         return None
     quote = _shown(s.quote)
     if not quote or quote not in _shown(s.excerpt):
         return None
-    return quote if _quotable(quote) else None
+    return quote if _quotable(quote, known=known) else None
 
 
 def cited(c: CandidateView) -> tuple[SignalEvidence, str]:
@@ -339,10 +365,11 @@ def cited(c: CandidateView) -> tuple[SignalEvidence, str]:
     a negative signal or a gate flag says why the company is NOT a lead.
     Every ERP note cites evidence: URL + date + verbatim quote (CLAUDE.md),
     so none is a refusal."""
+    known = known_names(c)
     for s in c.signals:
         if s.points <= 0:
             continue
-        quote = verified_quote(s)
+        quote = verified_quote(s, known=known)
         if quote is not None:
             return s, quote
     raise PayloadError("no_quote")
@@ -384,7 +411,7 @@ def _origin(c: CandidateView) -> str | None:
         found = next((s for s in c.signals if s.key == key), None)
         if found is None:
             continue
-        hint = verified_quote(found)
+        hint = verified_quote(found, known=known_names(c))
         if hint:
             return f"Xitoy: {word} («{_clip_points(hint, ORIGIN_HINT_MAX)}»)"
         return f"Xitoy: {word}"

@@ -74,6 +74,9 @@ Kind = Literal["PHONE", "TG", "EMAIL", "IG", "NAME"]
 KINDS: Final[tuple[Kind, ...]] = ("PHONE", "TG", "EMAIL", "IG", "NAME")
 TOKEN_RE: Final = re.compile(r"<(PHONE|TG|EMAIL|IG|NAME)_(\d+)>")
 ID_TOKEN: Final = "<ID>"
+# What a text bound for a person (the ERP's lead, its note) may not carry: a
+# token or the start of one, numbered or not — never restored (04 §7 item 11).
+TOKEN_TRACE_RE: Final = re.compile(r"<(?:PHONE|TG|IG|NAME|EMAIL)_|<ID>")
 # What assert_masked refuses, by name: the four patterns of 06 §5.2, and a
 # 14-digit run (a PINFL never reaches a model either; this module masks every
 # one, so a request that still carries one did not come through here).

@@ -273,6 +273,45 @@ def test_a_quote_without_contact_or_price_is_cited(fine):
     assert p.note.split("\n")[0].endswith(f"«{fine}»")
 
 
+@pytest.mark.parametrize(
+    ("shown", "leak"),
+    [
+        # A name the text states, as the pseudonymiser's name finder reads it.
+        ("Rustam aka 5 kub mato kerak", "Rustam"),
+        ("Menejer Dilshod Karimov: 5 kub mato kerak", "Karimov"),
+        # The decision maker the view names, with an Uzbek case ending and in
+        # lower case: still the person (the Masʼul line is their one place).
+        ("akmalga 5 kub mato kerak", "akmalga"),
+        ("Akmalga 5 kub mato kerak", "Akmalga"),
+    ],
+)
+def test_a_quote_naming_a_person_is_not_cited(shown, leak):
+    """04 §7 item 11 «no second person's name»: a quote that names somebody
+    gives way to the next signal's, through the one name finder of 04 §4.2
+    (pseudonyms + normalise.person_names) — integration of T-15 and T-28."""
+    dirty = sig(quote=shown, excerpt="Salom. " + shown, evidence_id=3, points=30)
+    v = view(signals=(dirty, CLEAN), person=PersonView("Namuna Akmal", "rahbar", None))
+    p = crm_push.build_payload(v)
+    assert p.note.split("\n")[0].endswith("«optom mato olamiz»")
+    assert leak not in json.dumps(p.model_dump(), ensure_ascii=False)
+    assert crm_push.names_a_person(shown, known=("Namuna Akmal",))
+
+
+@pytest.mark.parametrize(
+    "fine",
+    [
+        "umid qilamiz, 5 kub mato kerak",  # a hope, not Umid
+        "Sardor Savdo MChJ uchun 5 kub mato",  # a company's name stays
+        "Yiwu dan 5 kub mato kerak",
+    ],
+)
+def test_a_quote_without_a_person_is_cited(fine):
+    s = sig(quote=fine, excerpt="Salom. " + fine)
+    p = crm_push.build_payload(view(signals=(s,)))
+    assert p.note.split("\n")[0].endswith(f"«{fine}»")
+    assert not crm_push.names_a_person(fine)
+
+
 def test_a_forged_quote_is_never_cited():
     # A quote that is not a verbatim substring of its excerpt is never cited.
     forged = sig(quote="10 kub kerak", excerpt="Biz mato sotamiz")

@@ -95,6 +95,7 @@ from clientscrapper.services import (
     gates,
     scoring,
 )
+from clientscrapper.services.pseudonyms import TOKEN_TRACE_RE
 from clientscrapper.services.suppression import CLIENT_KINDS, Hit
 
 log = logging.getLogger(__name__)
@@ -121,8 +122,8 @@ UZ_MOBILE_OR_LANDLINE: Final = scoring.USABLE_PHONE_KINDS
 _E164: Final = re.compile(r"^\+[1-9][0-9]{6,14}$")
 _KUB: Final = re.compile(r"^[1-9][0-9]*(?:\.[0-9]+)?$")
 # 04 §7 item 11: no pseudonym token left (<PHONE_n>, <TG_n>, <NAME_n> …, and
-# 04 §4.2's unnumbered <ID> for a 14-digit run).
-_PSEUDONYM: Final = re.compile(r"<(?:PHONE|TG|IG|NAME|EMAIL)_|<ID>")
+# 04 §4.2's unnumbered <ID> for a 14-digit run) — pseudonyms' own pattern.
+_PSEUDONYM: Final = TOKEN_TRACE_RE
 _ILL_FORMED: Final = re.compile("[\x00\ud800-\udfff]")
 PAYLOAD_IDENTITY: Final = ("external_id", "name", "phone", "note")
 STATED_KEYS: Final = frozenset({scoring.STATED_3PLUS, scoring.STATED_1_3})
