@@ -110,6 +110,10 @@ def test_a_cargo_site_is_a_competitor_through_the_cargo_core_only():
     assert (
         cs.own_markers("Namuna Mebel Express", "Bepul dostavka, yetkazib beramiz") == []
     )
+    # The logistics words name a forwarder in a NAME only: an importer's own
+    # «logistika boʻlimi» is no cargo offer (03 §1.4, COMPETITOR_SELF_RE).
+    assert cs.own_markers("Namuna Mebel", "Oʻz logistika boʻlimimiz bor") == []
+    assert cs.own_markers("Namuna Logistika", "") == ["competitor"]
 
 
 def test_a_chinese_title_is_kept_as_written_for_gate_3():

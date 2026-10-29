@@ -838,10 +838,19 @@ async def test_stir_makes_e4_run_on_a_review_candidate_and_nothing_else(
     await contact(session, company, phone(43))
     cand = await enriching(session, company, state="review", score=65, due=None)
     # A clock an earlier enrichment left on a candidate that moved on is no
-    # re-run: only /stir's own mark is.
-    stale_company = await firm(session, "Namuna Eski", stir="300000044")
-    stale = await enriching(
-        session, stale_company, state="review", score=65, due=NOW - timedelta(days=2)
+    # re-run, even on a firm the owner once gave a STIR (its /stir ran a month
+    # ago): only /stir's own mark at that very clock is.
+    stale_company = await firm(session, "Namuna Eski")
+    stale = await enriching(session, stale_company, state="review", score=65, due=None)
+    await session.commit()
+    month_ago = NOW - timedelta(days=30)
+    assert (
+        await owner.set_stir(session, stale.id, "300000044", now=month_ago)
+    ).outcome == ("written")
+    await session.execute(
+        sa.update(LeadCandidate)
+        .where(LeadCandidate.id == stale.id)
+        .values(next_enrich_at=NOW - timedelta(days=2))
     )
     await session.commit()
     result = await owner.set_stir(session, cand.id, "310514454", now=NOW)
