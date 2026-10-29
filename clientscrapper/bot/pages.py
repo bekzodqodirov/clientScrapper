@@ -1,7 +1,7 @@
 """The bot's list pages that are not cards (06 §1.2): ``/manbalar`` and a
 source's ℹ️, ``/chats``, ``/lidlar holat``, ``/vazn``'s list, ``/dnc``'s
-preview. Pure: plain values in, HTML text out; every value from the database
-is escaped here, the words are ``bot/texts``'.
+preview, ``/unut``'s plan and result. Pure: plain values in, HTML text out;
+every value from the database is escaped here, the words are ``bot/texts``'.
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ from clientscrapper.bot.keyboards import CHAT_ICON, SOURCE_ICON
 from clientscrapper.bot.texts import t
 from clientscrapper.config import settings
 from clientscrapper.db.enums import CANDIDATE_STATES
-from clientscrapper.services import cards, health
+from clientscrapper.services import cards, health, purge
 from clientscrapper.services.cards import LidlarHolat
 from clientscrapper.services.owner import SourceInfo, SourceLine
 from clientscrapper.services.scoring import WeightSet
@@ -212,6 +212,24 @@ def dnc_preview_text(key: str, names: Sequence[str]) -> str:
     return t("dnc.preview", key=esc(key), companies=companies)
 
 
+def purge_plan_text(plan: purge.PurgePlan, *, by_name: bool = False) -> str:
+    """``/unut``'s plan card (06 §5.4): the counts and the company's uuid —
+    never a name; the confirm question last. A company the name match alone
+    found is a guess (``cards.lookup``): the card says so, since the legal
+    rows a purge writes are never removed (06 §5.5)."""
+    lines = [esc(line) for line in purge.plan_lines(plan)]
+    lines += [t("unut.subject", id=str(c)) for c in plan.company_ids]
+    if by_name and not plan.empty:
+        lines += [t("unut.by_name", id=str(c)) for c in plan.company_ids]
+    if not plan.empty:
+        lines.append(t("unut.ask"))
+    return "\n".join(lines)
+
+
+def purge_result_text(result: purge.PurgeResult, *, reason: str) -> str:
+    return "\n".join(esc(line) for line in purge.result_lines(result, reason=reason))
+
+
 __all__ = [
     "HITS_WINDOW",
     "ChatLine",
@@ -220,6 +238,8 @@ __all__ = [
     "dnc_preview_text",
     "lidlar_holat_text",
     "points_range",
+    "purge_plan_text",
+    "purge_result_text",
     "source_info_text",
     "source_line",
     "sources_text",

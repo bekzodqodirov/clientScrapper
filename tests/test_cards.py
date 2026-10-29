@@ -71,6 +71,43 @@ def test_the_owner_card_is_rendered_line_by_line():
     assert cards.card_hash(OWNER_CARD, "handoff") != card.hash
 
 
+def test_the_verdicts_uzbek_reasons_sit_between_the_link_and_the_breakdown():
+    card = cards.render_review(
+        review(
+            verdict_reasons=(
+                "Guangzhoudan mato olib keladi",
+                "Abu Sahiy bozorida doʻkon",
+            ),
+            verdict_small=True,
+        )
+    )
+    lines = card.text.split("\n")
+    link = lines.index("🔗 https://t.me/namuna_optom/101")
+    assert lines[link + 1 : link + 3] == [
+        "🤖 AI xulosasi: Guangzhoudan mato olib keladi; Abu Sahiy bozorida doʻkon",
+        "⚠️ AI: yuk 1 kubdan kam koʻrinadi (ball qoʻshilmadi)",
+    ]
+    assert lines[link + 3].startswith("🧮 hajm 30")
+    assert card.hash != cards.render_review(review()).hash
+
+
+def test_a_budget_refusal_says_so_and_reasons_win_over_it():
+    refused = cards.render_review(review(verdict_refused=True))
+    assert "🤖 AI xulosasi: byudjet tugadi" in refused.text.split("\n")
+    both = cards.render_review(
+        review(verdict_reasons=("Xitoydan import qiladi",), verdict_refused=True)
+    )
+    assert "byudjet tugadi" not in both.text
+    assert "🤖 AI xulosasi: Xitoydan import qiladi" in both.text.split("\n")
+    # No verdict, no refusal: no AI line at all (the golden card above).
+    assert "🤖" not in cards.render_review(review()).text
+
+
+def test_the_verdict_reasons_are_escaped_on_the_card():
+    card = cards.render_review(review(verdict_reasons=("<b>optom</b> & chakana",)))
+    assert "🤖 AI xulosasi: &lt;b&gt;optom&lt;/b&gt; &amp; chakana" in card.text
+
+
 def test_the_gate_line_is_gates_4_to_6_in_their_own_words():
     lines = dict(zip(gates.GATES, gate().lines, strict=True))
     assert lines["not_recent"] == "90 kunda yuborilmagan ✓"
@@ -288,7 +325,7 @@ MANAGER_CARD = (
     "🔎 «5 kub mato kerak» — Optom bozor chat, 25.10.2026\n"
     "🔗 https://t.me/namuna_optom/101\n"
     "👤 Yozish: t.me/namuna_tekstil — oʻz akkauntingizdan, 10:00–17:00 (Du–Sha)\n"
-    "✍️ Taklif: sotuv qoʻllanmasidagi «Bozor optom» shabloni (§3.1)\n"
+    "✍️ Taklif: sotuv qoʻllanmasidagi «Bozor optom» shabloni (§3.0)\n"
     "⚠️ Birinchi xabarda narx yoʻq. Oxirgi jumla: «Agar qiziq boʻlmasa, "
     '"yoʻq" deb yozing — boshqa yozmayman.»\n'
     "🔍 Yozishdan oldin ERPda nomi boʻyicha qidiring"

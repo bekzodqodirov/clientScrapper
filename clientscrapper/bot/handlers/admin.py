@@ -7,8 +7,14 @@ Each write is the service's that owns it — ``owner`` (pause, the CRM
 breaker, /stir), ``client_import``, ``suppression.dnc_command``,
 ``scoring.owner_edit``, ``crm_push.push_tekshir_*`` — in the handler's one
 transaction. A destructive write waits for its confirm button; ``/toxtat``
-does not (a safety action is at once). ``/unut`` is the purge's (T-31,
-``services/purge``) and answers «not ready» until it lands.
+does not (a safety action is at once). ``/unut`` is the purge's
+(``services/purge``, 06 §5.4): the key is looked up as ``/qidir`` looks it
+up, one live company is planned (its ``purge_log`` row written, the plan kept
+in memory under that id), the card shows counts and the uuid — never a name
+— and only ``pg:<purge_log_id>:y`` executes; a cancel or a confirm that
+outlived the plan closes the row, a second tap on a plan the first one took
+closes nothing, and a purge that stopped part-way tells the owner to send
+``/unut <uuid>`` again (the company is planned again while it holds anything).
 """
 
 from __future__ import annotations
@@ -39,6 +45,7 @@ from clientscrapper.services import (
     companies,
     crm_push,
     owner,
+    purge,
     scoring,
     suppression,
 )
@@ -51,6 +58,12 @@ log = logging.getLogger(__name__)
 IMPORT_MAX_BYTES: Final = 20 * 1000 * 1000
 PLAN_IMPORT: Final = "import"
 PLAN_DNC: Final = "dnc"
+PLAN_PURGE: Final = "purge"
+# /unut's reason (06 §5.4): a company the owner tells the agent to forget is
+# never carded or pushed again — suppression(legal) on every key it had.
+PURGE_REASON: Final = "legal_request"
+PURGE_CANCELLED: Final = "cancelled"
+PURGE_EXPIRED: Final = "expired"
 
 
 def _owner(message: Message) -> str:
@@ -186,11 +199,97 @@ async def on_import(tap: Tap) -> None:
     await edit(tap.query, esc(client_import.applied_line(applied)))
 
 
-# --- /unut (T-31) ---------------------------------------------------------------------
+# --- /unut ---------------------------------------------------------------------------
 
 
-async def unut(message: Message) -> None:
-    await reply(message, t("unut.not_ready"))
+async def unut(message: Message, deps: Deps) -> None:
+    arg = args_of(message)
+    if not arg:
+        await reply(message, t("unut.how"))
+        return
+    async with deps.session_factory() as session:
+        found, by_name = await cards.purge_roots(session, arg)
+        if len(found) == 1:
+            plan = await purge.plan_company(session, found[0], reason=PURGE_REASON)
+            purge_log_id = await purge.record(session, plan, requested_by=_owner(message))
+    if not found:
+        await reply(message, t("unut.none", query=esc(arg)))
+        return
+    if len(found) > 1:
+        ids = "\n".join(f"<code>{company_id}</code>" for company_id in found)
+        await reply(message, t("unut.many", n=len(found), ids=ids))
+        return
+    deps.plans.put(PLAN_PURGE, plan, now=deps.clock(), plan_id=purge_log_id)
+    keyboard = None if plan.empty else keyboards.purge_keyboard(purge_log_id)
+    await reply(message, pages.purge_plan_text(plan, by_name=by_name), keyboard=keyboard)
+
+
+# What a tap on a plan that will not run (again) says, by its log row
+# (``purge.row_state``): executed, being executed or stopped, failed part-way,
+# or closed.
+ROW_TEXT: Final = {
+    purge.ROW_DONE: "unut.done",
+    purge.ROW_RUNNING: "unut.running",
+    purge.ROW_FAILED: "unut.unfinished",
+    purge.ROW_CLOSED: "unut.closed",
+    purge.ROW_UNKNOWN: "unut.closed",
+    # A plan another tap took and has not claimed yet: it is being executed.
+    purge.ROW_OPEN: "unut.running",
+}
+
+
+async def _row_text(tap: Tap, purge_log_id: int) -> str:
+    async with tap.deps.session_factory() as session:
+        return t(ROW_TEXT[await purge.row_state(session, purge_log_id)])
+
+
+async def on_purge(tap: Tap) -> None:
+    purge_log_id = tap.data.ref
+    assert purge_log_id is not None
+    # Answered first: a purge may outlast the ~15 s a button waits for its
+    # answer; the outcome is the edited message.
+    await toast(tap.query)
+    now = tap.deps.clock()
+    plans = tap.deps.plans
+    planned = plans.take(PLAN_PURGE, purge_log_id, now=now)
+    yes = tap.data.action == "y"
+    if planned is None and plans.taken(PLAN_PURGE, purge_log_id, now=now):
+        # A second tap (a double tap, ✅ then ❌): the first one holds the
+        # plan — this one closes nothing and says where the row stands.
+        await edit(tap.query, await _row_text(tap, purge_log_id))
+        return
+    if not isinstance(planned, purge.PurgePlan) or not yes:
+        # A plan this process no longer holds (a restart, ten minutes gone)
+        # closes as expired; a row executed or closed already says so.
+        why = PURGE_CANCELLED if planned is not None else PURGE_EXPIRED
+        async with tap.deps.session_factory() as session:
+            closed = await purge.abandon(session, purge_log_id, why=why)
+        if not closed:
+            await edit(tap.query, await _row_text(tap, purge_log_id))
+            return
+        said = "unut.cancelled" if why == PURGE_CANCELLED else "unut.expired"
+        await edit(tap.query, t(said))
+        return
+    try:
+        async with tap.deps.session_factory() as session:
+            result = await purge.execute(
+                session,
+                planned,
+                requested_by=owner.owner_ref(tap.user_id),
+                now=now,
+            )
+    except purge.PurgeRefused as refused:
+        await edit(tap.query, t(ROW_TEXT.get(refused.code, "unut.closed")))
+        return
+    except Exception as exc:
+        # A group failed after the ones before it committed (06 §5.4): the
+        # owner is told how to finish — /unut plans the company again while
+        # it still holds anything (purge.unfinished).
+        log.warning("purge stopped", extra={"error": type(exc).__name__})
+        # /unut plans a company (plan_company): its root is the one id.
+        await edit(tap.query, t("unut.failed", id=str(planned.company_ids[0])))
+        return
+    await edit(tap.query, pages.purge_result_text(result, reason=planned.reason))
 
 
 # --- /dnc -------------------------------------------------------------------------------
@@ -415,6 +514,7 @@ __all__ = [
     "on_dnc",
     "on_import",
     "on_keep",
+    "on_purge",
     "on_push_check",
     "on_resume",
     "push",

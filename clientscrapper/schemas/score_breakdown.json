@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://clientscrapper.example.uz/schemas/score_breakdown.json",
   "title": "lead_candidates.score_breakdown (04 §5.2, 02 §2.9)",
-  "description": "What services/scoring.score writes and score_job stores. `gates` is filled by services/gates.py (T-19) and `enrichment` by services/enrich.py (T-24); score_job carries both over when it re-scores.",
+  "description": "What services/scoring.score writes and score_job stores. `gates` is filled by services/gates.py (T-19) and `enrichment` by services/enrich.py (T-24); score_job carries both over when it re-scores; `opener`/`opener_meta` are services/openers' (T-30), carried the same way.",
   "type": "object",
   "required": [
     "version",
@@ -200,6 +200,57 @@
     },
     "enrichment": {
       "type": "array"
+    },
+    "opener": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The first message a manager sends (services/openers, 04 §4.5): 04's draft after the redlines, or the playbook template."
+    },
+    "opener_meta": {
+      "type": "object",
+      "required": [
+        "source",
+        "segment",
+        "lang"
+      ],
+      "properties": {
+        "source": {
+          "enum": [
+            "draft",
+            "template"
+          ]
+        },
+        "segment": {
+          "type": "string"
+        },
+        "lang": {
+          "enum": [
+            "uz",
+            "ru"
+          ]
+        },
+        "why": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "flags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "model_job_id": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "at": {
+          "type": "string"
+        }
+      }
     }
   },
   "$defs": {

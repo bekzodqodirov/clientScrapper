@@ -67,9 +67,14 @@ from clientscrapper.services import (
     health,
     keys,
     normalise,
+    purge,
     push_gate,
+    redlines,
+    schemas,
     suppression,
+    validators,
 )
+from clientscrapper.services import verdict as verdict_service
 from clientscrapper.services.candidates import CandidateView, SignalEvidence
 from clientscrapper.services.gates import GateResult
 from clientscrapper.services.suppression import Hit
@@ -138,15 +143,24 @@ PHONE_HOLDER_UZ: Final = "raqam egasi"
 
 # The manager card's fixed lines (06 §1.7, 01 §7 decision 2a).
 MANAGER_HOURS_UZ: Final = "oʻz akkauntingizdan, 10:00–17:00 (Du–Sha)"
-NO_PRICE_UZ: Final = (
-    "⚠️ Birinchi xabarda narx yoʻq. Oxirgi jumla: "
-    '«Agar qiziq boʻlmasa, "yoʻq" deb yozing — boshqa yozmayman.»'
-)
+# The last sentence is the opt-out line of the playbook (§2.6) the redline
+# gate holds every opener to (services/redlines.OPTOUT_UZ — one home).
+NO_PRICE_UZ: Final = f"⚠️ Birinchi xabarda narx yoʻq. Oxirgi jumla: «{redlines.OPTOUT_UZ}»"
 ERP_FIRST_UZ: Final = "🔍 Yozishdan oldin ERPda nomi boʻyicha qidiring"
-OPENER_MAX: Final = crm_push.OPENER_MAX
-# Without 04's draft: the playbook's segment script (docs/sotuv-playbook.md
-# §3.1; the templates themselves are T-30's).
-OPENER_FALLBACK_UZ: Final = "sotuv qoʻllanmasidagi «{segment}» shabloni (§3.1)"
+# The manager card shows the whole opener — the message the manager sends is
+# this card's to show (docs/sotuv-playbook.md §3.0): up to the longest a draft
+# may be (04 §4.5 ``DraftOpener``; every template is within it), under the
+# card's 3,500. The ERP note has less room (``crm_push.OPENER_MAX``).
+OPENER_MAX: Final = schemas.OPENER_CHARS[1]
+# With no opener stored yet: the agent's own templates of the playbook — §3.0,
+# the ones with no price and no day count (§3.1 is the managers' full script).
+OPENER_FALLBACK_UZ: Final = "sotuv qoʻllanmasidagi «{segment}» shabloni (§3.0)"
+# 04 §4.4: the verdict's reasons on the owner card; 04 §8: the line when a
+# cap refused the verdict; the lt1 flag (validators.verdict_small), no points.
+VERDICT_LINE_UZ: Final = "🤖 AI xulosasi: "
+VERDICT_REFUSED_UZ: Final = "🤖 AI xulosasi: byudjet tugadi"
+VERDICT_SMALL_UZ: Final = "⚠️ AI: yuk 1 kubdan kam koʻrinadi (ball qoʻshilmadi)"
+VERDICT_REASON_SEP: Final = "; "
 
 
 class CardRefused(Exception):
@@ -314,6 +328,11 @@ class ReviewView:
     author: str | None = None
     # The person shown holds the shown phone: «(raqam egasi)».
     person_holds_phone: bool = False
+    # The company's RelevanceVerdict (04 §4.4): its Uzbek reasons, its lt1
+    # flag; ``verdict_refused`` when a cap refused it today and none stands.
+    verdict_reasons: tuple[str, ...] = ()
+    verdict_small: bool = False
+    verdict_refused: bool = False
 
     @property
     def handoff_card(self) -> bool:
@@ -343,6 +362,20 @@ def _contact_line(rv: ReviewView) -> str:
     if c.website_domain:
         parts.append(esc(c.website_domain))
     return " · ".join(parts)
+
+
+def verdict_lines(rv: ReviewView) -> list[str]:
+    """The card's AI lines (04 §4.4, §8): the reasons, else the budget's
+    word; the lt1 flag beside either."""
+    reasons = [r for r in (crm_push.clean(x) for x in rv.verdict_reasons) if r]
+    lines: list[str] = []
+    if reasons:
+        lines.append(VERDICT_LINE_UZ + esc(VERDICT_REASON_SEP.join(reasons)))
+    elif rv.verdict_refused:
+        lines.append(VERDICT_REFUSED_UZ)
+    if rv.verdict_small:
+        lines.append(VERDICT_SMALL_UZ)
+    return lines
 
 
 def render_review(rv: ReviewView, *, answered: bool = False) -> Card:
@@ -384,6 +417,7 @@ def render_review(rv: ReviewView, *, answered: bool = False) -> Card:
         SHARED_PHONE_UZ if rv.shared_phone and layout == "review" else "",
         _quote_line(quote, title, cited, rv.author),
         f"🔗 {esc(crm_push.url_line(cited))}",
+        *verdict_lines(rv),
         ("🧮 " + " · ".join(esc(p) for p in ball)) if ball else "",
         gate_line,
     ]
@@ -415,7 +449,9 @@ def render_manager(mv: ManagerView) -> Card:
     volume = volume_label(c)
     opener = crm_push.clean(c.opener)
     if opener:
-        offer = esc(crm_push.clip_words(opener, OPENER_MAX))
+        # The whole message the manager sends (docs/sotuv-playbook.md §3.0),
+        # never cut before its question and its opt-out line.
+        offer = esc(crm_push.fit_opener(opener, OPENER_MAX))
     else:
         offer = esc(OPENER_FALLBACK_UZ.format(segment=segment_label(mv.segment)))
     lines = [
@@ -586,6 +622,9 @@ async def review_view(
     gate = await gates.evaluate(session, candidate.company_id, now=now, tails=tails)
     handoff = candidates.is_handoff(candidate.score_breakdown)
     said = await attribution(session, view)
+    verdict = company.verdict if company is not None else None
+    reasons = verdict.get("reasons") if isinstance(verdict, dict) else None
+    refused = verdict is None and await verdict_service.refused_today(session, now=now)
     return ReviewView(
         review_id=review.id,
         candidate=view,
@@ -601,6 +640,9 @@ async def review_view(
         note=review.note,
         author=said.author,
         person_holds_phone=_holds_phone(view, lead),
+        verdict_reasons=tuple(str(r) for r in reasons or () if isinstance(r, str)),
+        verdict_small=validators.verdict_small(verdict),
+        verdict_refused=refused,
     )
 
 
@@ -999,6 +1041,32 @@ def render_company(card: CompanyCard, *, state_words: Mapping[str, str]) -> str:
     return "\n".join(lines)
 
 
+async def live_roots(session: AsyncSession, query: str) -> list[uuid.UUID]:
+    """``find_company_ids``' hits as the roots a purge names now
+    (``purge.subject_root``), each once — ``/unut``'s lookup. A purged company
+    is left out unless a purge of it stopped part-way (``purge.unfinished``:
+    its rows are still there), so ``/unut`` can finish that job."""
+    roots, _ = await purge_roots(session, query)
+    return roots
+
+
+async def purge_roots(session: AsyncSession, query: str) -> tuple[list[uuid.UUID], bool]:
+    """``live_roots`` and whether the name match alone found them (``lookup``)."""
+    hits, by_name = await lookup(session, query)
+    roots: list[uuid.UUID] = []
+    for company_id in hits:
+        found = await session.get(Company, company_id)
+        if found is None:
+            continue
+        root = await purge.subject_root(session, found)
+        if root.id in roots:
+            continue
+        if root.state == "purged" and not await purge.unfinished(session, root.id):
+            continue
+        roots.append(root.id)
+    return roots, by_name
+
+
 async def company_card(
     session: AsyncSession, company_id: uuid.UUID, *, now: datetime
 ) -> CompanyCard | None:
@@ -1054,17 +1122,20 @@ def parse_uuid(text: str) -> uuid.UUID | None:
         return None
 
 
-async def search(
-    session: AsyncSession,
-    query: str,
-    *,
-    now: datetime,
-    limit: int = companies.NAME_MATCHES,
-) -> list[CompanyCard]:
-    """``/qidir``'s lookup (06 §1.2), read-only: a uuid (a company or a
-    candidate), a phone or tail-9, an ``@username``/``t.me`` link, a STIR, a
-    domain, else a trigram name match (≤ ``limit``). A bare nine-digit
-    number is tried as a STIR and as a tail. Roots only, each once."""
+async def find_company_ids(session: AsyncSession, query: str) -> list[uuid.UUID]:
+    """What ``/qidir`` and ``/unut`` look a typed key up by (06 §1.2),
+    read-only, in the order found: a uuid (a company or a candidate), a phone
+    or tail-9, an ``@username``/``t.me`` link, a STIR, a domain, else a
+    trigram name match. A bare nine-digit number is tried as a STIR and as a
+    tail. Not yet roots, not yet unique."""
+    found, _ = await lookup(session, query)
+    return found
+
+
+async def lookup(session: AsyncSession, query: str) -> tuple[list[uuid.UUID], bool]:
+    """``find_company_ids``' hits and whether they came from the name match
+    alone (no exact key answered): a guess, which ``/unut`` says on its plan
+    card before anything is deleted for good."""
     text = query.strip()
     found: list[uuid.UUID] = []
     if (as_id := parse_uuid(text)) is not None:
@@ -1093,6 +1164,18 @@ async def search(
             )
         if tail is not None:
             found += [c.id for c in await companies.find_by_phone_tail(session, tail)]
+            # A purged firm whose purge stopped before its contacts went
+            # (find_by_phone_tail names live firms only): /unut finishes it.
+            found += await session.scalars(
+                sa.select(Contact.company_id)
+                .join(Company, Company.id == Contact.company_id)
+                .where(
+                    Contact.phone_tail == tail,
+                    Contact.anonymised_at.is_(None),
+                    Company.state == "purged",
+                )
+                .order_by(Contact.company_id)
+            )
         if handle is not None:
             found += await session.scalars(
                 sa.union(
@@ -1109,8 +1192,21 @@ async def search(
             )
         if not found and tail is None and stir is None and handle is None:
             found += [cid for cid, _ in await companies.find_companies(session, text)]
+            return found, True
+    return found, False
+
+
+async def search(
+    session: AsyncSession,
+    query: str,
+    *,
+    now: datetime,
+    limit: int = companies.NAME_MATCHES,
+) -> list[CompanyCard]:
+    """``/qidir``'s lookup (06 §1.2), read-only: ``find_company_ids``' hits
+    as company cards (≤ ``limit``), roots only, each once."""
     cards: list[CompanyCard] = []
-    for company_id in found:
+    for company_id in await find_company_ids(session, query):
         card = await company_card(session, company_id, now=now)
         if card is not None and card.company_id not in {c.company_id for c in cards}:
             cards.append(card)
@@ -1330,9 +1426,12 @@ __all__ = [
     "card_layout",
     "claim_owner_review",
     "company_card",
+    "find_company_ids",
     "footer",
     "lidlar_holat",
     "live_review",
+    "live_roots",
+    "lookup",
     "manager_view",
     "mark_asked",
     "merge_targets",
@@ -1340,6 +1439,7 @@ __all__ = [
     "parse_uuid",
     "pending_owner_count",
     "phone_shown",
+    "purge_roots",
     "push_opens_word",
     "refusal_note",
     "render_company",

@@ -199,7 +199,36 @@ UZ: Final[Mapping[str, str]] = MappingProxyType(
         "import.expired": "Reja eskirgan — faylni qayta yuboring.",
         "import.cancelled": "Bekor qilindi — hech narsa yozilmadi.",
         # --- /unut (services/purge, T-31) ---------------------------------------
-        "unut.not_ready": "⏳ /unut hali ulanmagan — keyingi yangilanishda ishlaydi.",
+        "unut.how": (
+            "Nimani oʻchiray? /unut &lt;STIR | +998… | @username | sayt | uuid | nom&gt;"
+        ),
+        "unut.none": "Hech narsa topilmadi: «{query}»",
+        "unut.many": (
+            "{n} ta kompaniya topildi — bittasini uuid bilan yozing "
+            "(nomini /qidir koʻrsatadi):\n{ids}"
+        ),
+        "unut.subject": "Kompaniya: <code>{id}</code> (nomi: /qidir {id})",
+        "unut.ask": "Oʻchiraymi? Buni qaytarib boʻlmaydi.",
+        "unut.by_name": (
+            "⚠️ Nom boʻyicha topildi — avval /qidir {id} bilan "
+            "shu kompaniya ekanini tekshiring."
+        ),
+        "unut.expired": "Reja eskirgan — /unut ni qaytadan yuboring.",
+        "unut.cancelled": "Bekor qilindi — hech narsa oʻchirilmadi.",
+        "unut.done": "Bu reja allaqachon bajarilgan.",
+        "unut.closed": "Bu reja yopilgan — kerak boʻlsa /unut ni qaytadan yuboring.",
+        "unut.running": (
+            "Bu reja bajarilmoqda. Toʻxtab qolgan boʻlsa, /unut ni qaytadan "
+            "yuboring — qolgan maʼlumot boʻlsa, yangi reja chiqadi."
+        ),
+        "unut.unfinished": (
+            "Bu reja oxirigacha yetmagan — /unut ni qaytadan yuboring, "
+            "qolgani oʻchiriladi."
+        ),
+        "unut.failed": (
+            "⚠️ Oʻchirish oxirigacha yetmadi. /unut <code>{id}</code> ni qaytadan "
+            "yuboring: qolgan maʼlumot boʻlsa, yangi reja chiqadi."
+        ),
         # --- /qidir ------------------------------------------------------------
         "qidir.how": (
             "Nimani qidiray? /qidir &lt;telefon | @username | STIR | sayt | nom&gt;"

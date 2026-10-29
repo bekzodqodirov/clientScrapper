@@ -31,14 +31,20 @@ outcomes/quarter/year walks), each ``run_collector(ErpSync, variant=…)``;
 ``classify`` (T-15, ``services/classify.classify_job``, woken by
 ``cs_interaction``); the batch lane (T-16, ``services/model_jobs``):
 ``model_batch_submit`` at 23:30 and ``model_batch_collect`` every 30 minutes
-00:30–08:00; ``score`` (T-18, ``services/candidates.score_job``, every 15
-minutes and at once on ``cs_interaction``); ``review_cards`` (T-21,
+00:30–08:00 — the ``company_verdict`` kind they carry, and the night's
+selection the submit runs first, are T-30's ``services/verdict``, which also
+fills ``verdict`` (every 10 minutes: the instant verdicts, then the openers;
+never the batch lane's fallbacks, which only the 23:30 run takes);
+``score`` (T-18, ``services/candidates.score_job``, every 15 minutes and at
+once on ``cs_interaction``); ``review_cards`` (T-21,
 ``services/reviews.review_cards_job``, every 2 minutes: the expiry sweep at
 any hour, the cards inside ``REVIEW_HOURS``, through the owner bot's
 ``BotCards`` that ``connect_owner_bot`` wires); ``crm_push`` (T-28,
 ``services/crm_push.crm_push_job``, every minute, sending only inside the
 push window) and ``reconcile`` (T-28, ``crm_push.reconcile_job``, every 10
-minutes: a crashed claim, the ``unknown`` outcomes walk, rule 5's re-push).
+minutes: a crashed claim, the ``unknown`` outcomes walk, rule 5's re-push);
+``retention`` (T-31, ``services/retention.retention_job``, 04:15: 02 §4's
+steps, each in its own transaction with its own ``purge_log`` row).
 
 **The event-driven path** (04 §0, 01 N-06). A slot with ``wakes_on`` also
 runs when its ``NOTIFY`` channel speaks: :func:`listen_for_wakes` holds a
@@ -124,7 +130,9 @@ from clientscrapper.services import (
     health,
     model_jobs,
     restore_drill,
+    retention,
     reviews,
+    verdict,
 )
 from clientscrapper.services import http as http_layer
 from clientscrapper.services.lifecycle import (
@@ -360,7 +368,7 @@ def job_table() -> tuple[JobSlot, ...]:
             note="sends inside REVIEW_HOURS",
         ),
         JobSlot("enrich", ("*/10 7-21 * * *",), "T-24", note="every 10 min 07:00–22:00"),
-        JobSlot("verdict", ("every 10m",), "T-30"),
+        JobSlot("verdict", ("every 10m",), "T-30", verdict.verdict_job),
         # --- 05: push, reconcile, precision ---------------------------------------
         JobSlot(
             "crm_push",
@@ -380,7 +388,7 @@ def job_table() -> tuple[JobSlot, ...]:
             note="an undelivered one is tried again with a backoff while it is due",
             pass_scheduler=True,
         ),
-        JobSlot("retention", ("15 4 * * *",), "T-31"),
+        JobSlot("retention", ("15 4 * * *",), "T-31", retention.retention_job),
     )
 
 

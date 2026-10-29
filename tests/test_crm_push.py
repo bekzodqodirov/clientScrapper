@@ -43,6 +43,7 @@ from clientscrapper.services import (
     crm_push,
     erp_feeds,
     health,
+    purge,
     push_gate,
     scoring,
 )
@@ -1919,6 +1920,32 @@ async def test_push_test_tool_new_external_id_each_run(world, monkeypatch):
         "test.example.uz",
     )
     assert first.exit_code() == 0
+
+
+async def test_a_purged_push_test_company_frees_the_synthetic_keys(world, monkeypatch):
+    """``tools/purge`` keeps a purged root's STIR and domain and renames it:
+    the next push-test still mints (the purged holder gives them up), unless
+    the purge's reason wrote legal rows for the test phone (then it refuses,
+    as for any suppressed phone)."""
+    monkeypatch.setattr(settings, "test_phone", "+998900000099")
+    first = await push_test.run(now=NOW, erp=world.erp)
+    assert first.status == "sent", first
+    assert first.company_id is not None
+    plan = await purge.plan_company(world.session, first.company_id, reason="owner")
+    await purge.execute(world.session, plan, requested_by="owner:1", now=NOW)
+    purged = await world.session.get(Company, first.company_id, populate_existing=True)
+    assert purged is not None and (purged.state, purged.stir) == ("purged", "300000099")
+    later = NOW + timedelta(hours=25)
+    await fresh_at(world, later)
+    second = await push_test.run(now=later, erp=world.erp)
+    assert second.status == "sent", second
+    purged = await world.session.get(Company, first.company_id, populate_existing=True)
+    assert purged is not None and (purged.stir, purged.website_domain) == (None, None)
+    plan = await purge.plan_company(world.session, second.company_id)
+    await purge.execute(world.session, plan, requested_by="owner:1", now=later)
+    third = await push_test.run(now=later + timedelta(hours=25), erp=world.erp)
+    assert third.status == "refused"
+    assert third.reason is not None and third.reason.startswith("TEST_PHONE bostirilgan")
 
 
 async def test_push_test_refuses_a_suppressed_phone_before_minting(world, monkeypatch):

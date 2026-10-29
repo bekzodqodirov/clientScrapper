@@ -9,7 +9,9 @@ an id of ``MANAGER_TELEGRAM_IDS``; only private chats are served at all.
 **Plans.** ``/import`` and ``/dnc`` keep what they would write for 10
 minutes under a random id the confirm button carries (06 §1.2: «plan kept
 in memory 10 min (restart = send again)»). A random id, not a counter: after
-a restart an old button must not name a new plan.
+a restart an old button must not name a new plan. ``/unut``'s plan is kept
+the same way under its ``purge_log`` id (the button is ``pg:<purge_log_id>``,
+06 §1.5): the log row holds only a hash, so the subject lives here.
 
 **The phone ✏️ waits for** (06 §1.3): the card a ✏️ tap opened, for 5
 minutes, per owner — the owner's next message is that card's phone. In memory
@@ -81,14 +83,22 @@ class Plans:
     ttl: timedelta = PLAN_TTL
     rng: random.Random = field(default_factory=random.SystemRandom)
     _items: dict[int, tuple[str, datetime, Any]] = field(default_factory=dict)
+    # Plans a tap took, for as long as they would have lived: a second tap on
+    # the same button finds the first one's, not a forgotten plan.
+    _taken: dict[int, tuple[str, datetime]] = field(default_factory=dict)
 
-    def put(self, kind: str, value: Any, *, now: datetime) -> int:
+    def put(
+        self, kind: str, value: Any, *, now: datetime, plan_id: int | None = None
+    ) -> int:
+        """Keep ``value`` under a fresh random id — or under ``plan_id``, an id
+        the database already gave the plan (``/unut``'s ``purge_log`` row)."""
         self._sweep(now)
-        while True:
-            plan_id = self.rng.randint(1, PLAN_ID_MAX)
-            if plan_id not in self._items:
-                break
+        while plan_id is None:
+            drawn = self.rng.randint(1, PLAN_ID_MAX)
+            if drawn not in self._items:
+                plan_id = drawn
         self._items[plan_id] = (kind, now, value)
+        self._taken.pop(plan_id, None)
         return plan_id
 
     def take(self, kind: str, plan_id: int, *, now: datetime) -> Any | None:
@@ -97,11 +107,21 @@ class Plans:
         if found is None or found[0] != kind:
             return None
         del self._items[plan_id]
+        self._taken[plan_id] = (kind, found[1])
         return found[2]
+
+    def taken(self, kind: str, plan_id: int, *, now: datetime) -> bool:
+        """A tap took this plan already (while it would still be fresh) — as
+        opposed to a plan this process never held or forgot."""
+        self._sweep(now)
+        found = self._taken.get(plan_id)
+        return found is not None and found[0] == kind
 
     def _sweep(self, now: datetime) -> None:
         for key in [k for k, (_, at, _) in self._items.items() if now - at > self.ttl]:
             del self._items[key]
+        for key in [k for k, (_, at) in self._taken.items() if now - at > self.ttl]:
+            del self._taken[key]
 
 
 @dataclass(slots=True)

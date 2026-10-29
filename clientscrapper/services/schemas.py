@@ -18,8 +18,12 @@ and refusing it would cost the retry and then the message. The list is cut
 to its bound and the number clamped into its range; the schema still states
 both bounds.
 
-Only ``ImportSignal`` (``classify``) is built here (T-15); ``RelevanceVerdict``
-and ``DraftOpener`` join with T-30, ``ContactFind`` with T-24.
+``ImportSignal`` (``classify``, T-15), ``RelevanceVerdict`` (``verdict`` and
+``company_verdict``, 04 §4.4) and ``DraftOpener`` (``draft``, 04 §4.5) are
+built here (T-30); ``ContactFind`` joins with T-24. A string bound (a quote's
+200 characters, a reason's 120, an opener's 200–520) is stated in the schema
+and held by ``services/validators``, which drops, clips or refuses what
+overruns it — the grammar does not enforce it either.
 """
 
 from __future__ import annotations
@@ -111,12 +115,114 @@ class ImportSignal(BaseModel):
     confidence: Confidence
 
 
+# --- RelevanceVerdict (04 §4.4) ----------------------------------------------------
+
+REASONS_MAX: Final = 5
+REASON_CHARS_MAX: Final = 120
+QUOTES_MAX: Final = 6
+QUOTE_CHARS_MAX: Final = 200
+ROLE_CHARS_MAX: Final = 40
+QUOTE_REF_PATTERN: Final = r"^E\d{1,2}$"
+
+ChinaImport = Literal["confirmed", "likely", "unlikely", "no"]
+Segment = Literal["A", "B", "C", "D", "E", "X", "Z"]
+VolumeBand = Literal["unknown", "lt1", "1_3", "3_10", "truck", "container"]
+
+
+def _first_n(n: int) -> Any:
+    def cut(items: list[Any]) -> list[Any]:
+        return items[:n]
+
+    return AfterValidator(cut)
+
+
+class EvidenceQuote(BaseModel):
+    """A fragment copied character for character from one evidence block."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    # The block the quote comes from: "E1", "E2", ...
+    ref: Annotated[str, Field(json_schema_extra={"pattern": QUOTE_REF_PATTERN})]
+    quote: Annotated[str, Field(json_schema_extra={"maxLength": QUOTE_CHARS_MAX})]
+
+
+# 04 §4.4. Both lanes (instant, batch) ask for it with the same request.
+class RelevanceVerdict(BaseModel):
+    """Is this Uzbek company a GSR Logistics prospect: a business that imports
+    from China at a volume worth a truck share or more."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    imports_from_china: ChinaImport
+    # A bazaar · B marketplace · C factory · D construction/furniture ·
+    # E electronics/auto/appliances · X competitor/supplier · Z unclear.
+    segment: Segment
+    est_volume_band: VolumeBand
+    is_b2b: bool
+    is_competitor: bool
+    is_supplier_cn: bool
+    is_state_body: bool
+    # A role, never a person's name.
+    decision_maker_role: Annotated[
+        str | None, Field(json_schema_extra={"maxLength": ROLE_CHARS_MAX})
+    ]
+    goods: Goods
+    # Uzbek Latin, for a sales manager; at most 120 characters each.
+    reasons: Annotated[
+        list[str],
+        _first_n(REASONS_MAX),
+        Field(json_schema_extra={"maxItems": REASONS_MAX}),
+    ]
+    evidence_quotes: Annotated[
+        list[EvidenceQuote],
+        _first_n(QUOTES_MAX),
+        Field(json_schema_extra={"maxItems": QUOTES_MAX}),
+    ]
+    confidence: Confidence
+
+
+# --- DraftOpener (04 §4.5) ----------------------------------------------------------
+
+OPENER_CHARS: Final = (200, 520)
+HOOK_CHARS_MAX: Final = 120
+
+
+class DraftOpener(BaseModel):
+    """One first message a sales manager sends from their own account."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    lang: Literal["uz", "ru"]
+    text: Annotated[
+        str,
+        Field(
+            json_schema_extra={"minLength": OPENER_CHARS[0], "maxLength": OPENER_CHARS[1]}
+        ),
+    ]
+    # The one public fact the message leans on.
+    hook: Annotated[str, Field(json_schema_extra={"maxLength": HOOK_CHARS_MAX})]
+
+
 __all__ = [
     "GOODS_MAX",
+    "HOOK_CHARS_MAX",
+    "OPENER_CHARS",
+    "QUOTES_MAX",
+    "QUOTE_CHARS_MAX",
+    "QUOTE_REF_PATTERN",
+    "REASONS_MAX",
+    "REASON_CHARS_MAX",
+    "ROLE_CHARS_MAX",
+    "ChinaImport",
+    "DraftOpener",
+    "EvidenceQuote",
     "Frequency",
     "GoodsCategory",
     "ImportSignal",
     "OriginCn",
+    "RelevanceVerdict",
+    "Segment",
     "SpeakerRole",
+    "VolumeBand",
     "VolumeBasis",
 ]

@@ -50,6 +50,7 @@ from clientscrapper.db.models import (
     Evidence,
     LeadCandidate,
     LeadReview,
+    PurgeLog,
     RuntimeFlag,
     ScoringWeight,
     Signal,
@@ -57,11 +58,12 @@ from clientscrapper.db.models import (
     Suppression,
 )
 from clientscrapper.db.session import engine, session_scope
-from clientscrapper.services import cards, chats, crm_push, health, owner, scoring
+from clientscrapper.services import cards, chats, crm_push, health, owner, purge, scoring
 from tests import gate_fixtures
 from tests.fake_bot import FakeSession, added_to_group, document, fake_bot, message, tap
 from tests.fixtures.candidate_views import EXCERPT
 from tests.gate_fixtures import NOW, phone
+from tests.test_cards import BUBBLE_PX, width_px
 from tests.test_uz_text import problems
 
 OWNER = 1001
@@ -777,9 +779,189 @@ async def test_import_refuses_a_file_it_cannot_read(w):
 # --- /unut, /qidir ----------------------------------------------------------------------
 
 
-async def test_unut_is_not_ready(w):
-    await w.say("/unut 300000011")
-    assert w.last() == t("unut.not_ready")
+async def test_unut_plans_by_counts_then_purges_after_its_confirm(w):
+    async with w.db() as s:
+        cand = await lead(s, name="Namuna Unut Savdo", stir="300000061")
+        company_id = cand.company_id
+    await w.say("/unut +998 90 000 00 61")
+    plan_text = w.last()
+    lines = plan_text.splitlines()
+    assert lines[0] == "🗑 Oʻchirish rejasi · huquqiy soʻrov"
+    assert width_px(lines[0]) <= BUBBLE_PX
+    assert "🏢 Kompaniya: 1 · kontakt: 1" in lines
+    assert t("unut.subject", id=str(company_id)) in lines
+    assert lines[-1] == t("unut.ask")
+    # Counts and the uuid only: never the name or the phone (06 §5.4).
+    assert "Namuna Unut" not in plan_text and "900000061" not in plan_text
+    [yes, no] = w.buttons()
+    parsed = cb.parse(yes)
+    assert parsed is not None and (parsed.kind, parsed.action) == ("pg", "y")
+    assert no == yes[:-1] + "n"
+    async with w.db() as s:
+        row = await s.scalar(sa.select(PurgeLog))
+        assert row is not None and (row.id, row.executed_at, row.error) == (
+            parsed.ref,
+            None,
+            None,
+        )
+        assert (row.requested_by, row.reason) == (f"owner:{OWNER}", "legal_request")
+        assert (await s.get(Company, company_id)).state == "active"
+    await w.press(yes)
+    done = w.last()
+    assert done.splitlines()[0] == "✅ Oʻchirildi · huquqiy soʻrov"
+    assert "Namuna Unut" not in done
+    async with w.db() as s:
+        found = await s.get(Company, company_id, populate_existing=True)
+        assert found is not None and found.state == "purged"
+        assert await s.get(LeadCandidate, cand.id, populate_existing=True) is None
+        held = await s.scalar(
+            sa.select(Suppression).where(
+                Suppression.key_type == "phone_tail", Suppression.key == "900000061"
+            )
+        )
+        assert held is not None and held.kind == "legal"
+        row = await s.scalar(
+            sa.select(PurgeLog).execution_options(populate_existing=True)
+        )
+        assert row is not None and row.executed_at is not None and row.error is None
+    await w.press(yes)
+    assert w.last() == t("unut.done")
+    # A purged company is no longer found — by the STIR it keeps either.
+    for query in ("+998 90 000 00 61", "300000061", str(company_id)):
+        await w.say(f"/unut {query}")
+        assert w.last() == t("unut.none", query=query)
+
+
+async def test_unut_cancel_and_a_forgotten_plan_delete_nothing(w):
+    async with w.db() as s:
+        cand = await lead(s, name="Namuna Bekor Savdo")
+        company_id = cand.company_id
+    await w.say(f"/unut {company_id}")
+    [yes, no] = w.buttons()
+    await w.press(no)
+    assert w.last() == t("unut.cancelled")
+    await w.press(yes)
+    assert w.last() == t("unut.closed")
+    # The bot restarted between the plan and the confirm: the plan is gone.
+    await w.say(f"/unut {cand.id}")
+    [yes, _no] = w.buttons()
+    w.deps.plans = Plans()
+    await w.press(yes)
+    assert w.last() == t("unut.expired")
+    async with w.db() as s:
+        rows = (await s.scalars(sa.select(PurgeLog).order_by(PurgeLog.id))).all()
+        assert [(r.error, r.executed_at) for r in rows] == [
+            ("cancelled", None),
+            ("expired", None),
+        ]
+        found = await s.get(Company, company_id, populate_existing=True)
+        assert found is not None and found.state != "purged"
+        assert await s.get(LeadCandidate, cand.id) is not None
+        assert await s.scalar(sa.select(sa.func.count(Suppression.id))) == 0
+
+
+async def test_unut_finishes_a_purge_that_stopped_part_way(w, monkeypatch):
+    """Group 1 committed, group 2 failed: the owner is told how to finish, a
+    re-tap says the plan did not finish, and /unut plans the firm again by
+    the keys it still has — until nothing is left."""
+    async with w.db() as s:
+        cand = await lead(s, nn=63, name="Namuna Yarim Savdo", stir="300000063")
+        company_id = cand.company_id
+    await w.say("/unut 300000063")
+    [yes, _no] = w.buttons()
+    real = purge._people
+
+    async def broken(*args: Any, **kw: Any) -> dict[str, int]:
+        raise RuntimeError("db blip in group 2")
+
+    monkeypatch.setattr(purge, "_people", broken)
+    await w.press(yes)
+    assert w.last() == t("unut.failed", id=str(company_id))
+    monkeypatch.setattr(purge, "_people", real)
+    async with w.db() as s:
+        row = await s.scalar(sa.select(PurgeLog))
+        assert row is not None and row.error == "failed:RuntimeError"
+        firm = await s.get(Company, company_id, populate_existing=True)
+        assert firm is not None and firm.state == "purged"
+        left = await s.scalar(
+            sa.select(sa.func.count())
+            .select_from(Contact)
+            .where(Contact.company_id == company_id)
+        )
+        assert left == 1
+    await w.press(yes)
+    assert w.last() == t("unut.unfinished")
+    for query in ("300000063", "+998 90 000 00 63", str(company_id)):
+        await w.say(f"/unut {query}")
+        assert t("unut.subject", id=str(company_id)) in w.last().splitlines()
+        assert len(w.buttons()) == 2
+    [yes, _no] = w.buttons()
+    await w.press(yes)
+    assert w.last().splitlines()[0] == "✅ Oʻchirildi · huquqiy soʻrov"
+    await w.say("/unut 300000063")
+    assert w.last() == t("unut.none", query="300000063")
+
+
+async def test_unut_a_second_tap_closes_nothing_the_first_one_runs(w):
+    """✅ twice (or ✅ then ❌): the first tap holds the plan; the second, which
+    finds none in memory, must not close the row as expired under it."""
+    async with w.db() as s:
+        cand = await lead(s, nn=64, name="Namuna Ikki Bosish")
+        company_id = cand.company_id
+    await w.say(f"/unut {company_id}")
+    [yes, no] = w.buttons()
+    ref = cb.parse(yes)
+    assert ref is not None and ref.ref is not None
+    # The first tap took the plan and has not claimed its row yet.
+    planned = w.deps.plans.take("purge", ref.ref, now=NOW)
+    assert planned is not None
+    for second in (yes, no):
+        await w.press(second)
+        assert w.last() == t("unut.running")
+    async with w.db() as s:
+        row = await s.scalar(sa.select(PurgeLog))
+        assert row is not None and (row.error, row.executed_at) == (None, None)
+        result = await purge.execute(s, planned, requested_by=f"owner:{OWNER}", now=NOW)
+    assert result.executed["companies"] == 1
+    await w.press(yes)
+    assert w.last() == t("unut.done")
+
+
+async def test_unut_says_when_only_the_name_matched(w):
+    """A fuzzy name hit is a guess, and the legal rows a purge writes are
+    never removed: the card asks for a /qidir look first. An exact key's
+    card carries no such line."""
+    async with w.db() as s:
+        cand = await lead(s, nn=65, name="Namuna Yagona Tekstil", stir="300000065")
+        company_id = cand.company_id
+    warning = t("unut.by_name", id=str(company_id))
+    await w.say("/unut Namuna Yagona Tekstil")
+    lines = w.last().splitlines()
+    assert warning in lines and lines[-1] == t("unut.ask")
+    assert "Namuna Yagona" not in w.last()
+    await w.say("/unut 300000065")
+    assert warning not in w.last().splitlines()
+    assert t("unut.subject", id=str(company_id)) in w.last().splitlines()
+
+
+async def test_unut_asks_for_one_company_when_a_key_names_several(w):
+    async with w.db() as s:
+        first = await gate_fixtures.firm(s, "Namuna Bir Savdo")
+        second = await gate_fixtures.firm(s, "Namuna Ikki Savdo")
+        for company in (first, second):
+            await gate_fixtures.contact(s, company, phone(62))
+    await w.say("/unut +998 90 000 00 62")
+    text = w.last()
+    assert text.startswith("2 ta kompaniya topildi")
+    assert f"<code>{first.id}</code>" in text and f"<code>{second.id}</code>" in text
+    assert "Namuna" not in text
+    assert w.buttons() == []
+    await w.say("/unut Yoʻq Kompaniya Xyz")
+    assert w.last() == t("unut.none", query="Yoʻq Kompaniya Xyz")
+    await w.say("/unut")
+    assert w.last() == t("unut.how")
+    async with w.db() as s:
+        assert await s.scalar(sa.select(sa.func.count(PurgeLog.id))) == 0
 
 
 async def test_qidir_finds_a_company_by_its_phone_and_creates_nothing(w):

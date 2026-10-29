@@ -61,6 +61,8 @@ VENDORED: dict[str, str] = {
     "clientscrapper/services/sheets.py": "miya/services/sheets.py",
     "clientscrapper/services/sheets_sync.py": "miya/services/sheets_sync.py",
     "clientscrapper/services/safety.py": "miya/services/safety.py",
+    # 04 §4.5: a descendant of check_outbound, cut to the opener's flags (T-30).
+    "clientscrapper/services/redlines.py": "miya/jarvis/redlines.py",
     "clientscrapper/services/purge.py": "miya/services/purge.py",
     # Owner bot (handlers.py is split per 06 §1.1, replies.py becomes texts.py)
     "clientscrapper/bot/formatting.py": "miya/bot/formatting.py",
@@ -152,6 +154,8 @@ REQUIRED_NOW = (
     "clientscrapper/bot/handlers/status.py",
     "clientscrapper/bot/handlers/admin.py",
     "clientscrapper/bot/handlers/manager.py",
+    # T-31
+    "clientscrapper/services/purge.py",
 )
 
 SCANNED_SUFFIXES = {".py", ".yml", ".yaml", ".ini", ".toml", ".cfg", ".sh", ".mako"}
