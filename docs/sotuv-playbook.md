@@ -310,6 +310,8 @@ Kim: [manager]   SLA: birinchi aloqa 1 ish kuni ichida
 ```
 Rule shown on the card: internal data (STIR, customs stats, score) is for the manager only — never quoted to the lead.
 
+**Qoida (egasining qarori, 2026-10-29):** birinchi xabarni yuborgach darhol «📞 Bogʻlandim» ni bosing yoki lid bosqichini oʻzgartiring. Lid bilan faqat ERPga ulangan Telegram akkauntdan yozing — shaxsiy akkauntdan yozilgan xabarni ERP koʻrmaydi va agent «bogʻlanilmagan» deb hisoblaydi. Yozishdan oldin ERPda kompaniya nomi boʻyicha qidiring: u boshqa raqam bilan allaqachon mijoz boʻlishi mumkin.
+
 ### 4.3 The 5 fields the manager must fill back (blocking: lead cannot be closed or snoozed twice without them)
 
 | Field | Values | ERP mapping | Feeds clientScrapper |

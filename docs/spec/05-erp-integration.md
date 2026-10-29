@@ -1233,6 +1233,8 @@ SUPPRESSION (full, salt changed)              OUTCOMES (nightly)
 
 ## Open questions
 
+> **2026-10-29:** questions 12–17 are answered by the owner as their ⭐ options — see the decision table in 01 §7 (1a: the ERP dictionary already holds the reasons, only «Qayta qilinmasin» is added if missing; 2a agent-side company keys + the card line; 3a `won` as proxy, receipts feed after the pilot; 4a deploy `agent-feed` before the pilot; 5a stage-name list; 6a seller rule in the playbook).
+
 1. ~~§A.3 `company` pass-through~~ — resolved: shipped (A.2; `company`/`firma` → `leads.company` on a created lead, and still a note line and a pair).
 2. ~~Inactive clients in the suppression set and the belt~~ — resolved: built that way (A.7, A.8).
 3. Should a push that JOINS another manager's open lead be `dropped/suppressed` instead? Today it is `joined` + a note + «🔁 Qayta yozdi» to that lead's owner, and the outcomes feed shows that lead's stage (A.9); left as is.

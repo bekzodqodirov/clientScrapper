@@ -81,6 +81,19 @@ How the ERP-fed rows can be measured (T-07 verification, 2026-10-24): precision 
 
 ## 7. Open questions (owner decisions)
 
+**Answered by Bekzod on 2026-10-29** — «1 a bular hozir ham bor / Qolgani sen aytgandek». Every
+question below is decided as its ⭐ option; the «Meanwhile» lines are superseded by these:
+
+| # | Decision | What it means for the build | Owner of the work |
+|---|---|---|---|
+| 1 | **(a)**, follow-up **(a)** | The lost-reason dictionary in the live ERP already holds the reasons («bular hozir ham bor»); only «Qayta qilinmasin» is added if it is missing (05 §A.14 step 2). The exact spellings are the owner's, so the agent keeps matching them by keyword (`outcomes.LOST_REASON_PATTERNS`) and must surface every dictionary label it could not class (in `/holat` and the digest) so a new label is mapped, never silently `lost_other`. «Raqam notoʻgʻri» is NOT added to `agent_no_contact_reasons`: the agent closes a number itself after two wrong-number outcomes. | T-10 (patterns), T-35/T-36 (unclassed labels shown) |
+| 2 | **(a)** | Agent side only: when a pushed company becomes `won`/`landed_client`, the agent suppresses all of that company's keys (Telegram username, Instagram, domain, STIR), not only the pushed phone tail; every manager card carries the line «Yozishdan oldin ERPda nomi boʻyicha qidiring». Old ERP clients stay phone-only. | T-10/T-19 (keys), T-20/T-21 (card line) |
+| 3 | **(a)** | `won` is the first-shipment proxy in `/holat` and `tools/mvp_report.py`, labelled as a proxy; no `measured` volume signal in v1. After the pilot an ERP round adds a feed of the client's first receipt date and m³ (no price). | T-36 now; ERP round after the pilot |
+| 4 | **(a)** | `agent-feed` is merged and deployed to production BEFORE the pilot; the «Boshqa» fallback is not used for pushes (it stays a capability only). | Owner deploy (05 §A.14), T-29 |
+| 5 | **(a)** | Quotes-sent is judged from the lead's current stage name: a configurable list of «price was given» stage names (default: stages whose name contains «narx», plus every `won` stage), approximate and labelled so. The owner can correct the list later. | T-36 |
+| 6 | **(a)** | Seller rule in `docs/sotuv-playbook.md`: after the first message press «📞 Bogʻlandim» or move the stage, and write only from an ERP-connected Telegram account. The metric stays as measured, with the under-count note. | Playbook (done), T-29 briefing |
+
+
 Raised by the T-07 verification (2026-10-24) against the ERP as built (fullprompt `agent-feed` at
 `23fe1736`, 05 Part A): requirements in §2 and §5 that the ERP cannot satisfy today. None of them is
 weakened here; each is a decision for Bekzod. The lead asks him the Uzbek question as written, with
@@ -181,3 +194,5 @@ The ERP side of each is in 05's open questions 12–17.
 ## Review pass changelog
 
 **T-07 verification (2026-10-24)** — an adversarial check of the spec against fullprompt `agent-feed` at `23fe1736` found seven requirements the ERP as built cannot satisfy. None was weakened: §7 lists them as owner decisions (questions 1–6, Uzbek wording, options, ⭐), and one-line pointers were added under §2 (the «measured» and «handle/STIR» clauses) and §5 (how the ERP-fed metrics can be measured). The seven findings fit six questions: measured volume and first shipment share question 3. §5's «Raqam notoʻgʻri» is now spelt with ʻ, as the recommended dictionary label of question 1.
+
+**Owner answers (2026-10-29)** — §7's six questions answered «1 a bular hozir ham bor / Qolgani sen aytgandek»: all ⭐ options (1a with follow-up a, 2a, 3a, 4a, 5a, 6a); the decision table at the top of §7 states what each means for the build and which task carries it.
