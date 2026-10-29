@@ -228,6 +228,26 @@ async def test_a_forbidden_source_found_on_is_turned_off(session):
     assert [(f.key, f.on) for f in run.flips] == [("exhibitors", False)]
 
 
+@pytest.mark.parametrize("value", ["kanmas", "yes", 1, None])
+async def test_only_the_json_true_forbids_and_no_other_value_stops_the_job(
+    session, value
+):
+    """The forbid is the JSON ``true`` the bot writes, read alike in Python
+    (``forbidden_of``) and in the turn-on UPDATE's guard: a hand-edited
+    string, number or null forbids nothing — and makes no week's run raise."""
+    await pushes(session, "telegram_monitor", good=15)
+    await session.execute(
+        sa.update(Source)
+        .where(Source.key == "telegram_monitor")
+        .values(config={erp_feeds.AUTO_PUSH_FORBIDDEN: value})
+    )
+    await session.commit()
+    assert erp_feeds.forbidden_of({erp_feeds.AUTO_PUSH_FORBIDDEN: value}) is False
+    run = await erp_feeds.source_precision_job(SessionLocal, NOW)
+    assert [(f.key, f.on) for f in run.flips] == [("telegram_monitor", True)]
+    assert (await row(session, "telegram_monitor")).auto_push is True
+
+
 async def test_the_turn_on_update_re_reads_the_forbid_itself(session, monkeypatch):
     """The SQL guard on its own: a row the job's predicate thinks allowed but
     whose stored config says forbidden is never set on."""
