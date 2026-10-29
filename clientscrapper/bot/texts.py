@@ -21,6 +21,8 @@ UZ: Final[Mapping[str, str]] = MappingProxyType(
         "error": "⚠️ Xatolik yuz berdi — birozdan keyin qaytadan urinib koʻring.",
         "stale_button": "Bu tugma eskirgan",
         "stale_card": "Bu karta eskirgan — /lidlar",
+        # A manager's card: /lidlar is the owner's alone (06 §1.7).
+        "stale_card_manager": "Bu karta eskirgan",
         "not_yours": "Bu karta sizga tegishli emas",
         "forwarded": (
             "↪️ Uzatilgan xabardagi buyruqni bajarmayman — buyruqni oʻzingiz "
@@ -53,6 +55,7 @@ UZ: Final[Mapping[str, str]] = MappingProxyType(
         ),
         "help_manager": (
             "/qidir &lt;soʻz&gt; — kompaniyani qidirish\n"
+            "/tel &lt;karta&gt; &lt;+998…&gt; — mijoz bergan raqamni yozish\n"
             "/yordam — shu roʻyxat\n"
             "Kartadagi tugmalar: 📞 Bogʻlandim · 🙅 Yozmang dedi · "
             "❌ Notoʻgʻri / B2C · ⏭ Keyinroq"
@@ -68,6 +71,8 @@ UZ: Final[Mapping[str, str]] = MappingProxyType(
         "lidlar.holat_line": "{state}: {n}",
         "lidlar.holat_oldest": "Koʻrib chiqishdagi eng eski karta: {age}",
         "lidlar.holat_no_review": "Koʻrib chiqishda karta yoʻq.",
+        "lidlar.holat_auto": "⏳ Avtomatik tasdiqlangan, yuborilmagan: {n} ta",
+        "lidlar.holat_auto_line": "  {name}: {note}",
         "lidlar.send_failed": "⚠️ Kartani yuborib boʻlmadi — birozdan keyin /lidlar",
         "lidlar.paused": (
             "⏸ Agent toʻxtatilgan — karta koʻrsatilmaydi. Davom ettirish: /yoq"
@@ -82,11 +87,51 @@ UZ: Final[Mapping[str, str]] = MappingProxyType(
         "state.suppressed": "bostirilgan",
         "state.excluded": "chiqarilgan",
         "state.hold": "kutishda",
-        # --- review buttons (the answers are services/reviews', T-21) --------
-        "review.not_ready": (
-            "⏳ Bu tugma hali ulanmagan — keyingi yangilanishda ishlaydi."
-        ),
+        # --- review buttons (services/reviews, T-21) ----------------------------
         "review.no_targets": "Birlashtirish uchun mos kompaniya topilmadi.",
+        "review.refused.wrong_card": "Bu tugma eskirgan",
+        "review.refused.not_yours": "Bu karta sizga tegishli emas",
+        "review.refused.stale": "Bu karta eskirgan — /lidlar",
+        "review.refused.no_phone": (
+            "Telefon yaroqsiz — CRMʼga yuborib boʻlmaydi. Karta joyida qoldi."
+        ),
+        "review.refused.no_target": "Bu kompaniya topilmadi.",
+        "review.refused.same_company": "Bu oʻsha kompaniyaning oʻzi.",
+        "review.refused.merge": "Birlashtirib boʻlmaydi: {why}. Karta joyida qoldi.",
+        "review.merge.stir": "STIRlar har xil",
+        "review.merge.telegram": "Telegram kanallari har xil",
+        "review.merge.domain": "ikkalasi reestrda, saytlari har xil",
+        "review.merge.candidate_approved": "nomzod CRMʼga yuborilmoqda",
+        "review.merge.purged": "kompaniya oʻchirilgan",
+        "review.merge.source_merged": "kompaniya allaqachon birlashtirilgan",
+        "review.merge.target_merged": "tanlangan kompaniya allaqachon birlashtirilgan",
+        "review.phone_ask": (
+            "✏️ Toʻgʻri raqamni 5 daqiqa ichida yozing (+998 90 123 45 67)."
+        ),
+        "review.phone_done": "✏️ Telefon tuzatildi",
+        "review.refused.bad_phone": (
+            "Bu Oʻzbekiston mobil yoki shahar raqami emas — ✏️ ni qayta bosing."
+        ),
+        "review.refused.same_phone": "Bu raqam kartada bor — oʻzgarmadi.",
+        "review.refused.phone_taken": (
+            "Bu raqam kompaniyaning boshqa aloqasida bor — oʻzgarmadi."
+        ),
+        # --- /tel (a manager, 06 §1.7) ----------------------------------------
+        "tel.how": "/tel &lt;karta raqami&gt; &lt;+998901234567&gt;",
+        "tel.done": "✅ Raqam yozildi — lid CRMʼga yuboriladi ({score}/100).",
+        "tel.held": (
+            "Raqam yozildi, lekin lid hali yuborilmaydi ({score}/100) — kutishda qoldi."
+        ),
+        "tel.gated": (
+            "Raqam yozildi, lekin lid CRMʼga yuborilmaydi ({score}/100) — firma "
+            "tekshiruvdan oʻtmadi (mijoz, DNC yoki B2C boʻlishi mumkin)."
+        ),
+        "tel.no_card": "Bunday karta yoʻq.",
+        "tel.not_yours": "Bu karta sizga tegishli emas.",
+        "tel.stale": "Bu karta yopilgan — raqam yozilmadi.",
+        "tel.bad_phone": "Bu Oʻzbekiston mobil yoki shahar raqami emas.",
+        "tel.not_waiting": "Bu nomzod endi kutishda emas — raqam yozilmadi.",
+        "tel.no_source": "Dalil topilmadi — raqam yozilmadi.",
         "review.merge_title": "🔀 Qaysi kompaniyaga birlashtiray?",
         # --- /manbalar ---------------------------------------------------------
         "manbalar.title": "🛰 Manbalar ({page}/{pages})",
@@ -235,6 +280,7 @@ COMMAND_MENU: Final[tuple[tuple[str, str], ...]] = (
 )
 MANAGER_MENU: Final[tuple[tuple[str, str], ...]] = (
     ("qidir", "Kompaniyani qidirish"),
+    ("tel", "Mijoz bergan raqamni yozish"),
     ("yordam", "Buyruqlar roʻyxati"),
 )
 

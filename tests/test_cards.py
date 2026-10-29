@@ -22,6 +22,7 @@ import pytest
 
 from clientscrapper.bot import keyboards
 from clientscrapper.services import cards, gates
+from clientscrapper.services.candidates import PersonView
 from clientscrapper.services.cards import CardRefused, ManagerView, ReviewView
 from clientscrapper.services.suppression import Hit
 from tests.fixtures.candidate_views import BREAKDOWN, sig, view
@@ -224,6 +225,60 @@ def test_a_shared_phone_adds_its_warning_line():
     lines = cards.render_review(review(shared_phone=True)).text.splitlines()
     assert lines[5] == "⚠️ Raqam 3+ firmada uchraydi"
     assert lines[4].startswith("📞 +998 90 000 00 61")
+
+
+def test_the_quote_line_names_the_messages_author_before_the_source():
+    lines = cards.render_review(review(author="Rustam Karimov")).text.splitlines()
+    assert (
+        lines[5] == "🔎 «5 kub mato kerak» — Rustam Karimov · Telegram guruh, 25.10.2026"
+    )
+    # Escaped like every value from the database.
+    lines = cards.render_review(review(author="<b>A&B</b>")).text.splitlines()
+    assert lines[5].startswith("🔎 «5 kub mato kerak» — &lt;b&gt;A&amp;B&lt;/b&gt; · ")
+
+
+def test_the_person_holding_the_shown_phone_is_named_as_its_holder():
+    person = view(person=PersonView("Rustam Karimov", "direktori", None))
+    held = cards.render_review(review(candidate=person, person_holds_phone=True))
+    assert held.text.splitlines()[4] == (
+        "📞 +998 90 000 00 61 (mobil) · 👤 Rustam Karimov, direktori (raqam egasi)"
+        " · @namuna_tekstil · IG namuna_tekstil · namuna-tekstil.example.uz"
+    )
+    # A person who does not hold the number is not called its holder.
+    other = cards.render_review(review(candidate=person)).text.splitlines()[4]
+    assert "👤 Rustam Karimov, direktori · @namuna_tekstil" in other
+    assert cards.PHONE_HOLDER_UZ not in other
+
+
+def test_a_push_refusal_note_is_line_two_and_the_owners_word_is_not_shown():
+    lines = cards.render_review(review(note="Ball tushdi: 58 < 60")).text.splitlines()
+    assert lines[1] == "⚠️ Ball tushdi: 58 &lt; 60"
+    assert lines[2].startswith("🏢 Namuna Tekstil Savdo")
+    shared = review(note="shared_ok · Raqam DNC roʻyxatida")
+    assert cards.render_review(shared).text.splitlines()[1] == ("⚠️ Raqam DNC roʻyxatida")
+    # The owner's word alone is no refusal: no line at all.
+    assert cards.render_review(review(note="shared_ok")).text == OWNER_CARD
+    assert cards.refusal_note(None) is None
+    assert cards.refusal_note("  ") is None
+
+
+def test_an_answered_card_keeps_its_body_without_the_gate_line_or_the_note():
+    answered = cards.render_review(review(note="Ball tushdi"), answered=True)
+    assert answered.text == OWNER_CARD.rsplit("\n", 1)[0]
+    # Its gates are not asked again: once pushed, gate 6 reads the push
+    # itself as «sent within 90 days» — the answered card is still shown.
+    sent = gates.Recent(company_push_until=NOW + timedelta(days=89))
+    assert cards.render_review(review(gate=gate(sent)), answered=True).text == (
+        answered.text
+    )
+    with pytest.raises(CardRefused):
+        cards.render_review(review(gate=gate(sent)))
+
+
+def test_a_footer_is_appended_after_a_blank_line_and_escaped():
+    line = cards.footer("merge", target="A<B")
+    assert line == "🔀 Birlashtirildi → A&lt;B"
+    assert cards.with_footer("body", line) == "body\n\n🔀 Birlashtirildi → A&lt;B"
 
 
 MANAGER_CARD = (

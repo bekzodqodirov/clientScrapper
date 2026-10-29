@@ -87,7 +87,7 @@ from clientscrapper.db.models import (
     UsageLog,
 )
 from clientscrapper.db.session import session_scope
-from clientscrapper.services import backup, costs, crontab
+from clientscrapper.services import backup, costs, crontab, smoke
 
 log = logging.getLogger(__name__)
 
@@ -109,6 +109,8 @@ _VARIANT = re.compile(r"[a-z][a-z0-9_]{0,30}")
 # cost_cap with the same prefix, so the two share one memory.
 ALERT_KIND: Final = costs.ALERT_KIND
 RECOVERED_KIND: Final = "recovered:"
+# A told-first key its own job could not deliver (costs.UNDELIVERED_KIND).
+UNDELIVERED_KIND: Final = costs.UNDELIVERED_KIND
 
 Severity = Literal["critical", "warning"]
 
@@ -134,6 +136,7 @@ PROBLEM_KEYS: Final = (
     costs.SPEND_HIGH_KEY,
     "no_signals_24h",
     "push_failing",
+    "push_rejected",
     "push_unconfirmed",
     "feed_contract",
     "suppression_shrunk",
@@ -166,7 +169,11 @@ SUPPRESSION_STALE_CRITICAL_AFTER: Final = timedelta(hours=6)
 # repeat window and announces their recovery (06 §4.2). Not flood_breaker:
 # the reader that trips it must not be the one to report it (06 §4.3 — the
 # worker watches the userbot), so the sweep says it first.
-TOLD_FIRST_ELSEWHERE: Final = frozenset({costs.COST_CAP_KEY, "push_404", "erp_redirect"})
+# push_rejected (an ERP 4xx other than 404 on a push, 05 §B.1 «owner alert»)
+# is told at once by crm_push the same way.
+TOLD_FIRST_ELSEWHERE: Final = frozenset(
+    {costs.COST_CAP_KEY, "push_404", "erp_redirect", "push_rejected"}
+)
 # 04 §8: the spend alerts are said once per Tashkent business day, not every
 # ALERT_REPEAT_HOURS — cost_cap holds all day once it is reached, and the
 # monthly cap all month.
@@ -175,9 +182,13 @@ DAILY_KEYS: Final = frozenset({costs.COST_CAP_KEY, costs.SPEND_HIGH_KEY})
 REPEAT_OVERRIDES: Final[Mapping[str, timedelta]] = {
     "source_low_precision": timedelta(days=7),
 }
-# Keys whose repeat window runs per subject (a source), not per key: the
-# ledger row's ``ref`` is ``<key>:<subject>``.
-PER_SUBJECT_KEYS: Final = frozenset({"source_low_precision"})
+# Keys whose repeat window runs per subject, not per key: the ledger row's
+# ``ref`` is ``<key>:<subject>``. job_failing's subjects are its items — a
+# scheduler job (``job:<id>``), a collector cadence (``run:<key>[.<variant>]``)
+# and the resolver backlog — so one failing item never hides another for
+# ALERT_REPEAT_HOURS: above all the health sweep's own streak, which only
+# the bot's watchdog can say (``sweep_failing``).
+PER_SUBJECT_KEYS: Final = frozenset({"source_low_precision", "job_failing"})
 # Raised and cleared by the module that sees them (raise_problem): the event
 # is that module's, so is the moment it is over.
 REPORTED_KEYS: Final = frozenset(
@@ -187,6 +198,7 @@ REPORTED_KEYS: Final = frozenset(
         "suppression_shrunk",  # full pull (T-09)
         "feed_contract",  # any feed call: detail.code (T-09/T-10)
         "push_unconfirmed",  # reconcile_unconfirmed after healthy walks (T-10)
+        "push_rejected",  # crm_push on a 4xx; the next push the ERP takes clears it
         "anthropic_failing",  # the instant lane's failure streak (T-15)
         "pii_leak",  # validators (T-15)
         "ig_token_expired",  # Graph 190 (T-26)
@@ -235,6 +247,8 @@ FAILING_LOOKBACK: Final = timedelta(days=100)
 # The resolver takes ≤ 200 observations every 2 minutes (04 §0, 6,000 an
 # hour): one still 'new' after this long means it is not working them off.
 RESOLVE_BACKLOG_AGE: Final = timedelta(hours=6)
+# job_failing's subject for that backlog line (PER_SUBJECT_KEYS).
+RESOLVE_BACKLOG_SUBJECT: Final = "resolve_backlog"
 # Lines of a list inside one problem (collector_blocked, collector_silent …).
 MAX_LINES: Final = 10
 
@@ -761,9 +775,11 @@ async def reported_problems(session: AsyncSession, now: datetime) -> dict[str, R
 
 
 async def _sources(session: AsyncSession) -> tuple[SourceState, ...]:
+    # A smoke test's row is ``skipped`` too, but the scheduler never fired the
+    # source: it must not restart a silent collector's clock (services/smoke).
     found = await session.execute(
         sa.select(CollectorRun.source_key, sa.func.max(CollectorRun.started_at))
-        .where(CollectorRun.status == "skipped")
+        .where(CollectorRun.status == "skipped", smoke.not_smoke())
         .group_by(CollectorRun.source_key)
     )
     skipped: dict[str, datetime] = {str(key): at for key, at in found.all()}
@@ -1126,6 +1142,16 @@ def erp_breaker_text(key: str, detail: str = "") -> str:
     raise ValueError(f"{key!r} is not an ERP breaker key")
 
 
+def push_rejected_text(status: int | None) -> str:
+    """push_rejected's line (05 §B.1): a 4xx other than 404 on a push — the
+    ERP door answers the agent only 200 / 404 / 503, so it is a proxy or a
+    wrong ``CRM_BASE_URL``. crm_push says it first, the sweep repeats it."""
+    return (
+        f"⚠️ ERP pushni rad etdi (HTTP {status or '4xx'}): <code>.env</code> dagi "
+        "CRM_BASE_URL va ERP oldidagi proksini tekshiring; lid koʻrib chiqishga qaytdi"
+    )
+
+
 def blocked_sources(status: Status) -> list[SourceState]:
     return [
         s
@@ -1274,6 +1300,76 @@ def _streak(component: Component) -> int:
     if component.detail.get("ok") is not False or isinstance(failures, bool):
         return 0
     return failures if isinstance(failures, int) else 0
+
+
+# The sweep's own scheduler id: when it is the job that keeps raising, it
+# cannot say so itself (06 §4.3), so the bot's watchdog reads its beat.
+HEALTH_JOB: Final = "health"
+# The error a ``job:health`` beat carries for a run the scheduler skipped
+# because the previous one never ended (APScheduler's max_instances=1): a
+# hung sweep raises nothing, so the worker counts each skip as a failed run
+# (``worker.on_job_skipped``) and the watchdog sees the streak.
+STILL_RUNNING: Final = "still_running"
+
+
+def job_subject(job_id: str) -> str:
+    """job_failing's subject for one scheduler job (``PER_SUBJECT_KEYS``)."""
+    return JOB_PREFIX + job_id
+
+
+def failing_job_line(job: Component, runs: int) -> str:
+    """job_failing's line for one scheduler job (the sweep and the watchdog
+    say it in these words)."""
+    if job.detail.get("error") == STILL_RUNNING:
+        return (
+            f"⚠️ <code>{escape(job.name)}</code> ishi tugamayapti: oxirgi {runs} ta "
+            "navbati oʻtkazib yuborildi — <code>make worker</code> loglari"
+        )
+    return (
+        f"⚠️ <code>{escape(job.name)}</code> ishi oxirgi {runs} marta xato bilan "
+        f"tugadi ({escape(job.detail.get('error') or '?')}) — "
+        "<code>make worker</code> loglari"
+    )
+
+
+def sweep_failing(status: Status) -> Problem | None:
+    """job_failing for the health sweep alone: its ``job:health`` beat says it
+    raised — or was skipped while a hung run held its place — ``JOB_FAILING_
+    STREAK`` times or more in a row (the worker is up — a dead worker is
+    worker_silent). The bot's watchdog says it, since a sweep that crashes
+    never reaches its own judgement; its subject is the sweep's own, so an
+    unrelated failing job said earlier never holds it back."""
+    job = status.jobs.get(HEALTH_JOB)
+    if job is None or not worker_fresh(status):
+        return None
+    runs = _streak(job)
+    if runs < JOB_FAILING_STREAK:
+        return None
+    line = failing_job_line(job, runs)
+    return Problem("job_failing", "warning", line, ((job_subject(HEALTH_JOB), line),))
+
+
+def status_from_beats(rows: Mapping[str, Heartbeat], now: datetime) -> Status:
+    """What the heartbeats alone say — the processes and the jobs — for a
+    reader whose ``gather`` failed with the database up (the watchdog): its
+    worker_silent and :func:`sweep_failing` hold on it; nothing else is
+    judged from it."""
+    return Status(
+        now=now,
+        db_ok=True,
+        disk_free_bytes=None,
+        disk_total_bytes=None,
+        disk_low=False,
+        backup=BackupInfo(configured=True),
+        components={
+            name: component_of(name, rows.get(name), now=now) for name in COMPONENTS
+        },
+        jobs={
+            key[len(JOB_PREFIX) :]: component_of(key[len(JOB_PREFIX) :], row, now=now)
+            for key, row in rows.items()
+            if key.startswith(JOB_PREFIX)
+        },
+    )
 
 
 def failing_jobs(status: Status) -> list[tuple[Component, int]]:
@@ -1498,28 +1594,38 @@ def problems(status: Status) -> list[Problem]:
     ]
     if silent:
         add("collector_silent", _lines(silent))
-    failing = [
-        f"⚠️ <code>{escape(job.name)}</code> ishi oxirgi {n} marta xato bilan "
-        f"tugadi ({escape(job.detail.get('error') or '?')}) — "
-        "<code>make worker</code> loglari"
+    # One subject per item (PER_SUBJECT_KEYS): each is said on its own clock.
+    failing: list[tuple[str, str]] = [
+        (job_subject(job.name), failing_job_line(job, n))
         for job, n in failing_jobs(status)
     ]
     failing += [
-        f"⚠️ {escape(source.title_uz)}"
-        f"{' · ' + escape(run.variant) if run.variant else ''}: oxirgi {run.runs} ta "
-        f"ishga tushirish xato bilan tugadi ({escape(run.error)}) — "
-        "<code>make worker</code> loglari; /manbalar"
+        (
+            f"run:{run.source_key}{'.' + run.variant if run.variant else ''}",
+            f"⚠️ {escape(source.title_uz)}"
+            f"{' · ' + escape(run.variant) if run.variant else ''}: oxirgi {run.runs} ta "
+            f"ishga tushirish xato bilan tugadi ({escape(run.error)}) — "
+            "<code>make worker</code> loglari; /manbalar",
+        )
         for source, run in failing_collectors(status)
     ]
     waited = resolve_backlog(status)
     if waited is not None:
         failing.append(
-            f"⚠️ {status.queues.observations_new} ta topilma navbatda kutmoqda (eng "
-            f"eskisi {age_label(waited)}) — saralash (resolve) ishlamayapti; "
-            "<code>make worker</code> loglari"
+            (
+                RESOLVE_BACKLOG_SUBJECT,
+                f"⚠️ {status.queues.observations_new} ta topilma navbatda kutmoqda "
+                f"(eng eskisi {age_label(waited)}) — saralash (resolve) ishlamayapti; "
+                "<code>make worker</code> loglari",
+            )
         )
     if failing:
-        add("job_failing", _lines(failing))
+        found["job_failing"] = Problem(
+            "job_failing",
+            "warning",
+            _lines([line for _, line in failing]),
+            tuple(failing),
+        )
     for alert in costs.spend_alerts(
         status.spend,
         daily_cap=settings.daily_cost_cap_usd,
@@ -1545,6 +1651,16 @@ def problems(status: Status) -> list[Problem]:
             "push_failing",
             f"⚠️ ERP javob bermayapti ({status.push_failing_streak} ta push "
             "muvaffaqiyatsiz)",
+        )
+    if "push_rejected" in rep:
+        status_code = rep["push_rejected"].detail.get("status")
+        add(
+            "push_rejected",
+            push_rejected_text(
+                status_code
+                if isinstance(status_code, int) and not isinstance(status_code, bool)
+                else None
+            ),
         )
     if "push_unconfirmed" in rep:
         add(
@@ -1683,6 +1799,7 @@ _RECOVERY: Final[Mapping[str, str]] = {
     costs.SPEND_HIGH_KEY: "✅ Xarajat yana chegara ichida — tiklandi",
     "no_signals_24h": "✅ Telegramdan yana signal kelyapti — tiklandi",
     "push_failing": "✅ ERP yana javob beryapti — tiklandi",
+    "push_rejected": "✅ ERP pushlarni yana qabul qilyapti — tiklandi",
     "push_unconfirmed": "✅ Hamma push ERPda koʻrindi — tiklandi",
     "feed_contract": "✅ ERP feed yana kutilgan shaklda — tiklandi",
     "suppression_shrunk": "✅ ERP roʻyxati qisqarmadi — tiklandi",
@@ -1772,8 +1889,30 @@ def _repeat(key: str) -> timedelta:
     return REPEAT_OVERRIDES.get(key, timedelta(hours=settings.alert_repeat_hours))
 
 
+def _undelivered(last: Mapping[str, datetime], key: str, now: datetime) -> bool:
+    """The key's own teller gave up on this episode: an ``undelivered:<key>``
+    row newer than the key's last recovery and inside its repeat window (a
+    ``DAILY_KEYS`` key: this Tashkent day) — an older one is another
+    episode's."""
+    at = last.get(UNDELIVERED_KIND + key)
+    if at is None:
+        return False
+    cleared = last.get(RECOVERED_KIND + key)
+    if cleared is not None and cleared >= at:
+        return False
+    if key in DAILY_KEYS:
+        return at >= costs.day_start(now)
+    return now - at <= _repeat(key)
+
+
 def _alert_due(last: Mapping[str, datetime], key: str, now: datetime) -> bool:
-    if key in TOLD_FIRST_ELSEWHERE and not _told(last, key):
+    # Said first by its own job — unless that job could not deliver it: then
+    # the sweep says it, or nobody ever would (06 §4.2).
+    if (
+        key in TOLD_FIRST_ELSEWHERE
+        and not _told(last, key)
+        and not _undelivered(last, key, now)
+    ):
         return False
     alerted = last.get(ALERT_KIND + key)
     if alerted is None:
@@ -1819,6 +1958,7 @@ def _narrowed(problem: Problem, subjects: tuple[tuple[str, str], ...]) -> Proble
 async def _ledger(session: AsyncSession, keys: Iterable[str]) -> dict[str, datetime]:
     wanted = list(keys)
     kinds = [ALERT_KIND + k for k in wanted] + [RECOVERED_KIND + k for k in wanted]
+    kinds += [UNDELIVERED_KIND + k for k in wanted if k in TOLD_FIRST_ELSEWHERE]
     rows = await session.execute(
         sa.select(ReminderLog.kind, sa.func.max(ReminderLog.sent_at))
         .where(ReminderLog.kind.in_(kinds))

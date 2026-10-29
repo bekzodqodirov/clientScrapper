@@ -14,9 +14,12 @@ stopped:
 * the 5-minute watchdog: the worker is the only process that speaks
   unprompted, so its silence is the one failure nothing else would report.
   The watchdog judges ``worker_silent`` and ``db_down`` alone (every other
-  key is the worker's health sweep's), through the same alert ledger — so
-  neither process repeats the other — and, with the database gone, an
-  in-memory memo the next reachable tick writes into the ledger.
+  key is the worker's health sweep's) — and the sweep itself failing
+  (``job:health``'s streak, ``health.sweep_failing``: a crashing sweep never
+  says it), from the heartbeats alone when ``gather`` itself raises —
+  through the same alert ledger, so neither process repeats the other, and,
+  with the database gone, an in-memory memo the next reachable tick writes
+  into the ledger.
 
 The process wires the seams every process that may refuse a paid call or
 judge health registers (``costs.set_anthropic_health``,
@@ -76,6 +79,9 @@ DB_DOWN: Final = (
 )
 # What the watchdog speaks for; every other key is the worker's sweep's.
 WATCHED: Final = frozenset({"worker_silent", "db_down"})
+# And one line of a key it never judges whole: the sweep itself failing
+# (``health.sweep_failing``) — a crashing sweep cannot say it. The watchdog
+# never announces job_failing's recovery: the sweep, back, judges the key.
 UNWATCHED: Final = frozenset(health.PROBLEM_KEYS) - WATCHED
 
 Sleep = Callable[[float], Awaitable[None]]
@@ -137,13 +143,38 @@ def wire(bot: Bot) -> health.OwnerNotify:
 _offline: dict[str, datetime] = {}
 
 
+def watched(status: health.Status) -> list[health.Problem]:
+    """The watchdog's problems: ``WATCHED`` and a failing health sweep."""
+    found = [p for p in health.problems(status) if p.key in WATCHED]
+    sweep = health.sweep_failing(status)
+    return [*found, sweep] if sweep is not None else found
+
+
+async def _from_beats(
+    notify: health.OwnerNotify, now: datetime
+) -> health.TellReport | None:
+    """``gather`` raised with the database up — the sweep's own code is what
+    fails, so it is likely failing in the worker too: judge what the
+    heartbeats alone say (``health.status_from_beats``)."""
+    try:
+        async with session_scope() as session:
+            status = health.status_from_beats(await health.beats(session), now)
+            return await health.tell(
+                session, watched(status), notify, now=now, unjudged=UNWATCHED
+            )
+    except Exception as exc:
+        log.warning("watchdog fallback failed", extra={"error": type(exc).__name__})
+        return None
+
+
 async def watchdog_tick(
     notify: health.OwnerNotify,
     *,
     now: datetime | None = None,
     memo: dict[str, datetime] | None = None,
 ) -> health.TellReport | None:
-    """One pass over ``worker_silent`` and ``db_down``. Never raises."""
+    """One pass over ``worker_silent``, ``db_down`` and a failing health
+    sweep. Never raises."""
     now = now or datetime.now(settings.tz)
     memo = _offline if memo is None else memo
     status: health.Status | None = None
@@ -152,14 +183,16 @@ async def watchdog_tick(
             status = await health.gather(session, now=now)
             if status.db_ok:
                 await health.adopt_offline(memo)
-                found = [p for p in health.problems(status) if p.key in WATCHED]
                 return await health.tell(
-                    session, found, notify, now=now, unjudged=UNWATCHED
+                    session, watched(status), notify, now=now, unjudged=UNWATCHED
                 )
     except Exception as exc:
         if status is not None and status.db_ok:
             log.warning("watchdog tick failed", extra={"error": type(exc).__name__})
             return None
+        if status is None and not isinstance(exc, DB_DOWN):
+            log.warning("watchdog: gather failed", extra={"error": type(exc).__name__})
+            return await _from_beats(notify, now)
     if status is None:
         return None
     found = [p for p in health.problems(status) if p.key in WATCHED]

@@ -161,6 +161,14 @@ def lidlar_holat_text(holat: LidlarHolat, now: datetime) -> str:
         out.append(t("lidlar.holat_oldest", age=age(holat.review_oldest_at, now)))
     else:
         out.append(t("lidlar.holat_no_review"))
+    if holat.auto_waiting_total:
+        # The auto-approved candidates a push refused: their note's home
+        # (lead_candidates.push_note, 04 §7 item 14).
+        out.append(t("lidlar.holat_auto", n=holat.auto_waiting_total))
+        out += [
+            t("lidlar.holat_auto_line", name=esc(w.display_name), note=esc(w.note))
+            for w in holat.auto_waiting
+        ]
     return "\n".join(out)
 
 

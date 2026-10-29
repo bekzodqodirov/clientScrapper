@@ -64,6 +64,7 @@ from clientscrapper.services import (
     companies,
     costs,
     erp_feeds,
+    health,
     outcomes,
     push_gate,
 )
@@ -840,7 +841,10 @@ BREAKER_ERRORS: Final[Mapping[str, erp_feeds.BreakerKey]] = {
     "http_404": "push_404",
     "http_3xx": "erp_redirect",
 }
-REJECTED_ALERT_KEY: Final = "push_rejected"
+# 06 §4.2 push_rejected: raised here on a 4xx other than 404 and told at once
+# (TOLD_FIRST_ELSEWHERE), cleared by the next push the ERP takes — so a tell
+# Telegram did not deliver is said by the health sweep, and its recovery too.
+REJECTED_PROBLEM: Final = "push_rejected"
 # Answers true of every push at this moment (05 §B.1): the job ends its run on
 # them. A 4xx other than 404 is a proxy or a wrong CRM_BASE_URL — the ERP door
 # answers the agent only 200 / 404 / 503 — so the candidate it hit goes back
@@ -1086,12 +1090,22 @@ async def _record(
         await erp_feeds.trip_breaker(
             session, breaker, status=answer.http_status or 0, now=now, by="push"
         )
+    if answer.error == "http_4xx":
+        await health.raise_problem(
+            session,
+            REJECTED_PROBLEM,
+            now=now,
+            by="push",
+            detail={"status": answer.http_status},
+        )
+    elif answer.status == "sent":
+        await health.clear_problem(session, REJECTED_PROBLEM)
     await session.commit()
     if breaker is not None:
         await erp_feeds.tell_breaker(breaker, status=answer.http_status or 0, now=now)
     elif answer.error == "http_4xx":
         await costs.tell_once(
-            REJECTED_ALERT_KEY, rejected_text(answer.http_status), now=now
+            REJECTED_PROBLEM, rejected_text(answer.http_status), now=now
         )
     log.info(
         "push %s",
@@ -1114,13 +1128,9 @@ async def _record(
 
 
 def rejected_text(status: int | None) -> str:
-    """The owner's line for a 4xx other than 404 (05 §B.1): the ERP door
-    answers the agent only 200 / 404 / 503, so it is a proxy or a wrong
-    ``CRM_BASE_URL``."""
-    return (
-        f"⚠️ ERP pushni rad etdi (HTTP {status or '4xx'}): <code>.env</code> dagi "
-        "CRM_BASE_URL va ERP oldidagi proksini tekshiring; lid koʻrib chiqishga qaytdi"
-    )
+    """The owner's line for a 4xx other than 404 (05 §B.1) — health's, the
+    one home of its words (push_rejected)."""
+    return health.push_rejected_text(status)
 
 
 # --- crm_push_job (every minute inside the window) -----------------------------------

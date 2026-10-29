@@ -32,7 +32,10 @@ outcomes/quarter/year walks), each ``run_collector(ErpSync, variant=…)``;
 ``cs_interaction``); the batch lane (T-16, ``services/model_jobs``):
 ``model_batch_submit`` at 23:30 and ``model_batch_collect`` every 30 minutes
 00:30–08:00; ``score`` (T-18, ``services/candidates.score_job``, every 15
-minutes and at once on ``cs_interaction``); ``crm_push`` (T-28,
+minutes and at once on ``cs_interaction``); ``review_cards`` (T-21,
+``services/reviews.review_cards_job``, every 2 minutes: the expiry sweep at
+any hour, the cards inside ``REVIEW_HOURS``, through the owner bot's
+``BotCards`` that ``connect_owner_bot`` wires); ``crm_push`` (T-28,
 ``services/crm_push.crm_push_job``, every minute, sending only inside the
 push window) and ``reconcile`` (T-28, ``crm_push.reconcile_job``, every 10
 minutes: a crashed claim, the ``unknown`` outcomes walk, rule 5's re-push).
@@ -87,7 +90,13 @@ from typing import Any, Final
 
 import httpx
 import sqlalchemy as sa
-from apscheduler.events import EVENT_JOB_ERROR, EVENT_JOB_EXECUTED, JobExecutionEvent
+from apscheduler.events import (
+    EVENT_JOB_ERROR,
+    EVENT_JOB_EXECUTED,
+    EVENT_JOB_MAX_INSTANCES,
+    JobExecutionEvent,
+    JobSubmissionEvent,
+)
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.base import BaseTrigger
 from apscheduler.triggers.combining import OrTrigger
@@ -110,10 +119,12 @@ from clientscrapper.services import (
     costs,
     crm_push,
     crontab,
+    digest,
     erp_feeds,
     health,
     model_jobs,
     restore_drill,
+    reviews,
 )
 from clientscrapper.services import http as http_layer
 from clientscrapper.services.lifecycle import (
@@ -170,18 +181,22 @@ def connect_owner_bot() -> Any | None:
     aiogram is imported here, not at the top: the scheduler's tests import
     this module and need no Telegram client."""
     from clientscrapper.bot import deliver
+    from clientscrapper.bot.cards_out import BotCards
 
     if not deliver.configured():
         return None
     bot = deliver.make_bot()
     set_owner_notifier(deliver.owner_notifier(bot))
     set_backup_sender(deliver.document_sender(bot))
+    # review_cards_job's cards (T-21): the owner's and the managers' only.
+    reviews.set_card_sender(BotCards(bot))
     return bot
 
 
 async def disconnect_owner_bot(bot: Any | None) -> None:
     set_owner_notifier(None)
     set_backup_sender(None)
+    reviews.set_card_sender(None)
     if bot is not None:
         with contextlib.suppress(Exception):
             await bot.session.close()
@@ -337,7 +352,13 @@ def job_table() -> tuple[JobSlot, ...]:
             candidates.score_job,
             wakes_on=chats.INTERACTION_CHANNEL,
         ),
-        JobSlot("review_cards", ("every 2m",), "T-21", note="sends inside REVIEW_HOURS"),
+        JobSlot(
+            "review_cards",
+            ("every 2m",),
+            "T-21",
+            reviews.review_cards_job,
+            note="sends inside REVIEW_HOURS",
+        ),
         JobSlot("enrich", ("*/10 7-21 * * *",), "T-24", note="every 10 min 07:00–22:00"),
         JobSlot("verdict", ("every 10m",), "T-30"),
         # --- 05: push, reconcile, precision ---------------------------------------
@@ -351,7 +372,14 @@ def job_table() -> tuple[JobSlot, ...]:
         JobSlot("reconcile", ("every 10m",), "T-28", crm_push.reconcile_slot),
         JobSlot("source_precision", ("0 4 * * 0",), "T-36"),
         # --- 06: digest, retention --------------------------------------------------
-        JobSlot("digest", (_at(settings.digest_time_parsed),), "T-35"),
+        JobSlot(
+            "digest",
+            (_at(settings.digest_time_parsed),),
+            "T-35",
+            digest_job,
+            note="an undelivered one is tried again with a backoff while it is due",
+            pass_scheduler=True,
+        ),
         JobSlot("retention", ("15 4 * * *",), "T-31"),
     )
 
@@ -659,6 +687,22 @@ def on_job_event(
     )
 
 
+def on_job_skipped(
+    event: JobSubmissionEvent, *, loop: asyncio.AbstractEventLoop
+) -> asyncio.Future[None] | Any | None:
+    """APScheduler listener (EVENT_JOB_MAX_INSTANCES): a run skipped because
+    the previous one of the same job has not ended. Only the health sweep's
+    skip is a failed run (``health.STILL_RUNNING``): a hung sweep raises
+    nothing and says nothing, and the bot's watchdog reads its streak
+    (``health.sweep_failing``). Any other job may outlast its interval
+    legitimately (a long collector run) — its skip is no failure."""
+    if event.job_id != health.HEALTH_JOB:
+        return None
+    return asyncio.run_coroutine_threadsafe(
+        record_job_event(event.job_id, ok=False, error=health.STILL_RUNNING), loop
+    )
+
+
 async def prune_job_heartbeats(registered: list[str]) -> int:
     """Drop ``job:*`` rows of jobs this worker no longer runs, so /holat never
     names a retired job."""
@@ -676,6 +720,10 @@ async def prune_job_heartbeats(registered: list[str]) -> int:
 @dataclass(slots=True)
 class _Deadman:
     last: float | None = None
+    # The last ping's answer, carried in the next «worker» beat (``seen``) so
+    # the digest can say the outside watcher is not taking pings — a wrong
+    # URL is otherwise silent until the day it should have alarmed.
+    seen: dict[str, Any] | None = None
 
 
 _deadman = _Deadman()
@@ -692,7 +740,13 @@ async def deadman_ping(*, transport: httpx.AsyncBaseTransport | None = None) -> 
         return False
     _deadman.last = now
     status = await http_layer.ping(url, transport=transport)
-    return status is not None and 200 <= status < 300
+    ok = status is not None and 200 <= status < 300
+    _deadman.seen = {
+        "at": datetime.now(settings.tz).isoformat(),
+        "ok": ok,
+        "status": status,
+    }
+    return ok
 
 
 async def heartbeat_job(
@@ -704,8 +758,11 @@ async def heartbeat_job(
     only after the beat is durable, so a dead database stops the ping too and
     the outside watcher notices."""
     jobs = len(scheduler.get_jobs()) if scheduler is not None else 0
+    detail: dict[str, Any] = {"jobs": jobs}
+    if _deadman.seen is not None:
+        detail["deadman"] = dict(_deadman.seen)
     async with session_scope() as session:
-        await health.beat(session, "worker", detail={"jobs": jobs})
+        await health.beat(session, "worker", detail=detail)
     await deadman_ping(transport=transport)
 
 
@@ -775,6 +832,88 @@ async def health_job(
     _log_problems(found, now)
     await health.tell_offline(found, speak, now=now, memo=_offline_alerted_at)
     return None
+
+
+# --- the digest (06 §1.8) --------------------------------------------------------------
+
+
+# A digest Telegram did not take (or the owner seam not wired yet) is tried
+# again this long after each attempt, the last step repeating, while it is
+# still due (``digest_due``): a blip at 09:00 must not cost the day's digest.
+DIGEST_RETRY: Final = (
+    timedelta(minutes=5),
+    timedelta(minutes=15),
+    timedelta(minutes=30),
+    timedelta(hours=1),
+)
+
+
+@dataclass(slots=True)
+class _DigestRetry:
+    day: str | None = None
+    tries: int = 0
+
+
+_digest_retry = _DigestRetry()
+
+
+def _retry_digest(scheduler: AsyncIOScheduler | None, now: datetime) -> datetime | None:
+    """Move the digest job's next run to the next backoff step (the cron's
+    own job: ``max_instances=1`` holds), or None when it is due no longer
+    then or there is no scheduler to ask."""
+    day = digest.day_ref(now)
+    if _digest_retry.day != day:
+        _digest_retry.day, _digest_retry.tries = day, 0
+    wait = DIGEST_RETRY[min(_digest_retry.tries, len(DIGEST_RETRY) - 1)]
+    _digest_retry.tries += 1
+    at = now + wait
+    if not digest_due(at) or not _run_now(scheduler, "digest", at):
+        log.warning("digest not delivered; due again at the next start-up")
+        return None
+    log.warning("digest not delivered; tried again", extra={"at": at.isoformat()})
+    return at
+
+
+async def digest_job(
+    scheduler: AsyncIOScheduler | None = None,
+    *,
+    now: datetime | None = None,
+    notify: health.OwnerNotify | None = None,
+) -> digest.SendOutcome:
+    """The owner's morning digest at DIGEST_TIME, once per Tashkent day
+    (``reminder_log(kind='digest')``), through the owner seam. One that was
+    not delivered — or whose run raised — is tried again (``DIGEST_RETRY``)
+    while it is still due."""
+    now = now or datetime.now(settings.tz)
+    outcome: digest.SendOutcome = "undelivered"
+    try:
+        outcome = await digest.send(notify or _seams.notify, now=now)
+    finally:
+        if outcome == "undelivered":
+            _retry_digest(scheduler, now)
+    return outcome
+
+
+def digest_due(now: datetime) -> bool:
+    """Past today's DIGEST_TIME and still inside REVIEW_HOURS (DIGEST_TIME's
+    own window, 06 §1.6): a digest the worker missed — down at 09:00, or the
+    owner's Telegram unreachable then — is still worth sending."""
+    local = now.astimezone(settings.tz)
+    start, end = settings.review_hours_parsed
+    return settings.digest_time_parsed <= local.time() < end and local.time() >= start
+
+
+async def _catch_up_digest(now: datetime, scheduler: AsyncIOScheduler | None) -> None:
+    """Today's digest when it is due and not sent yet (``digest_due``)."""
+    if not digest_due(now):
+        return
+    try:
+        async with session_scope() as session:
+            sent = await digest.sent_today(session, now)
+        if not sent and _run_now(scheduler, "digest", now):
+            log.info("catch-up: today's digest was not sent; sending it")
+    except Exception as exc:
+        log.error("catch-up of the digest failed", extra={"error": type(exc).__name__})
 
 
 # --- backups -------------------------------------------------------------------------
@@ -932,10 +1071,11 @@ async def catch_up(
     and one spanning 03:00 that night's outcomes walks (the next delta does
     not make them). Through ``scheduler`` the job is moved to now rather than
     called here. Every branch is guarded: a startup path that can raise is a
-    crash loop under ``restart: unless-stopped``. (The digest's catch-up is
-    T-35's.)"""
+    crash loop under ``restart: unless-stopped``. Today's digest too, when
+    DIGEST_TIME went by unsent (``digest_due``)."""
     now = now or datetime.now(settings.tz)
     await _catch_up_outcomes(now, scheduler)
+    await _catch_up_digest(now, scheduler)
     if not settings.backup_age_recipient:
         return
     try:
@@ -1211,6 +1351,10 @@ async def run() -> None:
     scheduler.add_listener(
         functools.partial(on_job_event, loop=asyncio.get_running_loop()),
         EVENT_JOB_EXECUTED | EVENT_JOB_ERROR,
+    )
+    scheduler.add_listener(
+        functools.partial(on_job_skipped, loop=asyncio.get_running_loop()),
+        EVENT_JOB_MAX_INSTANCES,
     )
     scheduler.start()
     listener = asyncio.ensure_future(listen_for_wakes(scheduler, stop))

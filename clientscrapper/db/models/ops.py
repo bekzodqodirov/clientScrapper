@@ -132,7 +132,9 @@ class UsageLog(Base):
 class ReminderLog(Base):
     """One row per reminder or alert actually sent, so nothing is said twice:
     alert:<key> | recovered:<key> | review_expired | push_unconfirmed | digest
-    | source_paused."""
+    | source_paused — and undelivered:<key>, one row per key moved to the
+    newest moment its own teller could not deliver it (costs.note_undelivered:
+    the health sweep says such a told-first key then)."""
 
     __tablename__ = "reminder_log"
 

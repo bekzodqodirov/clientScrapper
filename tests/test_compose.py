@@ -20,7 +20,10 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 APP_SERVICES = ("worker", "userbot", "bot")
-SERVICES = {"db", "init", *APP_SERVICES, "searxng"}
+# smoke (T-35): make smoke's live tests, under its own profile like searxng —
+# the VPS has no dev venv and the app image ships neither pytest nor tests/
+# (07 §1.12; 06 §3.1 lists the other six).
+SERVICES = {"db", "init", *APP_SERVICES, "searxng", "smoke"}
 
 
 def _services() -> dict[str, dict[str, Any]]:

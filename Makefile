@@ -12,7 +12,7 @@ COMPOSE := docker compose
 switch = $(if $(filter-out 0 1,$(strip $($(1)))),$(error $(1)=$($(1)): use $(1)=1 (on) or $(1)=0 (off)),$(filter 1,$(strip $($(1)))))
 .PHONY: help env doctor up update down reload logs ps psql migrate revision downgrade \
         bot worker userbot userbot-login backup backup-key backup-key-show restore \
-        import-clients erp-sync push-test purge install test lint fmt typecheck check db-test hooks smoke
+        import-clients erp-sync push-test purge install test lint fmt typecheck check db-test hooks smoke smoke-cron
 
 help: ## Show this help
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -183,5 +183,23 @@ hooks: ## Install the pre-push gate (scripts/pre-push.sh)
 	@test -x scripts/pre-push.sh || (echo "scripts/pre-push.sh yoʻq yoki bajariladigan emas" && exit 1)
 	ln -sf ../../scripts/pre-push.sh "$$(git rev-parse --git-path hooks)/pre-push"
 
-smoke: ## Live smoke tests, one real request per collector (VPS only)
-	LIVE=1 pytest -q -m live tests/live
+# The live tests run in the compose `smoke` service (the app image plus pytest
+# and tests/, 07 §1.12): the VPS has no dev venv and the app image ships
+# neither. Weekly: every live test but the `quarterly` ones; FULL=1: all of
+# them (the 1st of Jan/Apr/Jul/Oct). The outcomes land in collector_runs for
+# the next morning's digest («Tekshiruv: ✓ N / ✗ M / oʻtkazildi K»).
+SMOKE_MARK = $(if $(call switch,FULL),live,live and not quarterly)
+smoke: ## Live smoke tests, one real request per collector, VPS only (FULL=1: the quarterly full run)
+	$(COMPOSE) --profile smoke run --rm --build $(if $(call switch,FULL),-e CS_SMOKE_FULL=1,) smoke \
+		python -m pytest -q -rs -p no:cacheprovider -m "$(SMOKE_MARK)" tests/live
+
+# The host's crontab lines for this checkout (07 §1.12: Sunday 05:00 weekly,
+# quarterly on the 1st; the full run half an hour later so a Sunday 1st does
+# not run twice at once), in Tashkent time whatever the host's zone is (an
+# Ubuntu VPS runs cron in UTC): each line fires hourly and runs only when
+# `date` in SMOKE_TZ says it is the hour. `%` is escaped as cron needs.
+# Printed, not installed: docs/SMOKE.md.
+SMOKE_TZ ?= Asia/Tashkent
+smoke-cron: ## Print the VPS crontab lines for make smoke (weekly and quarterly, Tashkent time)
+	@echo '0 * * * * [ "$$(TZ=$(SMOKE_TZ) date +\%u\%H)" = 705 ] && cd $(CURDIR) && make smoke >> $(CURDIR)/data/smoke.log 2>&1'
+	@echo '30 * * * * case "$$(TZ=$(SMOKE_TZ) date +\%m\%d\%H)" in 010105|040105|070105|100105) cd $(CURDIR) && make smoke FULL=1 >> $(CURDIR)/data/smoke.log 2>&1;; esac'

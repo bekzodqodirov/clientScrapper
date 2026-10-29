@@ -70,6 +70,20 @@ services:
     cpus: 0.5
     command: ["python", "-m", "clientscrapper.bot.main"]
     healthcheck: { <<: *beat, test: ["CMD", "python", "-m", "clientscrapper.tools.healthcheck", "bot"] }
+  # `make smoke` (07 §1.12): the live tests, one real request per collector, from
+  # the VPS only — weekly and quarterly by the host's cron (`make smoke-cron`).
+  # The Dockerfile's smoke stage (the app plus pytest and tests/); it writes
+  # nothing but collector_runs rows (services/smoke.py) and runs only when
+  # asked: no restart, nobody's dependency.
+  smoke:
+    <<: *app
+    build: { context: ., target: smoke }
+    profiles: ["smoke"]
+    restart: "no"
+    mem_limit: 768m
+    cpus: 0.5
+    environment: { TZ: "${TIMEZONE:-Asia/Tashkent}", LIVE: "1" }
+    command: ["python", "-m", "pytest", "-q", "-rs", "-p", "no:cacheprovider", "-m", "live and not quarterly", "tests/live"]
   searxng:                         # optional: docker compose --profile searxng up -d
     image: searxng/searxng:2026.10.1      # UNVERIFIED tag — pin the current one on day 1
     profiles: ["searxng"]

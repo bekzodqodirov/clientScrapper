@@ -10,6 +10,10 @@ an id of ``MANAGER_TELEGRAM_IDS``; only private chats are served at all.
 minutes under a random id the confirm button carries (06 §1.2: «plan kept
 in memory 10 min (restart = send again)»). A random id, not a counter: after
 a restart an old button must not name a new plan.
+
+**The phone ✏️ waits for** (06 §1.3): the card a ✏️ tap opened, for 5
+minutes, per owner — the owner's next message is that card's phone. In memory
+like the plans (a restart: tap ✏️ again).
 """
 
 from __future__ import annotations
@@ -31,7 +35,7 @@ from clientscrapper.bot.callbacks import Callback
 from clientscrapper.bot.deliver import clip
 from clientscrapper.config import settings
 from clientscrapper.db.session import session_scope
-from clientscrapper.services import erp_feeds
+from clientscrapper.services import erp_feeds, reviews
 from clientscrapper.services.erp_feeds import ErpClient
 
 log = logging.getLogger(__name__)
@@ -101,6 +105,24 @@ class Plans:
 
 
 @dataclass(slots=True)
+class PhoneWaits:
+    """✏️'s second step: user → (the card, when ✏️ was tapped)."""
+
+    ttl: timedelta = reviews.EDIT_PHONE_WINDOW
+    _items: dict[int, tuple[int, datetime]] = field(default_factory=dict)
+
+    def put(self, user_id: int, review_id: int, *, now: datetime) -> None:
+        self._items[user_id] = (review_id, now)
+
+    def take(self, user_id: int, *, now: datetime) -> int | None:
+        """The card the user's message answers, once, while it is fresh."""
+        found = self._items.pop(user_id, None)
+        if found is None or now - found[1] > self.ttl:
+            return None
+        return found[0]
+
+
+@dataclass(slots=True)
 class Deps:
     """What the handlers reach outside Telegram."""
 
@@ -108,9 +130,7 @@ class Deps:
     clock: Callable[[], datetime] = _now
     erp: ErpFactory = _erp
     plans: Plans = field(default_factory=Plans)
-    # The answer of a review button (T-21's services/reviews): None = not
-    # wired, the tap is answered «not ready» and nothing changes.
-    review_answer: Callable[[Tap, Any], Awaitable[str | None]] | None = None
+    phones: PhoneWaits = field(default_factory=PhoneWaits)
 
 
 @dataclass(frozen=True, slots=True)
@@ -243,6 +263,7 @@ __all__ = [
     "PLAN_TTL",
     "Deps",
     "ErpFactory",
+    "PhoneWaits",
     "Plans",
     "SessionFactory",
     "Tap",

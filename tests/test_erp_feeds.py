@@ -723,8 +723,10 @@ async def test_a_proxy_s_401_and_403_are_push_404_too(session, erp_row, status):
         await erp_feeds.sync_suppression(session, erp, mode="full", now=NOW)
     assert await breaker(session) == (NOW + timedelta(hours=6), "push_404:feed")
     # No owner notifier registered: nothing is claimed, so the first process
-    # that can tell still tells.
-    assert (await session.scalars(sa.select(ReminderLog.kind))).all() == []
+    # that can tell still tells — the health sweep, which reads the note
+    # (06 §4.2: said first by its own job, visible when that one cannot).
+    kinds = (await session.scalars(sa.select(ReminderLog.kind))).all()
+    assert kinds == ["undelivered:push_404"]
 
 
 async def test_feed_3xx_is_never_followed_and_is_erp_redirect(session, erp_row, told):

@@ -4,7 +4,7 @@
 # Base image: the tag is pinned here and its digest recorded below; refresh
 # the digest monthly (06 §3.2). python:3.12-slim on 2026-10-24 (index):
 #   sha256:a0f57064cbdcd6285fa45f51237ab0b35ea8ebaed06a1f5973e89e19dfb86704
-FROM python:3.12-slim
+FROM python:3.12-slim AS app
 
 # PIP_DEFAULT_TIMEOUT: pip's default 15-second socket timeout gives up on a
 # slow link in the middle of a wheel. PIP_RETRIES then makes a dropped
@@ -70,3 +70,19 @@ RUN useradd --create-home --uid 10001 clientscrapper \
 USER clientscrapper
 
 CMD ["python", "-m", "clientscrapper.worker.main"]
+
+# `make smoke` (07 §1.12): the app image plus pytest and tests/, for the live
+# tests the VPS runs weekly and quarterly (the compose `smoke` service, profile
+# «smoke»). The services never run it: `build: .` takes the LAST stage, which
+# is the app again below.
+FROM app AS smoke
+USER root
+COPY requirements-dev.txt pyproject.toml ./
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install -r requirements-dev.txt
+COPY tests ./tests
+USER clientscrapper
+CMD ["python", "-m", "pytest", "-q", "-rs", "-p", "no:cacheprovider", "-m", "live and not quarterly", "tests/live"]
+
+# The default target: the app image, unchanged.
+FROM app

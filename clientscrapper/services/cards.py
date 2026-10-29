@@ -49,8 +49,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from clientscrapper.config import settings
 from clientscrapper.db.models import (
+    ChatMonitor,
     Company,
     Contact,
+    Interaction,
     LeadCandidate,
     LeadReview,
     Outcome,
@@ -78,6 +80,8 @@ log = logging.getLogger(__name__)
 CARD_MAX: Final = 3500
 QUOTE_MAX: Final = crm_push.QUOTE_MAX
 CardLayout = Literal["review", "handoff", "manager"]
+# An answered card's message: its keyboard removed (06 §1.3).
+NO_KEYBOARD: Final = "none"
 
 # The card's first line must fit a 360 px phone on one line (07 §3.1;
 # tests/test_cards.py measures it at 100/100): short segment words (01 §2's
@@ -128,6 +132,9 @@ PASSED_MARK: Final = " ✓"
 NO_GOODS_UZ: Final = "tovar nomaʼlum"
 NAMELESS_UZ: Final = "firma nomaʼlum"
 SHARED_PHONE_UZ: Final = "⚠️ Raqam 3+ firmada uchraydi"
+# 04 §2 attribution: the matched contact is «who answers this number», not
+# necessarily the message's author (the quote line names the author).
+PHONE_HOLDER_UZ: Final = "raqam egasi"
 
 # The manager card's fixed lines (06 §1.7, 01 §7 decision 2a).
 MANAGER_HOURS_UZ: Final = "oʻz akkauntingizdan, 10:00–17:00 (Du–Sha)"
@@ -160,10 +167,11 @@ class Card:
     hash: str
 
 
-def card_hash(text: str, keyboard: CardLayout) -> str:
+def card_hash(text: str, keyboard: CardLayout | None) -> str:
     """``lead_reviews.card_hash``: the rendered card, keyboard layout
-    included (a card is edited only when this changed)."""
-    return hashlib.sha256(f"{keyboard}\n{text}".encode()).hexdigest()
+    included (a card is edited only when this changed); None = the card's
+    keyboard was removed (an answered card)."""
+    return hashlib.sha256(f"{keyboard or NO_KEYBOARD}\n{text}".encode()).hexdigest()
 
 
 def _card(lines: Sequence[str], keyboard: CardLayout) -> Card:
@@ -246,9 +254,27 @@ def _quote(view: CandidateView) -> tuple[SignalEvidence, str]:
     return cited, crm_push.clip_words(quote, QUOTE_MAX)
 
 
-def _quote_line(quote: str, title: str, cited: SignalEvidence) -> str:
+def _quote_line(
+    quote: str, title: str, cited: SignalEvidence, author: str | None = None
+) -> str:
+    """«🔎 «quote» — {author} · {source}, {date}»: the author is the message's
+    own (``interactions.sender_*`` of the cited evidence, 04 §2), never the
+    contact the number matched."""
     when = day(cited.published_at or cited.fetched_at)
-    return f"🔎 «{esc(quote)}» — {esc(title)}, {when}"
+    by = f"{esc(author)} · " if author else ""
+    return f"🔎 «{esc(quote)}» — {by}{esc(title)}, {when}"
+
+
+def refusal_note(note: str | None) -> str | None:
+    """The refusal a push left on a card (04 §7 item 14) without the owner's
+    own word before it (``push_gate.owner_word``: «shared_ok · …»)."""
+    if not note:
+        return None
+    word = push_gate.owner_word(note)
+    if word == push_gate.SHARED_OK:
+        rest = note[len(word) :].removeprefix(push_gate.OWNER_WORD_SEP).strip()
+        return rest or None
+    return note.strip() or None
 
 
 def _gate_line(gate: GateResult) -> str:
@@ -281,6 +307,13 @@ class ReviewView:
     # not usable (short, foreign) is still the handoff card: ✅ would be
     # refused by the push gate's item 4.
     phone_usable: bool | None = None
+    # The review row's note: a push refusal that sent the candidate back
+    # (04 §7 item 14, «⚠️ …» on line 2) — the owner's own word stripped.
+    note: str | None = None
+    # The cited message's author (``interactions.sender_*``, 04 §2).
+    author: str | None = None
+    # The person shown holds the shown phone: «(raqam egasi)».
+    person_holds_phone: bool = False
 
     @property
     def handoff_card(self) -> bool:
@@ -301,7 +334,8 @@ def _contact_line(rv: ReviewView) -> str:
     if crm_push.masul_line(c) is not None and c.person is not None:
         person = esc(crm_push.clean(c.person.full_name) or "")
         role = crm_push.clean(c.person.role)
-        parts.append(f"👤 {person}" + (f", {esc(role)}" if role else ""))
+        holder = f" ({PHONE_HOLDER_UZ})" if rv.person_holds_phone else ""
+        parts.append(f"👤 {person}" + (f", {esc(role)}" if role else "") + holder)
     if c.telegram:
         parts.append(f"@{esc(c.telegram)}")
     if c.instagram:
@@ -311,8 +345,13 @@ def _contact_line(rv: ReviewView) -> str:
     return " · ".join(parts)
 
 
-def render_review(rv: ReviewView) -> Card:
-    """06 §1.3's card. Raises ``CardRefused``."""
+def render_review(rv: ReviewView, *, answered: bool = False) -> Card:
+    """06 §1.3's card. Raises ``CardRefused``.
+
+    ``answered``: the body of a card the owner already answered, which its
+    message keeps under the footer of the tap (``services/reviews``): no
+    gate line (it was the gates' word when the card was asked — after a push
+    gate 6 reads the push itself) and no refusal note."""
     c = rv.candidate
     if rv.handoff_card:
         if not rv.handoff_username:
@@ -324,8 +363,9 @@ def render_review(rv: ReviewView) -> Card:
         layout = "review"
     else:
         raise CardRefused("no_phone")
-    gate_line = _gate_line(rv.gate)
+    gate_line = "" if answered else _gate_line(rv.gate)
     cited, quote = _quote(c)
+    note = None if answered else refusal_note(rv.note)
     china = crm_push.china_signal(c)
     goods = f"📦 {_goods(c)}" + (f" · Xitoy: {china[1]}" if china is not None else "")
     volume = volume_label(c)
@@ -334,6 +374,7 @@ def render_review(rv: ReviewView) -> Card:
     ball = crm_push.ball_parts(c)
     lines = [
         f"🆕 Nomzod · {c.score}/100 · {esc(segment_label(rv.segment))}",
+        f"⚠️ {esc(note)}" if note else "",
         _company_line(c),
         goods,
         (f"📐 Hajm: {esc(volume)}" + (f" — {esc(said)}" if said else ""))
@@ -341,7 +382,7 @@ def render_review(rv: ReviewView) -> Card:
         else "",
         contact,
         SHARED_PHONE_UZ if rv.shared_phone and layout == "review" else "",
-        _quote_line(quote, title, cited),
+        _quote_line(quote, title, cited, rv.author),
         f"🔗 {esc(crm_push.url_line(cited))}",
         ("🧮 " + " · ".join(esc(p) for p in ball)) if ball else "",
         gate_line,
@@ -393,12 +434,66 @@ def render_manager(mv: ManagerView) -> Card:
     return _card(lines, "manager")
 
 
+# --- the footer a tap leaves (06 §1.3, §1.7) ----------------------------------------
+
+# One line under the card once it is answered (its keyboard removed): the
+# answer's own words (06 §1.3's table; the manager card's, 06 §1.7). The
+# ✅ footer follows the push (``push_footer``): after attempt 3 (or a 4xx)
+# the push gate sends the candidate back to review (``attempts_spent`` /
+# ``erp_refused`` are in push_gate.TO_REVIEW) and the owner gets a new card
+# — 06 §1.3's «qayta soʻrayman». The handoff footer names the manager by
+# first name, never by id; before the card is out it says it waits.
+FOOTER_UZ: Final[Mapping[str, str]] = {
+    "push_queued": "✅ Navbatda — CRMʼga yuboriladi",
+    "push_at": "⏳ {when} da yuboriladi",
+    "push_sent": "✅ CRMʼga yuborildi {time}",
+    "push_unknown": "⏳ CRM javobi nomaʼlum — tekshirilmoqda",
+    "push_failed": "⚠️ CRM javob bermadi — qayta soʻrayman",
+    "decline": "✖️ Rad etildi",
+    "merge": "🔀 Birlashtirildi → {target}",
+    "dnc": "🔒 DNC — boshqa koʻrsatilmaydi",
+    "later": "⏭ Keyinroq — ertaga qayta soʻrayman",
+    "not_b2b": "🙍 B2C — chiqarildi",
+    "competitor": "🚚 Kargo — chiqarildi; kanali manba sifatida qoladi",
+    "edit_phone": "✏️ Telefon tuzatildi",
+    "handoff": "👤 Menejerga yuborildi — {manager}",
+    "handoff_unnamed": "👤 Menejerga yuborildi",
+    "handoff_waiting": "👤 Menejerga navbatda — hali yetkazilmadi",
+    "handoff_no_manager": "👤 Kutishda — menejer qoʻshilgach yuboriladi",
+    "contacted": "📞 Bogʻlandim · raqam olsangiz: /tel {review_id} +998…",
+    "said_no": "🙅 Yozmang dedi — boshqa yozilmaydi",
+    "wrong_or_b2c": "❌ Notoʻgʻri / B2C — chiqarildi",
+    "manager_later": "⏭ Keyinroq — ertaga qayta yuboraman",
+    "no_reply": "⌛ Javob bermadi",
+}
+
+
+def footer(code: str, **values: object) -> str:
+    """The footer ``code`` with its values escaped (HTML)."""
+    return FOOTER_UZ[code].format(**{k: esc(v) for k, v in values.items()})
+
+
+def push_opens_word(opens: datetime, now: datetime) -> str:
+    """«Ertaga 09:30» / «Bugun 09:30» / «02.11.2026 09:30»: when the push
+    window opens next, in the owner's words."""
+    local = opens.astimezone(settings.tz)
+    today = now.astimezone(settings.tz).date()
+    clock = local.strftime("%H:%M")
+    if local.date() == today:
+        return f"Bugun {clock}"
+    if local.date() == today + timedelta(days=1):
+        return f"Ertaga {clock}"
+    return f"{local:%d.%m.%Y} {clock}"
+
+
+def with_footer(text: str, line: str) -> str:
+    return f"{text}\n\n{line}"
+
+
 # --- loading a review card ----------------------------------------------------------
 
 
-async def _handoff_username(
-    session: AsyncSession, candidate: LeadCandidate
-) -> str | None:
+async def handoff_username(session: AsyncSession, candidate: LeadCandidate) -> str | None:
     """The username a manager writes to: the candidate's own contact's, else
     the lineage's oldest live contact with one (02 §2.9's «contacts.
     telegram_username IS NOT NULL»)."""
@@ -418,6 +513,53 @@ async def _handoff_username(
     ).all()
     own = next((u for cid, u in rows if cid == candidate.contact_id), None)
     return own or next((u for _, u in rows), None)
+
+
+@dataclass(frozen=True, slots=True)
+class Attribution:
+    """Who said the cited words, and where (04 §2): the message's author from
+    the evidence itself — the stored ``interactions.sender_*`` — and the chat
+    it was posted in; None where the evidence is no Telegram message."""
+
+    author: str | None = None
+    chat_title: str | None = None
+
+
+async def attribution(session: AsyncSession, view: CandidateView) -> Attribution:
+    """The author and chat of the evidence the card's quote cites
+    (``crm_push.cited``, the renderer's own choice)."""
+    try:
+        cited, _ = crm_push.cited(view)
+    except crm_push.PayloadError:
+        return Attribution()
+    row = (
+        await session.execute(
+            sa.select(
+                Interaction.sender_name, Interaction.sender_username, ChatMonitor.title
+            )
+            .outerjoin(ChatMonitor, ChatMonitor.tg_chat_id == Interaction.tg_chat_id)
+            .where(Interaction.evidence_id == cited.evidence_id)
+            .order_by(Interaction.id)
+            .limit(1)
+        )
+    ).first()
+    if row is None:
+        return Attribution()
+    name, username, title = row
+    author = crm_push.clean(name) or (f"@{username}" if username else None)
+    return Attribution(author=author, chat_title=crm_push.clean(title))
+
+
+def _holds_phone(view: CandidateView, lead: Contact | None) -> bool:
+    """The person the card names is the contact whose phone it shows."""
+    person = view.person
+    return (
+        person is not None
+        and lead is not None
+        and lead.tier == "person"
+        and lead.anonymised_at is None
+        and lead.full_name == person.full_name
+    )
 
 
 async def review_view(
@@ -443,6 +585,7 @@ async def review_view(
     tails = [lead.phone_tail.strip()] if lead is not None and lead.phone_tail else []
     gate = await gates.evaluate(session, candidate.company_id, now=now, tails=tails)
     handoff = candidates.is_handoff(candidate.score_breakdown)
+    said = await attribution(session, view)
     return ReviewView(
         review_id=review.id,
         candidate=view,
@@ -452,9 +595,45 @@ async def review_view(
         shared_phone=bool(lead is not None and lead.shared_phone),
         handoff=handoff,
         handoff_username=(
-            await _handoff_username(session, candidate) if handoff else None
+            await handoff_username(session, candidate) if handoff else None
         ),
         phone_usable=push_gate.usable_lead_phone(lead),
+        note=review.note,
+        author=said.author,
+        person_holds_phone=_holds_phone(view, lead),
+    )
+
+
+async def manager_view(
+    session: AsyncSession, review_id: int, *, now: datetime
+) -> ManagerView | None:
+    """The manager card's view of review ``review_id`` (06 §1.7): the
+    username a manager writes to (the handoff card's own) and the chat the
+    quote was posted in; None when the row, its candidate or its company is
+    gone, or nobody can be written to."""
+    review = await session.get(LeadReview, review_id, populate_existing=True)
+    if review is None:
+        return None
+    candidate = await session.get(
+        LeadCandidate, review.candidate_id, populate_existing=True
+    )
+    if candidate is None:
+        return None
+    try:
+        view = await candidates.load_view(session, candidate.id, now=now)
+    except LookupError:
+        return None
+    username = await handoff_username(session, candidate)
+    if username is None:
+        return None
+    company = await session.get(Company, candidate.company_id)
+    said = await attribution(session, view)
+    return ManagerView(
+        review_id=review.id,
+        candidate=view,
+        username=username,
+        segment=company.segment if company is not None else None,
+        chat_title=said.chat_title,
     )
 
 
@@ -605,11 +784,28 @@ async def live_review(session: AsyncSession, review_id: int) -> LeadReview | Non
 
 
 @dataclass(frozen=True, slots=True)
+class AutoWaiting:
+    """An auto-approved candidate a push refused (``lead_candidates.
+    push_note``, 0004): it has no owner card to carry the refusal."""
+
+    display_name: str
+    note: str
+    noted_at: datetime | None
+
+
+# /lidlar holat lists at most this many of them (the count says the rest).
+AUTO_WAITING_SHOWN: Final = 5
+
+
+@dataclass(frozen=True, slots=True)
 class LidlarHolat:
-    """``/lidlar holat``: candidates per state and the oldest review."""
+    """``/lidlar holat``: candidates per state, the oldest review, and the
+    auto-approved candidates a push refused (newest first)."""
 
     counts: Mapping[str, int]
     review_oldest_at: datetime | None
+    auto_waiting: tuple[AutoWaiting, ...] = ()
+    auto_waiting_total: int = 0
 
 
 async def lidlar_holat(session: AsyncSession) -> LidlarHolat:
@@ -641,7 +837,34 @@ async def lidlar_holat(session: AsyncSession) -> LidlarHolat:
                 LeadCandidate.state == "review"
             )
         )
-    return LidlarHolat(counts=counts, review_oldest_at=oldest)
+    waiting = sa.and_(
+        LeadCandidate.state == "approved",
+        LeadCandidate.approved_by.startswith("auto:"),
+        LeadCandidate.push_note.is_not(None),
+    )
+    total = int(
+        await session.scalar(
+            sa.select(sa.func.count()).select_from(LeadCandidate).where(waiting)
+        )
+        or 0
+    )
+    rows = (
+        await session.execute(
+            sa.select(
+                Company.display_name, LeadCandidate.push_note, LeadCandidate.push_noted_at
+            )
+            .join(Company, Company.id == LeadCandidate.company_id)
+            .where(waiting)
+            .order_by(LeadCandidate.push_noted_at.desc().nulls_last(), LeadCandidate.id)
+            .limit(AUTO_WAITING_SHOWN)
+        )
+    ).all()
+    return LidlarHolat(
+        counts=counts,
+        review_oldest_at=oldest,
+        auto_waiting=tuple(AutoWaiting(str(n), str(t), at) for n, t, at in rows),
+        auto_waiting_total=total,
+    )
 
 
 async def merge_targets(
@@ -1078,16 +1301,22 @@ def render_xarajat(report: costs.SpendReport) -> str:
 
 
 __all__ = [
+    "AUTO_WAITING_SHOWN",
     "BAND_UZ",
     "CARD_GATES",
     "CARD_MAX",
     "CARD_REFUSED_HOLD",
     "ERP_FIRST_UZ",
+    "FOOTER_UZ",
+    "NO_KEYBOARD",
     "NO_PRICE_UZ",
     "OUTCOME_UZ",
+    "PHONE_HOLDER_UZ",
     "SEGMENT_UZ",
     "SHARED_PHONE_UZ",
     "SUPPRESSION_KIND_UZ",
+    "Attribution",
+    "AutoWaiting",
     "Card",
     "CardLayout",
     "CardRefused",
@@ -1096,18 +1325,23 @@ __all__ = [
     "LidlarHolat",
     "ManagerView",
     "ReviewView",
+    "attribution",
     "card_hash",
     "card_layout",
     "claim_owner_review",
     "company_card",
+    "footer",
     "lidlar_holat",
     "live_review",
+    "manager_view",
     "mark_asked",
     "merge_targets",
     "money",
     "parse_uuid",
     "pending_owner_count",
     "phone_shown",
+    "push_opens_word",
+    "refusal_note",
     "render_company",
     "render_holat",
     "render_manager",
@@ -1118,4 +1352,5 @@ __all__ = [
     "segment_label",
     "set_aside",
     "volume_label",
+    "with_footer",
 ]
