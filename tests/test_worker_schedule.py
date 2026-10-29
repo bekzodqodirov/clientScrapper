@@ -27,6 +27,7 @@ from clientscrapper.config import settings
 from clientscrapper.db import models as m
 from clientscrapper.services import (
     candidates,
+    classify,
     companies,
     costs,
     crm_push,
@@ -216,6 +217,23 @@ def test_the_scorer_is_the_score_slot_s_job_and_wakes_on_cs_interaction():
     assert job is not None and job.func.__name__ == "woken_score"
     # The channel's slots upstream first: each stage wakes the next (04 §0).
     assert worker.waking()["cs_interaction"] == ("telegram_monitor", "classify", "score")
+
+
+def test_the_pipeline_hooks_are_registered_where_the_jobs_run():
+    """The worker that runs ``classify`` and ``resolve`` also loads the signal
+    writer's hooks (services/candidates, imported for the ``score`` slot):
+    a classification and a resolution land as signals whichever comes second
+    (04 §0; tests/test_telegram_pipeline.py drives both orders)."""
+    assert candidates.after_classify in classify.AFTER_CLASSIFY
+    assert candidates.after_resolve in companies.AFTER_RESOLVE
+    table = {s.id: s for s in worker.job_table()}
+    assert table["classify"].job is classify.classify_job
+    # The NOTIFY chain of 04 §0, upstream first on the one channel.
+    assert [s.id for s in worker.job_table() if s.wakes_on] == [
+        "telegram_monitor",
+        "classify",
+        "score",
+    ]
 
 
 def test_the_push_and_reconcile_slots_are_crm_push_s_jobs():
