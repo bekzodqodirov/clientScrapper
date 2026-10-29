@@ -577,7 +577,9 @@ async def test_the_digest_names_the_flip_and_the_pause_on_their_own_lines(sessio
     await erp_feeds.source_precision_job(SessionLocal, NOW)
     tg, olx = await row(session, "telegram_monitor"), await row(session, "olx_business")
     view = (await digest.load(session, now=NOW.replace(hour=9))).view
-    assert view.flips == (digest.Flip(tg.title_uz, True, pct=100, pushes=15),)
+    assert view.flips == (
+        digest.Flip(tg.title_uz, True, pct=100, pushes=15, key="telegram_monitor"),
+    )
     assert view.paused_low == (digest.LowPause(olx.title_uz, "10"),)
     lines = digest.render_digest(view).splitlines()
     assert erp_feeds.flip_line(tg.title_uz, on=True, pct=100, pushes=15) in lines
@@ -600,5 +602,5 @@ async def test_a_flip_the_owner_made_has_no_numbers(session):
     await forbid(session, "telegram_monitor")
     view = (await digest.load(session, now=NOW.replace(hour=9))).view
     title = (await row(session, "telegram_monitor")).title_uz
-    assert view.flips == (digest.Flip(title, False),)
+    assert view.flips == (digest.Flip(title, False, key="telegram_monitor"),)
     assert f"🔁 Avtomatik push oʻchirildi: {title}" in digest.render_digest(view)
