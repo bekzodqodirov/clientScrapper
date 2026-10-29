@@ -1005,11 +1005,12 @@ async def test_an_observation_that_names_the_subject_s_person_goes(session, root
 
 async def test_a_tail_only_an_anonymised_contact_holds_names_no_company(session):
     company = await gate_fixtures.firm(session)
+    # Anonymised, the number kept (as a landline would be): no holder.
     await gate_fixtures.contact(
-        session, company, "+998712345644", tier="person", anonymised_at=now()
+        session, company, phone(44), tier="person", anonymised_at=now()
     )
     await session.commit()
-    plan = await purge.plan_contact(session, phone_tail="712345644")
+    plan = await purge.plan_contact(session, phone_tail=tail(44))
     assert plan.company_ids == ()
     assert plan.counts["companies"] == 0 and plan.counts["suppression"] == 1
 
