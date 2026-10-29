@@ -88,6 +88,38 @@ async def test_nothing_to_report_before_the_first_push(session, capsys):
     ]
 
 
+@pytest.mark.parametrize(
+    ("claude", "total", "marks"),
+    [
+        ("5.00", "10.00", ("✅", "✅")),  # each limit is «at most»: met at the limit
+        ("5.01", "10.01", ("❌", "❌")),
+    ],
+)
+def test_the_spend_row_is_held_to_at_most_five_and_the_cap(claude, total, marks):
+    from datetime import datetime
+    from decimal import Decimal
+
+    from clientscrapper.config import settings
+    from clientscrapper.services import cards, metrics
+
+    assert settings.daily_cost_cap_usd == Decimal("10.00")
+    since = datetime(2026, 11, 2, tzinfo=pf.TZ)
+    report = metrics.MvpReport(
+        start=since.date(),
+        now=pf.PILOT_NOW,
+        week2_start=since,
+        week2_end=since,
+        week2_hot=0,
+        results=metrics.Results(since=since, until=pf.PILOT_NOW),
+        spend=(metrics.SpendDay(date(2026, 11, 3), Decimal(claude), Decimal(total)),),
+    )
+    [row] = [x for x in cards.render_mvp(report).splitlines() if x.startswith("4. ")]
+    assert row == (
+        f"4. Claude xarajati: eng koʻp kun ${claude} (03.11, maqsad ≤ $5.00) {marks[0]}"
+        f" · hammasi eng koʻp kun ${total} (03.11, chegara $10.00) {marks[1]}"
+    )
+
+
 def test_the_empty_answer_exits_1(monkeypatch, capsys):
     async def nothing(**_: object) -> None:
         return None

@@ -246,6 +246,9 @@ async def test_the_flips_are_kept_for_the_digest(session):
     assert [(f.key, f.on, f.pct, f.pushes) for f in flips] == [
         ("telegram_monitor", True, 100, 15)
     ]
+    # A reader whose window opens at the run's own minute still reads it.
+    exact = await erp_feeds.precision_flips(session, since=NOW)
+    assert [f.key for f in exact] == ["telegram_monitor"]
     # The digest of two days later reads nothing new.
     assert (
         await erp_feeds.precision_flips(session, since=NOW + timedelta(minutes=1)) == []

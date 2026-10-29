@@ -1827,6 +1827,33 @@ async def test_a_client_row_stands_while_its_key_leaves_the_company(world, sessi
     assert await local(session) == set()
 
 
+async def test_a_landed_client_s_rows_stand_while_its_keys_leave_the_company(
+    world, session
+):
+    """KEPT_WHILE_STANDING holds for the fallback's ``landed_client`` as for
+    ``won``: the handles, domain and STIR stay closed when the company no
+    longer holds them."""
+    cid = await _known_company(world, session, 27)
+    world.fake.add_client([phone(27)])
+    p = await world.push(27, company_id=cid, door="other")
+    await world.walk()
+    assert (await outcome(session, p.external_id)).label == "landed_client"
+    await session.execute(
+        sa.update(Contact)
+        .where(Contact.company_id == cid)
+        .values(telegram_username=None, instagram=None, anonymised_at=NOW)
+    )
+    await session.execute(
+        sa.update(Company)
+        .where(Company.id == cid)
+        .values(telegram_channel=None, instagram=None, website_domain=None, stir=None)
+    )
+    await session.commit()
+    report = await world.walk("year", now=NOW + DAY)
+    assert report.deleted == 0
+    assert await local(session) == _keyed_rows("client", p)
+
+
 async def test_another_company_on_a_client_s_handle_is_refused_as_a_client(
     world, session
 ):

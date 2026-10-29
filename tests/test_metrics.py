@@ -238,6 +238,16 @@ async def test_a_push_is_counted_once_and_dated_by_the_row_its_outcome_is_about(
     assert [r.external_id for r in early] == [lost.external_id]
 
 
+async def test_the_window_holds_its_start_and_not_its_end(session):
+    """``[since, until)``: a push at the window's first instant is in it, one
+    at its end belongs to the next window."""
+    first = await pf.push(session, "telegram_monitor", sent_at=at(3, 0))
+    await pf.push(session, "telegram_monitor", sent_at=at(4, 0))
+    await session.commit()
+    rows = await metrics.pushes(session, since=at(3, 0), until=at(4, 0))
+    assert [r.external_id for r in rows] == [first.external_id]
+
+
 async def test_make_push_test_is_no_push_of_the_pilot(session):
     """make push-test's synthetic lead (``gates.test``, 05 §B.1) goes out on
     day 1, before the pilot (06 §7.1): it neither starts the pilot nor
