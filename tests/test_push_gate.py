@@ -862,6 +862,60 @@ async def test_11_kub_is_a_stated_volume_never_another_signal_s_value(session, e
     assert await refusals(session, cand, {**body, "kub": "14"}) == [(11, "payload")]
 
 
+async def test_11_a_stored_body_is_measured_by_the_claim_it_repeats(session, erp_ready):
+    """A body this id already claimed (a further attempt, a rule-5 re-push,
+    /push tekshir) is re-sent identical (02 §2.10 rule 6): a rename or a
+    larger stated volume since its claim is no refusal; a body the id never
+    claimed is still measured by today's facts."""
+    owner, _, cand, body = await pushable(session)
+    await signal(session, owner, "vol_stated_1_3", value=Decimal("2"))
+    body = {**body, "kub": "2"}
+    failed = NOW - timedelta(minutes=10)
+    await push(
+        session,
+        cand,
+        sent_at=failed,
+        finished_at=failed,
+        phone_tail=tail(61),
+        external_id=body["external_id"],
+        status="failed",
+        payload_sha256=push_gate.canonical_sha256(body),
+    )
+    assert await refusals(session, cand, body) == []
+    # Since that claim: the company renamed, a bigger volume stated.
+    owner.display_name = owner.display_name + " Group"
+    await signal(session, owner, "vol_stated_3plus", value=Decimal("12"))
+    assert await refusals(session, cand, body) == []
+    # A body this id never claimed: today's name and volume measure it.
+    fresh = {**body, "note": body["note"] + " (yangi)"}
+    found = await push_gate.check(session, cand, now=NOW, payload=fresh)
+    assert [(r.check, r.code, r.detail) for r in found] == [
+        (6, "payload_changed", None),
+        (11, "payload", "name;kub"),
+    ]
+
+
+async def test_11_a_stored_body_still_goes_to_today_s_lead_phone(session, erp_ready):
+    """Only the facts of the claim are the stored body's own: the phone it
+    carries must still be the lead contact's — the tail the gate checks
+    (items 4, 5, 7) is the one the body is sent to."""
+    _, _, cand, body = await pushable(session, 62)
+    body = {**body, "phone": phone(63)}
+    failed = NOW - timedelta(minutes=10)
+    await push(
+        session,
+        cand,
+        sent_at=failed,
+        finished_at=failed,
+        phone_tail=tail(63),
+        external_id=body["external_id"],
+        status="failed",
+        payload_sha256=push_gate.canonical_sha256(body),
+    )
+    found = await push_gate.check(session, cand, now=NOW, payload=body)
+    assert [(r.check, r.code, r.detail) for r in found] == [(11, "payload", "phone")]
+
+
 async def test_11_no_payload(session, erp_ready):
     _, _, cand, _ = await pushable(session)
     assert await refusals(session, cand, None) == [(11, "no_payload")]

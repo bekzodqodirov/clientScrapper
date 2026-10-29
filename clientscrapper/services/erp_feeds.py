@@ -298,8 +298,26 @@ class ErpClient:
 
     async def post_lead(self, path: str, body: Mapping[str, Any]) -> httpx.Response:
         """The lead door — ``crm_push._post``'s alone (07 §1.2); ``path`` is the
-        push path it formats. 20 s, 5 s to connect."""
-        return await self.client.post(path, json=dict(body), timeout=POST_TIMEOUT)
+        push path it formats. 20 s, 5 s to connect. A body that does not
+        decode as its ``Content-Encoding`` says (a proxy's corrupt gzip) is
+        answered as no body under the same status — the status is the answer
+        (a 2xx with no ``{"ok": true}`` is ``unknown``, the lead may have
+        landed); a read that fails mid-body stays the transport error it is."""
+        request = self.client.build_request(
+            "POST", path, json=dict(body), timeout=POST_TIMEOUT
+        )
+        response = await self.client.send(request, stream=True)
+        try:
+            await response.aread()
+        except httpx.DecodingError:
+            log.warning(
+                "erp push: a body that does not decode",
+                extra={"status": response.status_code},
+            )
+            return httpx.Response(response.status_code, request=request)
+        finally:
+            await response.aclose()
+        return response
 
     async def aclose(self) -> None:
         await self.client.aclose()
@@ -1624,18 +1642,32 @@ async def reconcile_unconfirmed(
         )
     ).all()
     re_pushed: set[str] = set()
+    attempts: dict[str, int] = {}
     if rows:
+        ids = sorted({r.external_id for r in rows})
         re_pushed = set(
             await session.scalars(
                 sa.select(PushLog.external_id).where(
-                    PushLog.external_id.in_(sorted({r.external_id for r in rows})),
-                    PushLog.superseded_at.is_not(None),
+                    PushLog.external_id.in_(ids), PushLog.superseded_at.is_not(None)
                 )
             )
         )
+        # The id's highest attempt, not the delivered row's own: a re-push
+        # whose attempt failed leaves the delivered row standing (crm_push's
+        # _record), and its failed attempts count against the three.
+        highest = await session.execute(
+            sa.select(PushLog.external_id, sa.func.max(PushLog.attempt))
+            .where(PushLog.external_id.in_(ids))
+            .group_by(PushLog.external_id)
+        )
+        attempts = {eid: int(n) for eid, n in highest.all()}
     report = ReconcileReport(checked=True, unconfirmed=len(rows))
     report.repushable = [
-        r.id for r in rows if r.kept and r.attempt < 3 and r.external_id not in re_pushed
+        r.id
+        for r in rows
+        if r.kept
+        and attempts.get(r.external_id, r.attempt) < 3
+        and r.external_id not in re_pushed
     ]
     report.exhausted = [r.id for r in rows if r.external_id in re_pushed]
     if rows:

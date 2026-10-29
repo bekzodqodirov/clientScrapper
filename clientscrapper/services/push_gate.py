@@ -31,7 +31,12 @@ is one refusal:
 10. Mon–Sat 09:30–17:30 Tashkent (``PUSH_WINDOW``/``PUSH_DAYS``);
 11. the payload's invariants (``payload_problems``): the identity fields,
     ``name``, ``phone``, ``note`` ≤ ``NOTE_MAX``, the stated ``kub``, no
-    pseudonym token, no NUL or lone surrogate. The body is
+    pseudonym token, no NUL or lone surrogate. A body this ``external_id``
+    already claimed (its sha is a row's — a further attempt, a rule-5
+    re-push, ``/push tekshir``) is re-sent as it was: today's display name
+    and stated volume are not its measure, the facts it was claimed on are
+    (rule 6: the identical body); its shape, and the lead phone it is sent
+    to, still are. The body is
     ``crm_push.build_payload``'s (T-28), and so are the invariants only its
     builder can state: the landed note ≤ 1,000 (``landed_note``), the first
     159 code points standing alone, the NEGA TOPILDI … BALL blocks, every
@@ -169,6 +174,9 @@ REFUSAL_UZ: Final[Mapping[str, str]] = {
     "unconfirmed": "CRM tasdiqlamadi",
     "repushed": "Bu push allaqachon bir marta qayta yuborilgan",
     "reported": "ERP bu pushni allaqachon koʻrsatgan",
+    # make push-test's company (score_breakdown.gates.test): only the tool
+    # pushes it, never a job, a re-push or /push tekshir (05 §B.1).
+    "test_company": "Sinov kompaniyasi (make push-test) — qayta yuborilmaydi",
 }
 # The job runs again: nothing for the owner to read (05 §B.1).
 SILENT: Final = frozenset(
@@ -180,6 +188,7 @@ SILENT: Final = frozenset(
         "in_flight",
         "delivered",
         "attempt_wait",
+        "test_company",
     }
 )
 # Only the owner can resolve these: the candidate goes back to a card.
@@ -240,6 +249,8 @@ class Plan:
     contact: Contact | None = None
     tail: str | None = None
     payload_sha256: str | None = None
+    # The body is one this external_id already claimed (item 11, rule 6).
+    stored: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -305,18 +316,24 @@ def payload_problems(
     display_name: str,
     phone: str | None,
     stated_m3: Decimal | None,
+    stored: bool = False,
 ) -> list[str]:
     """Item 11's invariants, whoever built the body (04 §7, 05 §B.1): the
     identity fields present; ``name`` the company's display name only;
     ``phone`` E.164 and the lead contact's (``phone=None``: item 4 refuses
     the missing contact, not this); a note within ``NOTE_MAX``
     UTF-16 units; ``kub`` only the stated volume, as a plain number; no
-    pseudonym token, no NUL, no lone surrogate in any value."""
+    pseudonym token, no NUL, no lone surrogate in any value.
+
+    ``stored``: the body is one this ``external_id`` already claimed and is
+    re-sent identical (rule 6) — its name and ``kub`` were measured against
+    the facts of that claim, so a rename or a larger stated volume since is
+    no refusal; the shape and the lead phone still are."""
     problems: list[str] = []
     missing = [k for k in PAYLOAD_IDENTITY if not isinstance(payload.get(k), str)]
     if missing:
         problems.append("missing:" + ",".join(missing))
-    if payload.get("name") != display_name:
+    if not stored and payload.get("name") != display_name:
         problems.append("name")
     sent_phone = payload.get("phone")
     if not (isinstance(sent_phone, str) and _E164.match(sent_phone)) or (
@@ -332,8 +349,7 @@ def payload_problems(
             ok = (
                 isinstance(kub, str)
                 and bool(_KUB.match(kub))
-                and stated_m3 is not None
-                and Decimal(kub) == stated_m3
+                and (stored or (stated_m3 is not None and Decimal(kub) == stated_m3))
             )
         except InvalidOperation:
             ok = False
@@ -484,6 +500,7 @@ async def _attempt_refusals(
         return
     last = rows[-1]
     plan.attempt = last.attempt + 1
+    plan.stored = sha is not None and any(r.payload_sha256 == sha for r in rows)
     if sha is not None and any(r.payload_sha256 != sha for r in rows):
         plan.refusals.append(Refusal(6, "payload_changed"))
     if plan.attempt > MAX_ATTEMPTS:
@@ -629,6 +646,7 @@ async def evaluate(
             display_name=company.display_name,
             phone=contact.phone if contact is not None else None,
             stated_m3=await stated_m3(session, got.lineage),
+            stored=plan.stored,
         )
         if problems:
             refuse(Refusal(11, "payload", detail=";".join(problems)))

@@ -29,7 +29,8 @@ ERP's replay) — and never after a read timeout (the first request may still
 be running); a further attempt is the next claim, after ``ATTEMPT_DELAYS``.
 
 ``crm_push_job`` (every minute inside the window) pushes the approved
-candidates; ``reconcile_job`` (every 10 minutes) settles a crashed claim
+candidates, passing over the ones the gate refuses for themselves;
+``reconcile_job`` (every 10 minutes) settles a crashed claim
 (``sending`` → ``unknown``), runs the ``unknown`` outcomes walk, and makes
 02 §2.10 rule 5's one re-push of a push the outcomes feed never showed.
 ``push_tekshir_*`` is the owner's ``/push tekshir`` (06 §1.2): the view, and
@@ -52,7 +53,7 @@ import sqlalchemy as sa
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from clientscrapper.collectors.keywords import EMAIL_RE, PHONE_RE, TG_RE
+from clientscrapper.collectors.keywords import EMAIL_RE, IG_RE, PHONE_RE, PRICE_RE, TG_RE
 from clientscrapper.collectors.runner import SessionFactory
 from clientscrapper.config import settings
 from clientscrapper.db import enums as e
@@ -143,6 +144,20 @@ TEXT_VOLUME_RE: Final = re.compile(
 MEASURE_MAX: Final = Decimal(100000)
 # 04 §7 item 11: what a value may not carry (a pseudonym never restored).
 _PSEUDONYM: Final = re.compile(r"<(?:PHONE|TG|IG|NAME|EMAIL)_|<ID>")
+# What a quote may not carry beyond keywords' Uzbek phone, handle and e-mail
+# shapes (05 §B.1: no phone or handle beyond what the body already carries):
+# a number with a «+» and seven digits or more (+7, +86 …), ten digits or
+# more in one run (a foreign number written without «+», «8 916 …»), and a
+# messenger id after its label — «WeChat: rustam_cn88», «viber rustam_88» (a
+# colon, or an id with a digit or «_»: «whatsapp orqali» is a sentence).
+_INTL_PHONE: Final = re.compile(r"\+\s*\d(?:[\s().\-]*\d){6,}")
+_LONG_NUMBER: Final = re.compile(r"(?<!\d)\d(?:[\s().\-]?\d){9,}(?!\d)")
+_MESSENGER_ID: Final = re.compile(
+    r"(?<!\w)(?:we\s?chat|weixin|微信|vx|wx|whats\s?app|ватсап|вотсап|viber|вайбер"
+    r"|skype|скайп|telegram|телеграм|line|qq)(?:\s*(?:id|ид))?"
+    r"(?:\s*[:：]\s*@?[\w.+\-]{3,}|\s+@?(?=[\w.\-]*[\d_])[\w.\-]{3,})",
+    re.I,
+)
 
 
 def js_trim(s: str) -> str:
@@ -283,12 +298,19 @@ SOURCE_TITLE_UZ: Final[Mapping[str, str]] = {
 
 
 def _quotable(text: str) -> bool:
-    """A quote the note may carry: no phone, handle, e-mail or pseudonym
-    beyond what the body already carries (05 §B.1)."""
+    """A quote the note may carry (05 §B.1): no phone (Uzbek or foreign), no
+    Telegram, Instagram or messenger handle, no e-mail, no pseudonym — the
+    body carries the one phone and the company's own handles — and no price
+    figure (the note template's «no price figures»)."""
     return not (
         PHONE_RE.search(text)
+        or _INTL_PHONE.search(text)
+        or _LONG_NUMBER.search(text)
         or TG_RE.search(text)
+        or IG_RE.search(text)
+        or _MESSENGER_ID.search(text)
         or EMAIL_RE.search(text)
+        or PRICE_RE.search(text)
         or _PSEUDONYM.search(text)
     )
 
@@ -313,9 +335,13 @@ def verified_quote(s: SignalEvidence) -> str | None:
 
 def cited(c: CandidateView) -> tuple[SignalEvidence, str]:
     """The signal NEGA TOPILDI cites — the best ranked one with a verified
-    quote (``CandidateView.signals`` is ranked). Every ERP note cites
-    evidence: URL + date + verbatim quote (CLAUDE.md), so none is a refusal."""
+    quote (``CandidateView.signals`` is ranked) among those that add points:
+    a negative signal or a gate flag says why the company is NOT a lead.
+    Every ERP note cites evidence: URL + date + verbatim quote (CLAUDE.md),
+    so none is a refusal."""
     for s in c.signals:
+        if s.points <= 0:
+            continue
         quote = verified_quote(s)
         if quote is not None:
             return s, quote
@@ -599,6 +625,9 @@ MAY_HAVE_LANDED: Final = (
     httpx.WriteError,
     httpx.RemoteProtocolError,
 )
+# The request never left for the ERP either (refused connection, a proxy
+# that refused the tunnel, a scheme the client cannot speak): ``failed``.
+NEVER_SENT: Final = (httpx.ConnectError, httpx.ProxyError, httpx.UnsupportedProtocol)
 TRIES_IN_ATTEMPT: Final = 3
 TRY_BASE: Final = 1.0
 TRY_CAP: Final = 8.0
@@ -679,8 +708,13 @@ async def _attempt(erp: ErpClient, source: str, body: Mapping[str, Any]) -> Answ
         return Answer("failed", exc.status, error_for_status(exc.status))
     except (httpx.ConnectTimeout, httpx.PoolTimeout):
         return Answer("failed", None, "timeout")
-    except httpx.ConnectError:
+    except NEVER_SENT:
         return Answer("failed", None, "conn")
+    except httpx.HTTPError:
+        # Any other transport failure (a close error, a protocol error of
+        # our own side, a redirect loop): the request may have reached the
+        # ERP, so no resend — the row is settled like a read timeout's.
+        return Answer("unknown", None, "timeout")
     return Answer("sent", status, None)
 
 
@@ -720,6 +754,11 @@ BREAKER_ERRORS: Final[Mapping[str, erp_feeds.BreakerKey]] = {
     "http_3xx": "erp_redirect",
 }
 REJECTED_ALERT_KEY: Final = "push_rejected"
+# Answers true of every push at this moment (05 §B.1): the job ends its run on
+# them. A 4xx other than 404 is a proxy or a wrong CRM_BASE_URL — the ERP door
+# answers the agent only 200 / 404 / 503 — so the candidate it hit goes back
+# to review (05 §B.1's table) and the rest of the run would only follow it.
+STOP_ERRORS: Final[Mapping[str, str]] = {**BREAKER_ERRORS, "http_4xx": "rejected"}
 
 
 def synthetic_marked(candidate: LeadCandidate) -> bool:
@@ -739,6 +778,34 @@ async def _lock_push(session: AsyncSession, push_log_id: int) -> PushLog | None:
     return found
 
 
+async def resendable(session: AsyncSession, external_id: str) -> PushLog | None:
+    """The row whose body the next attempt re-sends (02 §2.10 rules 4 and 6):
+    the id's newest row, when it is a ``failed`` one nobody superseded with
+    its body kept. A further attempt carries the identical body — never one
+    rebuilt from today's facts: a signal that arrived, a city enriched or a
+    signal expired between two attempts would make it a different body,
+    which rule 6 refuses under this id for the rest of the month."""
+    newest: PushLog | None = await session.scalar(
+        sa.select(PushLog)
+        .where(PushLog.external_id == external_id)
+        .order_by(PushLog.attempt.desc())
+        .limit(1)
+        .execution_options(populate_existing=True)
+    )
+    if newest is None or newest.status != "failed" or newest.superseded_at is not None:
+        return None
+    return newest if isinstance(newest.payload, dict) else None
+
+
+async def last_attempt(session: AsyncSession, external_id: str) -> int:
+    """The id's highest attempt so far (0 for none) — what «three attempts
+    spent» is measured on, whichever row is the delivered one."""
+    found = await session.scalar(
+        sa.select(sa.func.max(PushLog.attempt)).where(PushLog.external_id == external_id)
+    )
+    return int(found or 0)
+
+
 async def push_one(
     session: AsyncSession,
     candidate_id: uuid.UUID,
@@ -751,11 +818,20 @@ async def push_one(
     """One push of ``candidate_id`` (05 §B.1, 02 §2.10). Commits: the claim
     before the POST, the answer after it. ``repush_of`` is the delivered
     ``push_log`` row a rule-5 re-push or ``/push tekshir`` supersedes — its
-    stored body is re-sent as the next attempt, and the supersede stands only
-    if the claim does. ``synthetic`` is ``make push-test``'s alone: item 13
-    skipped for a company marked ``gates.test``, nothing recorded on a
-    refusal (the tool's synthetic company is rolled back with it)."""
+    stored body is re-sent as the next attempt, the supersede stands only if
+    the claim does, and it is taken back when that attempt fails (``_record``:
+    a failed attempt replaced nothing the ERP holds). Without ``repush_of``,
+    a further attempt after a failed one re-sends that row's stored body
+    (``resendable``); only attempt 1 of an id builds one. ``synthetic`` is
+    ``make push-test``'s alone: item 13 skipped for a company marked
+    ``gates.test``, nothing recorded on a refusal (the tool's synthetic
+    company is rolled back with it); a marked company is never pushed by
+    anybody else — the job, a rule-5 re-push, ``/push tekshir``."""
     source = settings.crm_push_source
+    # Lock order: the push_log row before the candidate — outcomes.promote's
+    # and _record's order; the other way round, the unknown walk promoting
+    # the row a re-push supersedes deadlocks with it.
+    prior = await _lock_push(session, repush_of) if repush_of is not None else None
     candidate: LeadCandidate | None = await session.scalar(
         sa.select(LeadCandidate)
         .where(LeadCandidate.id == candidate_id)
@@ -765,7 +841,9 @@ async def push_one(
     if candidate is None:
         await session.rollback()
         return PushResult.refused(Refusal(1, "not_approved"))
-    prior = await _lock_push(session, repush_of) if repush_of is not None else None
+    if not synthetic and synthetic_marked(candidate):
+        await session.rollback()
+        return PushResult.refused(Refusal(13, "test_company"))
     if repush_of is not None:
         if prior is None or prior.candidate_id != candidate.id:
             await session.rollback()
@@ -790,8 +868,17 @@ async def push_one(
     skip = SYNTHETIC_SKIPPED if marked else frozenset()
     record = not synthetic
     body: dict[str, Any] | None
+    resent = (
+        None
+        if prior is not None
+        else await resendable(
+            session, push_gate.external_id_for(candidate.company_id, now)
+        )
+    )
     if prior is not None:
         body = dict(prior.payload) if isinstance(prior.payload, dict) else None
+    elif resent is not None and isinstance(resent.payload, dict):
+        body = dict(resent.payload)
     else:
         try:
             view = await candidates.load_view(session, candidate.id, now=now)
@@ -842,7 +929,13 @@ async def push_one(
     await session.commit()
     answer = await _attempt(erp, source, body)
     return await _record(
-        session, claim.push_log_id, candidate_id, answer, now=now, record=record
+        session,
+        claim.push_log_id,
+        candidate_id,
+        answer,
+        now=now,
+        record=record,
+        repush_of=prior.id if prior is not None else None,
     )
 
 
@@ -854,17 +947,25 @@ async def _record(
     *,
     now: datetime,
     record: bool,
+    repush_of: int | None = None,
 ) -> PushResult:
     """The answer onto its row and its candidate (05 §B.1's table), then the
     owner told what only he can mend (after the commit: never a lock held
-    across the notifier)."""
+    across the notifier). A re-push whose attempt ``failed`` gives the
+    superseded row back its place: nothing new reached the ERP, so the push
+    is as unconfirmed as before — ``push_unconfirmed`` keeps counting it,
+    rule 5 re-pushes it again as the next attempt (after ``ATTEMPT_DELAYS``,
+    up to attempt 3), and ``/push tekshir`` still finds it."""
     row = await _lock_push(session, push_log_id)
     assert row is not None
+    prior = await _lock_push(session, repush_of) if repush_of is not None else None
     if row.status in ("sending", "unknown"):
         row.status = answer.status
         row.http_status = answer.http_status
         row.error = answer.error
         row.finished_at = now
+    if row.status == "failed" and prior is not None and prior.superseded_at is not None:
+        prior.superseded_at = None
     candidate = await push_gate.lock_candidate(session, candidate_id)
     breaker = BREAKER_ERRORS.get(answer.error or "")
     if candidate is not None:
@@ -923,7 +1024,16 @@ def rejected_text(status: int | None) -> str:
 
 # --- crm_push_job (every minute inside the window) -----------------------------------
 
+# Pushes that reach the ERP in one run (sent, unknown or failed).
 JOB_LIMIT: Final = 25
+# Approved candidates one run looks at: a refused one (a cooldown, a recent
+# push of the phone or the company, an attempt that waits) does not take a
+# push's place, so the ones behind it are reached.
+JOB_SCAN: Final = 200
+# After a 4xx other than 404 the job holds this long before it tries one
+# more push: the same proxy would send every approved candidate back to
+# review, one a minute (05 §B.1).
+REJECTED_PAUSE: Final = timedelta(minutes=30)
 
 
 @dataclass(slots=True)
@@ -949,6 +1059,30 @@ class JobReport:
 
     def as_dict(self) -> dict[str, Any]:
         return {k: v for k, v in asdict(self).items() if v not in (None, 0)}
+
+    @property
+    def reached(self) -> int:
+        """Pushes that went out to the ERP (whatever it answered)."""
+        return self.sent + self.unknown + self.failed
+
+
+async def rejected_until(session: AsyncSession, now: datetime) -> datetime | None:
+    """While the ERP door's newest answer is a 4xx other than 404 (05 §B.1:
+    a proxy or a wrong ``CRM_BASE_URL``, true of every push), the moment the
+    job tries again — ``REJECTED_PAUSE`` after it; else None. Any later
+    answer ends it, a 2xx from a rule-5 re-push included."""
+    newest = (
+        await session.execute(
+            sa.select(PushLog.error, PushLog.finished_at)
+            .where(PushLog.finished_at.is_not(None), PushLog.finished_at <= now)
+            .order_by(PushLog.finished_at.desc(), PushLog.id.desc())
+            .limit(1)
+        )
+    ).first()
+    if newest is None or newest.error != "http_4xx":
+        return None
+    until: datetime = newest.finished_at + REJECTED_PAUSE
+    return until if until > now else None
 
 
 async def due_candidates(session: AsyncSession, *, limit: int) -> list[uuid.UUID]:
@@ -988,13 +1122,17 @@ async def crm_push_job(
     *,
     now: datetime | None = None,
     limit: int = JOB_LIMIT,
+    scan: int = JOB_SCAN,
 ) -> JobReport:
     """The ``crm_push`` slot (every minute; it sends only inside the push
-    window, 02 §2.10 item 2): each due candidate through ``push_one``, its
-    own session; a refusal true of every candidate (cap, window, breaker,
-    stale list …) or a tripped breaker ends the run. ``now`` fixes the clock
-    (tests); else each push reads it afresh. ``PUSH_DAILY_CAP`` is the gate's
-    (item 9)."""
+    window, 02 §2.10 item 2): the due candidates best first, each through
+    ``push_one`` in its own session, until ``limit`` pushes went out or the
+    ``scan`` looked at are done — a candidate the gate refuses for itself
+    is passed over, never a stop. A refusal true of every candidate (cap,
+    window, breaker, stale list …), a tripped breaker or a 4xx other than
+    404 ends the run, and a 4xx holds the job ``REJECTED_PAUSE``. ``now``
+    fixes the clock (tests); else each push reads it afresh.
+    ``PUSH_DAILY_CAP`` is the gate's (item 9)."""
     report = JobReport()
     at = now or datetime.now(settings.tz)
     if not settings.crm_push_enabled:
@@ -1004,7 +1142,10 @@ async def crm_push_job(
         report.skipped = "window"
         return report
     async with session_factory() as session:
-        ids = await due_candidates(session, limit=limit)
+        if await rejected_until(session, at) is not None:
+            report.skipped = "rejected"
+            return report
+        ids = await due_candidates(session, limit=scan)
     report.candidates = len(ids)
     if not ids:
         return report
@@ -1035,9 +1176,11 @@ async def crm_push_job(
             report.add(result)
             stop = next((c for c in result.codes if c in STOP_CODES), None)
             if stop is None and result.error is not None:
-                stop = BREAKER_ERRORS.get(result.error)
+                stop = STOP_ERRORS.get(result.error)
             if stop is not None:
                 report.stopped = stop
+                break
+            if report.reached >= limit:
                 break
     finally:
         if erp is None:
@@ -1102,6 +1245,8 @@ async def review_unconfirmed(
         candidate = await push_gate.lock_candidate(session, row.candidate_id)
         if candidate is None or candidate.state != "approved":
             continue
+        if synthetic_marked(candidate):
+            continue  # make push-test's company never becomes a card
         await push_gate.record_refusals(
             session, candidate, [Refusal(6, "unconfirmed")], now=now
         )
@@ -1121,9 +1266,12 @@ async def reconcile_job(
     unknown push − 10 min) promotes what the ERP shows; (c) the 48-hour rule
     — after healthy nightly walks — re-pushes each unconfirmed id once
     (inside the push window: the gate refuses one outside it, and the
-    supersede is rolled back with the refusal) and sends an ``approved``
-    candidate whose re-push also went unseen back to ``review``. (b) and (c)
-    only while the feeds are configured (05 §B.3)."""
+    supersede is rolled back with the refusal; a re-push whose attempt
+    failed reached nothing, so it stays unconfirmed and is re-pushed as the
+    id's next attempt until the three are spent) and sends an ``approved``
+    candidate whose re-push also went unseen back to ``review`` — never
+    ``make push-test``'s company (``push_one`` refuses it ``test_company``).
+    (b) and (c) only while the feeds are configured (05 §B.3)."""
     report = ReconcileJobReport()
     at = now or datetime.now(settings.tz)
     async with session_factory() as session:
@@ -1207,6 +1355,9 @@ class PushCheck:
     push_log_id: int | None = None
     company: str | None = None
     attempt: int | None = None
+    # The id's highest attempt: a re-push whose attempt failed left the
+    # delivered row standing at its own (``_record``).
+    attempts: int | None = None
     status: str | None = None
     sent_at: datetime | None = None
     http_status: int | None = None
@@ -1241,10 +1392,11 @@ async def push_tekshir_view(session: AsyncSession, external_id: str) -> PushChec
     )
     reported = await session.get(Outcome, external_id) is not None
     kept = isinstance(row.payload, dict)
+    attempts = await last_attempt(session, external_id)
     refusal = None
     if reported:
         refusal = "reported"
-    elif row.attempt >= push_gate.MAX_ATTEMPTS:
+    elif attempts >= push_gate.MAX_ATTEMPTS:
         refusal = "attempts_spent"
     elif not kept:
         refusal = "no_payload"
@@ -1253,6 +1405,7 @@ async def push_tekshir_view(session: AsyncSession, external_id: str) -> PushChec
         push_log_id=row.id,
         company=company.display_name if company is not None else None,
         attempt=row.attempt,
+        attempts=attempts,
         status=row.status,
         sent_at=row.sent_at,
         http_status=row.http_status,
@@ -1263,6 +1416,13 @@ async def push_tekshir_view(session: AsyncSession, external_id: str) -> PushChec
     )
 
 
+# A push_log status as the owner reads it (06 §1.2's view).
+PUSH_STATUS_UZ: Final[Mapping[str, str]] = {
+    "sending": "yuborilmoqda",
+    "sent": "yuborildi",
+    "unknown": "javobi nomaʼlum",
+    "failed": "xato",
+}
 PUSH_CHECK_REFUSED_UZ: Final[Mapping[str, str]] = {
     "not_found": "Bu identifikator bilan yuborilgan push topilmadi",
     "reported": "ERP bu pushni allaqachon koʻrsatgan — qayta yuborilmaydi",
@@ -1276,11 +1436,16 @@ def render_push_check(check: PushCheck) -> str:
     ``pt:<push_log_id>:y|n`` are the bot's (T-20)."""
     if check.push_log_id is None:
         return PUSH_CHECK_REFUSED_UZ["not_found"]
+    status = PUSH_STATUS_UZ.get(check.status or "", "—")
     lines = [
         f"🔎 {check.company or '—'}",
-        f"Urinish: {check.attempt} · holat: {check.status} · "
+        f"Urinish: {check.attempt} · holat: {status} · "
         f"HTTP {check.http_status if check.http_status is not None else '—'}",
     ]
+    if check.attempts is not None and check.attempt is not None:
+        failed = check.attempts - check.attempt
+        if failed > 0:
+            lines.append(f"Qayta yuborish urinishlari xato bilan tugagan: {failed} ta")
     if check.sent_at is not None:
         lines.append(
             f"Yuborilgan: {check.sent_at.astimezone(settings.tz):%d.%m.%Y %H:%M}"
@@ -1306,10 +1471,10 @@ async def push_tekshir_confirm(
     erp: ErpClient,
 ) -> PushResult:
     """The confirm of ``/push tekshir`` (06 §1.2, 02 §2.10 rule 5(d)): the
-    delivered row superseded and re-pushed at once as ``attempt + 1`` with
-    the identical body. Refused when the ERP already reported the id — then
-    an ``unknown`` row is promoted to ``sent`` instead — at attempt 3, and
-    without a payload."""
+    delivered row superseded and re-pushed at once as the id's next attempt
+    with the identical body. Refused when the ERP already reported the id —
+    then an ``unknown`` row is promoted to ``sent`` instead — once the id's
+    three attempts are spent, and without a payload."""
     row = await session.get(PushLog, push_log_id, populate_existing=True)
     if row is None or row.superseded_at is not None:
         return PushResult.refused(Refusal(12, "external_id"))
@@ -1319,7 +1484,7 @@ async def push_tekshir_confirm(
             await outcomes.promote(session, [found[row.external_id]])
         await session.commit()
         return PushResult.refused(Refusal(6, "reported"))
-    if row.attempt >= push_gate.MAX_ATTEMPTS:
+    if await last_attempt(session, row.external_id) >= push_gate.MAX_ATTEMPTS:
         await session.rollback()
         return PushResult.refused(Refusal(6, "attempts_spent"))
     if not isinstance(row.payload, dict):
@@ -1334,6 +1499,8 @@ __all__ = [
     "BAND_HAJM",
     "ERP_KEY_HEADERS",
     "IDENTITY_KEYS",
+    "JOB_LIMIT",
+    "JOB_SCAN",
     "JS_SPACE",
     "JS_SPACE_RUN",
     "LANDED_NOTE_MAX",
@@ -1341,8 +1508,11 @@ __all__ = [
     "NOTE_MAX",
     "PUSH_PATH",
     "PUSH_PREVIEW",
+    "PUSH_STATUS_UZ",
+    "REJECTED_PAUSE",
     "RESERVED_BODY_KEYS",
     "RETRY_IN_ATTEMPT",
+    "STOP_ERRORS",
     "TEXT_VOLUME_RE",
     "UTM_SOURCE",
     "Answer",
@@ -1366,14 +1536,17 @@ __all__ = [
     "external_id_for",
     "js_trim",
     "landed_note",
+    "last_attempt",
     "push_one",
     "push_tekshir_confirm",
     "push_tekshir_view",
     "push_window_open",
     "reconcile_job",
     "reconcile_slot",
+    "rejected_until",
     "render_note",
     "render_push_check",
+    "resendable",
     "settle_crashed",
     "text_volume",
 ]

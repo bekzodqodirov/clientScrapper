@@ -213,34 +213,125 @@ def test_person_only_with_legal_basis_and_name_is_the_company():
         assert token not in json.dumps(p.model_dump(), ensure_ascii=False)
 
 
-def test_a_quote_with_a_phone_or_handle_is_not_cited():
-    shown = sig(
-        quote="5 kub mato kerak, tel +998 90 000 00 77",
-        excerpt="Kerak: 5 kub mato kerak, tel +998 90 000 00 77",
-        evidence_id=3,
-        points=30,
-    )
-    handle = sig(
-        quote="mato kerak @namuna_boshqa",
-        excerpt="mato kerak @namuna_boshqa",
-        evidence_id=4,
-    )
-    clean_one = sig(
-        "vol_wholesale_bulky",
-        quote="optom mato olamiz",
-        excerpt="Biz optom mato olamiz",
-        points=20,
-        value=None,
-        evidence_id=5,
-    )
-    p = crm_push.build_payload(view(signals=(shown, handle, clean_one)))
+CLEAN = sig(
+    "vol_wholesale_bulky",
+    quote="optom mato olamiz",
+    excerpt="Biz optom mato olamiz",
+    points=20,
+    value=None,
+    evidence_id=5,
+)
+
+
+@pytest.mark.parametrize(
+    ("shown", "leak"),
+    [
+        ("5 kub mato kerak, tel +998 90 000 00 77", "000 00 77"),
+        ("5 kub mato kerak, tel 90 000 00 77", "000 00 77"),
+        ("5 kub mato kerak @namuna_boshqa", "namuna_boshqa"),
+        ("5 kub mato kerak, t.me/namuna_boshqa", "namuna_boshqa"),
+        ("5 kub mato kerak, insta: namuna_boshqa", "namuna_boshqa"),
+        ("5 kub mato kerak, instagram.com/namuna_boshqa", "namuna_boshqa"),
+        ("5 kub mato kerak, WeChat: namuna_cn88", "namuna_cn88"),
+        ("5 kub mato kerak, viber namuna_88", "namuna_88"),
+        ("5 kub mato kerak, telegram: namuna_shop", "namuna_shop"),
+        ("5 kub mato kerak, agent +86 138 0000 0077", "0000 0077"),
+        ("5 kub mato kerak, tel +7 916 000-00-77", "000-00-77"),
+        ("5 kub mato kerak, tel 8 916 000 00 77", "000 00 77"),
+        ("5 kub mato kerak, namuna@namuna.example.uz", "@namuna.example.uz"),
+        ("5 kub mato kerak, <PHONE_1> ga yozing", "<PHONE_1>"),
+        ("5 kub mato kerak, kilosi 12$ dan", "12$"),
+    ],
+)
+def test_a_quote_with_a_phone_handle_or_price_is_not_cited(shown, leak):
+    """05 §B.1: no phone or handle beyond what the body already carries, no
+    price figures — a higher-ranked quote carrying one gives way to the next
+    signal's, and nothing of it reaches the note, the pairs or the landed
+    note."""
+    dirty = sig(quote=shown, excerpt="Kerak: " + shown, evidence_id=3, points=30)
+    p = crm_push.build_payload(view(signals=(dirty, CLEAN)))
     assert p.note.split("\n")[0].endswith("«optom mato olamiz»")
-    assert "000 00 77" not in p.note and "namuna_boshqa" not in p.note
+    assert leak not in crm_push.landed_note(p)
+    assert leak not in json.dumps(p.model_dump(), ensure_ascii=False)
+
+
+@pytest.mark.parametrize(
+    "fine",
+    [
+        "optom mato olamiz, whatsapp orqali yozing",
+        "Telegram guruhimizga 5 kub mato kerak",
+        "25.10.2026 dan 3 kub mato kerak",
+        "Toshkentga 1 200 kg yuk",
+    ],
+)
+def test_a_quote_without_contact_or_price_is_cited(fine):
+    """The shapes above are refused for what they carry, not for a word: a
+    messenger named without an id, a date, a weight."""
+    s = sig(quote=fine, excerpt="Salom. " + fine)
+    p = crm_push.build_payload(view(signals=(s,)))
+    assert p.note.split("\n")[0].endswith(f"«{fine}»")
+
+
+def test_a_forged_quote_is_never_cited():
     # A quote that is not a verbatim substring of its excerpt is never cited.
     forged = sig(quote="10 kub kerak", excerpt="Biz mato sotamiz")
     with pytest.raises(crm_push.PayloadError) as caught:
         crm_push.build_payload(view(signals=(forged,)))
     assert caught.value.code == "no_quote"
+
+
+def test_why_found_never_cites_a_negative_signal_or_a_gate_flag():
+    """NEGA TOPILDI says why the company is a lead: a negative signal or a
+    gate flag is evidence against it, never the citation — with no positive
+    signal that carries a quote, there is no note (``no_quote``)."""
+    ex = (
+        "Optom mato olamiz, 5 kub kerak. Hozircha Turkiyadan olib kelamiz, "
+        "chakana ham sotamiz. Kargo xizmati ham bor."
+    )
+    volume = sig(quote=None, excerpt=ex)
+    turkey = sig(
+        "neg_non_cn_origin",
+        quote="Turkiyadan olib kelamiz",
+        excerpt=ex,
+        group="negative",
+        points=-20,
+        value=None,
+        evidence_id=9,
+    )
+    retail = sig(
+        "neg_b2c_words",
+        quote="chakana ham sotamiz",
+        excerpt=ex,
+        group="negative",
+        points=-40,
+        value=None,
+        evidence_id=10,
+    )
+    cargo = sig(
+        "flag_competitor",
+        quote="Kargo xizmati ham bor",
+        excerpt=ex,
+        group="gate",
+        points=0,
+        value=None,
+        evidence_id=11,
+    )
+    with pytest.raises(crm_push.PayloadError) as caught:
+        crm_push.build_payload(view(signals=(volume, turkey, retail, cargo)))
+    assert caught.value.code == "no_quote"
+    prior = sig(
+        "cn_sector_prior",
+        quote="Optom mato olamiz",
+        excerpt=ex,
+        group="origin",
+        points=10,
+        value=None,
+        evidence_id=8,
+    )
+    p = crm_push.build_payload(view(signals=(volume, turkey, retail, cargo, prior)))
+    assert p.note.split("\n")[0].endswith("«Optom mato olamiz»")
+    assert "Turkiya" not in p.note and "chakana" not in p.note
+    assert p.evidence.endswith('"Optom mato olamiz"')
 
 
 def test_payload_drops_nul_and_lone_surrogates():
@@ -471,7 +562,76 @@ def test_render_note_is_owner_text():
         assert problems(crm_push.render_note(v, level=level), rendered=True) == set()
 
 
-# --- the push half -------------------------------------------------------------------
+def test_the_date_is_the_tashkent_day_of_publication():
+    """NEGA TOPILDI dates the post (``published_at``), on the Tashkent
+    calendar; only a page with no publication date is dated by the fetch."""
+    late = datetime(2026, 10, 25, 20, 30, tzinfo=UTC)  # 01:30 on the 26th there
+    s = replace(sig(), published_at=late, fetched_at=late + timedelta(days=2))
+    first = crm_push.build_payload(view(signals=(s,))).note.split("\n")[0]
+    assert first == "NEGA TOPILDI: Telegram guruh · 26.10.2026 · «5 kub mato kerak»"
+    undated = replace(s, published_at=None)
+    first = crm_push.build_payload(view(signals=(undated,))).note.split("\n")[0]
+    assert first == "NEGA TOPILDI: Telegram guruh · 28.10.2026 · «5 kub mato kerak»"
+
+
+def test_firma_names_the_legal_form_once():
+    assert crm_push.build_payload(view()).firma == "Namuna Tekstil Savdo MChJ"
+    named = view(display_name="Namuna Savdo MChJ", legal_form="MChJ")
+    assert crm_push.build_payload(named).firma == "Namuna Savdo MChJ"
+
+
+def test_a_sector_prior_reads_ehtimol():
+    prior = sig(
+        "cn_sector_prior",
+        quote="Xitoydan har oy keltiramiz",
+        group="origin",
+        points=10,
+        value=None,
+        evidence_id=8,
+    )
+    note = crm_push.build_payload(view(signals=(sig(), prior))).note
+    assert "· Xitoy: ehtimol («Xitoydan har oy keltiramiz»)" in note
+    assert "Xitoy: ha" not in note
+
+
+def test_a_container_signal_is_the_hajm_when_nothing_else_says():
+    box = sig(
+        "vol_container",
+        quote="konteyner bilan olib kelamiz",
+        excerpt="Biz konteyner bilan olib kelamiz",
+        points=40,
+        value=None,
+    )
+    unbanded = view(stated_m3=None, volume_band="unknown", signals=(box,))
+    p = crm_push.build_payload(unbanded)
+    assert "HAJM: konteyner (taxminan 28 kub)" in p.note.split("\n")
+    assert p.kub is None
+    quiet = replace(box, key="vol_wholesale_bulky")
+    p2 = crm_push.build_payload(replace(unbanded, signals=(quiet,)))
+    assert not any(line.startswith("HAJM") for line in p2.note.split("\n"))
+
+
+def test_the_evidence_pair_drops_its_quote_past_300_units():
+    quote = " ".join(["mato"] * 40)
+    url = "https://t.me/" + "n" * 187
+    assert push_gate.text_len(url) == 200
+    long_url = sig(url=url, quote=quote, excerpt="Salom. " + quote)
+    p = crm_push.build_payload(view(signals=(long_url,)))
+    assert p.evidence == url
+    short = replace(long_url, url="https://t.me/namuna_optom/101")
+    p2 = crm_push.build_payload(view(signals=(short,)))
+    assert p2.evidence.startswith('https://t.me/namuna_optom/101 — "mato mato')
+    assert push_gate.text_len(p2.evidence) <= crm_push.PAIR_VALUE_MAX
+
+
+def test_a_name_shorter_than_two_units_is_refused():
+    with pytest.raises(crm_push.PayloadError) as caught:
+        crm_push.build_payload(view(display_name="N"))
+    assert caught.value.code == "name"
+    assert crm_push.build_payload(view(display_name="NS")).name == "NS"
+
+
+# --- the push half ------------------------------------------------------------------
 
 
 async def no_sleep(_: float) -> None:
@@ -658,7 +818,7 @@ async def test_push_test_tool_payload_has_every_optional_key(world, monkeypatch)
     ]
 
 
-# --- helpers for the answers ---------------------------------------------------------
+# --- helpers for the answers --------------------------------------------------------
 
 
 def eid_of(cand: LeadCandidate, at: datetime = NOW) -> str:
@@ -707,7 +867,7 @@ async def outcome(session: AsyncSession, eid: str) -> Outcome:
     return row
 
 
-# --- the answers ----------------------------------------------------------------------
+# --- the answers --------------------------------------------------------------------
 
 
 async def test_push_404_trips_breaker_and_alerts_once(world, told):
@@ -1262,7 +1422,7 @@ async def test_a_crashed_claim_becomes_unknown_and_is_promoted(world):
     assert (await world.candidate(cand)).state == "pushed"
 
 
-# --- the job -------------------------------------------------------------------------
+# --- the job ------------------------------------------------------------------------
 
 
 async def test_crm_push_job_pushes_the_approved_best_first(world):
@@ -1317,7 +1477,7 @@ async def test_the_job_never_pushes_a_push_test_company(world, monkeypatch):
         assert await crm_push.due_candidates(s, limit=10) == []
 
 
-# --- /push tekshir (06 §1.2) ---------------------------------------------------------
+# --- /push tekshir (06 §1.2) --------------------------------------------------------
 
 
 async def test_push_tekshir_supersedes_and_re_pushes_at_once(world):
@@ -1414,7 +1574,7 @@ async def test_push_tekshir_refuses_attempt_3_and_no_payload(world):
     )
 
 
-# --- make push-test ------------------------------------------------------------------
+# --- make push-test -----------------------------------------------------------------
 
 
 async def test_push_test_tool_new_external_id_each_run(world, monkeypatch):
@@ -1529,3 +1689,617 @@ async def test_the_claim_is_committed_before_the_post_leaves(world):
     result = await world.push(cand, erp=erp)
     assert result.status == "sent"
     assert seen == [("sending", 1, "approved")]
+
+
+# --- the attempts after a failure (02 §2.10 rules 4–6) ------------------------------
+
+
+async def stated(world: World, cand: LeadCandidate, m3: int, *, at: datetime) -> None:
+    """A later post of the company stating ``m3`` kub (a new stated-volume
+    signal on its own evidence)."""
+    from clientscrapper.db.models import Signal
+
+    ev = Evidence(
+        source_key="telegram_monitor",
+        url=f"https://t.me/namuna_optom/{900 + m3}",
+        fetched_at=at,
+        published_at=at,
+        sha256=f"{900 + m3:064d}",
+        bytes=0,
+        excerpt=f"Bizga {m3} kub mato kerak, Xitoydan optom",
+        expires_at=at + timedelta(days=180),
+    )
+    world.session.add(ev)
+    await world.session.flush()
+    world.session.add(
+        Signal(
+            company_id=cand.company_id,
+            evidence_id=ev.id,
+            key=scoring.STATED_3PLUS,
+            value=Decimal(m3),
+            quote=f"{m3} kub mato kerak",
+            observed_at=at,
+            source_key="telegram_monitor",
+        )
+    )
+    await world.session.commit()
+
+
+async def test_a_further_attempt_re_sends_the_stored_body(world):
+    """Attempt 2 carries attempt 1's body (rules 4 and 6), whatever arrived
+    in between — a post stating more, an enriched city, a rename: a rebuilt
+    body would be refused ``payload_changed`` and the company locked out for
+    the rest of the month."""
+    cand = await world.lead()
+    eid = eid_of(cand)
+    world.fake.modes[eid] = ["503", "503", "503"]
+    first = await world.push(cand)
+    assert (first.status, first.attempt) == ("failed", 1)
+    await stated(world, cand, 12, at=NOW + timedelta(minutes=2))
+    company = await world.session.get(Company, cand.company_id, populate_existing=True)
+    assert company is not None
+    company.city = "Samarqand"
+    company.display_name = company.display_name + " Group"
+    await world.session.commit()
+    second = await world.push(cand, now=NOW + timedelta(minutes=5))
+    assert (second.status, second.attempt, second.codes) == ("sent", 2, [])
+    rows = await world.rows()
+    assert [(r.attempt, r.status) for r in rows] == [(1, "failed"), (2, "sent")]
+    assert rows[1].payload == rows[0].payload
+    assert rows[1].payload_sha256 == rows[0].payload_sha256
+    assert world.fake.posted[-1][2] == rows[0].payload
+    assert rows[1].payload is not None and "12 kub" not in rows[1].payload["note"]
+    assert (await world.candidate(cand)).state == "pushed"
+
+
+async def test_an_owner_s_re_approval_after_a_4xx_re_sends_the_stored_body(world, told):
+    """A 4xx sends the candidate back to review; the owner mends the proxy
+    and approves again the same month: the next attempt is the same body."""
+    cand = await world.lead()
+    erp, _ = answering(400, body=b"bad request")
+    assert (await world.push(cand, erp=erp)).error == "http_4xx"
+    assert (await world.candidate(cand)).state == "review"
+    await stated(world, cand, 12, at=NOW + timedelta(minutes=2))
+    c = await world.candidate(cand)
+    from clientscrapper.services import candidates
+
+    await candidates.transition(
+        world.session,
+        c,
+        "approved",
+        now=NOW + timedelta(minutes=9),
+        approved_by="owner:1",
+    )
+    await world.session.commit()
+    again = await world.push(cand, now=NOW + timedelta(minutes=10))
+    assert (again.status, again.attempt) == ("sent", 2)
+    rows = await world.rows()
+    assert rows[1].payload_sha256 == rows[0].payload_sha256
+
+
+async def test_a_repush_is_judged_by_the_claim_it_repeats(world, monkeypatch):
+    """Rule 5's re-push re-sends the stored body; today's display name and
+    stated volume are not its measure (item 11), so a rename and a later
+    «12 kub» since the push refuse nothing."""
+    erp = await fallback(world, monkeypatch)
+    cand = await world.lead()
+    eid = eid_of(cand)
+    world.fake.modes[eid] = "throw200"
+    assert (await world.push(cand, erp=erp)).status == "sent"
+    company = await world.session.get(Company, cand.company_id, populate_existing=True)
+    assert company is not None
+    company.display_name = company.display_name + " Group"
+    await world.session.commit()
+    await stated(world, cand, 12, at=NOW + timedelta(hours=2))
+    at = NOW + timedelta(hours=49)
+    await switch_over(world, monkeypatch, at)
+    report = await crm_push.reconcile_job(SessionLocal, world.erp, now=at)
+    assert [(r["status"], r["codes"]) for r in report.repushed] == [("sent", [])]
+    rows = await world.rows()
+    assert [(r.attempt, r.status) for r in rows] == [(1, "sent"), (2, "sent")]
+    assert rows[1].payload == rows[0].payload
+    assert world.fake.intakes[eid].outcome == "created"
+    assert (await world.candidate(cand)).state == "pushed"
+
+
+async def test_an_unknown_push_s_repush_is_its_own_body_too(world, monkeypatch):
+    cand = await world.lead()
+    eid = eid_of(cand)
+    world.fake.modes[eid] = "badjson"
+    assert (await world.push(cand)).status == "unknown"
+    world.fake.intakes.clear()
+    await stated(world, cand, 12, at=NOW + timedelta(hours=2))
+    at = NOW + timedelta(hours=49)
+    await switch_over(world, monkeypatch, at)
+    world.fake.modes[eid] = "ok"
+    report = await crm_push.reconcile_job(SessionLocal, world.erp, now=at)
+    assert [(r["status"], r["codes"]) for r in report.repushed] == [("sent", [])]
+    c = await world.candidate(cand)
+    assert (c.state, c.external_id) == ("pushed", eid)
+    assert await owner_note(world.session, cand) is None
+
+
+async def test_a_failed_repush_keeps_the_push_unconfirmed_and_tries_again(
+    world, monkeypatch
+):
+    """A re-push whose attempt fails replaced nothing the ERP holds: the
+    superseded row stands again, push_unconfirmed keeps it, /push tekshir
+    finds it, and rule 5 re-pushes it as the next attempt once
+    ATTEMPT_DELAYS passed — until the id's three attempts are spent."""
+    erp = await fallback(world, monkeypatch)
+    cand = await world.lead()
+    eid = eid_of(cand)
+    world.fake.modes[eid] = "throw200"
+    assert (await world.push(cand, erp=erp)).status == "sent"
+    at = NOW + timedelta(hours=49)
+    await switch_over(world, monkeypatch, at)
+    world.fake.modes[eid] = ["503", "503", "503"]
+    report = await crm_push.reconcile_job(SessionLocal, world.erp, now=at)
+    assert [r["status"] for r in report.repushed] == ["failed"]
+    rows = await world.rows()
+    assert [(r.attempt, r.status, r.superseded_at) for r in rows] == [
+        (1, "sent", None),
+        (2, "failed", None),
+    ]
+    assert (await world.candidate(cand)).state == "pushed"
+    assert "push_unconfirmed" in await problem_keys(world.session, at)
+    async with SessionLocal() as s:
+        check = await crm_push.push_tekshir_view(s, eid)
+    assert (check.push_log_id, check.attempt, check.attempts, check.refusal) == (
+        rows[0].id,
+        1,
+        2,
+        None,
+    )
+    assert "Qayta yuborish urinishlari xato bilan tugagan: 1 ta" in (
+        crm_push.render_push_check(check)
+    )
+    # Ten minutes on: attempt 3 waits for its 30 minutes, nothing is posted.
+    posts = len(world.lead_posts())
+    soon = at + timedelta(minutes=10)
+    report = await crm_push.reconcile_job(SessionLocal, world.erp, now=soon)
+    assert [r["codes"] for r in report.repushed] == [["attempt_wait"]]
+    assert len(world.lead_posts()) == posts
+    assert [(r.attempt, r.superseded_at) for r in await world.rows()] == [
+        (1, None),
+        (2, None),
+    ]
+    # Past the wait the ERP is back: attempt 3 lands the stored body.
+    world.fake.modes[eid] = "ok"
+    later = at + timedelta(minutes=31)
+    report = await crm_push.reconcile_job(SessionLocal, world.erp, now=later)
+    assert [r["status"] for r in report.repushed] == ["sent"]
+    rows = await world.rows()
+    assert [(r.attempt, r.status, r.superseded_at) for r in rows] == [
+        (1, "sent", later),
+        (2, "failed", None),
+        (3, "sent", None),
+    ]
+    assert rows[2].payload == rows[0].payload
+    assert world.fake.intakes[eid].outcome == "created"
+
+
+async def test_a_repush_whose_attempts_are_spent_is_only_flagged(world, monkeypatch):
+    erp = await fallback(world, monkeypatch)
+    cand = await world.lead()
+    eid = eid_of(cand)
+    world.fake.modes[eid] = "throw200"
+    assert (await world.push(cand, erp=erp)).status == "sent"
+    at = NOW + timedelta(hours=49)
+    await switch_over(world, monkeypatch, at)
+    world.fake.modes[eid] = ["503"] * 6
+    await crm_push.reconcile_job(SessionLocal, world.erp, now=at)
+    third = at + timedelta(minutes=31)
+    report = await crm_push.reconcile_job(SessionLocal, world.erp, now=third)
+    assert [r["status"] for r in report.repushed] == ["failed"]
+    assert [(r.attempt, r.status) for r in await world.rows()] == [
+        (1, "sent"),
+        (2, "failed"),
+        (3, "failed"),
+    ]
+    posts = len(world.lead_posts())
+    after = third + timedelta(hours=1)
+    report = await crm_push.reconcile_job(SessionLocal, world.erp, now=after)
+    assert report.repushed == []
+    assert report.reconcile is not None and report.reconcile["unconfirmed"] == 1
+    assert len(world.lead_posts()) == posts
+    assert "push_unconfirmed" in await problem_keys(world.session, after)
+    async with SessionLocal() as s:
+        check = await crm_push.push_tekshir_view(s, eid)
+        assert check.refusal == "attempts_spent"
+        result = await crm_push.push_tekshir_confirm(
+            s, check.push_log_id or 0, now=after, erp=world.erp
+        )
+    assert result.codes == ["attempts_spent"]
+    assert (await world.candidate(cand)).state == "pushed"
+
+
+async def test_a_repush_takes_the_push_log_row_before_the_candidate(world, monkeypatch):
+    """One lock order with outcomes.promote — the push_log row, then the
+    candidate: the unknown walk promoting the very row a re-push supersedes
+    waits for it, or it waits for the walk; neither deadlocks."""
+    import asyncio
+
+    cand = await world.lead()
+    eid = eid_of(cand)
+    world.fake.modes[eid] = "badjson"
+    first = await world.push(cand)
+    assert first.status == "unknown" and first.push_log_id is not None
+    world.fake.intakes.clear()
+    at = NOW + timedelta(hours=49)
+    await switch_over(world, monkeypatch, at)
+    world.fake.modes[eid] = "ok"
+    walk_ = SessionLocal()
+    try:
+        # The walk's first statement: the row promoted (locked).
+        await walk_.execute(
+            sa.text(
+                "UPDATE push_log SET status = 'sent' WHERE id = :i AND status = 'unknown'"
+            ),
+            {"i": first.push_log_id},
+        )
+        repush = asyncio.create_task(
+            world.push(cand, now=at, repush_of=first.push_log_id)
+        )
+        async with SessionLocal() as watcher:
+            for _ in range(200):
+                waiting = await watcher.scalar(
+                    sa.text(
+                        "SELECT count(*) FROM pg_stat_activity "
+                        "WHERE wait_event_type = 'Lock' AND datname = current_database()"
+                    )
+                )
+                if waiting:
+                    break
+                await asyncio.sleep(0.02)
+        assert waiting == 1  # the re-push waits on the row, holding nothing
+        # The walk's second statement: the candidate — free, no deadlock.
+        await walk_.execute(
+            sa.text(
+                "UPDATE lead_candidates SET state = 'pushed', pushed_at = :t, "
+                "external_id = :e WHERE id = :c AND state = 'approved'"
+            ),
+            {"t": NOW, "e": eid, "c": cand.id},
+        )
+        await walk_.commit()
+    finally:
+        await walk_.close()
+    result = await repush
+    assert (result.status, result.attempt) == ("sent", 2)
+
+
+# --- the job: refused candidates, a 4xx, make push-test's company -------------------
+
+
+async def test_the_job_passes_over_a_refused_candidate(world):
+    """A candidate the gate refuses for itself (a 30-day cooldown on its
+    phone) never takes a push's place: the run goes on to the next one."""
+    blocked = [await world.lead(nn, score=95) for nn in (61, 62)]
+    for nn in (61, 62):
+        await gate_fixtures.row(
+            world.session,
+            "cooldown",
+            "phone_tail",
+            tail(nn),
+            expires_at=NOW + timedelta(days=30),
+        )
+    await world.session.commit()
+    clean = await world.lead(63, score=65)
+    report = await crm_push.crm_push_job(SessionLocal, world.erp, now=NOW, limit=2)
+    assert (report.candidates, report.sent, report.refused) == (3, 1, 2)
+    assert [b["phone"] for _, _, b in world.fake.posted] == [phone(63)]
+    assert (await world.candidate(clean)).state == "pushed"
+    assert [(await world.candidate(c)).state for c in blocked] == ["approved"] * 2
+
+
+async def test_the_job_stops_after_limit_pushes(world):
+    for nn in (61, 62, 63):
+        await world.lead(nn)
+    report = await crm_push.crm_push_job(SessionLocal, world.erp, now=NOW, limit=2)
+    assert (report.candidates, report.sent) == (3, 2)
+    assert len(world.fake.posted) == 2
+
+
+async def test_a_4xx_stops_the_run_and_holds_the_job(world, told):
+    """A 4xx other than 404 is true of every push (a proxy, a wrong
+    CRM_BASE_URL): the candidate it hit goes back to review, the run ends,
+    and the job holds REJECTED_PAUSE before it tries one more."""
+    cands = [await world.lead(nn) for nn in (61, 62, 63)]
+    erp, seen = answering(400, body=b"<html>bad request</html>")
+    report = await crm_push.crm_push_job(SessionLocal, erp, now=NOW)
+    assert (report.failed, report.stopped, len(seen)) == (1, "rejected", 1)
+    states = [(await world.candidate(c)).state for c in cands]
+    assert sorted(states) == ["approved", "approved", "review"]
+    held = await crm_push.crm_push_job(SessionLocal, erp, now=NOW + timedelta(minutes=29))
+    assert held.skipped == "rejected" and len(seen) == 1
+    async with SessionLocal() as s:
+        assert await crm_push.rejected_until(s, NOW + timedelta(minutes=29)) == (
+            NOW + crm_push.REJECTED_PAUSE
+        )
+    again = await crm_push.crm_push_job(
+        SessionLocal, erp, now=NOW + timedelta(minutes=30)
+    )
+    assert (again.failed, again.stopped, len(seen)) == (1, "rejected", 2)
+    assert told == [crm_push.rejected_text(400)]
+    # Any later answer ends the hold: the ERP is reachable again.
+    ok = await crm_push.crm_push_job(
+        SessionLocal, world.erp, now=NOW + timedelta(minutes=61)
+    )
+    assert (ok.skipped, ok.sent) == (None, 1)
+    async with SessionLocal() as s:
+        assert await crm_push.rejected_until(s, NOW + timedelta(minutes=62)) is None
+
+
+async def test_make_push_test_s_company_is_never_re_pushed_or_reviewed(
+    world, monkeypatch
+):
+    """05 §B.1: no scorer or card ever touches the synthetic company — a
+    rule-5 re-push, /push tekshir and the second 48 h leave it alone."""
+    monkeypatch.setattr(settings, "test_phone", "+998900000099")
+    world.fake.default_mode = "badjson"
+    report = await push_test.run(now=NOW, erp=world.erp)
+    assert (report.status, report.error) == ("unknown", "http_2xx_badbody")
+    world.fake.default_mode = "ok"
+    world.fake.intakes.clear()
+    at = NOW + timedelta(hours=49)
+    await switch_over(world, monkeypatch, at)
+    posts = len(world.lead_posts())
+    rec = await crm_push.reconcile_job(SessionLocal, world.erp, now=at)
+    assert [r["codes"] for r in rec.repushed] == [["test_company"]]
+    assert len(world.lead_posts()) == posts
+    test_cand = await world.session.scalar(
+        sa.select(LeadCandidate)
+        .where(LeadCandidate.company_id == report.company_id)
+        .execution_options(populate_existing=True)
+    )
+    assert test_cand is not None and test_cand.state == "approved"
+    [row] = await world.rows()
+    async with SessionLocal() as s:
+        confirmed = await crm_push.push_tekshir_confirm(s, row.id, now=at, erp=world.erp)
+        assert confirmed.codes == ["test_company"]
+        assert await crm_push.review_unconfirmed(s, [row.id], now=at) == 0
+    assert (await world.candidate(test_cand)).state == "approved"
+    cards = await world.session.scalar(
+        sa.select(sa.func.count(LeadReview.id)).where(
+            LeadReview.candidate_id == test_cand.id
+        )
+    )
+    assert cards == 0
+    assert len(world.lead_posts()) == posts
+
+
+# --- the transport's other answers --------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "body", [b'{"ok": 1}', b'{"ok": "true"}', b'{"ok": true', b"", b"[true]"]
+)
+async def test_a_2xx_without_ok_true_is_unknown(world, body):
+    cand = await world.lead()
+    erp, seen = answering(200, body=body)
+    result = await world.push(cand, erp=erp)
+    assert (result.status, result.http_status, result.error) == (
+        "unknown",
+        200,
+        "http_2xx_badbody",
+    )
+    assert len(seen) == 1
+    assert (await world.candidate(cand)).state == "approved"
+
+
+def corrupt_gzip(status: int) -> tuple[ErpClient, list[httpx.Request]]:
+    """An answer whose body does not decode as its Content-Encoding says (a
+    proxy's corrupt gzip), read off the wire as a stream."""
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(
+            status,
+            headers={"content-encoding": "gzip", "content-type": "application/json"},
+            stream=httpx.ByteStream(b"not gzip at all"),
+        )
+
+    erp = ErpClient(BASE, KEY, transport=httpx.MockTransport(handler), sleep=no_sleep)
+    return erp, seen
+
+
+@pytest.mark.parametrize(
+    ("status", "answer", "posts"),
+    [
+        (200, ("unknown", 200, "http_2xx_badbody"), 1),
+        (503, ("failed", 503, "http_5xx"), 3),
+        (400, ("failed", 400, "http_4xx"), 1),
+    ],
+)
+async def test_a_body_that_does_not_decode_is_answered_by_its_status(
+    world, status, answer, posts
+):
+    cand = await world.lead()
+    erp, seen = corrupt_gzip(status)
+    result = await world.push(cand, erp=erp)
+    assert (result.status, result.http_status, result.error) == answer
+    assert len(seen) == posts
+    [row] = await world.rows()
+    assert (row.status, row.http_status, row.error) == answer
+
+
+@pytest.mark.parametrize(
+    ("raises", "answer"),
+    [
+        (httpx.CloseError, ("unknown", "timeout")),
+        (httpx.LocalProtocolError, ("unknown", "timeout")),
+        (httpx.ProxyError, ("failed", "conn")),
+        (httpx.UnsupportedProtocol, ("failed", "conn")),
+    ],
+)
+async def test_every_transport_error_settles_its_row(world, raises, answer):
+    """No transport error escapes push_one after the claim: a request that
+    may have reached the ERP is ``unknown`` (no resend), one that never left
+    is ``failed``."""
+    cand = await world.lead()
+    erp, seen = answering(0, raises=raises)
+    result = await world.push(cand, erp=erp)
+    assert (result.status, result.error) == answer
+    assert len(seen) == 1
+    [row] = await world.rows()
+    assert (row.status, row.error) == answer
+
+
+# --- 05 §B.4's named test and the reconcile's edges ---------------------------------
+
+
+async def test_push_unknown_promoted_by_outcomes(world):
+    """An ``unknown`` push (a 2xx with a body that says nothing) the ERP did
+    record: the nightly ``recent`` walk shows it — the row becomes ``sent``
+    and the candidate ``pushed``, ``pushed_at`` the push's own time."""
+    cand = await world.lead()
+    eid = eid_of(cand)
+    world.fake.modes[eid] = "badjson"
+    result = await world.push(cand)
+    assert (result.status, result.error) == ("unknown", "http_2xx_badbody")
+    assert (await world.candidate(cand)).state == "approved"
+    report = await walk(world, "recent", NOW + timedelta(hours=16))
+    assert report.promoted == 1
+    [row] = await world.rows()
+    assert (row.status, row.http_status, row.superseded_at) == ("sent", 200, None)
+    c = await world.candidate(cand)
+    assert (c.state, c.external_id, c.pushed_at) == ("pushed", eid, NOW)
+
+
+async def test_a_claim_ten_minutes_old_is_still_in_flight(world):
+    cand = await world.lead()
+    await gate_fixtures.push(
+        world.session,
+        cand,
+        sent_at=NOW - crm_push.CRASHED_AFTER,
+        phone_tail=tail(61),
+        external_id=eid_of(cand),
+        status="sending",
+        http_status=None,
+    )
+    await world.session.commit()
+    async with SessionLocal() as s:
+        assert await crm_push.settle_crashed(s, now=NOW) == 0
+        assert await crm_push.settle_crashed(s, now=NOW + timedelta(microseconds=1)) == 1
+
+
+async def test_reconcile_re_pushes_nothing_outside_the_window(world, monkeypatch):
+    erp = await fallback(world, monkeypatch)
+    cand = await world.lead()
+    world.fake.modes[eid_of(cand)] = "throw200"
+    assert (await world.push(cand, erp=erp)).status == "sent"
+    friday_night = NOW + timedelta(days=3, hours=8)  # 19:00 on Friday
+    await switch_over(world, monkeypatch, friday_night)
+    posts = len(world.lead_posts())
+    report = await crm_push.reconcile_job(SessionLocal, world.erp, now=friday_night)
+    assert report.reconcile is not None and report.reconcile["unconfirmed"] == 1
+    assert report.repushed == []
+    assert len(world.lead_posts()) == posts
+    assert [r.superseded_at for r in await world.rows()] == [None]
+
+
+async def test_the_tekshir_view_reads_the_standing_row_and_says_it_in_uzbek(world):
+    cand = await world.lead()
+    eid = eid_of(cand)
+    world.fake.modes[eid] = "badjson"
+    await world.push(cand)
+    world.fake.intakes.clear()
+    world.fake.modes[eid] = "ok"
+    async with SessionLocal() as s:
+        check = await crm_push.push_tekshir_view(s, eid)
+    assert "holat: javobi nomaʼlum" in crm_push.render_push_check(check)
+    assert "unknown" not in crm_push.render_push_check(check)
+    async with SessionLocal() as s:
+        await crm_push.push_tekshir_confirm(
+            s, check.push_log_id or 0, now=NOW + timedelta(hours=1), erp=world.erp
+        )
+    rows = await world.rows()
+    async with SessionLocal() as s:
+        after = await crm_push.push_tekshir_view(s, eid)
+    assert (after.push_log_id, after.attempt, after.status, after.repushed) == (
+        rows[1].id,
+        2,
+        "sent",
+        True,
+    )
+    text = crm_push.render_push_check(after)
+    assert "holat: yuborildi" in text and "sent" not in text
+    for status, words in crm_push.PUSH_STATUS_UZ.items():
+        shown = crm_push.render_push_check(replace(after, status=status))
+        assert f"holat: {words}" in shown and status not in shown.split("holat: ")[1]
+
+
+# --- load_view (05 §B.1 CandidateView) ----------------------------------------------
+
+
+async def test_load_view_reads_what_the_note_may_say(world):
+    """The view a push is built from: an expired signal never cited, the
+    signals best first (group, then points), the decision maker from the
+    person-tier row (the database holds one per company, and only with its
+    legal basis — ck_contacts_person_basis, ck_contacts_company_no_name), and
+    the person's handle only when the company has none."""
+    from clientscrapper.db.models import Signal
+    from clientscrapper.services import candidates
+
+    cand = await world.lead(score=74)
+    company = await world.session.get(Company, cand.company_id, populate_existing=True)
+    assert company is not None
+
+    async def evidence_signal(key: str, quote: str, *, expires: datetime | None) -> None:
+        ev = Evidence(
+            source_key="telegram_monitor",
+            url=f"https://t.me/namuna_optom/{len(quote)}",
+            fetched_at=NOW - timedelta(days=1),
+            published_at=NOW - timedelta(days=1),
+            sha256=f"{len(quote) + 500:064d}",
+            bytes=0,
+            excerpt=f"Salom. {quote}.",
+            expires_at=NOW + timedelta(days=180),
+        )
+        world.session.add(ev)
+        await world.session.flush()
+        world.session.add(
+            Signal(
+                company_id=company.id,
+                evidence_id=ev.id,
+                key=key,
+                quote=quote,
+                observed_at=NOW - timedelta(days=1),
+                source_key="telegram_monitor",
+                expires_at=expires,
+            )
+        )
+
+    # 40 points, but expired an hour ago: never in the view.
+    await evidence_signal(
+        "vol_container", "konteyner bilan olib kelamiz", expires=NOW - timedelta(hours=1)
+    )
+    # Newer than the stated volume, but 20 points to its 30: second.
+    await evidence_signal(
+        "vol_wholesale_bulky", "optom mato olamiz har hafta", expires=None
+    )
+    await world.session.commit()
+    view_ = await candidates.load_view(world.session, cand.id, now=NOW)
+    assert [s.key for s in view_.signals] == ["vol_stated_3plus", "vol_wholesale_bulky"]
+    assert (view_.person, view_.telegram) == (None, None)
+    assert (
+        crm_push.build_payload(view_).note.split("\n")[0].endswith("«5 kub mato kerak»")
+    )
+    await gate_fixtures.contact(
+        world.session,
+        company,
+        tier="person",
+        full_name="Namuna Akmal",
+        role="rahbar",
+        telegram_username="namuna_akmal",
+        is_decision_maker=True,
+    )
+    await world.session.commit()
+    view_ = await candidates.load_view(world.session, cand.id, now=NOW)
+    assert view_.person == PersonView("Namuna Akmal", "rahbar", "namuna_akmal")
+    assert view_.telegram == "namuna_akmal"
+    company.telegram_channel = "namuna_kanal"
+    await world.session.commit()
+    view_ = await candidates.load_view(world.session, cand.id, now=NOW)
+    assert view_.telegram == "namuna_kanal"
