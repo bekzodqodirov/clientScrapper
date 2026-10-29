@@ -2524,6 +2524,34 @@ async def test_the_tekshir_view_reads_the_standing_row_and_says_it_in_uzbek(worl
 # --- load_view (05 §B.1 CandidateView) ----------------------------------------------
 
 
+async def test_a_person_who_is_no_decision_maker_is_never_the_telegram(world):
+    """05 §B.1: ``telegram`` is the company's handle or the decision maker's
+    (with its legal basis). A bio-less poster is person-tier without the flag
+    (E2E review 2026-10-29: «@rustam_k88» was sent): the «Masʼul» line may
+    name them, the body carries no handle of theirs."""
+    from clientscrapper.services import candidates
+
+    cand = await world.lead()
+    company = await world.session.get(Company, cand.company_id, populate_existing=True)
+    assert company is not None
+    await gate_fixtures.contact(
+        world.session,
+        company,
+        tier="person",
+        full_name="Rustam Karimov",
+        telegram_username="rustam_k88",
+        is_decision_maker=False,
+    )
+    await world.session.commit()
+    view_ = await candidates.load_view(world.session, cand.id, now=NOW)
+    assert view_.telegram is None
+    assert view_.person == PersonView("Rustam Karimov", None, "rustam_k88")
+    body = crm_push.build_payload(view_)
+    assert body.telegram is None
+    assert "  Masʼul: Rustam Karimov" in body.note.split("\n")
+    assert "rustam_k88" not in json.dumps(body.model_dump(), ensure_ascii=False)
+
+
 async def test_load_view_reads_what_the_note_may_say(world):
     """The view a push is built from: an expired signal never cited, the
     signals best first (group, then points), the decision maker from the

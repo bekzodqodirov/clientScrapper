@@ -1021,8 +1021,10 @@ class SignalEvidence:
 
 @dataclass(frozen=True, slots=True)
 class PersonView:
-    """The one decision maker the note may name — a person-tier contact with
-    its ``legal_basis`` (CLAUDE.md: at most one per company)."""
+    """The person the note's «Masʼul» line may name — a person-tier contact
+    with its ``legal_basis`` (05 §B.1), the decision maker first (CLAUDE.md:
+    at most one per company). Only a decision maker's handle is ever sent as
+    ``telegram`` (``load_view``)."""
 
     full_name: str
     role: str | None
@@ -1110,8 +1112,21 @@ async def load_view(
     telegram = company.telegram_channel or next(
         (c.telegram_username for c in company_tier if c.telegram_username), None
     )
-    if telegram is None and person is not None:
-        telegram = person.telegram_username
+    if telegram is None:
+        # 05 §B.1: '@company' or the decision maker's handle only with its
+        # legal basis — a person who is no decision maker (a bio-less poster)
+        # is named on the «Masʼul» line at most, never sent as `telegram`.
+        telegram = next(
+            (
+                c.telegram_username
+                for c in contacts
+                if c.tier == "person"
+                and c.is_decision_maker
+                and c.legal_basis
+                and c.telegram_username
+            ),
+            None,
+        )
     instagram = company.instagram or next(
         (c.instagram for c in company_tier if c.instagram), None
     )
