@@ -44,7 +44,10 @@ is one refusal:
     ``test_payload_sections_and_limits``);
 12. ``external_id = cs:<root company id>:<yyyymm>`` (Tashkent month at claim
     time) — a merged company is no root;
-13. score ≥ 60;
+13. score ≥ 60 — the live score: ``crm_push.push_one`` re-scores an
+    approved candidate under its locks before it claims (score_job never
+    touches one), so a drop after the owner's tap is read here and sends it
+    back to review («Ball tushdi»);
 14. every refusal the owner should see is written to ``lead_reviews.note``
     (``record_refusals``) — on the owner's own answer row, after the
     owner's word when the note holds one (``shared_ok · …``), never as a row

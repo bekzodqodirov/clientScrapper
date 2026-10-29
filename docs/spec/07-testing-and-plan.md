@@ -92,8 +92,8 @@ Inputs are `SignalView`/`ContactView` fixtures (no DB), weights = version 1 load
 
 | Case | Expected |
 |---|---|
-| 04 §9.1 Telegram «2 kub mato» before enrichment | total **52**, tier `warm`, volume 20, origin 20, recency 10, contact 2 |
-| same after registry + directory phone | **70**, `hot`; solidity 12, contact 8, corroboration 0 (registry/directory are not volume/origin families) |
+| 04 §9.1 Telegram «2 kub mato» before enrichment | total **54**, tier `warm`, volume 20, origin 20, recency 10, contact 4 (dm channel 2 + decision maker 2: the bio's «direktori», the contact the resolver writes) |
+| same after registry + directory phone | **72**, `hot`; solidity 12, contact 10, corroboration 0 (registry/directory are not volume/origin families) — also end to end in `tests/test_telegram_pipeline.py` (settled 2026-10-29; it read 52 → 70) |
 | 04 §9.2 OLX seller, 14 ads, no phone | **65**, `warm` (≥60 without usable phone) |
 | 04 §9.3 hh vacancy before/after site + registry | **48** → **87**, `hot` with a landline (usable, no mobile points), corroboration 5 |
 | Caps bind | `vol_container 40 + vol_stated_3plus 30` → volume `raw 70, used 40` |
@@ -551,7 +551,7 @@ During the `other` fallback, steps 4–5 are replaced by `make import-clients FI
 - `make test` = `ruff check && ruff format --check && mypy && pytest` runs green locally with Postgres and in CI with `CS_REQUIRE_DB=1`; the four workflow jobs (`lint`, `test`, `time-travel`, `docker`) are required on `main`.
 - Every guard of §1.2 exists, is green, and has a self-test that proves it catches its shape (as MIYA's `test_the_write_detector_catches_each_shape`).
 - Every phase-1 collector has recorded fixtures with README lines dated from the VPS, a parse test with concrete fields, a negative fixture and a `@live` smoke test; `sources.enabled` is false for any collector without them.
-- The scoring golden tests reproduce 52 → 70, 65 and 48 → 87; the resolver band table, the suppression precedence table, the fake-ERP outcome table and the §1.9 budget boundaries are each pinned by a test named in this file.
+- The scoring golden tests reproduce 54 → 72, 65 and 48 → 87; the resolver band table, the suppression precedence table, the fake-ERP outcome table and the §1.9 budget boundaries are each pinned by a test named in this file.
 - `scripts/pre-push.sh` is installed by `make hooks`, stops at the first red gate, and refuses a planted secret or a missing trailer.
 - `tools/mvp_report.py` prints the four §3.2 metrics from fixture data in tests and from the live database in the pilot; `/holat` shows the same numbers.
 - The Day-1 checklist (§5.3) is executed on the VPS before any `sources.enabled=true`, every UNVERIFIED item of 03/04/05 has a dated README line, and the §5.6 end-to-end run (push → ERP → outcome → suppression → refusal) has been performed once with the synthetic lead.

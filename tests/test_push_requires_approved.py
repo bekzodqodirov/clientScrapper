@@ -222,7 +222,7 @@ async def door(session, monkeypatch) -> AsyncIterator[tuple[FakeErp, ErpClient]]
 
 async def _lead(session, state: str, nn: int) -> LeadCandidate:
     """A candidate that would pass every push check but its state: B2B, a
-    fresh phone, a cited stated volume."""
+    fresh phone, a cited stated volume and its origin."""
     owner = await gate_fixtures.firm(session)
     lead = await gate_fixtures.contact(session, owner, gate_fixtures.phone(nn))
     ev = await gate_fixtures.evidence(session, "telegram_monitor")
@@ -234,6 +234,18 @@ async def _lead(session, state: str, nn: int) -> LeadCandidate:
             key=scoring.STATED_3PLUS,
             value=Decimal(5),
             quote="5 kub mato kerak",
+            observed_at=NOW - timedelta(days=2),
+            source_key="telegram_monitor",
+        )
+    )
+    # The origin too: push_one re-scores an approved candidate (04 §7 item
+    # 13), and 30 + 20 + recency 10 + mobile 6 is hot.
+    session.add(
+        Signal(
+            company_id=owner.id,
+            evidence_id=ev.id,
+            key="cn_origin",
+            quote="Yiwu",
             observed_at=NOW - timedelta(days=2),
             source_key="telegram_monitor",
         )

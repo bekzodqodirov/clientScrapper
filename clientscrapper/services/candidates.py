@@ -21,7 +21,9 @@ Producers built here:
 * the classifier's signals (04 §4.3, §5.3 rule 3): an applied ImportSignal
   becomes model signals through ``signals.from_model`` on the same evidence
   as the rules' (``emit``'s upsert: the model's verified «2 kub mato» takes
-  the rule's «2 kub»). Classify runs in seconds, the resolver every two
+  the rule's «2 kub»), and its validated ``goods`` merged into
+  ``companies.goods`` (``merged_goods``, ≤ 6 — what the ERP note's «NIMA
+  OLIB KELADI» names). Classify runs in seconds, the resolver every two
   minutes, so the result meets its company on whichever side comes second:
   ``after_classify`` (registered with ``classify.register_after_classify``)
   when the observation is resolved already, ``after_resolve`` through
@@ -69,7 +71,7 @@ from __future__ import annotations
 import logging
 import re
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -94,7 +96,14 @@ from clientscrapper.db.models import (
     Source,
 )
 from clientscrapper.db.session import SessionLocal
-from clientscrapper.services import classify, companies, gates, scoring, signals
+from clientscrapper.services import (
+    classify,
+    companies,
+    gates,
+    scoring,
+    signals,
+    validators,
+)
 from clientscrapper.services.scoring import ScoreResult, Tier
 
 log = logging.getLogger(__name__)
@@ -494,6 +503,29 @@ async def _name_classification(
     )
 
 
+def merged_goods(held: Sequence[str], said: Any) -> list[str]:
+    """``companies.goods`` with what a validated ImportSignal names (02 §2.2
+    «from ImportSignal»; 04 §4.3 ``goods``): the goods held first, then the
+    new ones, through ``validators.clean_goods`` (lower-cased, letters only,
+    deduplicated, at most ``GOODS_MAX`` — the first said stays)."""
+    fresh = [g for g in said if isinstance(g, str)] if isinstance(said, list) else []
+    return validators.clean_goods([*held, *fresh])
+
+
+async def _take_goods(
+    session: AsyncSession, company: Company, classified: classify.Classified
+) -> None:
+    """The model's goods onto the company — the ERP note's «NIMA OLIB
+    KELADI» and ``imports`` read them (05 §B.1). A tout's goods are an
+    offer's, never the company's trade."""
+    if classified.signal.get("speaker_role") == "tout":
+        return
+    goods = merged_goods(list(company.goods or ()), classified.signal.get("goods"))
+    if goods != list(company.goods or ()):
+        company.goods = goods
+        await session.flush()
+
+
 async def _land(
     session: AsyncSession,
     company: Company,
@@ -545,6 +577,7 @@ async def after_resolve(
         if classified is not None:
             drafts += model_drafts(evidence, obs, classified, facts)
             await _name_classification(session, classified.model_job_id, company.id)
+            await _take_goods(session, company, classified)
     await _land(session, company, obs, drafts, contact_id=contact_id, now=now)
 
 
@@ -569,6 +602,7 @@ async def after_classify(
     evidence = _evidence_of(obs, obs.contact_id, now)
     facts = await signals.company_facts(session, company)
     drafts = model_drafts(evidence, obs, classified, facts)
+    await _take_goods(session, company, classified)
     await _land(session, company, obs, drafts, contact_id=obs.contact_id, now=now)
 
 

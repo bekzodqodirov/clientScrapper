@@ -772,12 +772,26 @@ def _label_key(display: str) -> str:
     return (LABEL_PREFIX + name_key(display))[:160]
 
 
+NAMELESS_LABELS: Final = ("Telegram mijoz", "Nomaʼlum firma")
+_NAMELESS_RE: Final = re.compile(
+    rf"(?:{'|'.join(re.escape(label) for label in NAMELESS_LABELS)}) #\d+"
+)
+
+
 def _nameless_label(keys: IdentityKeys, observation_id: int) -> str:
     """The display name of a firm nobody named: never the poster's handle or
     number (person-tier), only where it was seen."""
     if keys.kind == "intent_post":
-        return f"Telegram mijoz #{observation_id}"
-    return f"Nomaʼlum firma #{observation_id}"
+        return f"{NAMELESS_LABELS[0]} #{observation_id}"
+    return f"{NAMELESS_LABELS[1]} #{observation_id}"
+
+
+def is_nameless_label(display_name: str | None) -> bool:
+    """``display_name`` is the resolver's own label for a firm nobody named
+    («Telegram mijoz #1»), not a name anybody wrote: the ERP gets no
+    ``firma`` of it (its company column would hold junk a manager then
+    searches by)."""
+    return bool(display_name) and _NAMELESS_RE.fullmatch(display_name or "") is not None
 
 
 async def _name_candidates(

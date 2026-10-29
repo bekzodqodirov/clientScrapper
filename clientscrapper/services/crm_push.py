@@ -59,7 +59,14 @@ from clientscrapper.config import settings
 from clientscrapper.db import enums as e
 from clientscrapper.db.models import Company, LeadCandidate, Outcome, PushLog
 from clientscrapper.db.session import SessionLocal
-from clientscrapper.services import candidates, costs, erp_feeds, outcomes, push_gate
+from clientscrapper.services import (
+    candidates,
+    companies,
+    costs,
+    erp_feeds,
+    outcomes,
+    push_gate,
+)
 from clientscrapper.services.candidates import CandidateView, SignalEvidence
 from clientscrapper.services.erp_feeds import ErpClient, ErpHttpError
 from clientscrapper.services.gates import REGISTRY_UZ
@@ -402,8 +409,17 @@ def nega_topildi(c: CandidateView) -> str:
     return f"{prefix}{_clip_points(quote, budget)}»"
 
 
-def firma_of(c: CandidateView) -> str:
-    """The display name with its legal form (≤ COMPANY_MAX)."""
+# What the note says of a firm only the resolver's label names (05 §B.1).
+NAMELESS_FIRM_UZ: Final = "nomi nomaʼlum"
+
+
+def firma_of(c: CandidateView) -> str | None:
+    """The display name with its legal form (≤ COMPANY_MAX); None for the
+    resolver's label of a firm nobody named (``companies.is_nameless_label``:
+    «Telegram mijoz #1» is no firm — the ERP leaves leads.company empty,
+    and the lead keeps the label as its name)."""
+    if companies.is_nameless_label(c.display_name):
+        return None
     name = clean(c.display_name) or ""
     form = clean(c.legal_form)
     if form and form.lower() not in name.lower().split():
@@ -520,12 +536,12 @@ def render_note(c: CandidateView, *, level: int = 0) -> str:
     if "kompaniya" in drop:
         pass  # the firma line still names it
     elif "kompaniya_short" in drop:
-        sections.append(f"KOMPANIYA: {firma_of(c)}")
+        sections.append(f"KOMPANIYA: {firma_of(c) or NAMELESS_FIRM_UZ}")
     else:
         stir = clean(c.stir) or "—"
         sector = ", ".join(x for x in (clean(v) for v in c.sectors[:2]) if x)
         bits: list[str | None] = [
-            firma_of(c),
+            firma_of(c) or NAMELESS_FIRM_UZ,
             f"STIR {stir}",
             clean(c.city),
             REGISTRY_UZ.get(c.registry_status),
@@ -903,6 +919,14 @@ async def push_one(
         await session.rollback()
         return PushResult.refused(Refusal(1, "not_approved"))
     marked = synthetic and synthetic_marked(candidate)
+    if approved and not synthetic_marked(candidate):
+        # 04 §7 item 13: the score at push time. score_job never touches an
+        # approved candidate (signals.RESCORE_STATES), so a negative signal,
+        # a lost phone or plain decay since the owner's tap is read here,
+        # under the company → candidate locks; item 13 reads the live total
+        # and a drop below 60 takes the candidate back to review («Ball
+        # tushdi», push_gate.TO_REVIEW). The score only — never the state.
+        await candidates.rescore(session, candidate, now=now)
     skip = SYNTHETIC_SKIPPED if marked else frozenset()
     record = not synthetic
     body: dict[str, Any] | None

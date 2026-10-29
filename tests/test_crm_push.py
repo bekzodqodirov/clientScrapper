@@ -220,6 +220,22 @@ def test_a_person_line_that_carries_a_contact_is_dropped(name):
     assert "Masʼul" not in crm_push.build_payload(view(person=role)).note
 
 
+@pytest.mark.parametrize("label", ["Telegram mijoz #1", "Nomaʼlum firma #12"])
+def test_a_resolver_label_is_the_leads_name_and_no_firm(label):
+    """The resolver's label for a firm nobody named is no firm (E2E review
+    2026-10-29): no ``firma`` (the ERP leaves leads.company empty, and a
+    manager searching by name finds no junk), the note says the name is
+    unknown, the lead keeps the label as its name."""
+    p = crm_push.build_payload(view(display_name=label, legal_form=None))
+    assert (p.name, p.firma) == (label, None)
+    kompaniya = next(x for x in p.note.split("\n") if x.startswith("KOMPANIYA"))
+    assert kompaniya.startswith("KOMPANIYA: nomi nomaʼlum · STIR")
+    assert label not in kompaniya
+    # A firm whose name merely holds a «#» is a firm.
+    named = crm_push.build_payload(view(display_name="Namuna #1 Savdo"))
+    assert named.firma == "Namuna #1 Savdo MChJ"
+
+
 def test_person_only_with_legal_basis_and_name_is_the_company():
     # load_view hands a PersonView only for a legal_basis row; without one the
     # note names nobody and the body's name is the company's.
@@ -770,6 +786,10 @@ class World:
         self.session.add(ev)
         await self.session.flush()
         self.session.add(scoring_signal(owner.id, ev.id, quote=quote, value=value))
+        # The origin the excerpt states: push_one re-scores an approved
+        # candidate (04 §7 item 13), so its signals must hold a hot score —
+        # 30 + 20 + recency 10 + mobile 6 = 66 with a stated volume.
+        self.session.add(origin_signal(owner.id, ev.id))
         cand = await gate_fixtures.candidate(
             self.session, owner, state=state, lead=lead, score=score
         )
@@ -824,6 +844,19 @@ def scoring_signal(
     )
 
 
+def origin_signal(company_id: uuid.UUID, evidence_id: int):
+    from clientscrapper.db.models import Signal
+
+    return Signal(
+        company_id=company_id,
+        evidence_id=evidence_id,
+        key="cn_origin",
+        quote="Xitoydan",
+        observed_at=NOW - timedelta(days=2),
+        source_key="telegram_monitor",
+    )
+
+
 @pytest.fixture
 async def world(session, erp_ready) -> World:
     return World(session)
@@ -863,6 +896,55 @@ async def test_push_200_marks_pushed(world):
     assert world.fake.leads[intake.lead_id].notes == [
         "📣 agent\n" + fake_erp.landed_note(body)
     ]
+
+
+async def test_a_score_that_fell_after_approval_goes_back_to_review(world):
+    """04 §7 item 13: score ≥ 60 at push time. score_job never re-scores an
+    approved candidate, so push_one does, under its locks: negatives that
+    arrived after the owner's tap (E2E review 2026-10-29: 72 stored, 6
+    live) send it back to review with «Ball tushdi», and nothing is posted."""
+    from clientscrapper.db.models import Signal
+
+    cand = await world.lead()
+    for key in ("neg_non_cn_origin", "neg_state_body"):
+        ev = Evidence(
+            source_key="telegram_monitor",
+            url=f"https://t.me/namuna_optom/{len(key)}0",
+            fetched_at=NOW - timedelta(hours=1),
+            sha256=f"{len(key) + 900:064d}",
+            bytes=0,
+            excerpt="Rossiyadan keltiramiz, davlat buyurtmasi",
+            expires_at=NOW + timedelta(days=180),
+        )
+        world.session.add(ev)
+        await world.session.flush()
+        world.session.add(
+            Signal(
+                company_id=cand.company_id,
+                evidence_id=ev.id,
+                key=key,
+                observed_at=NOW - timedelta(hours=1),
+                source_key="telegram_monitor",
+            )
+        )
+    await world.session.commit()
+    result = await world.push(cand)
+    assert result.status == "refused" and "score_low" in result.codes
+    assert world.posts() == 0
+    c = await world.candidate(cand)
+    assert c.state == "review"
+    assert c.score is not None and c.score < push_gate.MIN_SCORE
+    assert await owner_note(world.session, cand) == "Ball tushdi"
+
+
+async def test_a_stored_score_below_the_live_one_is_no_refusal(world):
+    """The live score decides, both ways: a stale low number on an approved
+    row whose signals hold a hot score is pushed (and stored afresh)."""
+    cand = await world.lead(score=55)
+    result = await world.push(cand)
+    assert result.status == "sent"
+    c = await world.candidate(cand)
+    assert c.score == 66 and c.tier == "hot"
 
 
 async def test_push_test_tool_payload_has_every_optional_key(world, monkeypatch):
@@ -2490,7 +2572,12 @@ async def test_load_view_reads_what_the_note_may_say(world):
     )
     await world.session.commit()
     view_ = await candidates.load_view(world.session, cand.id, now=NOW)
-    assert [s.key for s in view_.signals] == ["vol_stated_3plus", "vol_wholesale_bulky"]
+    # The volume group first (by points), then origin (World.lead's cn_origin).
+    assert [s.key for s in view_.signals] == [
+        "vol_stated_3plus",
+        "vol_wholesale_bulky",
+        "cn_origin",
+    ]
     assert (view_.person, view_.telegram) == (None, None)
     assert (
         crm_push.build_payload(view_).note.split("\n")[0].endswith("«5 kub mato kerak»")

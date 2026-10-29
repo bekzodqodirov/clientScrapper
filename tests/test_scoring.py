@@ -2,7 +2,7 @@
 
 Inputs are SignalView/ContactView fixtures written from the worked examples'
 own words; weights are version 1 from the seed tuple; ``now`` is fixed. The
-expected numbers are the spec's, never recomputed here: 04 §9.1 52 → 70,
+expected numbers are the spec's, never recomputed here: 04 §9.1 54 → 72,
 §9.2 65, §9.3 48 → 87, and 04 §5.2's printed breakdown for §9.1 is compared
 key by key. Synthetic data only (07 §1.0).
 """
@@ -77,7 +77,14 @@ def used(result: scoring.ScoreResult) -> dict[str, int | float]:
 
 # --- 04 §9.1 -------------------------------------------------------------------------
 
-POSTER = ContactView(tier="person", telegram_username="namuna_tekstil")
+# The contact the resolver writes for 04 §9.1's poster (02 §8 row 5): the
+# bio's «direktori» makes the person-tier row the decision maker
+# (companies.role_rank). 04 §9.1 / 07 §1.3 were settled at 54 → 72 on
+# 2026-10-29 (the E2E review: they printed 52 → 70, a contact the resolver
+# never writes); tests/test_telegram_pipeline.py reproduces it end to end.
+POSTER = ContactView(
+    tier="person", telegram_username="namuna_tekstil", is_decision_maker=True
+)
 SIGNALS_91 = (
     sig(8101, "vol_stated_1_3", value="2"),
     sig(8102, "cn_origin"),
@@ -95,22 +102,23 @@ SPEC_5_2 = """
  "solidity": {"cap": 15, "raw": 0, "used": 0, "signals": []},
  "recency": {"cap": 10, "raw": 10, "used": 10, "signals": [{"key": "derived_fresh_7d",
  "points": 10, "age_days": 0}]},
- "contact": {"cap": 10, "raw": 2, "used": 2, "signals": [{"key":
+ "contact": {"cap": 10, "raw": 4, "used": 4, "signals": [{"key":
+ "derived_contact_decision_maker", "points": 2}, {"key":
  "derived_contact_dm_channel", "points": 2}]},
  "corroboration": {"cap": 5, "raw": 0, "used": 0, "families": ["telegram"]}},
- "negatives": [], "total": 52, "tier": "warm"}
+ "negatives": [], "total": 54, "tier": "warm"}
 """
 
 
-def test_9_1_the_telegram_post_before_enrichment_is_52_warm():
+def test_9_1_the_telegram_post_before_enrichment_is_54_warm():
     result = run(SIGNALS_91, [POSTER])
-    assert (result.total, result.tier, result.usable_phone) == (52, "warm", False)
+    assert (result.total, result.tier, result.usable_phone) == (54, "warm", False)
     assert used(result) == {
         "volume": 20,
         "origin": 20,
         "solidity": 0,
         "recency": 10,
-        "contact": 2,
+        "contact": 4,
         "corroboration": 0,
     }
 
@@ -124,7 +132,7 @@ def test_9_1_reproduces_the_breakdown_04_section_5_2_prints():
         assert got[key] == printed[key], key
 
 
-def test_9_1_after_the_registry_and_the_directory_phone_is_70_hot():
+def test_9_1_after_the_registry_and_the_directory_phone_is_72_hot():
     signals = (
         *SIGNALS_91,
         sig(8103, "ent_legal_confirmed", source="registry_lookup", evidence=7002),
@@ -132,18 +140,19 @@ def test_9_1_after_the_registry_and_the_directory_phone_is_70_hot():
     )
     phone = ContactView(tier="company", phone="+998900000001", phone_kind="mobile")
     result = run(signals, [POSTER, phone], now=NOW + timedelta(hours=1))
-    assert (result.total, result.tier, result.usable_phone) == (70, "hot", True)
+    assert (result.total, result.tier, result.usable_phone) == (72, "hot", True)
     assert used(result) == {
         "volume": 20,
         "origin": 20,
         "solidity": 12,
         "recency": 10,
-        "contact": 8,
+        "contact": 10,
         # registry/directory are not volume/origin families (04 §9.1).
         "corroboration": 0,
     }
     contact = result.breakdown["groups"]["contact"]["signals"]
     assert contact == [
+        {"key": "derived_contact_decision_maker", "points": 2},
         {"key": "derived_contact_dm_channel", "points": 2},
         {"key": "derived_contact_mobile", "points": 6},
     ]
@@ -355,12 +364,12 @@ def test_a_b2c_negative_does_not_count_beside_a_volume_signal(order):
     """«B2C words and no volume signal ≥ 1 m³»: a «bitta, o'zim uchun» post
     and a «2 kub mato» post of one buyer score the same in either order."""
     result = run(order, [POSTER])
-    assert (result.total, result.breakdown["negatives"]) == (52, [])
+    assert (result.total, result.breakdown["negatives"]) == (54, [])
 
 
 def test_a_b2c_negative_counts_without_a_volume_signal():
     result = run([B2C_POST, CHINA], [POSTER])
-    # origin 20 + recency 10 + contact 2 − 40, clamped
+    # origin 20 + recency 10 + contact 4 − 40, clamped
     assert result.total == 0
     assert [n["key"] for n in result.breakdown["negatives"]] == ["neg_b2c_words"]
 

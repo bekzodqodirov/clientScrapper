@@ -49,7 +49,7 @@ contacting anyone, without buying customs data, and within $10/day.
 1. `telegram_monitor` stores a message «Guangzhoudan 2 kub mato kerak, kim olib keladi?» from @username in a wholesale group → `interactions` → regex prefilter hits → Haiku `ImportSignal` (goods=mato, volume 2 m³, buyer, b2b) → `signals`.
 2. Resolver finds no company; enrichment: username bio mentions «Textile Trade MChJ, +998 90 …» → `companies` + `contacts` (phone tail-9) → registry lookup by name (stat.uz/myorg) → STIR, status active → `signals` (entity solid).
 3. Gates: b2b ✓, not competitor ✓, phone tail not in suppression ✓, no open push for this company in 90 d and none for this phone in 24 h ✓.
-4. Score 70 (volume 20 + China 20 + solidity 12 + recency 10 + contact 8 + corroboration 0) → `lead_candidates.state=review` → owner bot card.
+4. Score 72 (volume 20 + China 20 + solidity 12 + recency 10 + contact 10 + corroboration 0) → `lead_candidates.state=review` → owner bot card.
 5. Owner taps ✅ → `crm_push` builds the Uzbek note (NEGA TOPILDI / NIMA OLIB KELADI / HAJM / KOMPANIYA / NIMA DEYISH / BALL), `external_id=cs:<uuid>:202610`, POST to the ERP within business hours → `push_log(200)`.
 6. ERP routes it by `kub=2` to the cargo team; the manager gets «Yangi lid», writes from their own account, later moves it to won/lost.
 7. Nightly `erp_sync` reads `/api/agent/outcomes` → `outcomes.label` → source precision and weight proposals; if lost with «Qayta qilinmasin», the phone tail enters suppression via the next feed pull.

@@ -22,7 +22,7 @@ import sqlalchemy as sa
 
 from clientscrapper.config import settings
 from clientscrapper.db import models as m
-from clientscrapper.services import candidates, classify, companies, health
+from clientscrapper.services import candidates, classify, companies, crm_push, health
 from tests import classify_fixtures as cf
 from tests.classify_fixtures import ASK, NOW, chat, interaction, link, store
 from tests.fakes import message, model_fixture
@@ -127,6 +127,98 @@ async def test_the_worked_example_lands_as_signals_and_a_scored_candidate(
     assert cand.score_breakdown["gates"]["is_b2b"] == "pass:legal_form"
 
 
+async def test_the_worked_example_9_1_is_54_then_72_end_to_end(
+    session, enabled, offline, tmp_path, model_api
+):
+    """04 §9.1 / 07 §1.3's golden on the contact the resolver writes (not a
+    hand-built view): the poster's display name, the bio's «direktori» as
+    written and the decision-maker flag it implies — 54 warm before
+    enrichment; then E4's registry hit and E5's directory phone — 72 hot,
+    on to the owner's card (settled 2026-10-29: the spec printed 52 → 70)."""
+    await _message(session, offline, tmp_path)
+    model_api.queue(message(BUYER))
+    assert (await classify.classify_batch(now=NOW)).applied == 1
+    assert (await companies.resolve_batch(now=NOW)).resolved == 1
+    [person] = list(
+        await session.scalars(
+            sa.select(m.Contact).execution_options(populate_existing=True)
+        )
+    )
+    assert (person.tier, person.full_name, person.role, person.is_decision_maker) == (
+        "person",
+        "Rustam Karimov",
+        "direktori",
+        True,
+    )
+    assert (await candidates.score_batch(now=NOW)).scored == 1
+    cand = await _candidate(session)
+    assert (cand.score, cand.tier, cand.state) == (54, "warm", "enriching")
+    contact = cand.score_breakdown["groups"]["contact"]["signals"]
+    assert contact == [
+        {"key": "derived_contact_decision_maker", "points": 2},
+        {"key": "derived_contact_dm_channel", "points": 2},
+    ]
+
+    # E4: the registry by name — legal, active since 2019; E5: a directory
+    # card's company-tier mobile. T-24 writes these; here by hand.
+    later = NOW + timedelta(hours=1)
+    registry = m.Evidence(
+        source_key="registry_lookup",
+        url="https://registry.example.uz/300000011",
+        fetched_at=later,
+        sha256=f"{9101:064d}",
+        bytes=0,
+        excerpt="Namuna Tekstil Savdo MChJ, STIR 300000011, faol, 2019",
+        expires_at=later + timedelta(days=180),
+    )
+    session.add(registry)
+    await session.flush()
+    for key, value in (("ent_legal_confirmed", None), ("ent_age_2y_active", Decimal(7))):
+        session.add(
+            m.Signal(
+                company_id=cand.company_id,
+                evidence_id=registry.id,
+                key=key,
+                value=value,
+                observed_at=later,
+                source_key="registry_lookup",
+            )
+        )
+    session.add(
+        m.Contact(
+            company_id=cand.company_id,
+            tier="company",
+            phone="+998900000001",
+            phone_kind="mobile",
+        )
+    )
+    await session.flush()
+    from clientscrapper.services import signals
+
+    await signals.mark_stale(session, cand.company_id)
+    await session.commit()
+    assert (await candidates.score_batch(now=later)).scored == 1
+    cand = await _candidate(session)
+    assert (cand.score, cand.tier, cand.state) == (72, "hot", "review")
+    groups = cand.score_breakdown["groups"]
+    assert {k: g["used"] for k, g in groups.items()} == {
+        "volume": 20,
+        "origin": 20,
+        "solidity": 12,
+        "recency": 10,
+        "contact": 10,
+        "corroboration": 0,
+    }
+    # The model's goods are the company's (02 §2.2 «from ImportSignal»), so
+    # the ERP note names them (05 §B.1 «NIMA OLIB KELADI», ``imports``).
+    company = await session.get(m.Company, cand.company_id, populate_existing=True)
+    assert company is not None and company.goods == ["mato"]
+    view = await candidates.load_view(session, cand.id, now=later)
+    body = crm_push.build_payload(view)
+    assert body.imports == "mato"
+    assert body.note.split("\n")[2].startswith("NIMA OLIB KELADI: mato · Xitoy: ha")
+
+
 async def test_the_company_first_order_ends_the_same(
     session, enabled, offline, tmp_path, model_api
 ):
@@ -147,6 +239,9 @@ async def test_the_company_first_order_ends_the_same(
     )
     job = await _classify_job(session)
     assert job.company_id == found["vol_stated_1_3"].company_id
+    # The classifier's own hook carries the goods too (02 §2.2).
+    company = await session.get(m.Company, job.company_id, populate_existing=True)
+    assert company is not None and company.goods == ["mato"]
     await candidates.score_batch(now=NOW)
     cand = await _candidate(session)
     assert (cand.score, cand.tier, cand.state) == (54, "warm", "enriching")
