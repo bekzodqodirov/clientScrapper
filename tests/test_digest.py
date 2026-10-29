@@ -158,6 +158,19 @@ def test_fit_drops_middle_lines_and_keeps_the_first_and_the_last():
     assert digest.fit(["a", "b"], limit=1000) == "a\nb"
 
 
+def test_a_digest_past_the_caps_is_still_one_message():
+    """No list can pass its cap; a count can (an int has no bound): the
+    renderer gives way line by line instead of handing Telegram 4,097."""
+    huge = 10**3000
+    view = replace_view(dv.longest(), yesterday=digest.Yesterday(huge, 0, 0, 0, 0, 0))
+    text = digest.render_digest(view)
+    assert len(text) <= 4096
+    lines = text.splitlines()
+    assert lines[0] == "☀️ 29.10.2026 — Qidiruv agenti"
+    assert lines[-2:] == ["  …", "Sizni 99999 ta karta kutmoqda → /lidlar"]
+    assert uz_problems(text, rendered=True) == set()
+
+
 def replace_view(view: digest.DigestView, **changes: Any) -> digest.DigestView:
     from dataclasses import replace
 
