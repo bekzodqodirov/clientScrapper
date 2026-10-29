@@ -326,10 +326,26 @@ async def test_r2a_deletes_an_unconverted_post_and_its_evidence_at_31_days(sessi
     )
     young, young_ev, _ = await post(session, root, days=29)
     cited, cited_ev, _ = await post(session, root, days=31, signal=True)
-    files = {r.id: root / str(r.raw_path) for r in (plain_ev, rejected_ev, cited_ev)}
+    # A rejected post whose page another, live observation still reads.
+    read, read_ev, _ = await post(session, root, days=31, observation="rejected")
+    live = m.Observation(
+        evidence_id=read_ev.id,
+        ordinal=1,
+        source_key="telegram_monitor",
+        status="resolved",
+        parsed={"kind": "intent_post"},
+    )
+    session.add(live)
+    await session.commit()
+    files = {
+        r.id: root / str(r.raw_path) for r in (plain_ev, rejected_ev, cited_ev, read_ev)
+    }
     report = await run(dirs)
-    assert report["R2a"] == {"interactions": 3, "evidence": 2, "files": 2}
-    for row in (plain, rejected, cited):
+    assert report["R2a"] == {"interactions": 4, "evidence": 2, "files": 2}
+    assert await fresh(session, m.Evidence, read_ev.id) is not None
+    assert await fresh(session, m.Observation, live.id) is not None
+    assert files[read_ev.id].is_file()
+    for row in (plain, rejected, cited, read):
         assert await fresh(session, m.Interaction, row.id) is None
     for row in (converted, young):
         assert await fresh(session, m.Interaction, row.id) is not None

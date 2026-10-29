@@ -758,7 +758,7 @@ async def test_import_refuses_a_file_it_cannot_read(w):
 
 async def test_unut_plans_by_counts_then_purges_after_its_confirm(w):
     async with w.db() as s:
-        cand = await lead(s, name="Namuna Unut Savdo")
+        cand = await lead(s, name="Namuna Unut Savdo", stir="300000061")
         company_id = cand.company_id
     await w.say("/unut +998 90 000 00 61")
     plan_text = w.last()
@@ -803,9 +803,10 @@ async def test_unut_plans_by_counts_then_purges_after_its_confirm(w):
         assert row is not None and row.executed_at is not None and row.error is None
     await w.press(yes)
     assert w.last() == t("unut.closed")
-    # A purged company is no longer found.
-    await w.say("/unut +998 90 000 00 61")
-    assert w.last() == t("unut.none", query="+998 90 000 00 61")
+    # A purged company is no longer found — by the STIR it keeps either.
+    for query in ("+998 90 000 00 61", "300000061", str(company_id)):
+        await w.say(f"/unut {query}")
+        assert w.last() == t("unut.none", query=query)
 
 
 async def test_unut_cancel_and_a_forgotten_plan_delete_nothing(w):
