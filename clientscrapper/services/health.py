@@ -1331,26 +1331,36 @@ def _streak(component: Component) -> int:
 JOB_STUCK_AFTER: Final = timedelta(minutes=15)
 
 
+# A job that runs once a day or less often is said on its first raise: three
+# Sundays of a weekly job (source_precision) is two weeks of a source never
+# re-judged (seam review wave 4).
+JOB_DAILY: Final = timedelta(days=1)
+
+
 def job_failing_streak(job: Component) -> int | None:
-    """The job's failing streak once it counts as job_failing, else None:
-    ``JOB_FAILING_STREAK`` raises in a row; or, for skipped runs of a
-    short-interval job (``every`` in its beat), as many as span
-    ``JOB_STUCK_AFTER`` and at least ``JOB_FAILING_STREAK`` — a 2-minute job
-    hung on a lock is said after 16 minutes, a 15-minute one after three
-    skips."""
+    """The job's failing streak once it counts as job_failing, else None.
+    Raises: ``JOB_FAILING_STREAK`` in a row — one for a job whose period
+    (``every`` in its beat, ``worker.job_period``) is a day or more. Skipped
+    runs of a short-interval job (``error`` = ``STILL_RUNNING``, ``every``
+    its interval): as many as span ``JOB_STUCK_AFTER`` and at least
+    ``JOB_FAILING_STREAK`` — a 2-minute job hung on a lock is said after 16
+    minutes, a 15-minute one after three skips."""
     runs = _streak(job)
-    if runs < JOB_FAILING_STREAK:
+    if runs < 1:
         return None
-    every = job.detail.get("every")
-    if (
-        job.detail.get("error") == STILL_RUNNING
-        and isinstance(every, int)
-        and not isinstance(every, bool)
-        and every > 0
-        and runs * every < JOB_STUCK_AFTER.total_seconds()
-    ):
-        return None
-    return runs
+    raw = job.detail.get("every")
+    every = (
+        raw if isinstance(raw, int) and not isinstance(raw, bool) and raw > 0 else None
+    )
+    if job.detail.get("error") == STILL_RUNNING:
+        if runs < JOB_FAILING_STREAK:
+            return None
+        if every is not None and runs * every < JOB_STUCK_AFTER.total_seconds():
+            return None
+        return runs
+    if every is not None and every >= JOB_DAILY.total_seconds():
+        return runs
+    return runs if runs >= JOB_FAILING_STREAK else None
 
 
 # The sweep's own scheduler id: when it is the job that keeps raising, it

@@ -546,7 +546,14 @@ async def test_a_job_outcome_is_its_job_heartbeat(session):
         await asyncio.wrap_future(future)
     rows = await health.beats(session)
     assert rows["job:health"].detail == {"ok": True, "error": None, "failures": 0}
-    assert rows["job:backup"].detail == {"ok": False, "error": "OSError", "failures": 1}
+    # A raise carries the job's period: the nightly backup's is a day, so
+    # health says it on this first raise (health.job_failing_streak).
+    assert rows["job:backup"].detail == {
+        "ok": False,
+        "error": "OSError",
+        "failures": 1,
+        "every": 86400,
+    }
     await health.beat(session, "job:retired_job", now=NOW)
     await session.commit()
     assert await worker.prune_job_heartbeats(["job:health", "job:backup"]) == 1

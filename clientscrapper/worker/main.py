@@ -687,16 +687,42 @@ async def record_job_event(
         )
 
 
+def job_period(
+    job_id: str, *, now: datetime | None = None, slots: tuple[JobSlot, ...] | None = None
+) -> int | None:
+    """Seconds between the job's next two fire times (its slot's triggers),
+    or None for a job the table does not schedule: what a raise's streak is
+    judged against (``health.job_failing_streak`` — a weekly job is said on
+    its first raise, not its third Sunday)."""
+    now = now or datetime.now(settings.tz)
+    for slot in slots if slots is not None else job_table():
+        if slot.id != job_id or slot.job is None:
+            continue
+        try:
+            trigger = build_trigger(slot.triggers, settings.tz)
+        except crontab.CrontabError:
+            return None
+        first = trigger.get_next_fire_time(None, now)
+        if first is None:
+            return None
+        second = trigger.get_next_fire_time(first, first + timedelta(seconds=1))
+        if second is None:
+            return None
+        return int((second - first).total_seconds())
+    return None
+
+
 def on_job_event(
     event: JobExecutionEvent, *, loop: asyncio.AbstractEventLoop
 ) -> asyncio.Future[None] | Any:
     """APScheduler listener (EVENT_JOB_EXECUTED | EVENT_JOB_ERROR). Listeners
     are plain callbacks: the upsert is handed to the loop; the future is for
-    tests."""
+    tests. A raise carries the job's period (``job_period``)."""
     exc = getattr(event, "exception", None)
     error = None if exc is None else type(exc).__name__
+    every = job_period(event.job_id) if exc is not None else None
     return asyncio.run_coroutine_threadsafe(
-        record_job_event(event.job_id, ok=exc is None, error=error), loop
+        record_job_event(event.job_id, ok=exc is None, error=error, every=every), loop
     )
 
 

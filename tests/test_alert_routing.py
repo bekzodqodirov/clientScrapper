@@ -369,6 +369,29 @@ async def test_a_hung_sweep_s_skipped_runs_reach_the_watchdog(session):
     assert worker.on_job_skipped(event, loop=loop) is None
 
 
+async def test_a_weekly_job_is_said_on_its_first_raise(session):
+    """Seam review wave 4: source_precision raising every Sunday was first
+    said on its third Sunday, 14 days after the first failure — a raise of a
+    job that runs once a day or less often is said at once; a 2-minute job
+    still needs three."""
+    import asyncio
+
+    from apscheduler.events import EVENT_JOB_ERROR, JobExecutionEvent
+
+    assert worker.job_period("source_precision") == 7 * 86400
+    assert worker.job_period("resolve") == 120
+    loop = asyncio.get_running_loop()
+    for job_id in ("source_precision", "resolve"):
+        event = JobExecutionEvent(EVENT_JOB_ERROR, job_id, None, NOW, exception=OSError())
+        await asyncio.wrap_future(worker.on_job_event(event, loop=loop))
+    await health.beat(session, "worker", detail={"jobs": 20}, now=NOW)
+    await session.commit()
+    status = await health.gather(session, now=NOW)
+    assert [(j.name, n) for j, n in health.failing_jobs(status)] == [
+        ("source_precision", 1)
+    ]
+
+
 async def test_a_job_hung_on_a_lock_is_said_once_its_skips_span_15_minutes(session):
     """Seam review wave 4: review_cards blocked for ever on a row lock (a
     forgotten `make psql` FOR UPDATE) — max_instances=1 refuses every later
