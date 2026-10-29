@@ -903,6 +903,8 @@ async def run_collector(
                 "http_429": stats.http_429,
                 "new_evidence": written.new_evidence,
                 "new_observations": written.new_observations,
+                # None resolved yet: the resolver adds each company it mints
+                # from this run's evidence (companies.count_minted).
                 "new_companies": 0,
                 "new_signals": 0,
                 "cost_usd": stats.cost_usd,

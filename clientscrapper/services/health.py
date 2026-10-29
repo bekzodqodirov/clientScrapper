@@ -461,8 +461,9 @@ class SourceState:
     # been skipped since it was enabled (enabling it is a write).
     updated_at: datetime | None = None
     # /holat's per-source numbers (06 §1.4, 05 §B.2): the precision job's
-    # 30-day precision and pushes, its auto_push, and the companies the
-    # source's runs found since Tashkent midnight.
+    # 30-day precision and pushes, its auto_push, and the companies minted
+    # from the evidence of the source's runs started since Tashkent midnight
+    # (the resolver counts each on its run, companies.count_minted).
     precision_30d: Decimal | None = None
     pushes_30d: int = 0
     auto_push: bool = False
