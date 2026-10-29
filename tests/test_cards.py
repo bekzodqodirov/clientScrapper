@@ -270,7 +270,7 @@ MANAGER_CARD = (
     "🔎 «5 kub mato kerak» — Optom bozor chat, 25.10.2026\n"
     "🔗 https://t.me/namuna_optom/101\n"
     "👤 Yozish: t.me/namuna_tekstil — oʻz akkauntingizdan, 10:00–17:00 (Du–Sha)\n"
-    "✍️ Taklif: sotuv qoʻllanmasidagi «Bozor optom» shabloni (§3.1)\n"
+    "✍️ Taklif: sotuv qoʻllanmasidagi «Bozor optom» shabloni (§3.0)\n"
     "⚠️ Birinchi xabarda narx yoʻq. Oxirgi jumla: «Agar qiziq boʻlmasa, "
     '"yoʻq" deb yozing — boshqa yozmayman.»\n'
     "🔍 Yozishdan oldin ERPda nomi boʻyicha qidiring"

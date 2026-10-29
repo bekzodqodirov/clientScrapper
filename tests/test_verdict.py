@@ -471,10 +471,67 @@ async def test_a_budget_refusal_keeps_nothing_and_the_card_says_so(
         )
     ).one()
     assert (refusal.model, refusal.company_id) == ("refused:cost_cap_daily", owner.id)
-    assert await verdict.refused_today(session, [owner.id], now=NOW)
-    assert not await verdict.refused_today(
-        session, [owner.id], now=NOW + timedelta(days=1)
+    assert await verdict.refused_today(session, now=NOW)
+    assert not await verdict.refused_today(session, now=NOW + timedelta(days=1))
+
+
+async def test_every_card_the_cap_refused_says_so_not_only_the_first(
+    session, model_api, monkeypatch
+):
+    """04 §8: a run stops at its first refusal, so the second company has no
+    refused row of its own — the same cap refused it all the same."""
+    first, cand_a = await lead_firm(session, score=72)
+    second, cand_b = await lead_firm(session, score=71)
+    monkeypatch.setattr(settings, "daily_cost_cap_usd", Decimal("0"))
+    report = await verdict.verdict_batch(now=NOW)
+    assert (report.claimed, report.refused) == (1, 1)
+    rows = (
+        await session.scalars(
+            sa.select(m.UsageLog.company_id).where(m.UsageLog.operation == "verdict")
+        )
+    ).all()
+    assert rows == [first.id]
+    reviews = []
+    for cand in (cand_a, cand_b):
+        review = m.LeadReview(candidate_id=cand.id, kind="owner", state="pending")
+        session.add(review)
+        await session.commit()
+        reviews.append(review.id)
+        rv = await cards.review_view(session, review.id, now=NOW)
+        assert rv is not None
+        assert (rv.verdict_refused, cards.verdict_lines(rv)) == (
+            True,
+            [cards.VERDICT_REFUSED_UZ],
+        )
+    # A company that has its verdict shows its reasons, not the budget line.
+    second.verdict, second.verdict_at = answer(), NOW
+    await session.commit()
+    rv = await cards.review_view(session, reviews[1], now=NOW)
+    assert rv is not None and rv.verdict_refused is False
+
+
+def _refused(owner: m.Company, op: str, code: str) -> m.UsageLog:
+    return m.UsageLog(
+        provider="anthropic",
+        operation=op,
+        model=costs.REFUSED_PREFIX + code,
+        units=Decimal(0),
+        batch=False,
+        cost_usd=Decimal(0),
+        company_id=owner.id,
+        created_at=NOW - timedelta(hours=1),
     )
+
+
+async def test_a_refusal_that_is_no_cap_is_not_the_budget(session):
+    """Paused or unpriced is not «byudjet tugadi» (``costs.is_cap``)."""
+    owner = await firm(session)
+    session.add_all([_refused(owner, "verdict", c) for c in ("paused", "unpriced")])
+    await session.commit()
+    assert not await verdict.refused_today(session, now=NOW)
+    session.add(_refused(owner, "company_verdict", "cost_cap_daily"))
+    await session.commit()
+    assert await verdict.refused_today(session, now=NOW)
 
 
 async def test_the_second_rule_waits_for_a_far_batch_and_two_evidence_rows(session):
@@ -647,10 +704,11 @@ async def test_a_fallback_is_answered_and_checked_like_the_batch(session, model_
     assert owner.verdict["evidence_quotes"] == [
         {"ref": "E2", "quote": "mato va furnitura"}
     ]
-    # A verified quote holds «confirmed» (a dealership names no country).
-    assert owner.verdict["imports_from_china"] == "confirmed"
-    origin = [s for s in await signals_of(session, owner) if s.key == "cn_origin"]
-    assert [s.quote for s in origin] == ["mato va furnitura"]
+    # A verified quote that names no China, from no dealer's page, is no
+    # China origin: «confirmed» stands as «likely» (04 §4.4).
+    assert owner.verdict["imports_from_china"] == "likely"
+    keys = [s.key for s in await signals_of(session, owner) if s.model is not None]
+    assert keys == ["cn_sector_prior"]
 
 
 # --- the opener -----------------------------------------------------------------------

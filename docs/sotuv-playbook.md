@@ -123,7 +123,9 @@ Placeholders: `[Ism]/[Имя]` contact, `[Men]` manager name, `[tovar]` goods, `
 
 The agent never sends anything. For a lead it puts ONE suggested first message on the manager's card and in the ERP note; the manager reads it, edits it and sends it from their own account. A hot lead gets a draft written for that company (the model is asked with the company name, the segment, up to three goods, the public source and its date, and the skeleton below — never a person's name or phone); every other lead, and every draft the gate refuses, gets the segment's template below with the source and the goods filled in.
 
-The agent's gate (`clientscrapper/services/redlines.py`, 04 §4.5) is stricter than §2.4: a machine-written message carries **no digit except 2018**, no day count or delivery time ("kun", "hafta", "tez"), no price, tariff, per-m³ or discount word, no guarantee ("kafolat", "100%", "bojsiz"), no customs, declaration, tax or STIR word, no link or handle, no competitor's name, and it ends with the opt-out line of §2.6. The templates are the §3.1 messages with those taken out; the manager adds "15–25 kun" or a container's timing by hand when it helps. `[Men]` is the manager's name and `[Ism]` the contact's (the card shows the contact; the agent never writes a person's name into the text). `{salom}` is ", [Ism]" when a contact person is known, `{manba}` the source ("OLX", "Telegram guruh", "koʻrgazma"…), `{tovar}` the goods.
+The agent's gate (`clientscrapper/services/redlines.py`, 04 §4.5) is stricter than §2.4: a machine-written message carries **no digit except 2018**, no day count or delivery time ("kun", "hafta", "tez", "bir oyda", "за месяц"), no price, tariff, per-m³, percentage ("foiz", "процент") or discount word and no "arzon"/"дешевле"/"недорого" claim, no guarantee ("kafolat", "100%", "bojsiz"), no customs, declaration, tax or STIR word, no link, bare domain ("gsrlogistics.uz", "wa.me/…") or handle, no competitor's name, and it ends with the opt-out line of §2.6. The templates are the §3.1 messages with those taken out; the manager adds "15–25 kun" or a container's timing by hand when it helps. `[Men]` is the manager's name and `[Ism]` the contact's (the card shows the contact; the agent never writes a person's name into the text). `{salom}` is ", [Ism]" when a contact person is known, `{manba}` the source ("OLX", "Telegram guruh", "koʻrgazma"…; in Russian "на OLX", "в группе Telegram"…), `{tovar}` the goods — in a Russian template with the words around them (" по товару «mato»"), which drop out when no goods can be named ("…ваш опт."); an Uzbek one then says "tovar".
+
+The manager card shows the whole message. The ERP note has less room: when it must shorten «NIMA DEYISH», it drops whole sentences from the middle and marks the gap with "…" — the greeting stays first and the last two sentences (the question and the opt-out line) always stay.
 
 The code's copy (`clientscrapper/services/playbook.py` `TEMPLATES`) is the one the agent uses; `tests/fixtures/uz_corpus.py` holds a reference copy and `tests/test_redlines.py` checks every one, filled, through the gate. A change here is a change there.
 
@@ -133,7 +135,7 @@ Assalomu alaykum{salom}. Men [Men], GSR Logistics (Toshkent), 2018-yildan Xitoyd
 ```
 RU:
 ```
-Здравствуйте{salom}. Я [Men], GSR Logistics (Ташкент), с 2018 года возим грузы из Китая. Пишу, потому что увидел {manba} ваш опт по товару «{tovar}». Принимаем груз на своих пунктах в Иу и Гуанчжоу, замеряем и присылаем фотоотчёт. Сколько кубов в месяц обычно везёте? Если неактуально — напишите «нет», больше не побеспокою.
+Здравствуйте{salom}. Я [Men], GSR Logistics (Ташкент), с 2018 года возим грузы из Китая. Пишу, потому что увидел {manba} ваш опт{tovar}. Принимаем груз на своих пунктах в Иу и Гуанчжоу, замеряем и присылаем фотоотчёт. Сколько кубов в месяц обычно везёте? Если неактуально — напишите «нет», больше не побеспокою.
 ```
 
 **B.** UZ Latin:
@@ -142,7 +144,7 @@ Assalomu alaykum{salom}. Men [Men], GSR Logistics. {manba}dagi doʻkoningizni ko
 ```
 RU:
 ```
-Здравствуйте{salom}. Я [Men], GSR Logistics. Увидел ваш магазин {manba} — похоже, «{tovar}» идёт из Китая. Закупаем товар на китайских площадках, проверяем его в Китае и присылаем фото, документы готовим так, чтобы они подходили для сертификации и бухгалтерии. Когда следующая партия и сколько примерно кубов или килограммов? Если неактуально — напишите «нет», больше не побеспокою.
+Здравствуйте{salom}. Я [Men], GSR Logistics. Увидел ваш магазин {manba} — похоже, {tovar} идёт из Китая. Закупаем товар на китайских площадках, проверяем его в Китае и присылаем фото, документы готовим так, чтобы они подходили для сертификации и бухгалтерии. Когда следующая партия и сколько примерно кубов или килограммов? Если неактуально — напишите «нет», больше не побеспокою.
 ```
 
 **C.** UZ Latin:
@@ -151,7 +153,7 @@ Assalomu alaykum{salom}. Men [Men], GSR Logistics (Toshkent). {manba}da {tovar} 
 ```
 RU:
 ```
-Здравствуйте{salom}. Я [Men], GSR Logistics (Ташкент). Увидел {manba} ваше предприятие: «{tovar}». Везём оборудование и сырьё из Китая в контейнерах, принимаем груз на заводе с фотоотчётом, документы оформляем сами. Есть ли закупка в ближайшие месяцы? Если неактуально — напишите «нет», больше не побеспокою.
+Здравствуйте{salom}. Я [Men], GSR Logistics (Ташкент). Увидел {manba} ваше предприятие{tovar}. Везём оборудование и сырьё из Китая в контейнерах, принимаем груз на заводе с фотоотчётом, документы оформляем сами. Есть ли закупка в ближайшие месяцы? Если неактуально — напишите «нет», больше не побеспокою.
 ```
 
 **D.** UZ Latin:
@@ -160,7 +162,7 @@ Assalomu alaykum{salom}. Men [Men], GSR Logistics. {manba}da {tovar} boʻyicha o
 ```
 RU:
 ```
-Здравствуйте{salom}. Я [Men], GSR Logistics. Увидел {manba} ваш опт по товару «{tovar}». Для тяжёлого груза считаем рядом два варианта — полная фура и контейнер, приёмка и фото в Иу и Гуанчжоу. В сезон на Хоргосе очереди — бронируем место заранее. Вы обычно везёте полной фурой или сборным? Если неактуально — напишите «нет», больше не побеспокою.
+Здравствуйте{salom}. Я [Men], GSR Logistics. Увидел {manba} ваш опт{tovar}. Для тяжёлого груза считаем рядом два варианта — полная фура и контейнер, приёмка и фото в Иу и Гуанчжоу. В сезон на Хоргосе очереди — бронируем место заранее. Вы обычно везёте полной фурой или сборным? Если неактуально — напишите «нет», больше не побеспокою.
 ```
 
 **E.** UZ Latin:
@@ -169,7 +171,7 @@ Assalomu alaykum{salom}. Men [Men], GSR Logistics. {manba}da {tovar} boʻyicha f
 ```
 RU:
 ```
-Здравствуйте{salom}. Я [Men], GSR Logistics. Увидел {manba} вашу работу по товару «{tovar}». У нас свой пункт приёма в Гуанчжоу: пересчитываем места, проверяем хрупкое и присылаем фото, документы делаем сами. Есть и импорт авто и электромобилей. Сколько кубов или килограммов в месяц обычно везёте? Если неактуально — напишите «нет», больше не побеспокою.
+Здравствуйте{salom}. Я [Men], GSR Logistics. Увидел {manba} вашу работу{tovar}. У нас свой пункт приёма в Гуанчжоу: пересчитываем места, проверяем хрупкое и присылаем фото, документы делаем сами. Есть и импорт авто и электромобилей. Сколько кубов или килограммов в месяц обычно везёте? Если неактуально — напишите «нет», больше не побеспокою.
 ```
 
 ### 3.1 Telegram first messages — per segment (UZ Latin / UZ Cyrillic / RU)

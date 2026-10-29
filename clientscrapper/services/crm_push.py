@@ -257,6 +257,40 @@ def clip_words(text: str, max_units: int) -> str:
     return js_trim(cut).rstrip(",.;:·—-") + ELLIPSIS
 
 
+# A sentence ends at «.», «!», «?» or «…» before a space.
+_SENTENCE_BREAK: Final = re.compile(r"(?<=[.!?…])\s+")
+
+
+def fit_opener(text: str, max_units: int) -> str:
+    """An opener within ``max_units`` UTF-16 units that still ends the way
+    every opener must (04 §4.5): its last sentence — the opt-out line — and
+    the question before it are kept whole; then whole sentences from the
+    start, in order, while they fit; the sentences dropped between are one
+    «…». Never a sentence cut in the middle. ``text`` whole when it fits;
+    cut by words (``clip_words``) only when not even its last sentence does.
+    Pure."""
+    text = collapse(text)
+    if text_len(text) <= max_units:
+        return text
+    parts = _SENTENCE_BREAK.split(text)
+    closing, body = [parts[-1]], parts[:-1]
+    gap = text_len(ELLIPSIS) + 1
+
+    def size(items: Sequence[str]) -> int:
+        return text_len(" ".join(items))
+
+    if body and body[-1].endswith("?") and size([body[-1], *closing]) + gap <= max_units:
+        closing.insert(0, body.pop())
+    if size(closing) + gap > max_units:
+        return clip_words(text, max_units)
+    head: list[str] = []
+    for sentence in body:
+        if size([*head, sentence, *closing]) + gap > max_units:
+            break
+        head.append(sentence)
+    return " ".join([*head, ELLIPSIS, *closing])
+
+
 def _clip_points(text: str, max_points: int) -> str:
     """The same at a code-point budget (the seller's push preview)."""
     if len(text) <= max_points:
@@ -592,8 +626,9 @@ def render_note(c: CandidateView, *, level: int = 0) -> str:
         sections.append(masul)
     opener = clean(c.opener)
     if opener and "opener" not in drop:
+        # Shortened, the opener keeps its question and its opt-out line.
         limit = OPENER_SHORT if "opener_short" in drop else OPENER_MAX
-        sections.append("NIMA DEYISH: " + clip_words(opener, limit))
+        sections.append("NIMA DEYISH: " + fit_opener(opener, limit))
     sections.append(_ball(c, detail="ball_detail" not in drop))
     return "\n".join(sections)
 
@@ -1639,6 +1674,7 @@ __all__ = [
     "due_candidates",
     "endpoint_for",
     "external_id_for",
+    "fit_opener",
     "js_trim",
     "landed_note",
     "last_attempt",

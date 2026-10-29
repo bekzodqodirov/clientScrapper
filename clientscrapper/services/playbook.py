@@ -20,11 +20,20 @@ filled, through ``redlines.check_opener``.
 ``fill`` substitutes the source, the goods and the greeting; a value that
 would trip the gate alone (``redlines.trips``: a goods word «soat», a digit)
 is left out, so a filled template passes the same gate by construction —
-``opener`` checks it once more and falls back to the generic values.
+``opener`` checks it once more and falls back to the generic values. With
+no goods left an Uzbek template says «tovar» and a Russian one drops the
+words around them (``RU_GOODS``: «ваш опт.», not «по товару «товары»»); a
+Cyrillic goods word only Russian writes («холодильники») stays out of an
+Uzbek text rather than standing there transliterated.
+
+Every template ends with its qualifier question and the opt-out sentence:
+the two sentences a shortened opener keeps (``crm_push.fit_opener``, the
+ERP note's «NIMA DEYISH»).
 """
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Final
@@ -83,33 +92,33 @@ TEMPLATES: Final[Mapping[tuple[str, Lang], str]] = {
     ),
     ("A", "ru"): (
         "Здравствуйте{salom}. Я [Men], GSR Logistics (Ташкент), с 2018 года возим "
-        "грузы из Китая. Пишу, потому что увидел {manba} ваш опт по товару "
-        "«{tovar}». Принимаем груз на своих пунктах в Иу и Гуанчжоу, замеряем и "
+        "грузы из Китая. Пишу, потому что увидел {manba} ваш опт{tovar}. "
+        "Принимаем груз на своих пунктах в Иу и Гуанчжоу, замеряем и "
         "присылаем фотоотчёт. Сколько кубов в месяц обычно везёте? " + _OPTOUT_RU
     ),
     ("B", "ru"): (
         "Здравствуйте{salom}. Я [Men], GSR Logistics. Увидел ваш магазин {manba} — "
-        "похоже, «{tovar}» идёт из Китая. Закупаем товар на китайских площадках, "
+        "похоже, {tovar} идёт из Китая. Закупаем товар на китайских площадках, "
         "проверяем его в Китае и присылаем фото, документы готовим так, чтобы они "
         "подходили для сертификации и бухгалтерии. Когда следующая партия и "
         "сколько примерно кубов или килограммов? " + _OPTOUT_RU
     ),
     ("C", "ru"): (
         "Здравствуйте{salom}. Я [Men], GSR Logistics (Ташкент). Увидел {manba} "
-        "ваше предприятие: «{tovar}». Везём оборудование и сырьё из Китая в "
+        "ваше предприятие{tovar}. Везём оборудование и сырьё из Китая в "
         "контейнерах, принимаем груз на заводе с фотоотчётом, документы оформляем "
         "сами. Есть ли закупка в ближайшие месяцы? " + _OPTOUT_RU
     ),
     ("D", "ru"): (
-        "Здравствуйте{salom}. Я [Men], GSR Logistics. Увидел {manba} ваш опт по "
-        "товару «{tovar}». Для тяжёлого груза считаем рядом два варианта — полная "
+        "Здравствуйте{salom}. Я [Men], GSR Logistics. Увидел {manba} ваш "
+        "опт{tovar}. Для тяжёлого груза считаем рядом два варианта — полная "
         "фура и контейнер, приёмка и фото в Иу и Гуанчжоу. В сезон на Хоргосе "
         "очереди — бронируем место заранее. Вы обычно везёте полной фурой или "
         "сборным? " + _OPTOUT_RU
     ),
     ("E", "ru"): (
-        "Здравствуйте{salom}. Я [Men], GSR Logistics. Увидел {manba} вашу работу "
-        "по товару «{tovar}». У нас свой пункт приёма в Гуанчжоу: пересчитываем "
+        "Здравствуйте{salom}. Я [Men], GSR Logistics. Увидел {manba} вашу "
+        "работу{tovar}. У нас свой пункт приёма в Гуанчжоу: пересчитываем "
         "места, проверяем хрупкое и присылаем фото, документы делаем сами. Есть и "
         "импорт авто и электромобилей. Сколько кубов или килограммов в месяц "
         "обычно везёте? " + _OPTOUT_RU
@@ -133,7 +142,9 @@ SOURCE_UZ: Final[Mapping[str, str]] = {
     "registry": "reestr",
 }
 SOURCE_RU: Final[Mapping[str, str]] = {
-    "telegram": "в Telegram-группе",
+    # Not «в Telegram-группе»: a messenger's label before a word is a
+    # messenger id to services/pseudonyms («Telegram-группе» would be masked).
+    "telegram": "в группе Telegram",
     "olx": "на OLX",
     "instagram": "в Instagram",
     "directory": "в каталоге",
@@ -146,14 +157,41 @@ SOURCE_RU: Final[Mapping[str, str]] = {
     "registry": "в реестре",
 }
 DEFAULT_SOURCE: Final = "search"
-# The goods when none can be named.
-NO_GOODS: Final[Mapping[Lang, str]] = {"uz": "tovar", "ru": "товары"}
+# The goods when none can be named (Uzbek: the word «tovar» in their place).
+NO_GOODS_UZ: Final = "tovar"
+# How a Russian template carries the goods, by segment: the words around
+# them, and what stands when none can be named («ваш опт.», never «ваш опт по
+# товару «товары»»).
+RU_GOODS: Final[Mapping[str, tuple[str, str]]] = {
+    "A": (" по товару «{goods}»", ""),
+    "B": ("товар «{goods}»", "товар"),
+    "C": (": «{goods}»", ""),
+    "D": (" по товару «{goods}»", ""),
+    "E": (" по товару «{goods}»", ""),
+}
+# A Cyrillic goods word that only Russian writes — a letter Uzbek has not
+# («ы», «щ») or a Russian plural or adjective ending («холодильники»,
+# «стиральные») — stays out of an Uzbek text, where it would stand
+# transliterated («xolodilniki»); «мато», «мебель», «кунгабоқар ёғи» are
+# Uzbek and are written in Latin.
+_RU_ONLY_LETTERS: Final = frozenset("ыщЫЩ")
+_RU_ENDING: Final = re.compile(
+    r"(?:ы|и|ые|ие|ая|яя|ой|ый|ий|ое|ее|ую|юю|ов|ев|ей)$", re.IGNORECASE
+)
 GREETING: Final = ", [Ism]"
 # The playbook's placeholders, as a skeleton shows them to the model.
 SKELETON_FIELDS: Final[Mapping[Lang, Mapping[str, str]]] = {
     "uz": {"salom": GREETING, "manba": "[manba]", "tovar": "[tovar]"},
     "ru": {"salom": GREETING, "manba": "[источник]", "tovar": "[товар]"},
 }
+
+
+def _tovar(segment: str, lang: Lang, words: Sequence[str]) -> str:
+    """The goods as segment ``segment``'s template in ``lang`` writes them."""
+    if lang == "uz":
+        return ", ".join(words) if words else NO_GOODS_UZ
+    with_goods, without = RU_GOODS[segment]
+    return with_goods.format(goods=", ".join(words)) if words else without
 
 
 def template_segment(segment: str | None) -> str:
@@ -169,7 +207,13 @@ def lang_of(text: str | None) -> Lang:
 def skeleton(segment: str | None, lang: Lang) -> str:
     """The segment's template with the playbook's placeholders — what the
     draft request shows the model (04 §4.5)."""
-    return TEMPLATES[(template_segment(segment), lang)].format(**SKELETON_FIELDS[lang])
+    seg = template_segment(segment)
+    fields = SKELETON_FIELDS[lang]
+    return TEMPLATES[(seg, lang)].format(
+        salom=fields["salom"],
+        manba=fields["manba"],
+        tovar=_tovar(seg, lang, [fields["tovar"]]),
+    )
 
 
 def source_word(family: str | None, lang: Lang) -> str:
@@ -187,6 +231,8 @@ def goods_words(goods: Sequence[str], lang: Lang) -> list[str]:
         if not item:
             continue
         if lang == "uz":
+            if _russian(item):
+                continue
             item = uz_apostrophes(to_latin(item))
         if redlines.trips(item) or item in kept:
             continue
@@ -194,6 +240,15 @@ def goods_words(goods: Sequence[str], lang: Lang) -> list[str]:
         if len(kept) == GOODS_MAX:
             break
     return kept
+
+
+def _russian(item: str) -> bool:
+    """A goods word only Russian writes (``_RU_ENDING``)."""
+    if redlines.script_of(item) != "russian":
+        return False
+    return any(ch in _RU_ONLY_LETTERS for ch in item) or any(
+        _RU_ENDING.search(word) for word in item.split()
+    )
 
 
 def hooks(goods: Sequence[str], family: str | None) -> list[str]:
@@ -226,12 +281,11 @@ def fill(
     person: bool,
 ) -> str:
     """The segment's template filled by string substitution."""
-    words = goods_words(goods, lang)
-    tovar = ", ".join(words) if words else NO_GOODS[lang]
-    return TEMPLATES[(template_segment(segment), lang)].format(
+    seg = template_segment(segment)
+    return TEMPLATES[(seg, lang)].format(
         salom=GREETING if person else "",
         manba=source_word(family, lang),
-        tovar=tovar,
+        tovar=_tovar(seg, lang, goods_words(goods, lang)),
     )
 
 

@@ -163,14 +163,46 @@ MONEY_RE: Final = _lexicon(
     rf"{_B}прайс",
     rf"{_B}bepul",
     rf"{_B}бесплатн",
+    # A percentage written out, and a claim about the price («arzon»,
+    # «дешевле», «недорого», «выгодно»): docs/sotuv-playbook.md §2.5.
+    rf"{_B}foiz",
+    rf"{_B}фоиз",
+    rf"{_B}процент",
+    rf"{_B}pro[ts]{{1,2}}ent",
+    rf"{_B}arzon",
+    rf"{_B}арзон",
+    rf"{_B}qimmat",
+    rf"{_B}қиммат",
+    rf"{_B}деш(?:е|ё)в",
+    rf"{_B}недорог",
+    rf"{_B}дорого{_E}",
+    rf"{_B}дорож",
+    rf"{_B}выгодн",
 )
+# The number words a duration is spelled with («bir oyda», «два месяца»).
+_UZ_COUNT: Final = (
+    r"(?:bir|ikki|uch|to'rt|besh|olti|yetti|sakkiz|to'qqiz|o'n|yigirma|o'ttiz|yarim)"
+)
+_RU_COUNT: Final = (
+    r"(?:один|одн\w*|два|две|двух|три|трёх|трех|четыре|пять|шесть|семь|восемь"
+    r"|девять|десять|полтора|полутора|пару|пара)"
+)
+# A day, a week, an hour — with the endings Uzbek gives them, so a goods word
+# that only begins so («kungaboqar», «soatlar» — watches) is no time word.
+_UZ_UNIT_END: Final = r"(?:i|da|ga|gi|dan|lik|lab|gacha|ida|ini|ning|lar\w*)?"
 TIME_RE: Final = _lexicon(
-    rf"{_B}kun",
-    rf"{_B}кун",
+    rf"{_B}kun{_UZ_UNIT_END}{_E}",
     rf"{_B}hafta",
     rf"{_B}ҳафта",
-    rf"{_B}soat",
-    rf"{_B}соат",
+    rf"{_B}soat(?:i|da|ga|dan|gacha|lik|ida|ini|ning)?{_E}",
+    # A month as a delivery time — never «oyiga» / «в месяц» (a volume a
+    # month, the qualifier question) nor «yaqin oylarda» / «в ближайшие
+    # месяцы» (a purchase to come).
+    rf"{_B}{_UZ_COUNT}\s+oy(?:da|ga|dan|gacha|lik|ichida|davomida)?{_E}",
+    rf"{_B}oy\s+(?:ichida|davomida){_E}",
+    rf"{_B}{_RU_COUNT}\s+месяц",
+    rf"{_B}(?:за|через|в\s+течение)\s+(?:\w+\s+)?месяц",
+    rf"{_B}пол\s?месяц",
     rf"{_B}день{_E}",
     rf"{_B}дн(?:я|ей|ю|ям|ями|ях){_E}",
     rf"{_B}недел",
@@ -209,8 +241,9 @@ PROMISE_RE: Final = _lexicon(
     rf"{_B}без\s+проблем",
 )
 LEGAL_RE: Final = _lexicon(
-    rf"{_B}stir",
-    rf"{_B}стир{_E}",
+    # STIR with the endings Uzbek gives it («STIRingizni») — never a word
+    # that only begins so («стиральные машины» is «stiralnie»).
+    rf"{_B}stir(?:ni|ga|da|dan|ingiz\w*|imiz\w*|i|lar)?{_E}",
     rf"{_B}инн{_E}",
     rf"{_B}deklar",
     rf"{_B}деклар",
@@ -227,7 +260,16 @@ LEGAL_RE: Final = _lexicon(
     rf"{_B}tn\s?ved{_E}",
     rf"{_B}тн\s?вэд{_E}",
 )
-LINK_RE: Final = re.compile(r"https?://|t\.me/|@[a-z0-9_]{5,}|www\.")
+# A link with no scheme counts: a bare domain («gsrlogistics.uz»,
+# «instagram.com/…», «wa.me/…»), in either script (the surface view is Latin).
+_TLDS: Final = (
+    "uz|com|ru|me|org|net|io|info|biz|cn|kz|kg|tj|tm|su|pro|shop|store|online"
+    "|site|app|co|ly|link|page"
+)
+LINK_RE: Final = re.compile(
+    r"https?://|t\.me/|@[a-z0-9_]{5,}|www\."
+    rf"|(?<![a-z0-9@._'-])[a-z0-9][a-z0-9-]*(?:\.[a-z0-9-]+)*\.(?:{_TLDS})(?![a-z0-9'-])"
+)
 _OWN_RE: Final = re.compile(
     "|".join(rf"(?<!\w){re.escape(n)}(?!\w)" for n in OWN_NAMES), re.I
 )

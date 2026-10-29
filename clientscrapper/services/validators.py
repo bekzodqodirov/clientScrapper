@@ -41,7 +41,7 @@ from __future__ import annotations
 import math
 import re
 import unicodedata
-from collections.abc import Iterable, Mapping
+from collections.abc import Collection, Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Final
 
@@ -356,14 +356,22 @@ def _owner_text(raw: str, limit: int, names: Iterable[str]) -> str | None:
     return clip_text(uz_apostrophes(text), limit)
 
 
-def china_quote(quotes: Iterable[Mapping[str, Any]]) -> Mapping[str, Any] | None:
-    """The verified quote a ``confirmed`` China origin rests on: the first
-    that names China (``CHINA_RE``), else the first (a dealership of a Chinese
-    brand names no country)."""
+def china_quote(
+    quotes: Iterable[Mapping[str, Any]], *, dealer_refs: Collection[str] = ()
+) -> Mapping[str, Any] | None:
+    """The verified quote a ``confirmed`` China origin rests on (04 §4.4: an
+    explicit China/1688/Taobao/Yiwu/Guangzhou mention or a Chinese brand's
+    dealership quoted): the first that names China (``CHINA_RE``), else the
+    first from a block of a brand dealer's page (``dealer_refs`` — every
+    brand 03 §2.10 lists is Chinese, so the dealership names no country).
+    A quote that is neither — «Toshkent, Abu Sahiy bozori» — carries no
+    China origin: None."""
     kept = [q for q in quotes if isinstance(q, Mapping) and q.get("quote")]
     named = [q for q in kept if CHINA_RE.search(str(q["quote"]))]
-    chosen = named or kept
-    return chosen[0] if chosen else None
+    if named:
+        return named[0]
+    dealer = [q for q in kept if str(q.get("ref")) in dealer_refs]
+    return dealer[0] if dealer else None
 
 
 def relevance_verdict(
@@ -372,15 +380,18 @@ def relevance_verdict(
     blocks: Mapping[str, str],
     reverse: Mapping[str, str],
     names: Iterable[str] = (),
+    dealer_refs: Collection[str] = (),
 ) -> Validated:
     """One verdict after 04 §4.4/§4.7: ``blocks`` is the bundle's
     ``{"E1": excerpt, …}``, ``reverse`` its pseudonym map, ``names`` the
-    company's people (no output field may name one).
+    company's people (no output field may name one), ``dealer_refs`` the
+    blocks that are a brand dealer's page (``china_quote``).
 
     * every evidence quote is held against its own block (``verify_quote``):
       what is kept is the block's own fragment, a quote of a block the bundle
       does not have, or not in its block, is dropped;
-    * ``confirmed`` without a verified quote is ``likely`` (a sector prior);
+    * ``confirmed`` without a verified quote that names China or comes from
+      a dealer's page (``china_quote``) is ``likely`` (a sector prior);
     * the reasons and the role are owner text: Uzbek Latin with ʻ/ʼ, cut to
       120 and 40 characters (a Cyrillic role is transliterated), none naming a
       person, none carrying a token;
@@ -431,7 +442,7 @@ def relevance_verdict(
         ):
             quotes.append({"ref": ref, "quote": verified})
     china = verdict.imports_from_china
-    if china == "confirmed" and china_quote(quotes) is None:
+    if china == "confirmed" and china_quote(quotes, dealer_refs=dealer_refs) is None:
         china = "likely"
     weak = verdict.confidence < FLAG_CONFIDENCE
     competitor = verdict.is_competitor and not (
@@ -450,7 +461,7 @@ def relevance_verdict(
         reasons=reasons,
         evidence_quotes=quotes,
     )
-    found = china_quote(quotes) if china == "confirmed" else None
+    found = china_quote(quotes, dealer_refs=dealer_refs) if china == "confirmed" else None
     return Validated(
         result=result,
         quote=str(found["quote"]) if found is not None else None,

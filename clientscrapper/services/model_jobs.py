@@ -170,6 +170,11 @@ FALLBACK_OF: Final = "fallback_of"
 # and failed the same way again, the answer is final.
 DOUBLED: Final = "doubled"
 NUDGED: Final = "nudged"
+# The key of a batch job's request that says when its user text was built:
+# what the answer knows of the company is what stood then (T-30: a verdict is
+# stamped with it, never with the collect's clock — evidence that arrived
+# while the batch ran is in no bundle). ``enqueue`` writes it with the text.
+ASKED_AT: Final = "asked_at"
 
 # What ``collect_batch`` found: the batch read and its jobs settled, still
 # running, or not readable now (the API failed the read or the results
@@ -235,6 +240,22 @@ class Landed:
     company_id: uuid.UUID | None
     evidence_ids: tuple[int, ...]
     validated: Validated
+    # When the question's text was built (``asked_at``); None: unknown.
+    asked_at: datetime | None = None
+
+
+def asked_at(job: ModelJob) -> datetime:
+    """When ``job``'s user text was built: the request's ``ASKED_AT``, else
+    the job's own creation (a job enqueued before the key existed)."""
+    raw = (job.request or {}).get(ASKED_AT)
+    if isinstance(raw, str):
+        try:
+            at = datetime.fromisoformat(raw)
+        except ValueError:
+            at = None
+        if at is not None and at.tzinfo is not None:
+            return at
+    return job.created_at
 
 
 Checker = Callable[[Any], Validated]
@@ -414,7 +435,10 @@ async def enqueue(
     waiting = None if company_id is None else await _pending_for(session, op, company_id)
     if waiting is not None:
         waiting.model = model
-        waiting.request = _record(op, kind, model=model, user=user)
+        waiting.request = {
+            **_record(op, kind, model=model, user=user),
+            ASKED_AT: now.isoformat(),
+        }
         waiting.pseudonyms = dict(user.reverse) or None
         waiting.evidence_ids = list(evidence_ids)
         await session.flush()
@@ -428,7 +452,7 @@ async def enqueue(
         attempts=0,
         company_id=company_id,
         evidence_ids=list(evidence_ids),
-        request=_record(op, kind, model=model, user=user),
+        request={**_record(op, kind, model=model, user=user), ASKED_AT: now.isoformat()},
         pseudonyms=dict(user.reverse) or None,
         created_at=now,
     )
@@ -900,6 +924,7 @@ async def _apply_batch_answer(
         company_id=job.company_id,
         evidence_ids=tuple(job.evidence_ids or ()),
         validated=checked,
+        asked_at=asked_at(job),
     )
     if not await _effects(session, kind, landed, now):
         job.status = "failed"
@@ -1251,6 +1276,8 @@ async def _take(
         company_id=job.company_id,
         evidence_ids=tuple(job.evidence_ids or ()),
         validated=result.validated,
+        # The fallback asks the batch job's own text: what stood when it was built.
+        asked_at=asked_at(job),
     )
     if not await _effects(session, kind, landed, now):
         await session.execute(
@@ -1402,6 +1429,7 @@ async def model_batch_collect_job(*, now: datetime | None = None) -> dict[str, i
 
 
 __all__ = [
+    "ASKED_AT",
     "ATTEMPTS_MAX",
     "BATCH_MAX",
     "BATCH_ROUTES",
@@ -1416,6 +1444,7 @@ __all__ = [
     "Landed",
     "LaneReport",
     "Selector",
+    "asked_at",
     "collect",
     "collect_batch",
     "enqueue",

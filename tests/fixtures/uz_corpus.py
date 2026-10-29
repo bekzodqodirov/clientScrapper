@@ -123,6 +123,13 @@ REDLINE_BAD: tuple[tuple[str, str, set[str]], ...] = (
     (_uz("Komissiya atigi 3%."), "uz", {"digit", "money"}),
     (_ru("Цена от 150 долларов за куб."), "ru", {"digit", "money"}),
     (_ru("Даём скидку постоянным клиентам."), "ru", {"money"}),
+    # a percentage in words, a claim about the price
+    (_uz("Uch foiz komissiya olamiz."), "uz", {"money"}),
+    (_uz("Bizda juda arzon."), "uz", {"money"}),
+    (_uz("Boshqalardan qimmat emasmiz."), "uz", {"money"}),
+    (_ru("На двадцать процентов дешевле."), "ru", {"money"}),
+    (_ru("Недорого и надёжно."), "ru", {"money"}),
+    (_ru("Условия выгоднее, чем у других."), "ru", {"money"}),
     # days, durations, speed
     (_uz("Toshkentgacha 15 kunda yetkazamiz."), "uz", {"digit", "time"}),
     (_uz("Bir hafta ichida keladi."), "uz", {"time"}),
@@ -132,12 +139,17 @@ REDLINE_BAD: tuple[tuple[str, str, set[str]], ...] = (
     (_uz("Yetkazib berish 5-7 kun."), "uz", {"digit", "time"}),
     (_ru("Срок доставки — неделя."), "ru", {"time"}),
     (_ru("Довезём быстрее всех."), "ru", {"time"}),
+    # a month as a delivery time
+    (_uz("Bir oyda Toshkentga yetkazamiz."), "uz", {"time"}),
+    (_uz("Oy ichida yetkazib beramiz."), "uz", {"time"}),
+    (_ru("Доставим за месяц."), "ru", {"time"}),
+    (_ru("Привезём через два месяца."), "ru", {"time"}),
     # guarantees and promises
     (_uz("Kafolat beramiz."), "uz", {"promise"}),
     (_uz("Albatta oʻz vaqtida yetkazamiz."), "uz", {"promise"}),
-    (_uz("Eng arzon xizmat bizda."), "uz", {"promise"}),
+    (_uz("Eng arzon xizmat bizda."), "uz", {"money", "promise"}),
     (_uz("Bojsiz olib kelamiz."), "uz", {"promise"}),
-    (_uz("Yuz foiz emas, 100 foiz ishonchli."), "uz", {"digit", "promise"}),
+    (_uz("Yuz foiz emas, 100 foiz ishonchli."), "uz", {"digit", "money", "promise"}),
     (_ru("Гарантируем сохранность груза."), "ru", {"promise"}),
     # STIR, customs, declarations, tax
     (_uz("STIR raqamingizni yuboring."), "uz", {"legal"}),
@@ -151,6 +163,11 @@ REDLINE_BAD: tuple[tuple[str, str, set[str]], ...] = (
     (_uz("Kanalimiz t.me/namuna_kanal da."), "uz", {"link"}),
     (_uz("Yozing: @namuna_menejer"), "uz", {"link"}),
     (_uz("Batafsil https://namuna.uz sahifasida."), "uz", {"link"}),
+    # a link with no scheme
+    (_uz("Saytimiz: namuna-gsr.uz"), "uz", {"link"}),
+    (_uz("Sahifamiz instagram.com/namuna_gsr da."), "uz", {"link"}),
+    (_uz("WhatsApp orqali yozing: wa.me/namuna"), "uz", {"link"}),
+    (_ru("Сайт: намуна.уз"), "ru", {"link"}),
     # competitors
     (_uz("Halol Kargo kabi emasmiz."), "uz", {"competitor"}),
     (_uz("MK Express dan qulayroq."), "uz", {"competitor"}),
@@ -238,6 +255,20 @@ REDLINE_GOOD: tuple[tuple[str, str], ...] = (
         "uz",
     ),
     (_HEAD + _ASK + OPTOUT_UZ.replace(".", "!"), "uz"),
+    # goods words that only begin like a time or STIR word, and the volume
+    # a month («oyiga», «в месяц») and a purchase to come («yaqin oylarda»)
+    (
+        "Assalomu alaykum. Men [Men], GSR Logistics. OLXda kungaboqar yogʻi va "
+        "soatlar savdongizni koʻrdim. Yaqin oylarda Xitoydan xarid bormi? "
+        + _ASK
+        + OPTOUT_UZ,
+        "uz",
+    ),
+    (
+        "Здравствуйте. Я [Men], GSR Logistics. Увидел на OLX ваш опт: стиральные "
+        "машины. Есть ли закупка в ближайшие месяцы? " + _RU_ASK + OPTOUT_RU,
+        "ru",
+    ),
 )
 
 # Templates A–E (docs/sotuv-playbook.md §3.1) as services/playbook fills them:
@@ -281,35 +312,37 @@ PLAYBOOK_TEMPLATES: dict[str, str] = {
     ),
 }
 PLAYBOOK_TEMPLATES_RU: dict[str, str] = {
+    # {tovar} is the goods with the words around them (« по товару «mato»»,
+    # «товар «mato»», «: «mato»»), or what stands when none can be named.
     "A": (
         "Здравствуйте{salom}. Я [Men], GSR Logistics (Ташкент), с 2018 года возим "
-        "грузы из Китая. Пишу, потому что увидел {manba} ваш опт по товару "
-        "«{tovar}». Принимаем груз на своих пунктах в Иу и Гуанчжоу, замеряем и "
-        "присылаем фотоотчёт. Сколько кубов в месяц обычно везёте? " + OPTOUT_RU
+        "грузы из Китая. Пишу, потому что увидел {manba} ваш опт{tovar}. "
+        "Принимаем груз на своих пунктах в Иу и Гуанчжоу, замеряем и присылаем "
+        "фотоотчёт. Сколько кубов в месяц обычно везёте? " + OPTOUT_RU
     ),
     "B": (
         "Здравствуйте{salom}. Я [Men], GSR Logistics. Увидел ваш магазин {manba} — "
-        "похоже, «{tovar}» идёт из Китая. Закупаем товар на китайских площадках, "
+        "похоже, {tovar} идёт из Китая. Закупаем товар на китайских площадках, "
         "проверяем его в Китае и присылаем фото, документы готовим так, чтобы они "
         "подходили для сертификации и бухгалтерии. Когда следующая партия и "
         "сколько примерно кубов или килограммов? " + OPTOUT_RU
     ),
     "C": (
         "Здравствуйте{salom}. Я [Men], GSR Logistics (Ташкент). Увидел {manba} "
-        "ваше предприятие: «{tovar}». Везём оборудование и сырьё из Китая в "
+        "ваше предприятие{tovar}. Везём оборудование и сырьё из Китая в "
         "контейнерах, принимаем груз на заводе с фотоотчётом, документы оформляем "
         "сами. Есть ли закупка в ближайшие месяцы? " + OPTOUT_RU
     ),
     "D": (
-        "Здравствуйте{salom}. Я [Men], GSR Logistics. Увидел {manba} ваш опт по "
-        "товару «{tovar}». Для тяжёлого груза считаем рядом два варианта — полная "
+        "Здравствуйте{salom}. Я [Men], GSR Logistics. Увидел {manba} ваш "
+        "опт{tovar}. Для тяжёлого груза считаем рядом два варианта — полная "
         "фура и контейнер, приёмка и фото в Иу и Гуанчжоу. В сезон на Хоргосе "
         "очереди — бронируем место заранее. Вы обычно везёте полной фурой или "
         "сборным? " + OPTOUT_RU
     ),
     "E": (
-        "Здравствуйте{salom}. Я [Men], GSR Logistics. Увидел {manba} вашу работу "
-        "по товару «{tovar}». У нас свой пункт приёма в Гуанчжоу: пересчитываем "
+        "Здравствуйте{salom}. Я [Men], GSR Logistics. Увидел {manba} вашу "
+        "работу{tovar}. У нас свой пункт приёма в Гуанчжоу: пересчитываем "
         "места, проверяем хрупкое и присылаем фото, документы делаем сами. Есть и "
         "импорт авто и электромобилей. Сколько кубов или килограммов в месяц "
         "обычно везёте? " + OPTOUT_RU

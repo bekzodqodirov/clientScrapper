@@ -19,7 +19,15 @@ from pathlib import Path
 
 import pytest
 
-from clientscrapper.services import cards, playbook, prompts, redlines, validators
+from clientscrapper.services import (
+    cards,
+    crm_push,
+    playbook,
+    prompts,
+    push_gate,
+    redlines,
+    validators,
+)
 from clientscrapper.services.schemas import DraftOpener
 from tests.fixtures import uz_corpus
 from tests.test_uz_text import problems
@@ -150,7 +158,12 @@ def test_the_language_flag_reads_the_script_and_english():
 
 
 def test_trips_is_the_gate_on_one_value():
+    # Goods words that only begin like a time or STIR word are goods.
+    for goods in ("стиральные машины", "kungaboqar yogʻi", "soatlar", "kunjut"):
+        assert not redlines.trips(goods), goods
     assert redlines.trips("soat")
+    assert redlines.trips("arzon mato")
+    assert redlines.trips("namuna.uz")
     assert redlines.trips("100 dona")
     assert redlines.trips("narxi arzon")
     assert redlines.trips("Namuna Kargo")
@@ -256,7 +269,108 @@ def test_the_template_opener_is_the_fill():
         segment="C",
     )
     assert made.text.startswith("Здравствуйте, [Ism]. Я [Men], GSR Logistics (Ташкент).")
-    assert "Увидел в Telegram-группе ваше предприятие: «mato»." in made.text
+    assert "Увидел в группе Telegram ваше предприятие: «mato»." in made.text
+
+
+def test_a_russian_template_with_no_goods_drops_the_words_around_them():
+    """No goods left to name: «ваш опт.», never «по товару «товары»»."""
+    expected = {
+        "A": "увидел на OLX ваш опт. ",
+        "B": "похоже, товар идёт из Китая.",
+        "C": "Увидел на OLX ваше предприятие. ",
+        "D": "Увидел на OLX ваш опт. ",
+        "E": "Увидел на OLX вашу работу. ",
+    }
+    for segment, fragment in expected.items():
+        text = playbook.fill(segment, "ru", goods=("soat",), family="olx", person=False)
+        assert fragment in text, segment
+        assert "«" not in text.split("Если")[0], segment
+    named = playbook.fill("B", "ru", goods=("mato",), family="olx", person=False)
+    assert "похоже, товар «mato» идёт из Китая." in named
+    assert "ваш опт по товару «mato»." in playbook.fill(
+        "A", "ru", goods=("mato",), family="olx", person=False
+    )
+
+
+def test_russian_goods_stay_out_of_an_uzbek_text():
+    """«холодильники» would stand as «xolodilniki»; Uzbek Cyrillic and the
+    loanwords Uzbek writes too («мебель», «кафель») are written in Latin."""
+    words = playbook.goods_words(
+        ["стиральные машины", "холодильники", "ткани", "мебель", "кунгабоқар ёғи"], "uz"
+    )
+    assert words == ["mebel", "kungaboqar yogʻi"]
+    # In a Russian text they stay as written.
+    assert playbook.goods_words(["стиральные машины"], "ru") == ["стиральные машины"]
+    text = playbook.fill("A", "uz", goods=["холодильники"], family="olx", person=False)
+    assert "OLXda tovar optom" in text and "xolodil" not in text
+
+
+def test_no_source_word_reads_as_a_messenger_id():
+    """«в Telegram-группе» was a Telegram label with an id to the
+    pseudonymiser (04 §4.2): the draft request would carry «<TG_1>»."""
+    from clientscrapper.services import pseudonyms
+
+    for table in (playbook.SOURCE_UZ, playbook.SOURCE_RU):
+        for word in table.values():
+            line = f"SOURCE: {word}, 2026-10-26"
+            assert pseudonyms.unmasked(line) == [], word
+            assert pseudonyms.pseudonymise(line).text == line, word
+    assert playbook.SOURCE_RU["telegram"] == "в группе Telegram"
+
+
+# --- a shortened opener keeps its ending ------------------------------------------------
+
+
+def _question(text: str) -> str:
+    """A template's qualifier question: the sentence before the opt-out."""
+    body = text.rsplit("? ", 1)[0]
+    return body.rsplit(". ", 1)[-1] + "?"
+
+
+@pytest.mark.parametrize("lang", ["uz", "ru"])
+@pytest.mark.parametrize("segment", playbook.SEGMENTS)
+def test_a_shortened_template_keeps_its_question_and_its_opt_out(segment, lang):
+    """The ERP note shows an opener within 220 units, 120 when the note is
+    full (05 §B.1): what it drops are whole sentences from the middle, never
+    the qualifier question nor the opt-out line the gate demands."""
+    for family in [*playbook.SOURCE_UZ, None]:
+        for goods in GOODS_SAMPLES:
+            text = playbook.fill(segment, lang, goods=goods, family=family, person=True)
+            question = _question(text)
+            for limit in (crm_push.OPENER_MAX, crm_push.OPENER_SHORT):
+                fit = crm_push.fit_opener(text, limit)
+                assert push_gate.text_len(fit) <= limit, (segment, lang, limit)
+                assert redlines.ends_with_optout(fit, lang), (segment, lang, limit)
+                assert "…" in fit and fit != text
+                if limit == crm_push.OPENER_MAX:
+                    assert fit.endswith(f"{question} {redlines.OPTOUT[lang][0]}")
+                    greeting = text.split(". ", 1)[0] + "."
+                    assert fit.startswith(greeting), (segment, lang)
+
+
+def test_fit_opener_drops_whole_sentences_and_keeps_what_fits():
+    text = (
+        "Assalomu alaykum. Men [Men], GSR Logistics. OLXda mato savdongizni koʻrdim. "
+        + "Yiwu va Guangzhouda qabul qilamiz. " * 4
+        + "Oyiga necha kub olasiz? "
+        + uz_corpus.OPTOUT_UZ
+    )
+    assert crm_push.fit_opener(text, 1000) == text
+    fit = crm_push.fit_opener(text, 220)
+    assert fit == (
+        "Assalomu alaykum. Men [Men], GSR Logistics. OLXda mato savdongizni koʻrdim. "
+        "Yiwu va Guangzhouda qabul qilamiz. … Oyiga necha kub olasiz? "
+        + uz_corpus.OPTOUT_UZ
+    )
+    # Room for the closing only: «…» stands for everything before it.
+    assert crm_push.fit_opener(text, 100) == (
+        "… Oyiga necha kub olasiz? " + uz_corpus.OPTOUT_UZ
+    )
+    # The question goes before the opt-out does.
+    assert crm_push.fit_opener(text, 70) == "… " + uz_corpus.OPTOUT_UZ
+    # Not even the opt-out fits: cut by words, as any other value.
+    tiny = crm_push.fit_opener(text, 30)
+    assert tiny == crm_push.clip_words(text, 30) and tiny.endswith("…")
 
 
 # --- the draft validator --------------------------------------------------------------

@@ -22,11 +22,16 @@ block, the reasons and the role made owner text, a weak exclusion flag
 dropped without its evidence, hygiene.
 
 **Applied** (``apply_verdict``, the batch kind's effects and the instant
-lane's, in the job's transaction): ``companies.verdict`` / ``verdict_at`` /
+lane's, in the job's transaction; ``verdict_at`` is when the question was
+built — ``model_jobs.asked_at``, the bundle's time, not the collect's — and
+an answer to an older question than the standing verdict changes nothing):
+``companies.verdict`` / ``verdict_at`` /
 ``segment`` / ``volume_band`` (a known band; the band is for the card and
 routing and **never adds points** — points come from quoted evidence) /
-``goods`` (merged, ≤ 6); ``confirmed`` with its verified quote →
-``cn_origin`` (on the quote's evidence, ``model`` = the answering model),
+``goods`` (merged, ≤ 6); ``confirmed`` with its verified quote — one that
+names China, or one from a brand dealer's page (``validators.china_quote``;
+any other quote makes it ``likely``) → ``cn_origin`` (on the quote's
+evidence, ``model`` = the answering model),
 ``likely`` → ``cn_sector_prior``; ``is_competitor`` → ``flag_competitor``
 and ``companies.is_competitor``, ``is_supplier_cn`` → ``flag_supplier_cn``
 and ``companies.is_supplier_cn``, ``is_state_body`` →
@@ -49,8 +54,10 @@ twice) is not asked again until new evidence arrives; an API failure waits
 An instant verdict supersedes the company's batch job still waiting for its
 night. The job never hands over the batch lane's fallbacks: those belong to
 the 23:30 run alone (``model_jobs.take_fallbacks``, ``FALLBACK_UNTIL``).
-Then each ``review``/``approved`` candidate without an opener gets one
-(``openers.ensure_opener``: the draft for a hot one, the template else).
+Then each candidate an opener is due for gets one (``ensure_openers``,
+``openers.ensure_opener``: the draft for a hot one, the template else) — in
+``review`` or ``approved``, or ``hold`` with a live manager card — and a
+template filled before the verdict set the segment is filled again.
 
 **The night** (``select_company_verdicts``, the kind's ``select``, run by
 ``model_batch_submit`` right before the submit): companies whose candidate
@@ -77,11 +84,13 @@ import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from clientscrapper.config import settings
+from clientscrapper.db.enums import REVIEW_LIVE_STATES
 from clientscrapper.db.models import (
     Company,
     Contact,
     Evidence,
     LeadCandidate,
+    LeadReview,
     ModelJob,
     Signal,
     Source,
@@ -94,6 +103,7 @@ from clientscrapper.services import (
     costs,
     extraction,
     model_jobs,
+    normalise,
     openers,
     scoring,
     signals,
@@ -130,13 +140,16 @@ NIGHT_STATES: Final = ("enriching", "scored")
 HOLD_STATES: Final = ("hold",)
 LIVE_COMPANY_STATES: Final = ("new", "active")
 OPENER_STATES: Final = ("review", "approved")
+MANAGER_REVIEW: Final = "manager"
 # An instant verdict the API failed: waits RETRY_AFTER × 2ⁿ⁻¹, given up for
 # the company's evidence after TRIES_MAX (classify's rule).
 RETRY_AFTER: Final = timedelta(minutes=15)
 TRIES_MAX: Final = 3
 CANDIDATES_SCANNED: Final = 200
 NO_VALUE: Final = "-"
-# One verdict caller per company at a time (the instant lane, a fallback).
+# One instant verdict per company at a time (two overlapping instant runs).
+# A fallback (model_jobs.take_fallbacks) does not take it: the instant lane
+# leaves a company whose fallback waits (``History.in_flight``).
 VERDICT_LOCK: Final = 0x5645_5244  # "VERD"
 SUPERSEDED: Final = "superseded"
 # A verdict job that ended so is not asked again on the same evidence: the
@@ -176,6 +189,10 @@ class Bundle:
     def excerpts(self) -> dict[str, str]:
         return {b.ref: b.excerpt for b in self.blocks}
 
+    @property
+    def dealer_refs(self) -> frozenset[str]:
+        return frozenset(b.ref for b in self.blocks if is_dealer_page(b.source_key))
+
 
 @dataclass(frozen=True, slots=True)
 class Found:
@@ -188,6 +205,25 @@ class Found:
     excerpt: str
     observed_at: datetime
     fetched_at: datetime
+
+
+def is_dealer_page(source_key: str) -> bool:
+    """Is evidence of ``source_key`` a brand dealer's page (the brand
+    dealers' collector, 03 §2.10 — whose brands are all Chinese)? The
+    mapping is ``normalise.parsed_kind``'s."""
+    return normalise.parsed_kind("company", source_key) == "dealer_page"
+
+
+def dealer_refs_of(
+    evidence_ids: Sequence[int], evidence: Mapping[int, Any]
+) -> frozenset[str]:
+    """The block refs (``E<n>`` = the n-th id) that are a dealer's page."""
+    return frozenset(
+        f"E{n}"
+        for n, evidence_id in enumerate(evidence_ids, start=1)
+        if evidence_id in evidence
+        and is_dealer_page(str(getattr(evidence[evidence_id], "source_key", "")))
+    )
 
 
 def _host(url: str) -> str:
@@ -335,39 +371,48 @@ async def bundle_for(session: AsyncSession, company: Company) -> Bundle | None:
 
 
 def checker_for(
-    excerpts: Mapping[str, str], reverse: Mapping[str, str], names: Iterable[str]
+    excerpts: Mapping[str, str],
+    reverse: Mapping[str, str],
+    names: Iterable[str],
+    dealer_refs: Collection[str] = (),
 ) -> Callable[[RelevanceVerdict], validators.Validated]:
     names = tuple(names)
+    dealers = frozenset(dealer_refs)
 
     def check(answer: RelevanceVerdict) -> validators.Validated:
         return validators.relevance_verdict(
-            answer, blocks=excerpts, reverse=reverse, names=names
+            answer, blocks=excerpts, reverse=reverse, names=names, dealer_refs=dealers
         )
 
     return check
 
 
-async def _job_excerpts(session: AsyncSession, job: ModelJob) -> dict[str, str]:
+async def _job_blocks(
+    session: AsyncSession, job: ModelJob
+) -> tuple[dict[str, str], frozenset[str]]:
     """The blocks a job was asked with, rebuilt from its ``evidence_ids``
-    (``E<n>`` = the n-th); a block whose evidence is gone has no excerpt."""
+    (``E<n>`` = the n-th) — a block whose evidence is gone has no excerpt —
+    and the refs among them that are a dealer's page."""
     ids = list(job.evidence_ids or ())
-    rows = await session.execute(
-        sa.select(Evidence.id, Evidence.excerpt).where(Evidence.id.in_(ids))
-    )
-    found = {int(i): str(x or "") for i, x in rows.all()}
-    return {f"E{n}": found[i] for n, i in enumerate(ids, start=1) if i in found}
+    found = await _evidence(session, ids)
+    excerpts = {
+        f"E{n}": str(found[i].excerpt or "")
+        for n, i in enumerate(ids, start=1)
+        if i in found
+    }
+    return excerpts, dealer_refs_of(ids, found)
 
 
 async def batch_checker(
     session: AsyncSession, job: ModelJob
 ) -> Callable[[Any], validators.Validated]:
     """The ``company_verdict`` kind's checker (``model_jobs.BatchKind``)."""
-    excerpts = await _job_excerpts(session, job)
+    excerpts, dealers = await _job_blocks(session, job)
     names: tuple[str, ...] = ()
     if job.company_id is not None:
         lineage = (await companies.lineages(session, [job.company_id]))[job.company_id]
         names = (await people_of(session, lineage)).names
-    return checker_for(excerpts, dict(job.pseudonyms or {}), names)
+    return checker_for(excerpts, dict(job.pseudonyms or {}), names, dealers)
 
 
 # --- applied --------------------------------------------------------------------------
@@ -425,7 +470,9 @@ def drafts_of(
     newest = evidence_ids[0] if evidence_ids else None
     china = result.get("imports_from_china")
     if china == "confirmed":
-        found = validators.china_quote(quotes)
+        found = validators.china_quote(
+            quotes, dealer_refs=dealer_refs_of(evidence_ids, evidence)
+        )
         index = _ref_index(str(found["ref"])) if found is not None else None
         if found is not None and index is not None and index < len(evidence_ids):
             out.append(draft("cn_origin", evidence_ids[index], str(found["quote"])))
@@ -506,9 +553,20 @@ async def apply_verdict(
     )
     if company is None or company.state == "purged":
         return
+    # Stamped with when the question was built, never with when the answer
+    # came: evidence that arrived while a batch ran is in no bundle, and must
+    # stay newer than the verdict (04 §4.1). An answer to an older question
+    # than the company's standing verdict changes nothing.
+    bundled_at = landed.asked_at or now
+    if company.verdict_at is not None and bundled_at < company.verdict_at:
+        log.info(
+            "verdict older than the standing one: not applied",
+            extra={"model_job_id": landed.job_id, "lane": landed.lane},
+        )
+        return
     result = dict(landed.validated.result)
     company.verdict = result
-    company.verdict_at = now
+    company.verdict_at = bundled_at
     segment = result.get("segment")
     if isinstance(segment, str) and len(segment) == 1:
         company.segment = segment
@@ -776,7 +834,9 @@ async def ask_instant(
         company_id=company.id,
         evidence_ids=bundle.evidence_ids,
         prompt_version=VERDICT_PROMPT_VERSION,
-        validate=checker_for(bundle.excerpts, bundle.user.reverse, people.names),
+        validate=checker_for(
+            bundle.excerpts, bundle.user.reverse, people.names, bundle.dealer_refs
+        ),
     )
     if result.refused:
         raise _Refused(result.error or "refused")
@@ -796,6 +856,7 @@ async def ask_instant(
         company_id=company.id,
         evidence_ids=tuple(bundle.evidence_ids),
         validated=result.validated,
+        asked_at=now,
     )
     try:
         async with session.begin_nested():
@@ -866,26 +927,46 @@ async def ensure_openers(
     limit: int = VERDICT_BATCH,
     report: VerdictReport | None = None,
 ) -> VerdictReport:
-    """Each ``review``/``approved`` candidate without an opener gets one
-    (``openers.ensure_opener``), one transaction each, best score first."""
+    """Each candidate an opener is due for (``openers.due``) gets one
+    (``openers.ensure_opener``), one transaction each, best score first: one
+    in ``review`` or ``approved``, and one ``hold`` whose manager card is live
+    (06 §1.7 — the manager reads the opener there; the handoff may come
+    before this run). Due: none stored, or a template stored for another
+    segment than the company's now or for a candidate since become hot."""
     report = report or VerdictReport()
+    breakdown = LeadCandidate.score_breakdown
+    manager_card = sa.exists().where(
+        LeadReview.candidate_id == LeadCandidate.id,
+        LeadReview.kind == MANAGER_REVIEW,
+        LeadReview.state.in_(REVIEW_LIVE_STATES),
+    )
     async with session_factory() as session:
-        ids = list(
-            await session.scalars(
-                sa.select(LeadCandidate.id)
+        rows = (
+            await session.execute(
+                sa.select(
+                    LeadCandidate.id, LeadCandidate.tier, breakdown, Company.segment
+                )
+                .join(Company, Company.id == LeadCandidate.company_id)
                 .where(
-                    LeadCandidate.state.in_(OPENER_STATES),
                     sa.or_(
-                        LeadCandidate.score_breakdown.is_(None),
-                        sa.not_(
-                            LeadCandidate.score_breakdown.has_key(openers.OPENER_KEY)
-                        ),
+                        LeadCandidate.state.in_(OPENER_STATES),
+                        sa.and_(LeadCandidate.state.in_(HOLD_STATES), manager_card),
+                    ),
+                    sa.or_(
+                        breakdown.is_(None),
+                        sa.not_(breakdown.has_key(openers.OPENER_KEY)),
+                        breakdown[openers.META_KEY]["source"].astext == "template",
                     ),
                 )
                 .order_by(LeadCandidate.score.desc().nulls_last(), LeadCandidate.id)
-                .limit(limit)
+                .limit(CANDIDATES_SCANNED)
             )
-        )
+        ).all()
+    ids = [
+        candidate_id
+        for candidate_id, tier, held, segment in rows
+        if openers.due(held, segment=segment, hot=tier == "hot")
+    ][:limit]
     for candidate_id in ids:
         try:
             async with session_factory() as session, session.begin():
@@ -1011,15 +1092,16 @@ async def select_company_verdicts(
 # --- the card -------------------------------------------------------------------------
 
 
-async def refused_today(
-    session: AsyncSession, company_ids: Iterable[uuid.UUID], *, now: datetime
-) -> bool:
-    """Was a verdict for these companies refused by a cap today (04 §8: the
-    card says «AI xulosasi: byudjet tugadi»)?"""
+async def refused_today(session: AsyncSession, *, now: datetime) -> bool:
+    """Has a cap refused a verdict today (04 §8: a card whose company has no
+    verdict says «AI xulosasi: byudjet tugadi»)? Asked of the operation, not
+    of one company: a run stops at its first refusal, so the companies after
+    it were refused by the same cap without a row of their own — and the
+    bot's process cannot read the worker's in-memory refusal. A refusal that
+    is no cap (paused, unpriced) is not the budget."""
     rows = await session.scalars(
         sa.select(UsageLog.model).where(
             UsageLog.operation.in_(VERDICT_KINDS),
-            UsageLog.company_id.in_(list(company_ids)),
             UsageLog.created_at >= costs.day_start(now),
             UsageLog.model.startswith(costs.REFUSED_PREFIX, autoescape=True),
         )

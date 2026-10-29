@@ -19,6 +19,11 @@ both (``candidates._carried``).
    template instead (``playbook.opener``, which passes the same gate by
    construction). A flagged draft is never stored, so it is never rendered.
 
+A stored opener is made again only when ``due`` says so: a template filled
+for another segment than the company's now (the verdict that sets the
+segment may land after the opener was made), or made for a candidate that
+was not hot and now is. A stored draft stands: it was paid for.
+
 The model call runs with no row lock held; the write takes the company and
 then the candidate (the lock order every writer of the two keeps,
 ``services/candidates``) and keeps an opener another run stored meanwhile.
@@ -51,6 +56,7 @@ OP: Final = "draft"
 OPENER_KEY: Final = "opener"
 META_KEY: Final = "opener_meta"
 NO_VALUE: Final = "-"
+NOT_HOT: Final = "not_hot"
 # The forwarders' names the gate refuses beside its regex (the seeds').
 COMPETITOR_NAMES_MAX: Final = 500
 Source = Literal["draft", "template"]
@@ -89,6 +95,31 @@ def stored(breakdown: Mapping[str, Any] | None) -> str | None:
     return value if isinstance(value, str) and value.strip() else None
 
 
+def _template_meta(breakdown: Mapping[str, Any] | None) -> Mapping[str, Any] | None:
+    meta = (breakdown or {}).get(META_KEY)
+    if isinstance(meta, Mapping) and meta.get("source") == "template":
+        return meta
+    return None
+
+
+def due(breakdown: Mapping[str, Any] | None, *, segment: str | None, hot: bool) -> bool:
+    """Is an opener to be made — or made again? None stored: yes. A stored
+    template is remade when it was filled for another segment than the
+    company's now (the verdict that sets the segment may land after it:
+    «A» bazaar facts on a «D» construction importer), or made because the
+    candidate was not hot and now it is (a hot one is drafted, 04 §4.1). A
+    template costs nothing to remake; a stored draft was paid for and
+    stands."""
+    if stored(breakdown) is None:
+        return True
+    meta = _template_meta(breakdown)
+    if meta is None:
+        return False
+    if meta.get("segment") != playbook.template_segment(segment):
+        return True
+    return hot and meta.get("why") == NOT_HOT
+
+
 def _cited(view: CandidateView) -> SignalEvidence | None:
     try:
         signal, _ = crm_push.cited(view)
@@ -108,13 +139,17 @@ def user_content(
     lang: Lang,
     names: Sequence[str] = (),
 ) -> Pseudonymised:
-    """04 §4.5's input, pseudonymised (the company's name may carry a
-    person's): no contact name is sent — ``CONTACT: [Ism]`` says one is
-    known, and the manager writes it."""
+    """04 §4.5's input. The company's name is the one field that may carry
+    a person's (or a handle), and it alone is pseudonymised — the fixed
+    lines are the code's own words, and run through the pseudonymiser a
+    «в Telegram-группе» would be read as a messenger id. No contact name is
+    sent — ``CONTACT: [Ism]`` says one is known, and the manager writes it.
+    ``extraction`` still refuses the whole text unmasked."""
     seg = playbook.template_segment(segment)
     when = seen_on.astimezone(settings.tz).date().isoformat() if seen_on else NO_VALUE
+    name = pseudonymise(company, names=list(names))
     lines = (
-        f"COMPANY: {company}",
+        f"COMPANY: {name.text}",
         f"SEGMENT: {seg}",
         f"GOODS: {', '.join(goods) or NO_VALUE}",
         f"SOURCE: {source}, {when}",
@@ -123,7 +158,7 @@ def user_content(
         "SKELETON:",
         playbook.skeleton(seg, lang),
     )
-    return pseudonymise("\n".join(lines), names=list(names))
+    return Pseudonymised("\n".join(lines), dict(name.reverse))
 
 
 async def competitor_names(session: AsyncSession) -> list[str]:
@@ -167,7 +202,7 @@ async def make(
         )
 
     if not paid:
-        return fallback("not_hot")
+        return fallback(NOT_HOT)
     hooks = playbook.hooks(goods, family)
     competitors = await competitor_names(session)
     user = user_content(
@@ -220,22 +255,26 @@ async def ensure_opener(
     paid: bool | None = None,
 ) -> str | None:
     """The candidate's opener — made once and stored (the module docstring)
-    in the caller's transaction. ``paid`` defaults to «the candidate is
-    hot». None when the candidate or its company is gone."""
+    in the caller's transaction, and made again only when ``due`` says so (a
+    template for another segment, or for a candidate that was not hot).
+    ``paid`` defaults to «the candidate is hot». None when the candidate or
+    its company is gone."""
     candidate = await session.get(LeadCandidate, candidate_id, populate_existing=True)
     if candidate is None:
         return None
     have = stored(candidate.score_breakdown)
-    if have is not None:
+    if have is not None and _template_meta(candidate.score_breakdown) is None:
         return have
     try:
         view = await candidates.load_view(session, candidate_id, now=now)
     except LookupError:
-        return None
+        return have
     company = await session.get(Company, view.company_id)
     segment = company.segment if company is not None else None
     if paid is None:
         paid = candidate.tier == "hot"
+    if not due(candidate.score_breakdown, segment=segment, hot=paid):
+        return have
     made = await make(session, view, segment=segment, paid=paid, now=now)
     # The write: the company, then the candidate (services/candidates' order).
     await session.get(
@@ -252,9 +291,9 @@ async def ensure_opener(
     )
     if locked is None:
         return None
-    have = stored(locked.score_breakdown)
-    if have is not None:
-        return have
+    if not due(locked.score_breakdown, segment=segment, hot=paid):
+        # Another run stored one meanwhile: it stands.
+        return stored(locked.score_breakdown)
     locked.score_breakdown = {
         **dict(locked.score_breakdown or {}),
         OPENER_KEY: made.text,
@@ -274,9 +313,11 @@ async def ensure_opener(
 
 __all__ = [
     "META_KEY",
+    "NOT_HOT",
     "OPENER_KEY",
     "Made",
     "competitor_names",
+    "due",
     "ensure_opener",
     "make",
     "stored",

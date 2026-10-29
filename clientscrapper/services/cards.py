@@ -67,6 +67,7 @@ from clientscrapper.services import (
     normalise,
     push_gate,
     redlines,
+    schemas,
     suppression,
     validators,
 )
@@ -138,10 +139,14 @@ MANAGER_HOURS_UZ: Final = "oʻz akkauntingizdan, 10:00–17:00 (Du–Sha)"
 # gate holds every opener to (services/redlines.OPTOUT_UZ — one home).
 NO_PRICE_UZ: Final = f"⚠️ Birinchi xabarda narx yoʻq. Oxirgi jumla: «{redlines.OPTOUT_UZ}»"
 ERP_FIRST_UZ: Final = "🔍 Yozishdan oldin ERPda nomi boʻyicha qidiring"
-OPENER_MAX: Final = crm_push.OPENER_MAX
-# Without 04's draft: the playbook's segment script (docs/sotuv-playbook.md
-# §3.1; the templates themselves are T-30's).
-OPENER_FALLBACK_UZ: Final = "sotuv qoʻllanmasidagi «{segment}» shabloni (§3.1)"
+# The manager card shows the whole opener — the message the manager sends is
+# this card's to show (docs/sotuv-playbook.md §3.0): up to the longest a draft
+# may be (04 §4.5 ``DraftOpener``; every template is within it), under the
+# card's 3,500. The ERP note has less room (``crm_push.OPENER_MAX``).
+OPENER_MAX: Final = schemas.OPENER_CHARS[1]
+# With no opener stored yet: the agent's own templates of the playbook — §3.0,
+# the ones with no price and no day count (§3.1 is the managers' full script).
+OPENER_FALLBACK_UZ: Final = "sotuv qoʻllanmasidagi «{segment}» shabloni (§3.0)"
 # 04 §4.4: the verdict's reasons on the owner card; 04 §8: the line when a
 # cap refused the verdict; the lt1 flag (validators.verdict_small), no points.
 VERDICT_LINE_UZ: Final = "🤖 AI xulosasi: "
@@ -402,7 +407,9 @@ def render_manager(mv: ManagerView) -> Card:
     volume = volume_label(c)
     opener = crm_push.clean(c.opener)
     if opener:
-        offer = esc(crm_push.clip_words(opener, OPENER_MAX))
+        # The whole message the manager sends (docs/sotuv-playbook.md §3.0),
+        # never cut before its question and its opt-out line.
+        offer = esc(crm_push.fit_opener(opener, OPENER_MAX))
     else:
         offer = esc(OPENER_FALLBACK_UZ.format(segment=segment_label(mv.segment)))
     lines = [
@@ -473,9 +480,7 @@ async def review_view(
     handoff = candidates.is_handoff(candidate.score_breakdown)
     verdict = company.verdict if company is not None else None
     reasons = verdict.get("reasons") if isinstance(verdict, dict) else None
-    refused = verdict is None and await verdict_service.refused_today(
-        session, [candidate.company_id], now=now
-    )
+    refused = verdict is None and await verdict_service.refused_today(session, now=now)
     return ReviewView(
         review_id=review.id,
         candidate=view,
