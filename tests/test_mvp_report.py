@@ -21,10 +21,10 @@ EXPECTED = [
     # Judged (terminal): won, two not-importer losses, the unclassed loss;
     # the capped drop is no judgement. Strict: won / (won + two negatives).
     "2. Haqiqiy importyor: 50% (2/4) (maqsad ≥ 60%) ❌ · aniqlik 33% (1/3)",
-    # Created and due: seven (the drop is no lead); in time: won, «Narx
-    # aytildi», the unclassed loss, the Saturday push contacted on Monday.
-    # The re-pushed lead was contacted after its FIRST delivery's deadline.
-    "3. 1 ish kunida bogʻlanildi: 57% (4/7) (maqsad ≥ 40%) ✅ — faqat ERP koʻrgani",
+    # Created and due: seven (the drop is no lead); in time: won, the
+    # re-pushed loss (dated by its re-push), «Narx aytildi», the unclassed
+    # loss, the Saturday push contacted on Monday.
+    "3. 1 ish kunida bogʻlanildi: 71% (5/7) (maqsad ≥ 40%) ✅ — faqat ERP koʻrgani",
     "4. Claude xarajati: eng koʻp kun $5.20 (10.11, maqsad ≤ $5.00) ❌ · hammasi eng "
     "koʻp kun $7.20 (10.11, chegara $10.00) ✅",
     "Qoʻshimcha (taxminiy):",
@@ -82,9 +82,9 @@ async def test_nothing_to_report_before_the_first_push(session, capsys):
     assert started is not None
     assert started.splitlines()[1:5] == [
         "1. ≥60 ball, telefonli push, 2-hafta (09.11–15.11): 0 ta (maqsad ≥ 20) ❌",
-        "2. Haqiqiy importyor: — (maqsad ≥ 60%) — · aniqlik —",
-        "3. 1 ish kunida bogʻlanildi: — (maqsad ≥ 40%) — — faqat ERP koʻrgani",
-        "4. Xarajat: hali yoʻq",
+        "2. Haqiqiy importyor: hali yoʻq (maqsad ≥ 60%) · aniqlik hali yoʻq",
+        "3. 1 ish kunida bogʻlanildi: hali yoʻq (maqsad ≥ 40%) — faqat ERP koʻrgani",
+        "4. Claude xarajati: hali yoʻq (maqsad kuniga ≤ $5.00)",
     ]
 
 

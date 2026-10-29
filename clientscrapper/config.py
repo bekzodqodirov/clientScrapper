@@ -185,6 +185,11 @@ class Settings(BaseSettings):
     # «;»-separated fragments matched in the lead's current stage name (case
     # and spacing ignored); every won stage counts as well. Approximate.
     quote_stage_names: str = "narx"
+    # 07 T-39 / 06 open question 2: true lets a hot candidate of a source whose
+    # auto_push the weekly precision job turned on skip the owner's card
+    # (approved_by='auto:<source>'); false = every hot candidate reaches the
+    # owner and auto_push is only a number in /manbalar (candidates.auto_approves).
+    auto_approve: bool = False
 
     # --- Owner bot cadence --------------------------------------------------
     review_hours: str = "09:00-18:00"

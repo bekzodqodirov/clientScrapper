@@ -14,7 +14,8 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from clientscrapper.config import Settings
-from clientscrapper.services import metrics
+from clientscrapper.db.models import LeadCandidate
+from clientscrapper.services import cards, metrics
 from clientscrapper.services.metrics import PushRow, Ratio
 from tests import pilot_fixtures as pf
 
@@ -199,27 +200,79 @@ def test_first_shipment_is_won_or_landed_over_every_push():
 # --- over the database ---------------------------------------------------------------
 
 
-async def test_a_push_is_counted_once_and_dated_by_its_first_delivery(session):
+async def test_a_push_is_counted_once_and_dated_by_the_row_its_outcome_is_about(
+    session,
+):
+    """Rule 5 re-pushes an id the ERP never recorded (02 §2.10): its lead was
+    born at the re-push, so the live row dates it, as ``outcomes.deliveries``
+    dates its label. A superseded delivery whose re-push failed still dates
+    its own push; a push that never delivered is none."""
     first = await pf.push(
         session, "telegram_monitor", sent_at=at(3, 11), status="unknown"
     )
     await pf.repush(session, first, sent_at=at(5, 10))
+    lost = await pf.push(
+        session,
+        "telegram_monitor",
+        sent_at=at(3, 12),
+        status="unknown",
+        superseded_at=at(5, 12),
+    )
+    await pf.push(
+        session, "telegram_monitor", sent_at=at(5, 12), status="failed", attempt=2
+    )
     failed = await pf.push(
-        session, "telegram_monitor", sent_at=at(3, 12), status="failed"
+        session, "telegram_monitor", sent_at=at(3, 13), status="failed"
     )
     await session.commit()
     rows = await metrics.pushes(session, since=at(2, 0), until=at(9, 0))
-    assert [(r.external_id, r.sent_at) for r in rows] == [(first.external_id, at(3, 11))]
+    assert [(r.external_id, r.sent_at) for r in rows] == [
+        (lost.external_id, at(3, 12)),
+        (first.external_id, at(5, 10)),
+    ]
     assert failed.external_id not in {r.external_id for r in rows}
-    # The window reads the first delivery: from Wednesday on it is not there.
-    assert await metrics.pushes(session, since=at(4, 0), until=at(9, 0)) == []
+    # Until the re-push the re-pushed id is not in the window, after it is.
+    late = await metrics.pushes(session, since=at(4, 0), until=at(9, 0))
+    assert [r.external_id for r in late] == [first.external_id]
+    early = await metrics.pushes(session, since=at(2, 0), until=at(5, 10))
+    assert [r.external_id for r in early] == [lost.external_id]
+
+
+async def test_make_push_test_is_no_push_of_the_pilot(session):
+    """make push-test's synthetic lead (``gates.test``, 05 §B.1) goes out on
+    day 1, before the pilot (06 §7.1): it neither starts the pilot nor
+    counts in a number."""
+    test_push = await pf.push(session, "telegram_monitor", sent_at=at(2, 11))
+    candidate = await session.get(LeadCandidate, test_push.candidate_id)
+    assert candidate is not None
+    candidate.score_breakdown = {"gates": {"test": True}}
+    candidate.approved_by = "owner:push-test"
+    real = await pf.push(session, "telegram_monitor", sent_at=at(7, 11))
+    await session.commit()
+    assert await metrics.pilot_start(session) == at(7, 0).date()
+    rows = await metrics.pushes(session, since=at(1, 0), until=at(30, 0))
+    assert [r.external_id for r in rows] == [real.external_id]
+    report = await metrics.mvp_report(session, now=at(28, 12))
+    assert report is not None
+    assert (report.start, report.week2_start) == (at(7, 0).date(), at(14, 0))
+    assert report.results.pushed == 1
 
 
 async def test_unclassed_labels_are_the_dictionary_labels_no_class_matched(session):
-    for reason in ("Mijoz bilan kelishmadi", "mijoz  BILAN kelishmadi", "Boshqa sabab"):
+    # One label, two spellings: shown as the ERP spelt it last.
+    for reason, erp_at in (
+        ("mijoz  BILAN kelishmadi", at(3, 11)),
+        ("Mijoz bilan kelishmadi", at(4, 9)),
+        ("Boshqa sabab", at(3, 11)),
+    ):
         log = await pf.push(session, "telegram_monitor", sent_at=at(3, 11))
         await pf.judged(
-            session, log, read_at=at(9, 3), stage_kind="lost", lost_reason=reason
+            session,
+            log,
+            read_at=at(9, 3),
+            stage_kind="lost",
+            lost_reason=reason,
+            at=erp_at,
         )
     # Classed labels, the setting's «never again» and a loss with no label
     # (a seller's free text) are not «unclassed».
@@ -235,10 +288,31 @@ async def test_unclassed_labels_are_the_dictionary_labels_no_class_matched(sessi
         ("Mijoz bilan kelishmadi", 2),
         ("Boshqa sabab", 1),
     ]
-    assert found[0].last_at == at(3, 11)
-    assert [u.label for u in await metrics.unclassed_labels(session, limit=1)] == [
-        "Mijoz bilan kelishmadi"
-    ]
+    assert found[0].last_at == at(4, 9)
+
+
+async def test_every_unclassed_label_is_kept_and_the_line_counts_the_rest(session):
+    """Decision 1a: none is dropped — the line names the first ten and says
+    how many more there are."""
+    for i in range(12):
+        log = await pf.push(session, "telegram_monitor", sent_at=at(3, 11))
+        await pf.judged(
+            session,
+            log,
+            read_at=at(9, 3),
+            stage_kind="lost",
+            lost_reason=f"Yangi sabab {i:02d}",
+            at=at(3, 11) + timedelta(minutes=i),
+        )
+    await session.commit()
+    found = await metrics.unclassed_labels(session)
+    assert [u.label for u in found] == [f"Yangi sabab {i:02d}" for i in range(11, -1, -1)]
+    [line] = cards.unclassed_lines(found)
+    assert cards.UNCLASSED_SHOWN == 10
+    assert "«Yangi sabab 02» 1 ta · va yana 2 ta sabab — dasturchiga" in line
+    assert "Yangi sabab 01" not in line
+    [whole] = cards.unclassed_lines(found[:10])
+    assert "va yana" not in whole
 
 
 async def test_spend_is_grouped_by_the_tashkent_day(session):
@@ -279,7 +353,7 @@ async def test_the_pilot_by_its_numbers(session):
     assert (r.importer, r.precision, r.contacted) == (
         Ratio(2, 4),
         Ratio(1, 3),
-        Ratio(4, 7),
+        Ratio(5, 7),
     )
     assert (r.quoted, r.first_shipment) == (Ratio(2, 5), Ratio(1, 33))
     assert [(u.label, u.n) for u in r.unclassed] == [(pf.UNCLASSED, 1)]

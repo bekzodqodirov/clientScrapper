@@ -2,11 +2,14 @@
 (07 §3.2, 01 §5; the owner's decisions of 2026-10-29, 01 §7).
 
 What is counted is a **push**: an ``external_id`` with a delivered
-``push_log`` row (``sent`` or ``unknown``), dated by its first delivered
-row — a re-push supersedes a row and writes another with the same id, and
-one push must not count twice. The outcome is the ``outcomes`` row of that
-id (05 §B.2); its ``label`` and ``precision_class`` are
-``outcomes.derive_label``'s and are never re-derived here.
+``push_log`` row (``sent`` or ``unknown``), once — a re-push supersedes a
+row and writes another with the same id — and dated by the row its outcome
+is about (``outcomes.delivery_order``: the live one). Rule 5 re-pushes an
+id the ERP never recorded (02 §2.10), so its lead was born at the re-push
+and the managers' day runs from there. ``make push-test``'s synthetic lead
+(``candidates.synthetic_sql``) is no push of the pilot's. The outcome is the
+``outcomes`` row of that id (05 §B.2); its ``label`` and ``precision_class``
+are ``outcomes.derive_label``'s and are never re-derived here.
 
 * **hot** — the candidate's score ≥ 60 (07 §3.2's first row; every push has
   a phone, ``push_log.phone_tail`` is NOT NULL).
@@ -52,7 +55,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from clientscrapper.config import settings
 from clientscrapper.db import enums
 from clientscrapper.db.models import LeadCandidate, Outcome, PushLog, UsageLog
-from clientscrapper.services.outcomes import CLIENT_LABELS, normalise_label
+from clientscrapper.services.candidates import synthetic_sql
+from clientscrapper.services.outcomes import (
+    CLIENT_LABELS,
+    delivery_order,
+    normalise_label,
+)
 
 # 07 §3.2: «Mon–Sat Tashkent calendar».
 BUSINESS_DAYS: Final = frozenset({1, 2, 3, 4, 5, 6})
@@ -68,7 +76,6 @@ DROPPED_PREFIX: Final = "dropped_"
 # /holat's window (01 §5's month-3 targets are read over the same 30 days
 # the precision job uses).
 HOLAT_WINDOW: Final = timedelta(days=30)
-UNCLASSED_LIMIT: Final = 10
 # 07 §3.2: the MVP is read at the end of week 2 of the pilot.
 WEEK: Final = timedelta(days=7)
 # 07 §3.2 targets (and 01 §5's for the two approximate rows).
@@ -149,7 +156,7 @@ class PushRow:
 
 @dataclass(frozen=True, slots=True)
 class Results:
-    """The numbers over the pushes first delivered in ``[since, until)``."""
+    """The numbers over the pushes dated in ``[since, until)``."""
 
     since: datetime
     until: datetime
@@ -166,21 +173,18 @@ class Results:
 async def pushes(
     session: AsyncSession, *, since: datetime, until: datetime
 ) -> list[PushRow]:
-    """Every push first delivered in ``[since, until)``, with its outcome."""
-    first = (
-        sa.select(
-            PushLog.external_id,
-            PushLog.candidate_id,
-            sa.func.min(PushLog.sent_at).label("sent_at"),
-        )
+    """Every push dated in ``[since, until)``, with its outcome."""
+    dated = (
+        sa.select(PushLog.external_id, PushLog.candidate_id, PushLog.sent_at)
         .where(PushLog.status.in_(enums.PUSH_DELIVERED_STATUSES))
-        .group_by(PushLog.external_id, PushLog.candidate_id)
+        .distinct(PushLog.external_id)
+        .order_by(PushLog.external_id, *delivery_order())
         .subquery()
     )
     rows = await session.execute(
         sa.select(
-            first.c.external_id,
-            first.c.sent_at,
+            dated.c.external_id,
+            dated.c.sent_at,
             LeadCandidate.score,
             Outcome.landing,
             Outcome.stage_kind,
@@ -189,16 +193,13 @@ async def pushes(
             Outcome.precision_class,
             Outcome.contacted_at,
         )
-        .join(LeadCandidate, LeadCandidate.id == first.c.candidate_id)
-        .outerjoin(Outcome, Outcome.external_id == first.c.external_id)
-        .where(first.c.sent_at >= since, first.c.sent_at < until)
-        .order_by(first.c.sent_at, first.c.external_id)
+        .join(LeadCandidate, LeadCandidate.id == dated.c.candidate_id)
+        .outerjoin(Outcome, Outcome.external_id == dated.c.external_id)
+        .where(dated.c.sent_at >= since, dated.c.sent_at < until, ~synthetic_sql())
+        .order_by(dated.c.sent_at, dated.c.external_id)
     )
-    seen: dict[str, PushRow] = {}
-    for r in rows:
-        if r.external_id in seen:
-            continue  # one id, two candidates: the earlier delivery stands
-        seen[r.external_id] = PushRow(
+    return [
+        PushRow(
             external_id=r.external_id,
             sent_at=r.sent_at,
             score=r.score,
@@ -209,7 +210,8 @@ async def pushes(
             precision_class=r.precision_class,
             contacted_at=r.contacted_at,
         )
-    return list(seen.values())
+        for r in rows
+    ]
 
 
 def importer_rate(rows: Sequence[PushRow], *, now: datetime) -> Ratio:
@@ -270,11 +272,11 @@ def first_shipment(rows: Sequence[PushRow]) -> Ratio:
     return Ratio(sum(1 for r in rows if r.label in CLIENT_LABELS), len(rows))
 
 
-async def unclassed_labels(
-    session: AsyncSession, *, limit: int = UNCLASSED_LIMIT
-) -> tuple[Unclassed, ...]:
+async def unclassed_labels(session: AsyncSession) -> tuple[Unclassed, ...]:
     """Decision 1a: every dictionary label no pattern classed, most used
-    first (then newest), one entry per normalised label."""
+    first (then newest), one entry per normalised label, shown as the ERP
+    spelt it last — all of them (a cut is the renderer's, and it says how
+    many it left out)."""
     rows = await session.execute(
         sa.select(Outcome.lost_reason, Outcome.erp_at)
         .where(Outcome.label == "lost_other", Outcome.lost_reason.is_not(None))
@@ -288,7 +290,7 @@ async def unclassed_labels(
         shown, n, last = found.get(key, (" ".join(reason.split()), 0, at))
         found[key] = (shown, n + 1, max(last, at))
     ranked = sorted(found.values(), key=lambda x: (-x[1], -x[2].timestamp(), x[0]))
-    return tuple(Unclassed(label, n, at) for label, n, at in ranked[:limit])
+    return tuple(Unclassed(label, n, at) for label, n, at in ranked)
 
 
 async def measure(
@@ -299,7 +301,7 @@ async def measure(
     now: datetime,
     quote_names: Sequence[str] | None = None,
 ) -> Results:
-    """Every number over the pushes first delivered in ``[since, until)``."""
+    """Every number over the pushes dated in ``[since, until)``."""
     rows = await pushes(session, since=since, until=until)
     names = settings.quote_stage_names_parsed if quote_names is None else quote_names
     return Results(
@@ -357,11 +359,13 @@ def local_midnight(day: date, tz: tzinfo | None = None) -> datetime:
 
 
 async def pilot_start(session: AsyncSession) -> date | None:
-    """The Tashkent day of the first delivered push, None before any."""
+    """The Tashkent day of the first delivered push, None before any;
+    ``make push-test``'s synthetic lead — day 1's check, before the pilot
+    (06 §7.1) — is not the pilot's first push."""
     first = await session.scalar(
-        sa.select(sa.func.min(PushLog.sent_at)).where(
-            PushLog.status.in_(enums.PUSH_DELIVERED_STATUSES)
-        )
+        sa.select(sa.func.min(PushLog.sent_at))
+        .join(LeadCandidate, LeadCandidate.id == PushLog.candidate_id)
+        .where(PushLog.status.in_(enums.PUSH_DELIVERED_STATUSES), ~synthetic_sql())
     )
     return None if first is None else first.astimezone(settings.tz).date()
 

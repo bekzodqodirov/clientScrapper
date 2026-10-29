@@ -1911,7 +1911,9 @@ async def apply_precision(session: AsyncSession, now: datetime) -> PrecisionRun:
                 run.flips.append(
                     PrecisionFlip(row.key, row.title_uz, due, pct, mine.pushes)
                 )
-        if low_precision(mine) and pct is not None:
+        if row.enabled and low_precision(mine) and pct is not None:
+            # A switched-off source runs nothing to pause, and switching it
+            # back on is the owner's own say (owner.toggle_source).
             until = now + LOW_PRECISION_PAUSE
             if row.paused_until is None or row.paused_until < until:
                 await session.execute(
@@ -1936,11 +1938,39 @@ async def apply_precision(session: AsyncSession, now: datetime) -> PrecisionRun:
     return run
 
 
+async def end_low_precision_pause(
+    session: AsyncSession, key: str, *, now: datetime
+) -> None:
+    """The owner switched a paused source back on (``owner.toggle_source``):
+    its line leaves the open ``source_low_precision`` problem, which is
+    cleared with its last line — the alert names only what is still paused."""
+    open_ = (await health.reported_problems(session, now)).get(LOW_PRECISION_PROBLEM)
+    if open_ is None:
+        return
+    listed = open_.detail.get("sources")
+    if not isinstance(listed, list):
+        return
+    kept = [i for i in listed if not (isinstance(i, Mapping) and i.get("key") == key)]
+    if len(kept) == len(listed):
+        return
+    if not kept:
+        await health.clear_problem(session, LOW_PRECISION_PROBLEM)
+        return
+    await health.raise_problem(
+        session,
+        LOW_PRECISION_PROBLEM,
+        now=now,
+        by=PRECISION_WRITER,
+        detail={"sources": kept},
+        until=open_.until,
+    )
+
+
 def _forbidden_sql() -> sa.ColumnElement[bool]:
-    """``forbidden_of`` as SQL, for the turn-on UPDATE's own guard."""
-    return sa.func.coalesce(
-        Source.config[AUTO_PUSH_FORBIDDEN].as_boolean(), sa.false()
-    ).is_(True)
+    """``forbidden_of`` as SQL, for the turn-on UPDATE's own guard: the JSON
+    ``true`` only (containment, never a cast — a hand-edited ``"yes"`` reads
+    as not forbidden here as in Python, and cannot make the job raise)."""
+    return Source.config.contains({AUTO_PUSH_FORBIDDEN: True}).is_(sa.true())
 
 
 async def _store_flips(session: AsyncSession, run: PrecisionRun) -> None:
@@ -2144,6 +2174,7 @@ __all__ = [
     "SyncReport",
     "apply_precision",
     "auto_push_due",
+    "end_low_precision_pause",
     "feeds_configured",
     "fetch_pages",
     "fmt_since",

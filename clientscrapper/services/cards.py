@@ -930,21 +930,26 @@ def precision_text(value: Decimal | None) -> str:
 
 def _source_line(source: health.SourceState, now: datetime) -> str:
     """06 §1.4: ``{title} {✅|⏸|⛔} {age} · {n} yangi · aniqlik {p}%`` — the
-    30-day pushes beside the precision and «avto» while auto-push is on
-    (05 §B.2: the three numbers per source)."""
+    30-day pushes beside the precision and «avto» while auto-push approves
+    its leads (05 §B.2: the three numbers per source;
+    ``candidates.auto_approves``)."""
     line = (
         f"  {esc(source.title_uz)} {_source_icon(source, now)} "
         f"{_age(source.last_run_at, now)} · bugun {source.new_companies_today} yangi · "
         f"aniqlik {precision_text(source.precision_30d)} ({source.pushes_30d})"
     )
-    return line + (" · avto" if source.auto_push else "")
+    return line + (" · avto" if candidates.auto_approves(source.auto_push) else "")
+
+
+# A number with nothing to count yet (/holat, the MVP report).
+NOTHING_YET_UZ: Final = "hali yoʻq"
 
 
 def ratio_text(ratio: metrics.Ratio, *, approx: bool = False) -> str:
-    """«45% (9/20)» — «~45% (9/20)» for an approximate one — or «—» with
-    nothing to count."""
+    """«45% (9/20)» — «~45% (9/20)» for an approximate one — or «hali yoʻq»
+    with nothing to count."""
     if ratio.pct is None:
-        return "—"
+        return NOTHING_YET_UZ
     return f"{'~' if approx else ''}{ratio.pct}% ({ratio.n}/{ratio.of})"
 
 
@@ -976,14 +981,21 @@ def render_results(results: metrics.Results) -> list[str]:
     return lines
 
 
+# Decision 1a's line names this many labels (most used first) and counts the rest.
+UNCLASSED_SHOWN: Final = 10
+
+
 def unclassed_lines(found: Sequence[metrics.Unclassed]) -> list[str]:
     """Decision 1a: every lost-reason label no class matched, so it is
-    mapped — none, no line (T-35's digest says it the same way)."""
+    mapped — the first ``UNCLASSED_SHOWN`` by name, «va yana N ta» for the
+    rest, none, no line (T-35's digest says it the same way)."""
     if not found:
         return []
-    shown = " · ".join(f"«{esc(u.label)}» {u.n} ta" for u in found)
+    shown = " · ".join(f"«{esc(u.label)}» {u.n} ta" for u in found[:UNCLASSED_SHOWN])
+    rest = len(found) - UNCLASSED_SHOWN
+    more = f" · va yana {rest} ta sabab" if rest > 0 else ""
     return [
-        f"⚠️ Sinflanmagan yoʻqotish sabablari: {shown} — dasturchiga ayting, "
+        f"⚠️ Sinflanmagan yoʻqotish sabablari: {shown}{more} — dasturchiga ayting, "
         "aniqlik hisobiga qoʻshilsin"
     ]
 
@@ -1148,10 +1160,12 @@ def render_xarajat(report: costs.SpendReport) -> str:
     return "\n".join(lines)
 
 
-def _target(pct: int | None, target: int, *, at_least: bool = True) -> str:
+def _target(pct: int | None, target: int) -> str:
+    """« ✅»/« ❌» against an «at least» target; nothing while nothing is
+    counted (a number not there yet has met no target and missed none)."""
     if pct is None:
-        return "—"
-    return "✅" if (pct >= target if at_least else pct <= target) else "❌"
+        return ""
+    return " ✅" if pct >= target else " ❌"
 
 
 def render_mvp(report: metrics.MvpReport) -> str:
@@ -1168,15 +1182,18 @@ def render_mvp(report: metrics.MvpReport) -> str:
         f"(maqsad ≥ {metrics.TARGET_PUSHED_W2}) "
         + ("✅" if report.week2_hot >= metrics.TARGET_PUSHED_W2 else "❌"),
         f"2. Haqiqiy importyor: {ratio_text(r.importer)} (maqsad ≥ "
-        f"{metrics.TARGET_IMPORTER}%) {_target(r.importer.pct, metrics.TARGET_IMPORTER)}"
+        f"{metrics.TARGET_IMPORTER}%){_target(r.importer.pct, metrics.TARGET_IMPORTER)}"
         f" · aniqlik {ratio_text(r.precision)}",
         f"3. 1 ish kunida bogʻlanildi: {ratio_text(r.contacted)} (maqsad ≥ "
-        f"{metrics.TARGET_CONTACTED}%) "
+        f"{metrics.TARGET_CONTACTED}%)"
         f"{_target(r.contacted.pct, metrics.TARGET_CONTACTED)} — {CONTACT_NOTE_UZ}",
     ]
     top_ai, top_all = report.anthropic_max, report.total_max
     if top_ai is None or top_all is None:
-        lines.append("4. Xarajat: hali yoʻq")
+        lines.append(
+            f"4. Claude xarajati: {NOTHING_YET_UZ} (maqsad kuniga ≤ "
+            f"{money(metrics.TARGET_CLAUDE_DAY)})"
+        )
     else:
         ok = top_ai.anthropic <= metrics.TARGET_CLAUDE_DAY
         within = top_all.total <= settings.daily_cost_cap_usd

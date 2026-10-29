@@ -45,7 +45,7 @@ from clientscrapper.db.models import (
     Source,
     UsageLog,
 )
-from clientscrapper.services import companies, costs, erp_feeds, keys
+from clientscrapper.services import candidates, companies, costs, erp_feeds, keys
 
 PAUSE_FLAG: Final = costs.PAUSE_FLAG
 REASON_MAX: Final = 200
@@ -137,6 +137,11 @@ class SourceLine:
     paused_until: datetime | None
     breaker_until: datetime | None
 
+    @property
+    def auto_live(self) -> bool:
+        """Earned auto-push that approves leads now (``AUTO_APPROVE``)."""
+        return candidates.auto_approves(self.auto_push)
+
     def state(self, now: datetime) -> Literal["on", "paused", "off"]:
         """✅ on · ⏸ paused or breaker-held · ⛔ off."""
         if not self.enabled:
@@ -215,19 +220,28 @@ async def _locked_source(session: AsyncSession, key: str) -> Source | None:
     return found
 
 
-async def toggle_source(session: AsyncSession, key: str) -> bool | None:
+async def toggle_source(session: AsyncSession, key: str, *, now: datetime) -> bool | None:
     """``src:<key>:t``: the switch flipped under the row's lock (a tap that
     arrives twice flips it twice, as two taps would). The new value, or None
-    when the row is gone. Switching a source ON ends the precision job's
-    week-long pause (06 §4.2 «/manbalar bilan yoqiladi»); a breaker's pause
-    is the breaker's and stays."""
+    when the row is gone. The precision job's week-long pause is the owner's
+    to end (06 §4.2 «/manbalar bilan yoqiladi»): a tap on the ⏸ row it holds
+    resumes the source — it stays on — and so does switching a source on; a
+    breaker's pause is the breaker's and stays. The ended pause leaves the
+    open ``source_low_precision`` alert."""
     row = await _locked_source(session, key)
     if row is None:
         return None
-    row.enabled = not row.enabled
+    held = (
+        row.paused_reason == erp_feeds.LOW_PRECISION_REASON
+        and row.paused_until is not None
+        and row.paused_until > now
+    )
+    if not (row.enabled and held):
+        row.enabled = not row.enabled
     if row.enabled and row.paused_reason == erp_feeds.LOW_PRECISION_REASON:
         row.paused_until = None
         row.paused_reason = None
+        await erp_feeds.end_low_precision_pause(session, key, now=now)
     await session.flush()
     return row.enabled
 

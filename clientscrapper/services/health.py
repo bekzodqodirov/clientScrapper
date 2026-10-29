@@ -1712,7 +1712,7 @@ _RECOVERY: Final[Mapping[str, str]] = {
     "backup_unconfigured": "✅ Zaxira sozlandi — tiklandi",
     "backup_stale": "✅ Zaxira yana yangi — tiklandi",
     "ig_token_expired": "✅ Instagram tokeni yangilandi — tiklandi",
-    "source_low_precision": "✅ Manbalar aniqligi yana yaxshi — tiklandi",
+    "source_low_precision": "✅ Past aniqlik pauzasi tugadi — tiklandi",
     "evidence_over_cap": "✅ Dalil papkasi chegara ichida — tiklandi",
 }
 

@@ -84,7 +84,7 @@ The bot names every problem with its remedy (06 §4.2); `/holat` lists the open 
 | «Qayta qilinmasin» renamed in the dictionary | a seller says a «never again» lead came back, or no new `lost` rows for weeks | A rename never rewrites old leads, but new losses under the new spelling are not in `agent_no_contact_reasons` and arrive with `no_contact=false`. **Boshqaruv → Sozlamalar → `agent_no_contact_reasons`**: add the new spelling (`;`), keep the old one; then `make erp-sync WALK=full` | the next full pull holds the new losses as `kind='lost'` |
 | Feed shrank | `suppression_shrunk` | Nothing was deleted. Check the ERP: a client export change, a renamed `agent_no_contact_reasons` label, a retired class of tails? Fix the cause, then `make erp-sync WALK=full ACCEPT_SHRINK=1` once | the full pull's count ≥ 90 % of the previous one |
 | A lost reason the agent cannot class | `/holat`: «⚠️ Sinflanmagan yoʻqotish sabablari: «…» N ta» | The owner added a dictionary label no `outcomes.LOST_REASON_PATTERNS` entry matches (decision 1a): it counts as neutral until mapped. Tell the developer the exact spelling; the pattern is added in code with a test (`tests/test_outcomes_labels_table.py`); the next `quarter`/`year` walk re-labels the old rows | the line disappears from `/holat` |
-| A source paused for low precision | «⚠️ {manba} aniqligi N% — bir haftaga toʻxtatildi» | The weekly job paused it (≥ 30 pushes, < 20 % precision, 06 §4.2). Ask why (wrong keywords, a B2C channel); fix the source's config, then `/manbalar` → switch it off and on again — that ends the pause; otherwise it resumes by itself after 7 days and is judged again next Sunday | `/manbalar` shows ✅ |
+| A source paused for low precision | «⚠️ {manba} aniqligi N% — bir haftaga toʻxtatildi» | The weekly job paused it (≥ 30 pushes, < 20 % precision, 06 §4.2). Ask why (wrong keywords, a B2C channel); fix the source's config, then `/manbalar` → tap its ⏸ row once — that ends the pause (the source stays on) and takes it out of the alert; otherwise it resumes by itself after 7 days and is judged again next Sunday. A source switched off is never paused or named | `/manbalar` shows ✅ |
 
 ## 4. The weekly precision job and auto-push
 
@@ -104,8 +104,19 @@ The bot names every problem with its remedy (06 §4.2); `/holat` lists the open 
 
 Run it by hand only if a Sunday was missed: `docker compose run --rm --no-deps worker python -c
 "import asyncio; from clientscrapper.worker.main import source_precision_job;
-print(asyncio.run(source_precision_job()))"`. Auto-approval itself (`approved_by='auto:<source>'`)
-is T-39's, month 1; until then `auto_push` is a number the owner reads in `/manbalar`.
+print(asyncio.run(source_precision_job()))"`.
+
+What a flip **does** is the owner's switch `AUTO_APPROVE` (`.env`, default `false`; 06 open
+question 2's «review everything until the first precision numbers exist», T-39):
+
+- `AUTO_APPROVE=false` — `auto_push` approves nothing. Every hot candidate still reaches the
+  owner's card; `/manbalar` → ℹ️ says «aniqlik yetarli, lekin hali yoqilmagan» for a source that
+  earned it, and the source's mode stays «qoʻlda».
+- `AUTO_APPROVE=true` (then `make reload`) — from the moment the Sunday job turns a source's
+  `auto_push` on, its hot candidates are approved as `auto:<source>` and pushed **without an
+  owner card**; `/manbalar` and `/holat` say «avto». The owner is not told of a flip until the
+  digest exists (T-35, «a flip of auto_push is its own line»): read `/manbalar` on Monday, and
+  forbid a source there (ℹ️ → «🚫 Avto-pushni taqiqlash») to keep its cards.
 
 ## 5. The pilot's numbers (07 §3.2) — `/holat` and `make mvp-report`
 
@@ -115,7 +126,7 @@ is T-39's, month 1; until then `auto_push` is a number the owner reads in `/manb
 
 | Number | Target (MVP) | How it is counted |
 |---|---|---|
-| Pushes with a phone and score ≥ 60, week 2 | ≥ 20 | one per `external_id` (a re-push is the same lead), dated by its first delivered row |
+| Pushes with a phone and score ≥ 60, week 2 | ≥ 20 | one per `external_id` (a re-push is the same lead), dated by the row its outcome is about — a re-push of a lead the ERP never recorded is dated by the re-push; `make push-test`'s synthetic lead is not counted |
 | Real importer rate | ≥ 60 % | over pushes whose outcome is terminal (won, lost, client, dropped) or ≥ 14 days old: 1 − (not importer, wrong number, competitor, small) / labels that are not `dropped_*`; the strict precision (positives / (positives + negatives)) is printed beside it |
 | Contacted within 1 business day | ≥ 40 % | `contacted_at` by the end of the next Mon–Sat Tashkent business day after the push, over the leads the ERP created whose deadline has passed (or that were contacted in time). **Under-counts**: the ERP sees calls, connected Telegram accounts, notes, stage moves and «📞 Bogʻlandim» only (decision 6a) |
 | Claude spend | ≤ $5/day | the most expensive Tashkent day; all providers together are held to `DAILY_COST_CAP_USD` ($10) |

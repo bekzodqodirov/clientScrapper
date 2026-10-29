@@ -667,9 +667,12 @@ async def test_holat_shows_the_layout_and_the_problems(w):
     assert any(line.startswith("Muammolar: ") for line in lines)
 
 
-async def test_holat_prints_each_source_s_numbers(w):
+@pytest.mark.parametrize(("approve", "tail"), [(True, " · avto"), (False, "")])
+async def test_holat_prints_each_source_s_numbers(w, monkeypatch, approve, tail):
     """06 §1.4 / 05 §B.2: today's new companies, the 30-day precision with
-    its pushes, and «avto» while auto-push is on."""
+    its pushes, and «avto» while auto-push approves the source's leads —
+    earned, and the owner's ``AUTO_APPROVE`` on (candidates.auto_approves)."""
+    monkeypatch.setattr(settings, "auto_approve", approve)
     async with w.db() as s:
         await s.execute(
             sa.update(Source).values(
@@ -707,7 +710,7 @@ async def test_holat_prints_each_source_s_numbers(w):
     await w.say("/holat")
     lines = w.last().splitlines()
     start = lines.index("Manbalar:")
-    assert lines[start + 1] == f"  {title} ✅ — · bugun 3 yangi · aniqlik 60% (15) · avto"
+    assert lines[start + 1] == f"  {title} ✅ — · bugun 3 yangi · aniqlik 60% (15){tail}"
 
 
 async def test_holat_shows_the_pilot_s_numbers_and_the_unclassed_labels(w):
@@ -724,7 +727,7 @@ async def test_holat_shows_the_pilot_s_numbers_and_the_unclassed_labels(w):
     start = next(i for i, line in enumerate(lines) if line.startswith("Natija ("))
     assert lines[start : start + 6] == [
         "Natija (30 kun): push 33 · ≥60 ball 31",
-        "  Bogʻlanildi 1 ish kunida: 57% (4/7) — faqat ERP koʻrgani",
+        "  Bogʻlanildi 1 ish kunida: 71% (5/7) — faqat ERP koʻrgani",
         "  Haqiqiy importyor: 50% (2/4) · aniqlik 33% (1/3)",
         "  Narx aytildi / bogʻlanildi: ~40% (2/5) — taxminiy, bosqich nomidan",
         "  Yutildi: 3% (1/33) — taxminiy: «yutildi» birinchi yuk oʻrniga",
@@ -1314,6 +1317,31 @@ async def test_forbidding_auto_push_switches_it_off(w):
         row = await s.get(Source, "telegram_monitor", populate_existing=True)
         assert row is not None
         assert (row.config.get("auto_push_forbidden"), row.auto_push) == (True, False)
+
+
+@pytest.mark.parametrize(
+    ("approve", "mode", "state"),
+    [
+        (False, "manbalar.mode_manual", "manbalar.auto_earned"),
+        (True, "manbalar.mode_auto", "manbalar.auto_on"),
+    ],
+)
+async def test_an_earned_auto_push_reads_as_the_owner_s_switch_makes_it(
+    w, monkeypatch, approve, mode, state
+):
+    """The precision job earned ``auto_push``; whether it approves leads is
+    ``AUTO_APPROVE`` (candidates.auto_approves) — /manbalar says which."""
+    monkeypatch.setattr(settings, "auto_approve", approve)
+    async with w.db() as s:
+        await s.execute(
+            sa.update(Source)
+            .where(Source.key == "telegram_monitor")
+            .values(auto_push=True)
+        )
+    await w.press(cb.source("telegram_monitor", "i"))
+    lines = w.last().splitlines()
+    assert lines[1].endswith(f" · {t(mode)}")
+    assert t("manbalar.info_auto", state=t(state)) in lines
 
 
 async def test_stir_the_company_holds_already_and_a_merged_holder(w):

@@ -235,8 +235,9 @@ async def pilot(session: AsyncSession, source: str = "telegram_monitor") -> None
     """Two weeks of pushes, read on day 15 (``PILOT_NOW``):
 
     week 1 — eight pushes: won (contacted in time); lost «Import qilmaydi»,
-    re-pushed two days later and contacted only then (late against the
-    first delivery); lost «Raqam notoʻgʻri», never contacted; open at «Narx
+    re-pushed two days later and contacted an hour after the re-push (in
+    time: the lead was born at the re-push, the first attempt never landed);
+    lost «Raqam notoʻgʻri», never contacted; open at «Narx
     aytildi», contacted in time; a Saturday push nobody touched (its
     deadline was Monday 24:00); lost with a label no class matches; a capped
     drop; a Saturday push contacted Monday 10:00 (in time) at «Muzokara».

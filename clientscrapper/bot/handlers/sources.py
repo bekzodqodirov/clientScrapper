@@ -57,7 +57,7 @@ async def on_toggle(tap: Tap) -> None:
     key = tap.data.target
     assert key is not None
     async with tap.deps.session_factory() as session:
-        enabled = await owner.toggle_source(session, key)
+        enabled = await owner.toggle_source(session, key, now=tap.deps.clock())
         title = await _title(session, key)
     if enabled is None:
         await toast(tap.query, t("manbalar.gone"), alert=True)

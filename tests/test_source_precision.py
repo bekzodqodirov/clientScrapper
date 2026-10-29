@@ -82,6 +82,14 @@ async def forbid(session, key: str) -> None:
     await session.commit()
 
 
+async def enable(session, *keys: str, on: bool = True) -> None:
+    """``sources.enabled`` is the owner's (the fixture puts it back)."""
+    await session.execute(
+        sa.update(Source).where(Source.key.in_(keys)).values(enabled=on)
+    )
+    await session.commit()
+
+
 async def problem(session) -> dict | None:
     flag = await session.get(
         RuntimeFlag,
@@ -245,6 +253,7 @@ async def test_the_flips_are_kept_for_the_digest(session):
 
 
 async def test_a_low_precision_source_is_paused_for_a_week_and_the_owner_told(session):
+    await enable(session, "olx_business", "hh_vacancies")
     await pushes(session, "olx_business", good=3, bad=27)  # 10 % over 30
     await pushes(session, "hh_vacancies", good=1, bad=9, pending=19)  # 29 pushes
     run = await erp_feeds.source_precision_job(SessionLocal, NOW)
@@ -276,7 +285,20 @@ async def test_a_low_precision_source_is_paused_for_a_week_and_the_owner_told(se
     assert (await row(session, "olx_business")).paused_until is None
 
 
+async def test_a_switched_off_source_is_neither_paused_nor_named(session):
+    """A source the owner switched off runs nothing a pause could stop, and
+    switching it back on is his say (06 §4.2's alert names what it paused)."""
+    await enable(session, "olx_business", on=False)
+    await pushes(session, "olx_business", good=1, bad=29)
+    run = await erp_feeds.source_precision_job(SessionLocal, NOW)
+    olx = await row(session, "olx_business")
+    assert (olx.enabled, olx.paused_until, olx.paused_reason) == (False, None, None)
+    assert run.paused == []
+    assert await problem(session) is None
+
+
 async def test_a_longer_pause_is_never_shortened(session):
+    await enable(session, "olx_business")
     await pushes(session, "olx_business", good=1, bad=29)
     held = NOW + 20 * DAY
     await session.execute(
@@ -332,26 +354,75 @@ async def test_the_worker_slot_runs_the_job(session):
     assert (await row(session, "telegram_monitor")).auto_push is True
 
 
-async def test_switching_a_source_back_on_ends_the_low_precision_pause(session):
-    """06 §4.2: «/manbalar bilan yoqiladi» — off, then on, and it runs again;
-    a breaker's pause is not the owner's switch to end."""
+async def test_one_tap_on_the_paused_row_resumes_it_and_its_alert_line_goes(session):
+    """06 §4.2 «/manbalar bilan yoqiladi»: one tap on the ⏸ row the job holds
+    resumes the source (it stays on) and takes its line out of the open
+    alert — cleared with the last one; a breaker's pause is not the owner's
+    switch to end, and a tap on that row switches it off as it says."""
+    await enable(session, "olx_business", "hh_vacancies")
     await pushes(session, "olx_business", good=1, bad=29)
+    await pushes(session, "hh_vacancies", good=2, bad=28)
     await erp_feeds.source_precision_job(SessionLocal, NOW)
-    await session.execute(
-        sa.update(Source)
-        .where(Source.key.in_(["olx_business", "hh_vacancies"]))
-        .values(enabled=True)
-    )
+    keys = ("olx_business", "hh_vacancies")
+    titles = {k: (await row(session, k)).title_uz for k in keys}
+    assert [i["key"] for i in (await problem(session) or {})["detail"]["sources"]] == [
+        "hh_vacancies",
+        "olx_business",
+    ]
+    tap = NOW + DAY
+    assert await owner.toggle_source(session, "olx_business", now=tap) is True
+    await session.commit()
+    olx = await row(session, "olx_business")
+    assert (olx.enabled, olx.paused_until, olx.paused_reason) == (True, None, None)
+    raised = await problem(session)
+    assert raised is not None
+    assert raised["detail"] == {
+        "sources": [{"key": "hh_vacancies", "title": titles["hh_vacancies"], "pct": "6"}]
+    }
+    assert raised["until"] == (NOW + 7 * DAY).isoformat()
+    assert raised["since"] == NOW.isoformat()
+    assert await owner.toggle_source(session, "hh_vacancies", now=tap) is True
+    await session.commit()
+    assert await problem(session) is None
+    # A second tap is an ordinary switch: off.
+    assert await owner.toggle_source(session, "olx_business", now=tap) is False
+    # A breaker-held row: the tap switches it off, the breaker's pause stays,
+    # and switching it back on leaves that pause too.
     await session.execute(
         sa.update(Source)
         .where(Source.key == "hh_vacancies")
-        .values(paused_until=NOW + DAY, paused_reason="host_blocked:hh.uz")
+        .values(paused_until=tap + DAY, paused_reason="host_blocked:hh.uz")
     )
     await session.commit()
-    for key in ("olx_business", "hh_vacancies"):
-        assert await owner.toggle_source(session, key) is False
-        assert await owner.toggle_source(session, key) is True
+    assert await owner.toggle_source(session, "hh_vacancies", now=tap) is False
+    assert await owner.toggle_source(session, "hh_vacancies", now=tap) is True
     await session.commit()
-    olx, hh = await row(session, "olx_business"), await row(session, "hh_vacancies")
+    hh = await row(session, "hh_vacancies")
+    assert (hh.paused_until, hh.paused_reason) == (tap + DAY, "host_blocked:hh.uz")
+
+
+async def test_a_low_precision_pause_that_ran_out_is_no_hold(session):
+    """Past ``paused_until`` the row is ✅ again: a tap is the ordinary off."""
+    await enable(session, "olx_business")
+    await pushes(session, "olx_business", good=1, bad=29)
+    await erp_feeds.source_precision_job(SessionLocal, NOW)
+    after = NOW + 7 * DAY
+    assert await owner.toggle_source(session, "olx_business", now=after) is False
+    assert await owner.toggle_source(session, "olx_business", now=after) is True
+    await session.commit()
+    olx = await row(session, "olx_business")
     assert (olx.enabled, olx.paused_until, olx.paused_reason) == (True, None, None)
-    assert (hh.paused_until, hh.paused_reason) == (NOW + DAY, "host_blocked:hh.uz")
+
+
+async def test_a_switched_off_paused_source_switched_on_runs_again(session):
+    """A row the job paused that the owner then switched off (an old row):
+    switching it on ends the pause as well."""
+    await enable(session, "olx_business")
+    await pushes(session, "olx_business", good=1, bad=29)
+    await erp_feeds.source_precision_job(SessionLocal, NOW)
+    await enable(session, "olx_business", on=False)
+    assert await owner.toggle_source(session, "olx_business", now=NOW + DAY) is True
+    await session.commit()
+    olx = await row(session, "olx_business")
+    assert (olx.enabled, olx.paused_until, olx.paused_reason) == (True, None, None)
+    assert await problem(session) is None

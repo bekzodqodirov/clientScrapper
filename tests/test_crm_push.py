@@ -966,6 +966,28 @@ async def test_push_test_tool_payload_has_every_optional_key(world, monkeypatch)
     ]
 
 
+async def test_push_test_s_lead_is_no_push_of_the_pilot(world, monkeypatch):
+    """Day 1's ``make push-test`` (06 §7.1 step 6) is delivered like any push
+    and marked ``gates.test``: the pilot's numbers (services/metrics) neither
+    start on it nor count it."""
+    from clientscrapper.services import metrics
+
+    monkeypatch.setattr(settings, "test_phone", "+998 90 000 00 99")
+    report = await push_test.run(now=NOW, erp=world.erp)
+    assert report.status == "sent", report
+    s = world.session
+    delivered = await s.scalar(
+        sa.select(sa.func.count())
+        .select_from(PushLog)
+        .where(PushLog.external_id == report.external_id, PushLog.status == "sent")
+    )
+    assert delivered == 1
+    assert await metrics.pilot_start(s) is None
+    window = {"since": NOW - timedelta(days=1), "until": NOW + timedelta(days=1)}
+    assert await metrics.pushes(s, **window) == []
+    assert (await metrics.holat(s, now=NOW + timedelta(hours=1))).pushed == 0
+
+
 # --- helpers for the answers --------------------------------------------------------
 
 
