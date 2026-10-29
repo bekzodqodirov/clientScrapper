@@ -599,6 +599,34 @@ async def test_the_digest_is_sent_once_per_tashkent_day(session):
     assert len(owner.told) == 2
 
 
+async def test_two_speakers_at_once_send_one_digest(session, monkeypatch):
+    """The worker's cron and its start-up catch-up (or two worker
+    processes) both pass the cheap «sent today?» look before either has
+    claimed: the claim under the day's advisory lock lets one through."""
+    import asyncio
+
+    real_load = digest.load
+    entered = 0
+    both_looked = asyncio.Event()
+
+    async def load(session: AsyncSession, *, now: datetime) -> digest.Loaded:
+        nonlocal entered
+        entered += 1
+        if entered == 2:
+            both_looked.set()
+        await asyncio.wait_for(both_looked.wait(), timeout=10)
+        return await real_load(session, now=now)
+
+    monkeypatch.setattr(digest, "load", load)
+    owner = Owner()
+    outcomes = await asyncio.gather(
+        digest.send(owner, now=NOW), digest.send(owner, now=NOW + timedelta(seconds=1))
+    )
+    assert sorted(outcomes) == ["already", "sent"]
+    assert len(owner.told) == 1
+    assert await digest_rows(session) == [("digest", "2026-10-29")]
+
+
 async def test_an_undelivered_digest_stays_due_and_remembers_nothing(session):
     flag = await session.get(RuntimeFlag, digest.AUTO_PUSH_FLAG)
     assert flag is None
