@@ -415,7 +415,9 @@ async def test_lidlar_sends_the_best_owner_cards_first_within_the_burst(w, monke
             cand = await lead(s, nn)
             cand.score = score
             await pending_card(s, cand)
-        # A manager's card on a review candidate is never the owner's.
+        # A manager's card on a review candidate is never the owner's: /lidlar
+        # makes the candidate its own owner card (the card job's step,
+        # reviews.ensure_pending) and sends that one.
         other = await lead(s, 54)
         other.score = 99
         manager_card = await pending_card(
@@ -425,20 +427,32 @@ async def test_lidlar_sends_the_best_owner_cards_first_within_the_burst(w, monke
     await w.say("/lidlar")
     sent = _owner_cards(w)
     assert [line for x in sent for line in x.splitlines() if line.startswith("📞")] == [
+        "📞 +998 90 000 00 54 (mobil)",
         "📞 +998 90 000 00 52 (mobil)",
-        "📞 +998 90 000 00 53 (mobil)",
     ]
-    assert w.fake.texts()[-1] == t("lidlar.more", n=2)
+    assert w.fake.texts()[-1] == t("lidlar.more", n=3)
     assert w.fake.chats() == {OWNER}
     async with w.db() as s:
         row = await s.get(LeadReview, manager_card.id, populate_existing=True)
         assert row is not None and row.state == "pending"
+        mine = await s.scalar(
+            sa.select(LeadReview).where(
+                LeadReview.candidate_id == other.id, LeadReview.kind == "owner"
+            )
+        )
+        assert mine is not None and (mine.state, mine.created_at) == ("asked", NOW)
     await w.say("/lidlar")
     assert [x.splitlines()[0] for x in _owner_cards(w)] == [
         "🆕 Nomzod · 70/100 · Segment yoʻq",
-        "🆕 Nomzod · 50/100 · Segment yoʻq",
+        "🆕 Nomzod · 70/100 · Segment yoʻq",
     ]
-    assert "📞 +998 90 000 00 55 (mobil)" in _owner_cards(w)[0]
+    # Ties: the older card first (06 §1.6) — 53's before 55's.
+    assert "📞 +998 90 000 00 53 (mobil)" in _owner_cards(w)[0]
+    assert "📞 +998 90 000 00 55 (mobil)" in _owner_cards(w)[1]
+    await w.say("/lidlar")
+    assert [x.splitlines()[0] for x in _owner_cards(w)] == [
+        "🆕 Nomzod · 50/100 · Segment yoʻq"
+    ]
 
 
 async def test_a_card_telegram_refused_waits_and_the_cards_out_stay_asked(w):
@@ -1178,9 +1192,10 @@ async def test_each_card_answers_only_its_own_kind_of_button(w):
             by_telegram_id=MANAGER,
             card_message_id=78,
         )
-    # A manager's mh: on an owner card, the owner's rv:/mg: on a manager card.
+    # A manager's mh: on an owner card (a manager is never pointed at the
+    # owner's /lidlar, 06 §1.7), the owner's rv:/mg: on a manager card.
     await w.press(cb.manager(owner_card.id, "c"), user=MANAGER)
-    assert w.fake.answers() == [t("stale_card")]
+    assert w.fake.answers() == [t("stale_card_manager")] == ["Bu karta eskirgan"]
     for data in (
         cb.review(manager_card.id, "p"),
         cb.review(manager_card.id, "o"),

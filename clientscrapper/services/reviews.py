@@ -15,15 +15,16 @@ answer          row         candidate
 push            approved    review → approved(``owner:<tg_id>``)
 decline         declined    review → rejected
 later           asked       stays; ``expires_at += 24 h``, asked again in
-                            24 h (``remind_at``, 0004)
+                            24 h (``remind_at``, 0004) inside the hours
 dnc             declined    review → suppressed + ``suppression(dnc)`` rows
 not_b2b         declined    review → excluded(b2c) + ``suppression(b2c)``
 competitor      declined    review → excluded(competitor), the company flag
-merge           merged      ``companies.merge_into``'s own rule: excluded
-                            (merged) beside the target's open candidate, else
-                            moved onto the target (re-scored there)
+merge           merged      review → excluded(merged): beside the target's
+                            open candidate (``merge_into``), or moved onto the
+                            target by ``merge_into`` and excluded there
 edit_phone      asked       stays; the lead contact's digits replaced
 handoff         approved    review → hold 30 d + a ``kind='manager'`` row
+                            (with nobody yet when no manager is listed)
 contacted       approved    stays hold (``/tel`` re-scores it)
 said_no         declined    hold → suppressed + ``suppression(dnc)``
 wrong_or_b2c    declined    hold → excluded(b2c)
@@ -33,6 +34,14 @@ An owner card waits on a candidate in ``review``, a manager card on one in
 ``hold``; a tap, the sweep or the card job that finds the candidate moved on
 closes the card (``expired``, ``note='stale:<state>'``, its keyboard removed)
 and never transitions the candidate (06 §1.3).
+
+**⏭** (06 §1.3): the tap adds 24 hours to ``expires_at`` and sets
+``remind_at`` a day ahead; the card is asked again — a fresh message — on the
+first run inside the hours from then on, and never has less than a fresh
+card's ``REVIEW_EXPIRY_HOURS`` after that resend. A card put off and not yet
+asked again is never expired by the sweep (its old message has no buttons:
+nobody could answer it). An owner resend counts against ``REVIEW_DAILY_CAP``
+(``reminder_log(kind='review_resent', ref=review_id)``, ``asked_today``).
 
 **Expiry** (02 §2.9): an owner card nobody answered puts its candidate in
 ``hold`` for 7 days, ``reminder_log(kind='review_expired',
@@ -48,20 +57,31 @@ answered leaves the candidate in its handoff hold (the digest says
 claims its review row with ``UPDATE … WHERE state='asked'`` — the row count
 decides, so a second tap of the same button answers «Bu karta eskirgan»
 (06 §1.3). ``record_refusals`` writes a review row after the candidate, so
-the review row is always the last of the three.
+the review row is always the last of the three. The job's edits of a live
+card (``refresh_live``, the ⏭ resend) hold the card's row (``FOR UPDATE …
+SKIP LOCKED``) across the Telegram call, so a tap landing meanwhile waits for
+that edit and its own edit comes last; they take no company or candidate
+lock while they hold it (a card that cannot be shown is set aside after the
+row is let go). The sweep locks its pairs in company order (the order
+``merge_into`` locks two companies in).
 
 **The card job** (``review_cards_job``, every 2 minutes, 06 §1.6): the
 sweep, the stale cards, a ``pending`` owner row for every ``review``
 candidate that has none, then — not while ``/toxtat`` holds, and only when a
-bot is wired — the keyboards of the closed cards, the ✅ cards whose push just
-finished (their footer follows it), the live cards whose content changed
-(``card_hash``: edited only on a change), and inside ``REVIEW_HOURS``
-(Mon–Sat, never in ``QUIET_HOURS``) the sending: the cards put off with ⏭,
-then the next ``pending`` owner cards (``send_owner_cards``, ``/lidlar``'s
-own loop) within ``REVIEW_BURST_MAX`` per run and ``REVIEW_DAILY_CAP``
-``asked`` per Tashkent day, then the manager cards waiting. Every card is
-rendered with the gates evaluated at that moment (``cards.review_view``, 04
-§6); a card that cannot be shown leaves the queue (``cards.set_aside``).
+bot is wired — the keyboards of the closed cards (every closed card whose
+message may still show buttons, ``card_message_id`` cleared once stripped, so
+a card closed while paused loses them after ``/yoq``), the ✅ cards whose push
+just finished (their footer follows it), the live cards whose content changed
+(``card_hash``: edited only on a change; the newest and a rotating window of
+the rest each run), and inside ``REVIEW_HOURS`` (Mon–Sat, never in
+``QUIET_HOURS``) the sending: the cards put off with ⏭, then the next
+``pending`` owner cards (``send_owner_cards``, ``/lidlar``'s own loop) within
+``REVIEW_BURST_MAX`` per run and ``REVIEW_DAILY_CAP`` owner cards per
+Tashkent day, then the manager cards waiting (the owner's handoff card then
+says who received it). A recipient Telegram refused is skipped for the rest
+of the run; the others still get theirs. Every card is rendered with the
+gates evaluated at that moment (``cards.review_view``, 04 §6); a card that
+cannot be shown leaves the queue (``cards.set_aside``).
 
 The cards go out through a ``CardSender`` (``bot/cards_out.BotCards`` over
 ``bot/deliver.to_person``: the owner and the allow-listed managers only).
@@ -98,6 +118,7 @@ from clientscrapper.services import (
     companies,
     costs,
     crm_push,
+    gates,
     health,
     normalise,
     owner,
@@ -123,6 +144,9 @@ LATER: Final = timedelta(hours=24)
 # 06 §1.3 ✏️: «the owner's next message within 5 min must be a phone».
 EDIT_PHONE_WINDOW: Final = timedelta(minutes=5)
 EXPIRED_REMINDER: Final = "review_expired"
+# An owner card put off with ⏭ and asked again (ref = the review id): the
+# resend is a card the owner sees, so REVIEW_DAILY_CAP counts it.
+RESENT_REMINDER: Final = "review_resent"
 # suppression.reason of the card's own writes (the source is the owner bot's).
 OWNER_CARD_REASON: Final = "owner_card"
 MANAGER_REASON: Final = "manager_report"
@@ -132,8 +156,15 @@ TEL_BASIS: Final = "pre_contract_request"
 STALE_NOTE: Final = "stale:"
 # A manager card that could not be shown at all.
 REFUSED_NOTE: Final = "refused:"
-# Live cards re-rendered per run (the newest first); edited only on a change.
+# Live cards re-rendered per run — the newest half of them, then a window of
+# the rest that moves on every run (REFRESH_SLOT, the job's cadence), so an
+# older card is re-judged too; edited only on a change.
 REFRESH_MAX: Final = 20
+REFRESH_SLOT: Final = timedelta(minutes=2)
+LIVE_SCAN_MAX: Final = 1000
+# A closed card's buttons are taken off its message while it is this young
+# (a message Telegram no longer lets the bot edit is not retried for ever).
+STRIP_WINDOW: Final = timedelta(days=14)
 # A ✅ card whose push finished this recently gets the push's footer (the job
 # runs every 2 minutes: a few chances, and an edit only when the text moved).
 PUSH_FOOTER_WINDOW: Final = timedelta(minutes=15)
@@ -178,7 +209,7 @@ ROW_STATE: Final[Mapping[str, str]] = {
 class Refused(Exception):
     """A tap or a command that changes nothing (the caller rolls back):
     ``wrong_card``, ``not_yours``, ``no_phone`` (✅ without a usable phone),
-    ``no_manager``, ``no_target``, ``same_company``, ``merge:<reason>``,
+    ``no_target``, ``same_company``, ``merge:<reason>``,
     ``bad_phone``, ``same_phone``, ``phone_taken``, ``no_card``, ``stale``,
     ``not_waiting``, ``no_source``."""
 
@@ -260,17 +291,30 @@ def sending_hours(now: datetime) -> bool:
 
 
 async def asked_today(session: AsyncSession, now: datetime) -> int:
-    """Owner cards asked this Tashkent day (``REVIEW_DAILY_CAP``'s count)."""
-    found = await session.scalar(
+    """Owner cards shown this Tashkent day (``REVIEW_DAILY_CAP``'s count, 06
+    §1.6): the cards first asked today and the ⏭ cards asked again today
+    (``RESENT_REMINDER``) — a resend does not move ``asked_at``. A manager's
+    card is not the owner's budget."""
+    start, end = costs.day_start(now), costs.day_end(now)
+    asked = await session.scalar(
         sa.select(sa.func.count())
         .select_from(LeadReview)
         .where(
             LeadReview.kind == "owner",
-            LeadReview.asked_at >= costs.day_start(now),
-            LeadReview.asked_at < costs.day_end(now),
+            LeadReview.asked_at >= start,
+            LeadReview.asked_at < end,
         )
     )
-    return int(found or 0)
+    resent = await session.scalar(
+        sa.select(sa.func.count())
+        .select_from(ReminderLog)
+        .where(
+            ReminderLog.kind == RESENT_REMINDER,
+            ReminderLog.sent_at >= start,
+            ReminderLog.sent_at < end,
+        )
+    )
+    return int(asked or 0) + int(resent or 0)
 
 
 def owner_budget(asked: int) -> int:
@@ -289,19 +333,21 @@ async def _claim(
     *,
     by: int,
     now: datetime,
-    **values: Any,
+    only: tuple[sa.ColumnElement[bool], ...] = (),
+    values: Mapping[str, Any] | None = None,
 ) -> bool:
-    """The row takes the answer while it is still ``asked``: the row count
-    decides (06 §1.3 — a second tap of the same card is stale)."""
+    """The row takes the answer while it is still ``asked`` (and ``only``
+    holds): the row count decides (06 §1.3 — a second tap of the same card
+    is stale)."""
     state = ROW_STATE[code]
-    row: dict[str, Any] = {"answer": code, **values}
+    row: dict[str, Any] = {"answer": code, **(values or {})}
     if review.kind == "owner":
         row["by_telegram_id"] = by
     if state != "asked":
         row.update(state=state, answered_at=now, remind_at=None)
     result = await session.execute(
         sa.update(LeadReview)
-        .where(LeadReview.id == review.id, LeadReview.state == "asked")
+        .where(LeadReview.id == review.id, LeadReview.state == "asked", *only)
         .values(**row)
         .returning(LeadReview.id)
     )
@@ -383,7 +429,7 @@ async def _push(
     # exactly (push_gate.SHARED_OK, read by owner_word).
     note = push_gate.SHARED_OK if lead is not None and lead.shared_phone else None
     extra = {"note": note} if note is not None else {}
-    if not await _claim(session, review, "push", by=by, now=now, **extra):
+    if not await _claim(session, review, "push", by=by, now=now, values=extra):
         raise Refused("stale")
     return await push_footer(session, candidate, now=now), None
 
@@ -408,6 +454,8 @@ async def _later(
     by: int,
     now: datetime,
 ) -> tuple[str, int | None]:
+    # A card already put off (and not asked again yet) is stale: a second
+    # ⏭ of the same message in flight adds nothing (06 §1.3).
     expires = (review.expires_at or now) + LATER
     if not await _claim(
         session,
@@ -415,8 +463,8 @@ async def _later(
         "later",
         by=by,
         now=now,
-        expires_at=expires,
-        remind_at=now + LATER,
+        only=(LeadReview.remind_at.is_(None),),
+        values={"expires_at": expires, "remind_at": now + LATER},
     ):
         raise Refused("stale")
     return cards.footer("later" if review.kind == "owner" else "manager_later"), None
@@ -519,9 +567,9 @@ async def _handoff(
     by: int,
     now: datetime,
 ) -> tuple[str, int | None]:
+    # 06 §3.4: with no manager listed the prospect waits in hold — its card
+    # is made with nobody yet, and the first manager listed receives it.
     manager = await pick_manager(session, now)
-    if manager is None:
-        raise Refused("no_manager")
     if not await _claim(session, review, "handoff", by=by, now=now):
         raise Refused("stale")
     await candidates.transition(
@@ -548,7 +596,31 @@ async def _handoff(
                 LeadReview.state.in_(("pending", "asked")),
             )
         )
-    return cards.footer("handoff_waiting", manager=manager), made
+    return handoff_footer(None, configured=manager is not None), made
+
+
+def handoff_footer(out: SentCard | None, *, configured: bool = True) -> str:
+    """The owner's handoff footer (06 §1.3 «👤 Menejerga yuborildi —
+    {manager}»): the manager's first name once the card is out (a card out
+    to a chat Telegram named nobody for says only that it went); before
+    that, that it waits — or that no manager is listed yet. Never an id."""
+    if out is not None:
+        if out.name:
+            return cards.footer("handoff", manager=out.name)
+        return cards.footer("handoff_unnamed")
+    return cards.footer("handoff_waiting" if configured else "handoff_no_manager")
+
+
+async def handoff_line(
+    session: AsyncSession, manager_review_id: int, out: SentCard | None
+) -> str:
+    """``handoff_footer`` for the tap's own send: when this send got nothing
+    because the card job sent the card meanwhile, it is out — unnamed."""
+    if out is None:
+        review = await session.get(LeadReview, manager_review_id, populate_existing=True)
+        if review is not None and review.state == "asked":
+            return cards.footer("handoff_unnamed")
+    return handoff_footer(out, configured=bool(settings.manager_telegram_ids))
 
 
 async def _contacted(
@@ -639,6 +711,16 @@ async def _merge(
         )
     except companies.MergeRefused as exc:
         raise Refused(f"merge:{exc.reason}") from None
+    # 06 §1.3 / 02 §2.9: 🔀 → excluded(merged). Beside the target's open
+    # candidate merge_into did it; alone it moved the candidate onto the
+    # target, which is excluded there (merge_into holds its row lock) — the
+    # owner is not asked again about the lead he merged; a newer signal
+    # reopens the company (candidates.may_reopen).
+    moved = await session.get(LeadCandidate, candidate.id, populate_existing=True)
+    if moved is not None and moved.state == "review":
+        await candidates.transition(
+            session, moved, "excluded", now=now, exclude_reason="merged"
+        )
     if not await _claim(session, review, "merge", by=by, now=now):
         raise Refused("stale")
     return Tapped(
@@ -707,11 +789,14 @@ async def edit_phone(
 
 @dataclass(frozen=True, slots=True)
 class TelResult:
-    """``/tel``: the score the new phone gave, and whether the candidate is
-    now approved (``manager:<tg_id>``) on its way to the push."""
+    """``/tel``: the score the new phone gave, whether the candidate is now
+    approved (``manager:<tg_id>``) on its way to the push, and — when a gate
+    refuses the company with this phone (an ERP client's number, a DNC) —
+    that gate, the candidate having taken the gate's walk instead."""
 
     approved: bool
     score: int
+    gated: str | None = None
 
 
 async def _source_url(
@@ -796,6 +881,17 @@ async def tel(
     await session.flush()
     if review.state == "asked":
         await _claim(session, review, "contacted", by=by, now=now)
+    # The gates before the approval (04 §6), over the phone just given: a
+    # refused company walks the gate's way (excluded, suppressed, or it
+    # stays held) and the manager is told it will not be pushed.
+    gate = await gates.evaluate(session, company.id, now=now, tails=[phone.tail])
+    failure = gate.decide(card=True)
+    if failure is not None:
+        result = await candidates.rescore(session, candidate, now=now)
+        await candidates.apply_score(
+            session, candidate, result, now=now, auto_push=False, gate=gate
+        )
+        return TelResult(approved=False, score=result.total, gated=failure.gate)
     result = await candidates.manager_phone_rescore(session, candidate, tg_id=by, now=now)
     return TelResult(approved=candidate.state == "approved", score=result.total)
 
@@ -905,12 +1001,15 @@ async def expired_count(session: AsyncSession, candidate_id: uuid.UUID) -> int:
 async def expire_due(
     session: AsyncSession, *, now: datetime, limit: int = SWEEP_LIMIT
 ) -> list[Closed]:
-    """Every ``asked`` card past ``expires_at`` → ``expired``. An owner
-    card's candidate (still in ``review``) → ``hold`` 7 days and a
-    ``reminder_log`` row; the third silence holds it with no timer (re-asked
-    at most twice). A manager card's candidate keeps its handoff hold. The
-    company and the candidate are locked before the row (the module's
-    order); the caller commits."""
+    """Every ``asked`` card past ``expires_at`` → ``expired`` — but not a
+    card put off with ⏭ and not asked again yet (``remind_at`` set: its old
+    message has no buttons, nobody could have answered it; the resend gives
+    it a fresh deadline). An owner card's candidate (still in ``review``) →
+    ``hold`` 7 days and a ``reminder_log`` row; the third silence holds it
+    with no timer (re-asked at most twice). A manager card's candidate keeps
+    its handoff hold. The company and the candidate are locked before the
+    row (the module's order), the pairs in company order — the order
+    ``merge_into`` locks two companies in; the caller commits."""
     due = (
         await session.execute(
             sa.select(
@@ -919,14 +1018,21 @@ async def expire_due(
                 LeadReview.kind,
                 LeadReview.card_chat_id,
                 LeadReview.card_message_id,
+                LeadCandidate.company_id,
             )
-            .where(LeadReview.state == "asked", LeadReview.expires_at <= now)
+            .join(LeadCandidate, LeadCandidate.id == LeadReview.candidate_id)
+            .where(
+                LeadReview.state == "asked",
+                LeadReview.expires_at <= now,
+                LeadReview.remind_at.is_(None),
+            )
             .order_by(LeadReview.expires_at, LeadReview.id)
             .limit(limit)
         )
     ).all()
     closed: list[Closed] = []
-    for review_id, candidate_id, kind, chat_id, message_id in due:
+    ordered = sorted(due, key=lambda r: (r.company_id, r.id))
+    for review_id, candidate_id, kind, chat_id, message_id, _ in ordered:
         candidate = await push_gate.lock_for_push(session, candidate_id)
         claimed = await session.execute(
             sa.update(LeadReview)
@@ -934,6 +1040,7 @@ async def expire_due(
                 LeadReview.id == review_id,
                 LeadReview.state == "asked",
                 LeadReview.expires_at <= now,
+                LeadReview.remind_at.is_(None),
             )
             .values(state="expired", remind_at=None)
             .returning(LeadReview.id)
@@ -1096,13 +1203,38 @@ async def send_owner_cards(
     return burst
 
 
+async def _manager_for(
+    session: AsyncSession, review: LeadReview, now: datetime
+) -> int | None:
+    """The manager a manager card goes to: its own while listed, else the
+    least-loaded listed one (written on the row); None when nobody is."""
+    if review.by_telegram_id in settings.manager_telegram_ids:
+        return review.by_telegram_id
+    chosen = await pick_manager(session, now)
+    if chosen is None:
+        return None
+    review.by_telegram_id = chosen
+    await session.flush()
+    return chosen
+
+
 async def send_manager_card(
-    session: AsyncSession, review_id: int, sender: CardSender, *, now: datetime
+    session: AsyncSession,
+    review_id: int,
+    sender: CardSender,
+    *,
+    now: datetime,
+    refused: set[int] | None = None,
 ) -> SentCard | None:
     """A ``pending`` manager card to its manager (06 §1.7): a manager no
     longer in ``MANAGER_TELEGRAM_IDS`` is replaced by the least-loaded one;
-    a card that cannot be shown is closed (``refused:<code>``). The caller
-    commits. The sent card, or None."""
+    a card that cannot be shown is closed (``refused:<code>``). Nothing goes
+    out while ``/toxtat`` holds («no card», 06 §1.2): the card waits
+    ``pending`` for the job after ``/yoq``. ``refused``: the managers
+    Telegram refused this run — skipped, and one refusing now is added. The
+    caller commits. The sent card, or None."""
+    if await owner.paused(session):
+        return None
     review = await session.scalar(
         sa.select(LeadReview)
         .where(LeadReview.id == review_id, LeadReview.state == "pending")
@@ -1111,14 +1243,9 @@ async def send_manager_card(
     )
     if review is None or review.kind != "manager":
         return None
-    if review.by_telegram_id not in settings.manager_telegram_ids:
-        chosen = await pick_manager(session, now)
-        if chosen is None:
-            return None
-        review.by_telegram_id = chosen
-        await session.flush()
-    manager = review.by_telegram_id
-    assert manager is not None
+    manager = await _manager_for(session, review, now)
+    if manager is None or (refused is not None and manager in refused):
+        return None
     view = await cards.manager_view(session, review_id, now=now)
     if view is None:
         await close_card(
@@ -1127,13 +1254,13 @@ async def send_manager_card(
         return None
     try:
         card = cards.render_manager(view)
-    except CardRefused as refused:
-        await close_card(
-            session, review_id, REFUSED_NOTE + refused.code, states=("pending",)
-        )
+    except CardRefused as why:
+        await close_card(session, review_id, REFUSED_NOTE + why.code, states=("pending",))
         return None
     out = await sender.send(manager, card.text, card.keyboard, review_id)
     if out is None:
+        if refused is not None:
+            refused.add(manager)
         return None
     await cards.mark_asked(
         session,
@@ -1146,31 +1273,84 @@ async def send_manager_card(
     return out
 
 
-async def _rendered(
+@dataclass(frozen=True, slots=True)
+class _Drawn:
+    """A live card as it reads now."""
+
+    text: str
+    layout: CardLayout
+
+
+@dataclass(frozen=True, slots=True)
+class _Unshowable:
+    """A live card that cannot be shown any more: an owner card's candidate
+    is to be set aside (``cards.set_aside``) once the card's row is let go."""
+
+    candidate_id: uuid.UUID | None = None
+    code: str = ""
+    gate: gates.GateResult | None = None
+
+
+async def _draw(
     session: AsyncSession, review: LeadReview, *, now: datetime
-) -> tuple[str, CardLayout] | None:
-    """A live card as it reads now (the gates evaluated): owner or manager;
-    None when it cannot be shown (an owner card's candidate is set aside)."""
+) -> _Drawn | _Unshowable:
+    """A live card as it reads now (the gates evaluated): owner or manager.
+    Reads only — the caller may hold the card's row."""
     if review.kind == "manager":
         mv = await cards.manager_view(session, review.id, now=now)
         if mv is None:
-            return None
+            return _Unshowable()
         try:
             card = cards.render_manager(mv)
         except CardRefused:
-            return None
-        return card.text, card.keyboard
+            return _Unshowable()
+        return _Drawn(card.text, card.keyboard)
     view = await cards.review_view(session, review.id, now=now)
     if view is None:
-        return None
+        return _Unshowable()
     try:
         card = cards.render_review(view)
     except CardRefused as refused:
+        return _Unshowable(view.candidate.candidate_id, refused.code, view.gate)
+    return _Drawn(card.text, card.keyboard)
+
+
+async def _set_aside_later(
+    session_factory: SessionFactory, shown: _Unshowable, *, now: datetime
+) -> None:
+    """The set-aside of a card the job could not show, in its own
+    transaction: the company and the candidate are locked there, after the
+    card's row was let go (the tap's order is company → candidate → row)."""
+    if shown.candidate_id is None:
+        return
+    async with session_factory() as session:
         await cards.set_aside(
-            session, view.candidate.candidate_id, refused.code, view.gate, now=now
+            session, shown.candidate_id, shown.code, shown.gate, now=now
         )
-        return None
-    return card.text, card.keyboard
+        await session.commit()
+
+
+async def _lock_live(
+    session: AsyncSession, review_id: int, *, now: datetime, due: bool
+) -> LeadReview | None:
+    """The card's row for an edit, held to the end of the caller's
+    transaction (``FOR UPDATE … SKIP LOCKED``): ``asked``, with a message;
+    a ⏭ card whose resend is due (``due``) or a card not put off. A tap
+    holding the row meanwhile makes the job skip it this run."""
+    stmt = sa.select(LeadReview).where(
+        LeadReview.id == review_id,
+        LeadReview.state == "asked",
+    )
+    if due:
+        stmt = stmt.where(LeadReview.remind_at <= now)
+    else:
+        stmt = stmt.where(
+            LeadReview.remind_at.is_(None), LeadReview.card_message_id.is_not(None)
+        )
+    found: LeadReview | None = await session.scalar(
+        stmt.with_for_update(skip_locked=True).execution_options(populate_existing=True)
+    )
+    return found
 
 
 async def resend_later(
@@ -1181,9 +1361,13 @@ async def resend_later(
     owner_limit: int,
 ) -> tuple[int, int]:
     """The cards put off with ⏭ whose day has come: sent again as a fresh
-    message (the old one lost its buttons at the tap), still ``asked``.
-    Owner cards within ``owner_limit``; manager cards to their manager.
-    Returns (owner, manager) cards sent."""
+    message (the old one lost its buttons at the tap), still ``asked``, with
+    at least a fresh card's ``REVIEW_EXPIRY_HOURS`` from now (``expires_at``
+    never moves earlier). Owner cards within ``owner_limit``, each counted
+    against the day's cap (``RESENT_REMINDER``); manager cards to their
+    manager, a manager no longer listed replaced by the least-loaded one. A
+    recipient Telegram did not take is skipped for the rest of the run — the
+    others still get theirs. Returns (owner, manager) cards sent."""
     async with session_factory() as session:
         due = list(
             await session.scalars(
@@ -1194,48 +1378,47 @@ async def resend_later(
             )
         )
     sent_owner = sent_manager = 0
+    refused: set[int] = set()
     for review_id in due:
         async with session_factory() as session:
-            review = await session.scalar(
-                sa.select(LeadReview)
-                .where(
-                    LeadReview.id == review_id,
-                    LeadReview.state == "asked",
-                    LeadReview.remind_at <= now,
-                )
-                .with_for_update(skip_locked=True)
-                .execution_options(populate_existing=True)
-            )
+            review = await _lock_live(session, review_id, now=now, due=True)
             if review is None:
                 continue
-            if review.kind == "owner" and sent_owner >= owner_limit:
+            if review.kind == "owner":
+                if sent_owner >= owner_limit:
+                    continue
+                to = settings.owner_telegram_id
+            else:
+                to = await _manager_for(session, review, now)
+            if to is None or to in refused:
+                await session.rollback()
                 continue
-            to = (
-                settings.owner_telegram_id
-                if review.kind == "owner"
-                else review.by_telegram_id
-            )
-            if to is None:
+            drawn = await _draw(session, review, now=now)
+            if isinstance(drawn, _Unshowable):
+                await session.rollback()
+                await _set_aside_later(session_factory, drawn, now=now)
                 continue
-            rendered = await _rendered(session, review, now=now)
-            if rendered is None:
-                await session.commit()  # a set-aside walk, if any
-                continue
-            text, layout = rendered
-            out = await sender.send(to, text, layout, review_id)
+            out = await sender.send(to, drawn.text, drawn.layout, review_id)
             if out is None:
                 await session.rollback()
-                break
+                refused.add(to)
+                continue
+            fresh_deadline = now + timedelta(hours=settings.review_expiry_hours)
             await session.execute(
                 sa.update(LeadReview)
                 .where(LeadReview.id == review_id)
                 .values(
                     card_chat_id=out.chat_id,
                     card_message_id=out.message_id,
-                    card_hash=cards.card_hash(text, layout),
+                    card_hash=cards.card_hash(drawn.text, drawn.layout),
                     remind_at=None,
+                    expires_at=sa.func.greatest(LeadReview.expires_at, fresh_deadline),
                 )
             )
+            if review.kind == "owner":
+                session.add(
+                    ReminderLog(kind=RESENT_REMINDER, ref=str(review_id), sent_at=now)
+                )
             await session.commit()
             if review.kind == "owner":
                 sent_owner += 1
@@ -1244,11 +1427,58 @@ async def resend_later(
     return sent_owner, sent_manager
 
 
+async def follow_handoff(
+    session: AsyncSession,
+    manager_review_id: int,
+    out: SentCard,
+    sender: CardSender,
+    *,
+    now: datetime,
+) -> bool:
+    """The owner's handoff card, once the job delivered its manager card:
+    the footer says who received it (06 §1.3 «👤 Menejerga yuborildi —
+    {manager}»), edited only when it changed. True when edited."""
+    manager_card = await session.get(LeadReview, manager_review_id)
+    if manager_card is None:
+        return False
+    review = await session.scalar(
+        sa.select(LeadReview)
+        .where(
+            LeadReview.candidate_id == manager_card.candidate_id,
+            LeadReview.kind == "owner",
+            LeadReview.state == "approved",
+            LeadReview.answer == "handoff",
+            LeadReview.card_message_id.is_not(None),
+        )
+        .order_by(LeadReview.answered_at.desc(), LeadReview.id.desc())
+        .limit(1)
+        .execution_options(populate_existing=True)
+    )
+    if review is None:
+        return False
+    text = await answered_text(session, review.id, handoff_footer(out), now=now)
+    if text is None:
+        return False
+    digest = cards.card_hash(text, None)
+    if digest == review.card_hash:
+        return False
+    chat, message = review.card_chat_id, review.card_message_id
+    assert chat is not None and message is not None
+    if not await sender.edit(chat, message, text, None, review.id):
+        return False
+    await store_hash(session, review.id, digest)
+    return True
+
+
 async def send_pending_managers(
     session_factory: SessionFactory, sender: CardSender, *, now: datetime
 ) -> int:
     """Manager cards a handoff made that are not out yet (sent outside the
-    hours, or Telegram did not take them)."""
+    hours, while paused, with no manager listed, or Telegram did not take
+    them): ≤ ``REVIEW_BURST_MAX`` sent per run, oldest first; a manager
+    Telegram refused is skipped for the rest of the run, so the cards of a
+    manager who blocked the bot never hold the others back. Each delivery
+    edits the owner's handoff card to name the manager."""
     async with session_factory() as session:
         waiting = list(
             await session.scalars(
@@ -1260,18 +1490,40 @@ async def send_pending_managers(
                     LeadCandidate.state == "hold",
                 )
                 .order_by(LeadReview.created_at, LeadReview.id)
-                .limit(settings.review_burst_max)
+                .limit(SWEEP_LIMIT)
             )
         )
     sent = 0
+    refused: set[int] = set()
     for review_id in waiting:
+        if sent >= settings.review_burst_max:
+            break
         async with session_factory() as session:
-            out = await send_manager_card(session, review_id, sender, now=now)
+            out = await send_manager_card(
+                session, review_id, sender, now=now, refused=refused
+            )
             await session.commit()
         if out is None:
             continue
         sent += 1
+        async with session_factory() as session:
+            if await follow_handoff(session, review_id, out, sender, now=now):
+                await session.commit()
     return sent
+
+
+def _rotation(ids: list[int], limit: int, now: datetime) -> list[int]:
+    """The live cards a refresh re-judges this run: the newest half of
+    ``limit``, then a window of the rest that moves on every run (the slot
+    of ``REFRESH_SLOT`` ``now`` falls in), so every card is re-judged within
+    a few runs however many are live."""
+    if len(ids) <= limit:
+        return ids
+    head, rest = ids[: limit // 2], ids[limit // 2 :]
+    window = limit - len(head)
+    slot = int(now.timestamp() // REFRESH_SLOT.total_seconds())
+    start = (slot * window) % len(rest)
+    return head + [rest[(start + i) % len(rest)] for i in range(window)]
 
 
 async def refresh_live(
@@ -1282,8 +1534,10 @@ async def refresh_live(
     limit: int = REFRESH_MAX,
 ) -> int:
     """Live owner cards re-rendered (the gates evaluated now): edited only
-    when ``card_hash`` changed; a card that can no longer be shown sets its
-    candidate aside, and the next run closes the card. Returns the edits."""
+    when ``card_hash`` changed, the card's row held across the edit (a tap
+    landing meanwhile waits for it — its own edit comes last); a card that
+    can no longer be shown sets its candidate aside, and the next run closes
+    the card. ⏭ cards wait for their resend. Returns the edits."""
     async with session_factory() as session:
         live = list(
             await session.scalars(
@@ -1297,26 +1551,26 @@ async def refresh_live(
                     LeadCandidate.state == "review",
                 )
                 .order_by(LeadReview.asked_at.desc(), LeadReview.id)
-                .limit(limit)
+                .limit(LIVE_SCAN_MAX)
             )
         )
     edits = 0
-    for review_id in live:
+    for review_id in _rotation(live, limit, now):
         async with session_factory() as session:
-            review = await session.get(LeadReview, review_id, populate_existing=True)
-            if review is None or review.state != "asked":
+            review = await _lock_live(session, review_id, now=now, due=False)
+            if review is None:
                 continue
-            rendered = await _rendered(session, review, now=now)
-            if rendered is None:
-                await session.commit()
+            drawn = await _draw(session, review, now=now)
+            if isinstance(drawn, _Unshowable):
+                await session.rollback()
+                await _set_aside_later(session_factory, drawn, now=now)
                 continue
-            text, layout = rendered
-            digest = cards.card_hash(text, layout)
+            digest = cards.card_hash(drawn.text, drawn.layout)
             if digest == review.card_hash:
                 continue
             chat, message = review.card_chat_id, review.card_message_id
             assert chat is not None and message is not None
-            if await sender.edit(chat, message, text, layout, review_id):
+            if await sender.edit(chat, message, drawn.text, drawn.layout, review_id):
                 await store_hash(session, review_id, digest)
                 await session.commit()
                 edits += 1
@@ -1328,7 +1582,10 @@ async def refresh_push_footers(
 ) -> int:
     """✅ cards whose push finished within ``PUSH_FOOTER_WINDOW``: the
     footer follows it (06 §1.3 «✅ CRMʼga yuborildi {hh:mm}»), edited only on
-    a change. Returns the edits."""
+    a change, the card's row held across the edit. A tap's own edit that
+    lands after this one (the push was faster than the tap's edit) is put
+    right by the next run inside the window: its hash differs. Returns the
+    edits."""
     async with session_factory() as session:
         rows = list(
             await session.scalars(
@@ -1348,7 +1605,12 @@ async def refresh_push_footers(
     edits = 0
     for review_id in sorted(rows):
         async with session_factory() as session:
-            review = await session.get(LeadReview, review_id, populate_existing=True)
+            review = await session.scalar(
+                sa.select(LeadReview)
+                .where(LeadReview.id == review_id)
+                .with_for_update(skip_locked=True)
+                .execution_options(populate_existing=True)
+            )
             candidate = (
                 await session.get(LeadCandidate, review.candidate_id)
                 if review is not None
@@ -1370,6 +1632,47 @@ async def refresh_push_footers(
                 await session.commit()
                 edits += 1
     return edits
+
+
+async def strip_closed(
+    session_factory: SessionFactory, sender: CardSender, *, now: datetime
+) -> int:
+    """Every closed card whose message may still show its buttons (an
+    ``expired`` row that still names its message — closed by the sweep, as
+    stale, or while ``/toxtat`` held or no bot was wired): the buttons go
+    (a later tap would answer «Bu karta eskirgan» anyway), then the row
+    forgets the message. Only cards asked within ``STRIP_WINDOW``: a message
+    Telegram will not edit any more is not retried for ever. Returns the
+    cards stripped."""
+    async with session_factory() as session:
+        rows = (
+            await session.execute(
+                sa.select(
+                    LeadReview.id, LeadReview.card_chat_id, LeadReview.card_message_id
+                )
+                .where(
+                    LeadReview.state == "expired",
+                    LeadReview.card_message_id.is_not(None),
+                    LeadReview.card_chat_id.is_not(None),
+                    LeadReview.asked_at >= now - STRIP_WINDOW,
+                )
+                .order_by(LeadReview.id)
+                .limit(SWEEP_LIMIT)
+            )
+        ).all()
+    stripped = 0
+    for review_id, chat_id, message_id in rows:
+        if not await sender.strip(chat_id, message_id):
+            continue
+        async with session_factory() as session:
+            await session.execute(
+                sa.update(LeadReview)
+                .where(LeadReview.id == review_id, LeadReview.state == "expired")
+                .values(card_message_id=None)
+            )
+            await session.commit()
+        stripped += 1
+    return stripped
 
 
 # --- the job (06 §1.6) --------------------------------------------------------------
@@ -1433,11 +1736,7 @@ async def run_cards(
     if sender is None:
         report.held = "no_bot"
         return report
-    for card in report.closed:
-        if card.chat_id is None or card.message_id is None:
-            continue
-        if await sender.strip(card.chat_id, card.message_id):
-            report.stripped += 1
+    report.stripped = await strip_closed(session_factory, sender, now=now)
     report.footers = await refresh_push_footers(session_factory, sender, now=now)
     report.refreshed = await refresh_live(session_factory, sender, now=now)
     if not sending_hours(now):
@@ -1494,6 +1793,7 @@ __all__ = [
     "MANAGER_ANSWERS",
     "MAX_REASKS",
     "OWNER_ANSWERS",
+    "RESENT_REMINDER",
     "REVIEW_DAYS",
     "ROW_STATE",
     "STALE_NOTE",
@@ -1515,6 +1815,9 @@ __all__ = [
     "ensure_pending",
     "expire_due",
     "expired_count",
+    "follow_handoff",
+    "handoff_footer",
+    "handoff_line",
     "owner_budget",
     "pick_manager",
     "push_footer",
@@ -1528,6 +1831,7 @@ __all__ = [
     "send_pending_managers",
     "sending_hours",
     "set_card_sender",
+    "strip_closed",
     "tapped_text",
     "tel",
     "usable_phone",

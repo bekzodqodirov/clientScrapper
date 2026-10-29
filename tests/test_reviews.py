@@ -12,6 +12,7 @@ to a ``FakeSender`` that records them. Synthetic data only (07 §1.0).
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta
 
 import pytest
@@ -292,20 +293,27 @@ async def test_merge_beside_the_targets_open_candidate_excludes_merged(session, 
     assert (source.state, source.merged_into) == ("merged", target.company_id)
 
 
-async def test_merge_into_a_company_without_a_candidate_moves_it(session, setup):
-    """``merge_into``'s own rule: the open candidate moves onto the target
-    and stays in review — the next card asks about the merged company."""
+async def test_merge_into_a_company_without_a_candidate_excludes_it_too(session, setup):
+    """06 §1.3 / 02 §2.9: 🔀 → ``excluded(merged)`` whether or not the target
+    had an open candidate. ``merge_into`` moves the lone candidate onto the
+    target; the answer then excludes it there, so the owner is not asked
+    again about the lead he just merged (only a newer signal reopens it)."""
     cand = await lead(session, 61)
     target = await gate_fixtures.firm(session, "Namuna Tekstil MChJ")
     review = await card(session, cand, state="asked")
     await session.commit()
-    await tapped(session, review, "merge", target=target.id)
+    done = await tapped(session, review, "merge", target=target.id)
+    assert done.footer == "🔀 Birlashtirildi → Namuna Tekstil MChJ"
     found = await fresh(session, cand)
-    assert (found.state, found.company_id) == ("review", target.id)
+    assert (found.state, found.exclude_reason, found.company_id) == (
+        "excluded",
+        "merged",
+        target.id,
+    )
     assert (await fresh(session, review)).state == "merged"
-    assert await reviews.ensure_pending(session, now=NOW) == 1
+    assert await reviews.ensure_pending(session, now=NOW) == 0
     await session.commit()
-    assert [r.state for r in await reviews_of(session, cand)] == ["merged", "pending"]
+    assert [r.state for r in await reviews_of(session, cand)] == ["merged"]
 
 
 async def test_a_merge_two_stirs_forbid_keeps_the_card(session, setup):
@@ -865,3 +873,270 @@ def test_review_hours_are_monday_to_saturday():
     assert not reviews.sending_hours(tuesday.replace(hour=18))
     assert not reviews.sending_hours(tuesday.replace(day=25))
     assert reviews.sending_hours(tuesday.replace(day=31, hour=17, minute=59))
+
+
+# --- ⏭ asks again before the card can expire (06 §1.3) -----------------------------
+
+
+async def test_a_saturday_evening_later_is_asked_again_on_monday_not_expired(
+    session, setup
+):
+    """⏭ on Saturday 17:00, the card's deadline 30 minutes away: «ertaga qayta
+    soʻrayman» — but Sunday sends nothing (06 §1.6), so the card waits for
+    Monday 09:00 and goes out then, with a fresh card's 72 hours; the sweep
+    never closes a card put off with ⏭ that was not asked again yet."""
+    wednesday = NOW.replace(day=28, hour=17, minute=30)
+    cand = await lead(session)
+    review = await card(
+        session,
+        cand,
+        state="asked",
+        asked_at=wednesday,
+        expires_at=wednesday + timedelta(hours=72),
+    )
+    await session.commit()
+    saturday = NOW.replace(day=31, hour=17, minute=0)
+    await tapped(session, review, "later", now=saturday)
+    row = await fresh(session, review)
+    assert (row.remind_at, row.expires_at) == (
+        NOW.replace(day=31, hour=17) + timedelta(hours=24),
+        wednesday + timedelta(hours=72 + 24),
+    )
+    sender = FakeSender()
+    t = saturday
+    while t <= NOW.replace(day=31, hour=17) + timedelta(days=2, hours=1):
+        await reviews.run_cards(sender, now=t)
+        t += timedelta(minutes=30)
+    monday = NOW.replace(day=31, hour=9) + timedelta(days=2)
+    assert [(to, rid) for to, _, _, rid in sender.sent] == [(OWNER, review.id)]
+    row = await fresh(session, review)
+    assert (row.state, row.remind_at, row.expires_at) == (
+        "asked",
+        None,
+        monday + timedelta(hours=72),
+    )
+    found = await fresh(session, cand)
+    assert (found.state, found.hold_until) == ("review", None)
+    assert await reviews.expired_count(session, cand.id) == 0
+
+
+async def test_a_later_tapped_minutes_before_the_deadline_gets_a_whole_card_again(
+    session, setup
+):
+    cand = await lead(session)
+    review = await card(
+        session,
+        cand,
+        state="asked",
+        asked_at=NOW - timedelta(hours=72) + timedelta(minutes=5),
+        expires_at=NOW + timedelta(minutes=5),
+    )
+    await session.commit()
+    await tapped(session, review, "later")
+    # Past the shifted deadline, not yet asked again: the sweep leaves it.
+    past = NOW + timedelta(hours=24, minutes=6)
+    assert await reviews.expire_due(session, now=past) == []
+    await session.rollback()
+    resent_at = NOW + timedelta(hours=24, minutes=10)
+    report = await reviews.run_cards(FakeSender(), now=resent_at)
+    assert (report.expired, report.resent) == (0, 1)
+    row = await fresh(session, review)
+    assert (row.state, row.expires_at) == ("asked", resent_at + timedelta(hours=72))
+
+
+async def test_a_double_later_tap_adds_24_hours_once(session, setup):
+    """Two callback queries of one ⏭ in flight before the keyboard went: the
+    second is stale (the claim needs a card not already put off)."""
+    cand = await lead(session)
+    review = await card(session, cand, state="asked")
+    await session.commit()
+    assert (await tapped(session, review, "later")).answer == "later"
+    with pytest.raises(reviews.Refused) as refused:
+        await reviews.answer(session, review.id, "later", by=OWNER, now=NOW)
+    await session.rollback()
+    assert refused.value.code == "stale"
+    row = await fresh(session, review)
+    assert (row.expires_at, row.remind_at) == (
+        NOW + timedelta(hours=72 + 24),
+        NOW + timedelta(hours=24),
+    )
+
+
+# --- ⏭ resends: one recipient never stops the others --------------------------------
+
+
+async def test_a_refused_later_card_does_not_stop_the_owners(session, setup):
+    """A manager's ⏭ card whose manager blocked the bot comes first in remind
+    order; Telegram refuses it every run, and the owner's ⏭ card behind it
+    still goes out (the loop stops for that recipient, never for all)."""
+    held = await lead(session, 61, person=True, username="namuna_tg", state="hold")
+    blocked = await card(
+        session, held, kind="manager", state="asked", by_telegram_id=OTHER_MANAGER
+    )
+    cand = await lead(session, 62)
+    mine = await card(session, cand, state="asked")
+    await session.commit()
+    await tapped(session, blocked, "later", by=OTHER_MANAGER)
+    await tapped(session, mine, "later", now=NOW + timedelta(minutes=1))
+    sender = FakeSender(refuse={OTHER_MANAGER})
+    report = await reviews.run_cards(sender, now=NOW + timedelta(hours=24, minutes=5))
+    assert (report.resent, report.managers) == (1, 0)
+    assert sender.tried == [(OTHER_MANAGER, blocked.id), (OWNER, mine.id)]
+    assert [(to, rid) for to, _, _, rid in sender.sent] == [(OWNER, mine.id)]
+    assert (await fresh(session, mine)).remind_at is None
+    assert (await fresh(session, blocked)).remind_at == NOW + timedelta(hours=24)
+
+
+async def test_a_later_manager_card_whose_manager_left_goes_to_another(
+    session, setup, monkeypatch
+):
+    held = await lead(session, 61, person=True, username="namuna_tg", state="hold")
+    gone = await card(
+        session, held, kind="manager", state="asked", by_telegram_id=OTHER_MANAGER
+    )
+    cand = await lead(session, 62)
+    mine = await card(session, cand, state="asked")
+    await session.commit()
+    await tapped(session, gone, "later", by=OTHER_MANAGER)
+    await tapped(session, mine, "later", now=NOW + timedelta(minutes=1))
+    monkeypatch.setattr(settings, "manager_telegram_ids", (MANAGER,))
+    sender = FakeSender()
+    report = await reviews.run_cards(sender, now=NOW + timedelta(hours=24, minutes=5))
+    assert (report.resent, report.managers) == (1, 1)
+    assert [(to, rid) for to, _, _, rid in sender.sent] == [
+        (MANAGER, gone.id),
+        (OWNER, mine.id),
+    ]
+    row = await fresh(session, gone)
+    assert (row.by_telegram_id, row.card_chat_id, row.remind_at) == (
+        MANAGER,
+        MANAGER,
+        None,
+    )
+
+
+# --- ⏭ resends count against REVIEW_DAILY_CAP (06 §1.6) ------------------------------
+
+
+async def test_resent_cards_count_against_the_daily_cap(session, setup, monkeypatch):
+    """Three cards put off yesterday come back today and three new ones wait:
+    with a cap of 3 the owner sees 3 cards today, over every run of the day."""
+    monkeypatch.setattr(settings, "review_daily_cap", 3)
+    monkeypatch.setattr(settings, "review_burst_max", 10)
+    yesterday = NOW - timedelta(days=1)
+    old = []
+    for nn in range(51, 54):
+        c = await lead(session, nn)
+        old.append(
+            await card(
+                session,
+                c,
+                state="asked",
+                asked_at=yesterday,
+                expires_at=yesterday + timedelta(hours=72),
+            )
+        )
+    for nn in range(61, 64):
+        await lead(session, nn)
+    await session.commit()
+    for r in old:
+        await tapped(session, r, "later", now=yesterday)
+    sender = FakeSender()
+    t = NOW
+    for _ in range(5):
+        await reviews.run_cards(sender, now=t)
+        t += timedelta(minutes=2)
+    assert sorted(rid for _, _, _, rid in sender.sent) == sorted(r.id for r in old)
+    assert await reviews.asked_today(session, NOW) == 3
+    reminders = list(
+        await session.scalars(
+            sa.select(ReminderLog).where(ReminderLog.kind == reviews.RESENT_REMINDER)
+        )
+    )
+    assert sorted(r.ref for r in reminders) == sorted(str(r.id) for r in old)
+
+
+async def test_one_run_resends_no_more_than_the_budget(session, setup, monkeypatch):
+    monkeypatch.setattr(settings, "review_daily_cap", 2)
+    yesterday = NOW - timedelta(days=1)
+    old = []
+    for nn in range(51, 54):
+        c = await lead(session, nn)
+        old.append(await card(session, c, state="asked", asked_at=yesterday))
+    await session.commit()
+    for r in old:
+        await tapped(session, r, "later", now=yesterday)
+    sender = FakeSender()
+    report = await reviews.run_cards(sender, now=NOW)
+    assert (report.resent, report.sent) == (2, 0)
+    assert [rid for _, _, _, rid in sender.sent] == [old[0].id, old[1].id]
+    assert (await fresh(session, old[2])).remind_at == NOW
+
+
+async def test_a_manager_card_asked_today_is_not_the_owners_cap(
+    session, setup, monkeypatch
+):
+    monkeypatch.setattr(settings, "review_daily_cap", 1)
+    held = await lead(session, 61, person=True, username="namuna_tg", state="hold")
+    await card(session, held, kind="manager", state="asked", by_telegram_id=MANAGER)
+    await lead(session, 62)
+    await session.commit()
+    assert await reviews.asked_today(session, NOW) == 0
+    assert (await reviews.run_cards(FakeSender(), now=NOW)).sent == 1
+
+
+# --- a refresh never puts a live keyboard back on an answered card ---------------------
+
+
+async def test_a_tap_landing_during_a_refresh_waits_for_its_edit(session, setup):
+    """The refresh holds the card's row across its Telegram edit: a tap
+    arriving meanwhile commits after that edit (its own edit comes last),
+    so the answered card never gets the live keyboard back."""
+    cand = await lead(session)
+    review = await card(session, cand, state="asked")
+    await session.commit()
+    company = await company_of(session, cand)
+    company.display_name = "Namuna Mato Savdo"
+    await session.commit()
+    events: list[str] = []
+    tasks: list[asyncio.Task[None]] = []
+
+    async def tap() -> None:
+        async with reviews.SessionLocal() as other:
+            await reviews.answer(other, review.id, "decline", by=OWNER, now=NOW)
+            await other.commit()
+        events.append("tap")
+
+    class Racing(FakeSender):
+        async def edit(self, telegram_id, message_id, text, layout, review_id):
+            task = asyncio.create_task(tap())
+            tasks.append(task)
+            await asyncio.wait({task}, timeout=0.5)
+            events.append("edit")
+            return await super().edit(telegram_id, message_id, text, layout, review_id)
+
+    sender = Racing()
+    assert await reviews.refresh_live(reviews.SessionLocal, sender, now=NOW) == 1
+    await asyncio.gather(*tasks)
+    assert events == ["edit", "tap"]
+    row = await fresh(session, review)
+    assert (row.state, row.answer) == ("declined", "decline")
+
+
+async def test_a_refresh_skips_a_card_a_tap_holds(session, setup):
+    cand = await lead(session)
+    review = await card(session, cand, state="asked")
+    await session.commit()
+    company = await company_of(session, cand)
+    company.display_name = "Namuna Mato Savdo"
+    await session.commit()
+    async with reviews.SessionLocal() as holder:
+        await holder.execute(
+            sa.select(LeadReview).where(LeadReview.id == review.id).with_for_update()
+        )
+        sender = FakeSender()
+        # Bounded: a refresh that waited for the lock would wait for ever.
+        refreshed = reviews.refresh_live(reviews.SessionLocal, sender, now=NOW)
+        assert await asyncio.wait_for(refreshed, timeout=10) == 0
+        await holder.rollback()
+    assert sender.edits == []

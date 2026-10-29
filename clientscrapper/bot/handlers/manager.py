@@ -25,7 +25,7 @@ from clientscrapper.bot.handlers.common import (
     reply,
     toast,
 )
-from clientscrapper.bot.handlers.review import apply_answer
+from clientscrapper.bot.handlers.review import apply_answer, stale_text
 from clientscrapper.bot.texts import UZ, t
 from clientscrapper.db.enums import CANDIDATE_STATES
 from clientscrapper.services import cards, reviews
@@ -71,7 +71,7 @@ async def on_answer(tap: Tap) -> None:
     async with tap.deps.session_factory() as session:
         review = await cards.live_review(session, review_id)
     if review is None or review.kind != "manager":
-        await toast(tap.query, t("stale_card"), alert=True)
+        await toast(tap.query, stale_text(tap), alert=True)
         return
     action = tap.data.action
     if action is None or action not in cb.MANAGER_ANSWERS:
@@ -100,6 +100,9 @@ async def tel(message: Message, deps: Deps) -> None:
             await reply(message, UZ[key] if key in UZ else t("tel.stale"))
             return
         await session.commit()
+    if done.gated is not None:
+        await reply(message, t("tel.gated", score=done.score))
+        return
     await reply(message, t("tel.done" if done.approved else "tel.held", score=done.score))
 
 

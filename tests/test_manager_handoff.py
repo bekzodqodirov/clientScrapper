@@ -28,7 +28,7 @@ from clientscrapper.bot.texts import t
 from clientscrapper.config import settings
 from clientscrapper.db.models import LeadReview, Suppression
 from clientscrapper.db.session import session_scope
-from clientscrapper.services import candidates, cards, reviews
+from clientscrapper.services import candidates, cards, owner, reviews
 from tests.ast_tools import PACKAGE, dotted_name, imported_modules, is_under, tree_of
 from tests.gate_fixtures import NOW
 from tests.review_fixtures import (
@@ -114,16 +114,35 @@ async def test_the_least_loaded_manager_gets_the_card_round_robin(session, setup
     assert taken == [MANAGER, OTHER_MANAGER, MANAGER]
 
 
-async def test_without_a_manager_the_handoff_is_refused_and_the_card_stays(
-    session, monkeypatch
-):
+async def test_without_a_manager_the_prospect_waits_in_hold(session, monkeypatch):
+    """06 §3.4: «MANAGER_TELEGRAM_IDS empty = Telegram-only prospects wait in
+    hold». 👤 is taken: the candidate holds 30 days and its manager card waits
+    ``pending`` with nobody yet; the first manager listed later receives it."""
     configure(monkeypatch, managers=())
     cand, review = await handoff_lead(session)
     w = world(session_scope)
     await w.press(cb.review(review.id, "h"))
-    assert w.fake.answers() == [t("review.refused.no_manager")]
-    assert (await fresh(session, review)).state == "asked"
-    assert (await fresh(session, cand)).state == "review"
+    [edited] = w.fake.named("EditMessageText")
+    assert edited["text"].splitlines()[-1] == (
+        "👤 Kutishda — menejer qoʻshilgach yuboriladi"
+    )
+    assert w.fake.named("SendMessage") == []
+    assert (await fresh(session, review)).state == "approved"
+    found = await fresh(session, cand)
+    assert (found.state, found.hold_until) == ("hold", NOW + timedelta(days=30))
+    waiting = await manager_card(session, cand)
+    assert (waiting.state, waiting.by_telegram_id) == ("pending", None)
+    # Nobody to send to: the job sends nothing and keeps it.
+    sender = FakeSender()
+    assert (await reviews.run_cards(sender, now=NOW + timedelta(minutes=2))).managers == 0
+    assert sender.tried == []
+    # A manager is listed: the next run hands it over.
+    monkeypatch.setattr(settings, "manager_telegram_ids", (MANAGER,))
+    report = await reviews.run_cards(sender, now=NOW + timedelta(minutes=4))
+    assert report.managers == 1
+    assert [to for to, _, _, _ in sender.sent] == [MANAGER]
+    row = await fresh(session, waiting)
+    assert (row.state, row.by_telegram_id) == ("asked", MANAGER)
 
 
 # --- the whole road: 👤 → the manager's card → 📞 → /tel → approved -------------------
@@ -134,6 +153,7 @@ async def test_the_handoff_reaches_the_manager_and_tel_approves_as_the_manager(
 ):
     cand, review = await handoff_lead(session)
     w = world(session_scope)
+    w.fake.names[MANAGER] = "Aziz"
     await w.press(cb.review(review.id, "h"))
     # The manager's card, in the manager's chat, with decision 2a's line.
     [sent] = [m for m in w.fake.named("SendMessage") if m["chat_id"] == MANAGER]
@@ -148,11 +168,12 @@ async def test_the_handoff_reaches_the_manager_and_tel_approves_as_the_manager(
     buttons = [b["callback_data"] for row in rows for b in row]
     assert buttons == [cb.manager(manager.id, a) for a in ("c", "x", "w", "l")]
     assert (manager.state, manager.card_chat_id) == ("asked", MANAGER)
-    # The owner's card: edited in place, the footer naming the manager.
+    # The owner's card: edited in place, the footer naming the manager by
+    # the first name Telegram gave — never the numeric id.
     [edited] = w.fake.named("EditMessageText")
     assert (edited["chat_id"], edited["text"].splitlines()[-1]) == (
         OWNER,
-        f"👤 Menejerga yuborildi — {MANAGER}",
+        "👤 Menejerga yuborildi — Aziz",
     )
     # 📞 Bogʻlandim: the card is answered, the candidate stays in hold.
     await w.press(cb.manager(manager.id, "c"), user=MANAGER)
@@ -277,17 +298,20 @@ async def test_tel_on_a_candidate_that_left_hold_writes_nothing(session, setup):
 
 
 async def test_a_handoff_after_hours_is_sent_by_the_job_next_morning(session, setup):
+    """The owner's footer says the card waits, with no id in it; when the job
+    hands the card over the next morning, the owner's card is edited to say
+    who received it (06 §1.3 «👤 Menejerga yuborildi — {manager}»)."""
     cand, review = await handoff_lead(session)
     evening = NOW.replace(hour=19)
     w = world(session_scope, clock=evening)
     await w.press(cb.review(review.id, "h"))
     assert [m["chat_id"] for m in w.fake.named("SendMessage")] == []
     [edited] = w.fake.named("EditMessageText")
-    assert edited["text"].splitlines()[-1] == (
-        f"👤 Menejerga navbatda — {MANAGER} (hali yetkazilmadi)"
-    )
+    waiting = edited["text"].splitlines()[-1]
+    assert waiting == "👤 Menejerga navbatda — hali yetkazilmadi"
+    assert str(MANAGER) not in edited["text"]
     assert (await manager_card(session, cand)).state == "pending"
-    sender = FakeSender()
+    sender = FakeSender(names={MANAGER: "Aziz"})
     morning = NOW.replace(hour=9, minute=5) + timedelta(days=1)
     report = await reviews.run_cards(sender, now=morning)
     assert report.managers == 1
@@ -296,6 +320,42 @@ async def test_a_handoff_after_hours_is_sent_by_the_job_next_morning(session, se
     assert text.splitlines()[-1] == cards.ERP_FIRST_UZ
     row = await manager_card(session, cand)
     assert (row.state, row.asked_at) == ("asked", morning)
+    # The owner's card follows the delivery, once.
+    owner_row = await fresh(session, review)
+    [(chat, message, body, layout, rid)] = sender.edits
+    assert (chat, message, layout, rid) == (
+        OWNER,
+        owner_row.card_message_id,
+        None,
+        review.id,
+    )
+    assert body.splitlines()[-1] == "👤 Menejerga yuborildi — Aziz"
+    assert body.splitlines()[0] == edited["text"].splitlines()[0]
+    assert owner_row.card_hash == cards.card_hash(body, None)
+    for minutes in (2, 4):
+        await reviews.run_cards(sender, now=morning + timedelta(minutes=minutes))
+    assert len(sender.edits) == 1
+
+
+async def test_a_handoff_while_paused_sends_no_card_until_yoq(session, setup):
+    """/toxtat: «no card» — the manager's card too (06 §1.2)."""
+    cand, review = await handoff_lead(session)
+    await owner.pause(session, by=f"owner:{OWNER}", reason=None, now=NOW)
+    await session.commit()
+    w = world(session_scope)
+    await w.press(cb.review(review.id, "h"))
+    assert w.fake.named("SendMessage") == []
+    [edited] = w.fake.named("EditMessageText")
+    assert edited["text"].splitlines()[-1] == "👤 Menejerga navbatda — hali yetkazilmadi"
+    assert (await manager_card(session, cand)).state == "pending"
+    sender = FakeSender(names={MANAGER: "Aziz"})
+    assert (await reviews.run_cards(sender, now=NOW)).held == "paused"
+    assert sender.sent == []
+    await owner.resume(session)
+    await session.commit()
+    report = await reviews.run_cards(sender, now=NOW + timedelta(minutes=2))
+    assert report.managers == 1
+    assert [to for to, _, _, _ in sender.sent] == [MANAGER]
 
 
 async def test_a_manager_dropped_from_the_list_hands_the_card_on(

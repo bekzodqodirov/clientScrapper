@@ -39,6 +39,9 @@ class FakeSession(BaseSession):
         # None = a call that goes through (``fail(…, after=n)``).
         self.failures: dict[str, list[Exception | None]] = {}
         self.files: dict[str, bytes] = {}
+        # A private chat's first name, as Telegram puts it in the Chat of a
+        # sent message (a chat not listed comes back without one).
+        self.names: dict[int, str] = {}
 
     def fail(
         self, method: str, error: Exception, times: int = 1, *, after: int = 0
@@ -69,11 +72,14 @@ class FakeSession(BaseSession):
         }:
             chat_id = fields.get("chat_id", 1)
             message_id = fields.get("message_id") or next(_IDS)
+            chat: dict[str, Any] = {"id": chat_id, "type": "private"}
+            if chat_id in self.names:
+                chat["first_name"] = self.names[chat_id]
             return Message.model_validate(
                 {
                     "message_id": message_id,
                     "date": datetime.now(UTC),
-                    "chat": {"id": chat_id, "type": "private"},
+                    "chat": chat,
                     "from": BOT_USER,
                     "text": fields.get("text"),
                 },

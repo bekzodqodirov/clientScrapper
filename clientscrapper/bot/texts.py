@@ -21,6 +21,8 @@ UZ: Final[Mapping[str, str]] = MappingProxyType(
         "error": "⚠️ Xatolik yuz berdi — birozdan keyin qaytadan urinib koʻring.",
         "stale_button": "Bu tugma eskirgan",
         "stale_card": "Bu karta eskirgan — /lidlar",
+        # A manager's card: /lidlar is the owner's alone (06 §1.7).
+        "stale_card_manager": "Bu karta eskirgan",
         "not_yours": "Bu karta sizga tegishli emas",
         "forwarded": (
             "↪️ Uzatilgan xabardagi buyruqni bajarmayman — buyruqni oʻzingiz "
@@ -93,9 +95,6 @@ UZ: Final[Mapping[str, str]] = MappingProxyType(
         "review.refused.no_phone": (
             "Telefon yaroqsiz — CRMʼga yuborib boʻlmaydi. Karta joyida qoldi."
         ),
-        "review.refused.no_manager": (
-            "Menejer sozlanmagan (MANAGER_TELEGRAM_IDS) — karta joyida qoldi."
-        ),
         "review.refused.no_target": "Bu kompaniya topilmadi.",
         "review.refused.same_company": "Bu oʻsha kompaniyaning oʻzi.",
         "review.refused.merge": "Birlashtirib boʻlmaydi: {why}. Karta joyida qoldi.",
@@ -122,6 +121,10 @@ UZ: Final[Mapping[str, str]] = MappingProxyType(
         "tel.done": "✅ Raqam yozildi — lid CRMʼga yuboriladi ({score}/100).",
         "tel.held": (
             "Raqam yozildi, lekin lid hali yuborilmaydi ({score}/100) — kutishda qoldi."
+        ),
+        "tel.gated": (
+            "Raqam yozildi, lekin lid CRMʼga yuborilmaydi ({score}/100) — firma "
+            "tekshiruvdan oʻtmadi (mijoz, DNC yoki B2C boʻlishi mumkin)."
         ),
         "tel.no_card": "Bunday karta yoʻq.",
         "tel.not_yours": "Bu karta sizga tegishli emas.",

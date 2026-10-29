@@ -65,6 +65,11 @@ async def lidlar(message: Message, command: CommandObject, deps: Deps) -> None:
             # 06 §1.2 /toxtat: «… no push, no card …» until /yoq.
             await reply(message, t("lidlar.paused"))
             return
+        # A candidate that reached review since the card job last ran has no
+        # card row yet: /lidlar makes it (the job's own step), so it is not
+        # invisible here — nor for good while the worker is down.
+        await reviews.ensure_pending(session, now=now)
+        await session.commit()
         burst = await reviews.send_owner_cards(
             session, BotCards(bot), now=now, limit=settings.review_burst_max
         )
@@ -89,15 +94,24 @@ async def lidlar_holat(message: Message, deps: Deps) -> None:
 # --- the answers ---------------------------------------------------------------------
 
 
-def refusal_text(code: str) -> str:
-    """A ``reviews.Refused`` code in the owner's (or the manager's) words."""
+def refusal_text(code: str, *, manager: bool = False) -> str:
+    """A ``reviews.Refused`` code in the owner's (or the manager's) words; a
+    manager is never pointed at ``/lidlar`` (06 §1.7: the owner's alone)."""
     if code.startswith("merge:"):
         reason = code.split(":", 1)[1]
         key = f"review.merge.{reason}"
         why = UZ.get(key, reason)
         return t("review.refused.merge", why=why)
+    if manager and code == "stale":
+        return t("stale_card_manager")
     key = f"review.refused.{code}"
     return UZ[key] if key in UZ else t("stale_button")
+
+
+def stale_text(tap: Tap) -> str:
+    """«Bu karta eskirgan»: with ``/lidlar`` for the owner, without it for a
+    manager's card (``mh:``)."""
+    return t("stale_card_manager" if tap.data.kind == "mh" else "stale_card")
 
 
 def _plain(line: str) -> str:
@@ -106,8 +120,10 @@ def _plain(line: str) -> str:
 
 
 async def _send_handoff(tap: Tap, manager_review_id: int) -> str | None:
-    """👤: the manager card goes out at once inside the hours (06 §1.6), else
-    the card job sends it; the footer then names the manager."""
+    """👤: the manager card goes out at once inside the hours (06 §1.6) and
+    not while ``/toxtat`` holds (``send_manager_card``), else the card job
+    sends it and edits the owner's card then; the footer names the manager
+    by first name (``reviews.handoff_line``), never by id."""
     now = tap.deps.clock()
     bot = tap.query.bot
     if bot is None or not reviews.sending_hours(now):
@@ -117,9 +133,7 @@ async def _send_handoff(tap: Tap, manager_review_id: int) -> str | None:
             session, manager_review_id, BotCards(bot), now=now
         )
         await session.commit()
-    if out is None:
-        return None
-    return cards.footer("handoff", manager=out.name or out.chat_id)
+        return await reviews.handoff_line(session, manager_review_id, out)
 
 
 async def apply_answer(tap: Tap, code: str, *, target: uuid.UUID | None = None) -> None:
@@ -137,12 +151,13 @@ async def apply_answer(tap: Tap, code: str, *, target: uuid.UUID | None = None) 
             )
         except reviews.Refused as refused:
             await session.rollback()
-            await toast(tap.query, refusal_text(refused.code), alert=True)
+            text = refusal_text(refused.code, manager=tap.data.kind == "mh")
+            await toast(tap.query, text, alert=True)
             return
         await session.commit()
     if done.stale or done.footer is None:
         await edit_keyboard(tap.query, None)
-        await toast(tap.query, t("stale_card"), alert=True)
+        await toast(tap.query, stale_text(tap), alert=True)
         return
     line = done.footer
     if done.manager_review_id is not None:
@@ -274,4 +289,5 @@ __all__ = [
     "on_more",
     "phone_answer",
     "refusal_text",
+    "stale_text",
 ]

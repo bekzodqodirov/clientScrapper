@@ -438,15 +438,17 @@ def render_manager(mv: ManagerView) -> Card:
 
 # One line under the card once it is answered (its keyboard removed): the
 # answer's own words (06 §1.3's table; the manager card's, 06 §1.7). The
-# ✅ footer follows the push (``push_footer``): the retry 06 §1.3 promised
-# after attempt 3 cannot come this month — the external_id is the month's
-# and its three attempts are spent (04 §7 item 6) — so it says so.
+# ✅ footer follows the push (``push_footer``): after attempt 3 (or a 4xx)
+# the push gate sends the candidate back to review (``attempts_spent`` /
+# ``erp_refused`` are in push_gate.TO_REVIEW) and the owner gets a new card
+# — 06 §1.3's «qayta soʻrayman». The handoff footer names the manager by
+# first name, never by id; before the card is out it says it waits.
 FOOTER_UZ: Final[Mapping[str, str]] = {
     "push_queued": "✅ Navbatda — CRMʼga yuboriladi",
     "push_at": "⏳ {when} da yuboriladi",
     "push_sent": "✅ CRMʼga yuborildi {time}",
     "push_unknown": "⏳ CRM javobi nomaʼlum — tekshirilmoqda",
-    "push_failed": "⚠️ CRM javob bermadi — bu oy qayta yuborib boʻlmaydi",
+    "push_failed": "⚠️ CRM javob bermadi — qayta soʻrayman",
     "decline": "✖️ Rad etildi",
     "merge": "🔀 Birlashtirildi → {target}",
     "dnc": "🔒 DNC — boshqa koʻrsatilmaydi",
@@ -455,7 +457,9 @@ FOOTER_UZ: Final[Mapping[str, str]] = {
     "competitor": "🚚 Kargo — chiqarildi; kanali manba sifatida qoladi",
     "edit_phone": "✏️ Telefon tuzatildi",
     "handoff": "👤 Menejerga yuborildi — {manager}",
-    "handoff_waiting": "👤 Menejerga navbatda — {manager} (hali yetkazilmadi)",
+    "handoff_unnamed": "👤 Menejerga yuborildi",
+    "handoff_waiting": "👤 Menejerga navbatda — hali yetkazilmadi",
+    "handoff_no_manager": "👤 Kutishda — menejer qoʻshilgach yuboriladi",
     "contacted": "📞 Bogʻlandim · raqam olsangiz: /tel {review_id} +998…",
     "said_no": "🙅 Yozmang dedi — boshqa yozilmaydi",
     "wrong_or_b2c": "❌ Notoʻgʻri / B2C — chiqarildi",

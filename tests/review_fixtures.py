@@ -181,7 +181,10 @@ async def contacts_of(s: AsyncSession, cand: LeadCandidate) -> list[Contact]:
 @dataclass
 class FakeSender:
     """``reviews.CardSender`` that records: every card sent, edited and
-    stripped of its buttons; ``fail`` makes Telegram refuse the sends."""
+    stripped of its buttons; ``fail`` makes Telegram refuse the sends,
+    ``refuse`` the sends to those chats only (a manager who blocked the
+    bot), and — like ``deliver.to_person`` — a chat that is neither the
+    owner's nor a listed manager's is never sent to."""
 
     sent: list[tuple[int, str, CardLayout, int]] = field(default_factory=list)
     edits: list[tuple[int, int, str, CardLayout | None, int]] = field(
@@ -190,11 +193,18 @@ class FakeSender:
     strips: list[tuple[int, int]] = field(default_factory=list)
     fail: bool = False
     names: dict[int, str] = field(default_factory=dict)
+    refuse: set[int] = field(default_factory=set)
+    # Every send tried, taken or not: (chat, review id).
+    tried: list[tuple[int, int]] = field(default_factory=list)
 
     async def send(
         self, telegram_id: int, text: str, layout: CardLayout, review_id: int
     ) -> SentCard | None:
-        if self.fail:
+        self.tried.append((telegram_id, review_id))
+        listed = telegram_id == settings.owner_telegram_id or (
+            telegram_id in settings.manager_telegram_ids
+        )
+        if self.fail or telegram_id in self.refuse or not listed:
             return None
         self.sent.append((telegram_id, text, layout, review_id))
         return SentCard(telegram_id, next(_IDS), self.names.get(telegram_id))
