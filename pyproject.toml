@@ -102,6 +102,11 @@ files = [
     "clientscrapper/services/classify.py",
     # T-16
     "clientscrapper/services/model_jobs.py",
+    # T-20: the bot's pure halves (handlers and main stay out, like MIYA's)
+    "clientscrapper/bot/callbacks.py",
+    "clientscrapper/bot/texts.py",
+    "clientscrapper/services/cards.py",
+    "clientscrapper/services/owner.py",
 ]
 
 # APScheduler 3 ships no type information.

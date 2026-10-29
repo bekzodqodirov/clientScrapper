@@ -554,6 +554,92 @@ async def activate_version(
     )
 
 
+# The owner's /vazn (06 §1.2): one version at a time across processes.
+WEIGHTS_LOCK: Final = "cs:scoring_weights"
+
+
+@dataclass(frozen=True, slots=True)
+class WeightEdit:
+    """What ``/vazn <key> <points>`` did: the key's points before and after
+    and the version that now holds them."""
+
+    key: str
+    old: int
+    new: int
+    version: int
+    group: str
+    cap: int
+
+
+def points_allowed(weight: Weight, points: int) -> bool:
+    """A key's points within its group (``validate_version``'s rule for
+    one row): a positive group's key 1…cap, a negative one below 0 (and at
+    least −100, the column), a gate key 0."""
+    if weight.group == "negative":
+        return -100 <= points < 0
+    if weight.group == "gate":
+        return points == 0
+    return 0 < points <= weight.cap
+
+
+async def owner_edit(
+    session: AsyncSession, key: str, points: int, *, by: str, now: datetime
+) -> WeightEdit:
+    """02 §2.7's ``/vazn key points``: copy the active version into
+    ``version + 1`` with the one change, ``proposed_by`` and ``approved_by``
+    the owner, and approve it (``activate_version`` validates it: an owner's
+    edit may move a key more than ±30 %). Raises KeyError for a key the
+    active version does not hold and VersionRefused when the points do not
+    fit the group (``points_allowed``) or the version fails validation.
+    Does not commit."""
+    if not by.startswith(OWNER_PREFIX):
+        raise ValueError("an owner edit is proposed by owner:<id>")
+    await session.execute(
+        sa.select(sa.func.pg_advisory_xact_lock(sa.func.hashtext(WEIGHTS_LOCK)))
+    )
+    current = await active_version(session)
+    if current is None:
+        raise LookupError("no approved scoring_weights version")
+    active = await load_weights(session, current)
+    if key not in active.rows:
+        raise KeyError(key)
+    weight = active.rows[key]
+    target = current + 1
+    if not points_allowed(weight, points):
+        raise VersionRefused(target, [f"points:{key}"])
+    rows = (
+        await session.scalars(
+            sa.select(ScoringWeight)
+            .where(ScoringWeight.version == current)
+            .order_by(ScoringWeight.key)
+        )
+    ).all()
+    session.add_all(
+        ScoringWeight(
+            version=target,
+            key=row.key,
+            group_key=row.group_key,
+            points=points if row.key == key else row.points,
+            group_cap=row.group_cap,
+            decay_days=row.decay_days,
+            decayed_factor=row.decayed_factor,
+            note=row.note,
+            proposed_by=by,
+        )
+        for row in rows
+    )
+    await session.flush()
+    await activate_version(session, target, by=by, now=now)
+    return WeightEdit(
+        key=key,
+        old=weight.points,
+        new=points,
+        version=target,
+        group=weight.group,
+        cap=weight.cap,
+    )
+
+
 # --- a company as the score function's input ---------------------------------------
 
 
