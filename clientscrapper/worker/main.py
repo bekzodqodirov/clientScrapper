@@ -90,7 +90,13 @@ from typing import Any, Final
 
 import httpx
 import sqlalchemy as sa
-from apscheduler.events import EVENT_JOB_ERROR, EVENT_JOB_EXECUTED, JobExecutionEvent
+from apscheduler.events import (
+    EVENT_JOB_ERROR,
+    EVENT_JOB_EXECUTED,
+    EVENT_JOB_MAX_INSTANCES,
+    JobExecutionEvent,
+    JobSubmissionEvent,
+)
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.base import BaseTrigger
 from apscheduler.triggers.combining import OrTrigger
@@ -671,6 +677,22 @@ def on_job_event(
     error = None if exc is None else type(exc).__name__
     return asyncio.run_coroutine_threadsafe(
         record_job_event(event.job_id, ok=exc is None, error=error), loop
+    )
+
+
+def on_job_skipped(
+    event: JobSubmissionEvent, *, loop: asyncio.AbstractEventLoop
+) -> asyncio.Future[None] | Any | None:
+    """APScheduler listener (EVENT_JOB_MAX_INSTANCES): a run skipped because
+    the previous one of the same job has not ended. Only the health sweep's
+    skip is a failed run (``health.STILL_RUNNING``): a hung sweep raises
+    nothing and says nothing, and the bot's watchdog reads its streak
+    (``health.sweep_failing``). Any other job may outlast its interval
+    legitimately (a long collector run) — its skip is no failure."""
+    if event.job_id != health.HEALTH_JOB:
+        return None
+    return asyncio.run_coroutine_threadsafe(
+        record_job_event(event.job_id, ok=False, error=health.STILL_RUNNING), loop
     )
 
 
@@ -1275,6 +1297,10 @@ async def run() -> None:
     scheduler.add_listener(
         functools.partial(on_job_event, loop=asyncio.get_running_loop()),
         EVENT_JOB_EXECUTED | EVENT_JOB_ERROR,
+    )
+    scheduler.add_listener(
+        functools.partial(on_job_skipped, loop=asyncio.get_running_loop()),
+        EVENT_JOB_MAX_INSTANCES,
     )
     scheduler.start()
     listener = asyncio.ensure_future(listen_for_wakes(scheduler, stop))

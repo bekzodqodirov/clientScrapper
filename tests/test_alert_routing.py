@@ -240,6 +240,103 @@ async def test_a_crashed_sweep_s_heartbeat_reaches_job_failing_through_the_watch
     assert (await health.tell(session, mine, told, now=NOW)).said == ()
 
 
+async def test_an_unrelated_failing_job_said_earlier_never_holds_back_the_sweep(
+    session,
+):
+    """job_failing is said per item (PER_SUBJECT_KEYS): the healthy sweep
+    said «score» an hour ago, and the sweep's own streak is still said at
+    once — not ALERT_REPEAT_HOURS later — and only once."""
+    earlier = NOW - timedelta(hours=1)
+    await health.beat(session, "worker", detail={"jobs": 20}, now=earlier)
+    await session.commit()
+    for _ in range(3):
+        await worker.record_job_event("score", ok=False, error="ValueError")
+    status = await health.gather(session, now=earlier)
+    found = [p for p in health.problems(status) if p.key == "job_failing"]
+    said = await health.tell(
+        session, found, Told(), now=earlier, unjudged=health.unjudged(status)
+    )
+    assert said.said == ("job_failing",)
+    await session.commit()
+    await failing_sweep(session)
+    told = Told()
+    report = await bot_main.watchdog_tick(told, now=NOW, memo={})
+    assert report is not None and report.said == ("job_failing",)
+    assert told.texts == [
+        "⚠️ <code>health</code> ishi oxirgi 3 marta xato bilan tugadi "
+        "(ProgrammingError) — <code>make worker</code> loglari"
+    ]
+    for minutes in (30, 120):
+        later = NOW + timedelta(minutes=minutes)
+        await health.beat(session, "worker", detail={"jobs": 20}, now=later)
+        await session.commit()
+        await bot_main.watchdog_tick(told, now=later, memo={})
+    assert len(told.texts) == 1
+    # The sweep, back, repeats neither line inside the window: «score» is
+    # its own subject, «health» the watchdog said.
+    back = await health.gather(session, now=NOW + timedelta(minutes=125))
+    mine = [p for p in health.problems(back) if p.key == "job_failing"]
+    assert [s for s, _ in mine[0].subjects] == ["job:health", "job:score"]
+    again = await health.tell(session, mine, told, now=NOW + timedelta(minutes=125))
+    assert again.said == () and len(told.texts) == 1
+
+
+async def test_a_new_failing_job_is_said_beside_one_already_said(session):
+    """A second item of job_failing is not held back by the first's window;
+    the first is not repeated with it."""
+    await health.beat(session, "worker", detail={"jobs": 20}, now=NOW)
+    await session.commit()
+    for _ in range(3):
+        await worker.record_job_event("score", ok=False, error="ValueError")
+    told = Told()
+    status = await health.gather(session, now=NOW)
+    found = [p for p in health.problems(status) if p.key == "job_failing"]
+    assert (await health.tell(session, found, told, now=NOW)).said == ("job_failing",)
+    await session.commit()
+    for _ in range(3):
+        await worker.record_job_event("resolve", ok=False, error="OSError")
+    later = NOW + timedelta(minutes=5)
+    await health.beat(session, "worker", detail={"jobs": 20}, now=later)
+    await session.commit()
+    status = await health.gather(session, now=later)
+    found = [p for p in health.problems(status) if p.key == "job_failing"]
+    assert (await health.tell(session, found, told, now=later)).said == ("job_failing",)
+    assert told.texts[1] == (
+        "⚠️ <code>resolve</code> ishi oxirgi 3 marta xato bilan tugadi (OSError) — "
+        "<code>make worker</code> loglari"
+    )
+
+
+async def test_a_hung_sweep_s_skipped_runs_reach_the_watchdog(session):
+    """A sweep that hangs raises nothing: APScheduler skips the next runs
+    (max_instances=1) and the worker counts each skip of the health job as
+    a run that did not end (``on_job_skipped``)."""
+    import asyncio
+
+    from apscheduler.events import EVENT_JOB_MAX_INSTANCES, JobSubmissionEvent
+
+    await health.beat(
+        session, "worker", detail={"jobs": 20}, now=NOW - timedelta(minutes=1)
+    )
+    await session.commit()
+    loop = asyncio.get_running_loop()
+    for job_id in ("health", "score", "health", "health"):
+        event = JobSubmissionEvent(EVENT_JOB_MAX_INSTANCES, job_id, None, [NOW])
+        recorded = worker.on_job_skipped(event, loop=loop)
+        if recorded is not None:
+            await asyncio.wrap_future(recorded)
+    told = Told()
+    report = await bot_main.watchdog_tick(told, now=NOW, memo={})
+    assert report is not None and report.said == ("job_failing",)
+    assert told.texts == [
+        "⚠️ <code>health</code> ishi tugamayapti: oxirgi 3 ta navbati oʻtkazib "
+        "yuborildi — <code>make worker</code> loglari"
+    ]
+    # A slow job other than the sweep is no failure: its skips are not counted.
+    beats = await health.beats(session)
+    assert health.JOB_PREFIX + "score" not in beats
+
+
 async def test_two_raises_are_not_yet_a_failing_sweep(session):
     await failing_sweep(session, runs=2)
     told = Told()

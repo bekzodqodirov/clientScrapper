@@ -1305,6 +1305,65 @@ async def test_other_4xx_goes_back_to_review_and_tells_the_owner(world, told):
     assert await world.breaker() == (None, None)
 
 
+async def test_a_4xx_telegram_did_not_take_is_said_by_the_sweep_until_a_push_lands(
+    world,
+):
+    """push_rejected is a 06 §4.2 key (05 §B.1 «owner alert»): crm_push says
+    it first, and when Telegram is down at that moment its undelivered note
+    lets the health sweep say it; the next push the ERP takes clears it, and
+    its recovery is said once."""
+    down: list[str] = []
+
+    async def unreachable(text: str) -> bool:
+        down.append(text)
+        return False
+
+    costs.set_cap_notifier(unreachable)
+    try:
+        cand = await world.lead()
+        erp, _ = answering(407, body=b"proxy auth")
+        assert (await world.push(cand, erp=erp)).error == "http_4xx"
+    finally:
+        costs.set_cap_notifier(None)
+    assert down == [crm_push.rejected_text(407)]
+    kinds = (await world.session.scalars(sa.select(ReminderLog.kind))).all()
+    assert kinds == ["undelivered:push_rejected"]
+
+    others = frozenset(health.PROBLEM_KEYS) - {"push_rejected"}
+
+    async def sweep(at: datetime) -> tuple[health.TellReport, list[str]]:
+        said: list[str] = []
+
+        async def owner(text: str) -> bool:
+            said.append(text)
+            return True
+
+        async with SessionLocal() as s:
+            found = [
+                p
+                for p in health.problems(await health.gather(s, now=at))
+                if p.key == "push_rejected"
+            ]
+            report = await health.tell(s, found, owner, now=at, unjudged=others)
+            await s.commit()
+        return report, said
+
+    report, said = await sweep(NOW + timedelta(minutes=5))
+    assert report.said == ("push_rejected",)
+    assert said == [
+        "⚠️ ERP pushni rad etdi (HTTP 407): <code>.env</code> dagi CRM_BASE_URL va "
+        "ERP oldidagi proksini tekshiring; lid koʻrib chiqishga qaytdi"
+    ]
+    assert (await sweep(NOW + timedelta(minutes=10)))[1] == []
+    # The proxy is fixed: the next push lands, the problem clears, once.
+    second = await world.lead(62)
+    assert (await world.push(second, now=NOW + timedelta(minutes=40))).status == "sent"
+    report, said = await sweep(NOW + timedelta(minutes=45))
+    assert report.recovered == ("push_rejected",)
+    assert said == ["✅ ERP pushlarni yana qabul qilyapti — tiklandi"]
+    assert (await sweep(NOW + timedelta(minutes=50)))[1] == []
+
+
 async def test_a_refused_connection_is_three_tries_then_conn(world):
     cand = await world.lead()
     erp, seen = answering(0, raises=httpx.ConnectError)
