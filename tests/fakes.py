@@ -11,8 +11,10 @@ reach the network. ``fetcher_for`` builds a ``Fetcher`` over both.
 T-15): it answers from a queue of scripted responses — hand-written and
 SYNTHETIC (``tests/fixtures/model/README.md``; real recordings are a day-1
 task on the VPS, 07 §5.5) — keeps every request body, and notes any request
-whose strings still match ``PHONE_RE``/``TG_RE``/``IG_RE``/``EMAIL_RE`` or
-carry a 14-digit run, and any request nobody scripted an answer for.
+whose strings still carry personal data (``pseudonyms.unmasked``: a phone,
+Uzbek or foreign, a long digit run, a Telegram, messenger or Instagram
+handle, an e-mail or a 14-digit run), and any request nobody scripted an
+answer for.
 ``tests/conftest.py`` installs one on ``services/extraction`` for every test
 and fails the test that leaked or called unscripted.
 
@@ -46,9 +48,9 @@ import anthropic
 import httpx
 
 from clientscrapper.collectors.base import Budget
-from clientscrapper.collectors.keywords import EMAIL_RE, IG_RE, PHONE_RE, PINFL_RE, TG_RE
 from clientscrapper.config import settings
 from clientscrapper.services.http import Fetcher, HostState
+from clientscrapper.services.pseudonyms import unmasked
 
 TASHKENT = ZoneInfo("Asia/Tashkent")
 T0 = datetime(2026, 10, 24, 10, 0, tzinfo=TASHKENT)
@@ -164,13 +166,6 @@ ALLOW_ALL = httpx.Response(200, text="User-agent: *\nDisallow:\n")
 # --- the Messages API (T-15) -----------------------------------------------------
 
 MODEL_FIXTURES = Path(__file__).parent / "fixtures" / "model"
-PII_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
-    ("PHONE_RE", PHONE_RE),
-    ("TG_RE", TG_RE),
-    ("IG_RE", IG_RE),
-    ("EMAIL_RE", EMAIL_RE),
-    ("14 digits", PINFL_RE),
-)
 GRAMMAR_MESSAGE = "Grammar compilation timed out for the provided schema"
 
 
@@ -189,15 +184,12 @@ def strings_of(value: Any) -> Iterator[str]:
 
 def pii_in(body: Any) -> list[str]:
     """The patterns a request body still matches — the pattern's name, never
-    the value (a failing test must not print what it protects)."""
-    return sorted(
-        {
-            name
-            for text in strings_of(body)
-            for name, pattern in PII_PATTERNS
-            if pattern.search(text)
-        }
-    )
+    the value (a failing test must not print what it protects). The one home
+    of what may not reach a model is ``pseudonyms.unmasked`` (its
+    ``GUARDED`` list, the shapes keywords keeps): the fence and
+    ``assert_masked`` cannot disagree — a labelled STIR is company-tier for
+    both."""
+    return sorted({name for text in strings_of(body) for name in unmasked(text)})
 
 
 def batch_pii_in(body: Any) -> list[str]:

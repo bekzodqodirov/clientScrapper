@@ -203,6 +203,23 @@ def test_no_field_is_reserved_and_identity_is_exactly_four():
     }
 
 
+@pytest.mark.parametrize(
+    "name",
+    ["Rustam 90 000 00 07", "Rustam @namuna_boshqa", "Rustam (WeChat rustam_cn88)"],
+)
+def test_a_person_line_that_carries_a_contact_is_dropped(name):
+    """05 §B.1: no phone or handle beyond what the body carries — a name or
+    role holding one loses the «Masʼul» line, never the push."""
+    p = crm_push.build_payload(view(person=PersonView(name, "direktori", None)))
+    assert "Masʼul" not in p.note
+    for raw in ("90 000 00 07", "namuna_boshqa", "rustam_cn88"):
+        assert raw not in json.dumps(p.model_dump(), ensure_ascii=False)
+    clean = crm_push.build_payload(view(person=PersonView("Rustam", "direktori", None)))
+    assert "  Masʼul: Rustam (direktori)" in clean.note.split("\n")
+    role = PersonView("Rustam", "direktor +7 701 000 00 00", None)
+    assert "Masʼul" not in crm_push.build_payload(view(person=role)).note
+
+
 def test_person_only_with_legal_basis_and_name_is_the_company():
     # load_view hands a PersonView only for a legal_basis row; without one the
     # note names nobody and the body's name is the company's.

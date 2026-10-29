@@ -221,15 +221,18 @@ def user_content(
     bio: str | None,
     text: str,
     names: Iterable[str] = (),
+    handles: Iterable[str] = (),
 ) -> Pseudonymised:
     """04 §4.3's user message, pseudonymised part by part with one numbering:
     ``SOURCE: telegram group «<title>»``, ``DATE``, ``SENDER_BIO`` (or ``-``)
-    and ``TEXT`` (masked whole, then cut to ``TEXT_MAX``). The reverse map
-    holds only the tokens the message carries."""
-    names = list(names)
-    head = pseudonymise(title or "", names=names)
-    told = pseudonymise(bio or "", names=names, prior=head)
-    said = pseudonymise(text, names=names, prior=told)
+    and ``TEXT`` (masked whole, then cut to ``TEXT_MAX``). ``handles`` are
+    the sender's own username and Telegram id, masked verbatim wherever the
+    message writes them (a bare «namuna_tekstil» no pattern reads). The
+    reverse map holds only the tokens the message carries."""
+    names, handles = list(names), list(handles)
+    head = pseudonymise(title or "", names=names, handles=handles)
+    told = pseudonymise(bio or "", names=names, handles=handles, prior=head)
+    said = pseudonymise(text, names=names, handles=handles, prior=told)
     source = f"telegram {chat_type}" + (f" «{head.text}»" if head.text else "")
     date = occurred_at.astimezone(settings.tz).isoformat(timespec="seconds")
     lines = (
@@ -497,6 +500,7 @@ async def classify_message(
         return "waits"
     speaker = _speaker(row, monitor)
     names: list[str] = []
+    handles: list[str] = []
     bio: str | None = None
     if speaker.kind == "person":
         bio = row.sender_bio
@@ -505,6 +509,9 @@ async def classify_message(
                 row.sender_id
             )
         names = [*name_words(row.sender_name), *person_names(bio)]
+        handles = [row.sender_username] if row.sender_username else []
+        if row.sender_id is not None:
+            handles.append(str(row.sender_id))
     user = user_content(
         chat_type=monitor.chat_type,
         title=monitor.title,
@@ -512,6 +519,7 @@ async def classify_message(
         bio=bio,
         text=row.text or "",
         names=names,
+        handles=handles,
     )
     text = row.text or ""
 

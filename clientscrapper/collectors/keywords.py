@@ -808,6 +808,101 @@ IG_RE = re.compile(
 EMAIL_RE = re.compile(
     r"(?<![\w.%+-])[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}(?![\w-])"
 )
+# The personal-data shapes beyond PHONE_RE, TG_RE, IG_RE and EMAIL_RE (06
+# §5.2, CLAUDE.md: phones and handles never reach a model; 05 §B.1: a note
+# carries none beyond the body's). One home for the pseudonymiser, its
+# ``assert_masked``, the push note's quote filter and the scrubber (E2E review
+# 2026-10-29: each kept its own copy, and the pseudonymiser had none).
+#
+# A number with a country code other than Uzbekistan's (+7, +86, +996 …):
+# «+», 9 to 15 digits, a separator or two between them; +998 is PHONE_RE's.
+# ``intl_phones`` cuts a match back to its numbering plan.
+INTL_PHONE_RE = re.compile(r"(?<![\w+])\+(?!998)\d(?:[\s\-.()]{0,2}\d){8,14}(?!\d)")
+# A foreign or trunk number written without «+» («8 916 000 00 77», «0086 138
+# …», «79161234567»): ten digits or more in one run, a space, hyphen or
+# bracket (or two) between them — no dot, so a date beside a volume («25.11.2026 10
+# kub») is no number. ``long_numbers`` cuts it back the same way.
+LONG_NUMBER_RE = re.compile(r"(?<![\d+])\d(?:[\s\-()]{0,2}\d){9,}(?!\d)")
+# A messenger id after its label: «WeChat: rustam_cn88», «viber rustam_88»,
+# «Telegram: namuna_tekstil», «tg namuna_tekstil» — a colon or dash after the
+# label, or, after a space, an id with a digit or «_» («whatsapp orqali» is a
+# sentence, «tg kanal» a word). ``label`` names the messenger, ``id`` the
+# handle (``TELEGRAM_LABELS``: a Telegram username written without «@»).
+_MESSENGER_LABELS = (
+    r"we\s?chat|weixin|微信|vx|wx|whats\s?app|ватсап|вотсап|viber|вайбер|skype|скайп|"
+    r"telegramm?|телеграмм?|tg|тг|line|qq|imo"
+)
+# A messenger's label alone, ``fullmatch``ed on a word (a display name's).
+MESSENGER_LABEL_RE = re.compile(rf"(?:{_MESSENGER_LABELS})(?:\s*(?:id|ид))?", re.I)
+MESSENGER_ID_RE = re.compile(
+    rf"(?<!\w)(?P<label>{_MESSENGER_LABELS})(?:\s*(?:id|ид))?"
+    r"(?:\s*[:：\-–—]\s*@?|\s+@?(?=[\w.\-]*[\d_]))(?P<id>[\w.+\-]{3,})",
+    re.I,
+)
+TELEGRAM_LABELS = frozenset(
+    {"telegram", "telegramm", "телеграм", "телеграмм", "tg", "тг"}
+)
+# The longest number of a numbering plan, in digits with its country code:
+# China's +86 1xx xxxx xxxx is 13; +7 (Kazakhstan, Russia) and +1 are 11. A
+# trunk number without «+» is at most 12 («8 701 …», «0 532 …»), one written
+# with «00» for «+» 15.
+INTL_DIGITS_MAX = 13
+INTL_PLAN_DIGITS = {"7": 11, "1": 11}
+LONG_DIGITS_MAX = 12
+LONG_ZERO_ZERO_MAX = 15
+_PHONE_GROUP = re.compile(r"[\s\-.()]+\(?(\d+)\)?\Z")
+_PHONE_DIGITS_MIN = 9
+
+
+def _phone_span(text: str, start: int, end: int, cap: int) -> tuple[int, int]:
+    """``text[start:end]`` cut back, a whole digit group at a time, until it
+    holds at most ``cap`` digits and does not end in a one-digit group — a
+    number never does, the volume after it may («+7 701 000 00 00 30 kub»)."""
+    body = text[start:end]
+    while True:
+        last = _PHONE_GROUP.search(body)
+        digits = sum(c.isdigit() for c in body)
+        if last is None or not (digits > cap or len(last.group(1)) == 1):
+            break
+        cut = body[: last.start()]
+        if sum(c.isdigit() for c in cut) < _PHONE_DIGITS_MIN:
+            break
+        body = cut
+    return start, start + len(body)
+
+
+def intl_phones(text: str) -> list[tuple[int, int]]:
+    """The spans of the foreign numbers ``INTL_PHONE_RE`` finds in ``text``,
+    each cut back to its numbering plan."""
+    spans = []
+    for match in INTL_PHONE_RE.finditer(text):
+        cap = INTL_PLAN_DIGITS.get(match.group(0)[1], INTL_DIGITS_MAX)
+        spans.append(_phone_span(text, match.start(), match.end(), cap))
+    return spans
+
+
+def long_numbers(text: str) -> list[tuple[int, int]]:
+    """The spans of the digit runs ``LONG_NUMBER_RE`` finds in ``text``, each
+    cut back to the longest trunk number. A run with no separator is one
+    number, kept whole — except a 14-digit one (``PINFL_RE``'s: masked as
+    ``<ID>`` first, never a reversible token) and one longer than any number
+    (a 17-digit 2GIS firm id is no phone) — and the tail of a foreign number
+    (``intl_phones``' own)."""
+    spans = []
+    foreign = intl_phones(text)
+    for match in LONG_NUMBER_RE.finditer(text):
+        if any(s < match.end() and match.start() < e for s, e in foreign):
+            continue
+        run = match.group(0)
+        if run.isdigit() and (PINFL_RE.fullmatch(run) or len(run) > LONG_ZERO_ZERO_MAX):
+            continue
+        cap = LONG_ZERO_ZERO_MAX if run.startswith("00") else LONG_DIGITS_MAX
+        start, end = _phone_span(text, match.start(), match.end(), cap)
+        if sum(c.isdigit() for c in text[start:end]) >= 10:
+            spans.append((start, end))
+    return spans
+
+
 STIR_RE = re.compile(r"(?<!\w)(?:STIR|СТИР|ИНН|INN|TIN)\s*[:№#]?\s*(\d{9})(?!\d)", re.I)
 LEGAL_FORM_RE = re.compile(
     r"(?<!\w)(MChJ|MCHJ|МЧЖ|OOO|ООО|LLC|XK|ХК|QK|ҚК|AJ|АЖ|AO|АО|ЧП|XChK|ХЧК|YaTT|ЯТТ|ИП|SP|СП|"

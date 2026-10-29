@@ -53,7 +53,7 @@ import sqlalchemy as sa
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from clientscrapper.collectors.keywords import EMAIL_RE, IG_RE, PHONE_RE, PRICE_RE, TG_RE
+from clientscrapper.collectors.keywords import PRICE_RE
 from clientscrapper.collectors.runner import SessionFactory
 from clientscrapper.config import settings
 from clientscrapper.db import enums as e
@@ -64,7 +64,12 @@ from clientscrapper.services.candidates import CandidateView, SignalEvidence
 from clientscrapper.services.erp_feeds import ErpClient, ErpHttpError
 from clientscrapper.services.gates import REGISTRY_UZ
 from clientscrapper.services.normalise import person_names
-from clientscrapper.services.pseudonyms import TOKEN_RE, TOKEN_TRACE_RE, pseudonymise
+from clientscrapper.services.pseudonyms import (
+    TOKEN_RE,
+    TOKEN_TRACE_RE,
+    pseudonymise,
+    unmasked,
+)
 from clientscrapper.services.push_gate import Refusal, text_len
 from clientscrapper.services.retry import with_backoff
 from clientscrapper.services.text import well_formed
@@ -146,20 +151,8 @@ TEXT_VOLUME_RE: Final = re.compile(
 MEASURE_MAX: Final = Decimal(100000)
 # 04 §7 item 11: what a value may not carry (a pseudonym never restored).
 _PSEUDONYM: Final = TOKEN_TRACE_RE
-# What a quote may not carry beyond keywords' Uzbek phone, handle and e-mail
-# shapes (05 §B.1: no phone or handle beyond what the body already carries):
-# a number with a «+» and seven digits or more (+7, +86 …), ten digits or
-# more in one run (a foreign number written without «+», «8 916 …»), and a
-# messenger id after its label — «WeChat: rustam_cn88», «viber rustam_88» (a
-# colon, or an id with a digit or «_»: «whatsapp orqali» is a sentence).
-_INTL_PHONE: Final = re.compile(r"\+\s*\d(?:[\s().\-]*\d){6,}")
-_LONG_NUMBER: Final = re.compile(r"(?<!\d)\d(?:[\s().\-]?\d){9,}(?!\d)")
-_MESSENGER_ID: Final = re.compile(
-    r"(?<!\w)(?:we\s?chat|weixin|微信|vx|wx|whats\s?app|ватсап|вотсап|viber|вайбер"
-    r"|skype|скайп|telegram|телеграм|line|qq)(?:\s*(?:id|ид))?"
-    r"(?:\s*[:：]\s*@?[\w.+\-]{3,}|\s+@?(?=[\w.\-]*[\d_])[\w.\-]{3,})",
-    re.I,
-)
+# The note's person line (05 §B.1), as push_gate's item 11 finds it.
+MASUL_PREFIX: Final = push_gate.MASUL_PREFIX
 
 
 def js_trim(s: str) -> str:
@@ -314,25 +307,39 @@ def names_a_person(text: str, *, known: Sequence[str] = ()) -> bool:
     return any(m.group(1) == "NAME" for m in TOKEN_RE.finditer(masked))
 
 
+def contactless(text: str) -> bool:
+    """No phone (Uzbek or foreign, or a long digit run), no Telegram,
+    Instagram or messenger handle, no e-mail and no pseudonym in ``text`` —
+    05 §B.1: no phone or handle beyond what the body already carries. The
+    shapes are the pseudonymiser's (``pseudonyms.unmasked``, one home)."""
+    return not (unmasked(text) or _PSEUDONYM.search(text))
+
+
 def _quotable(text: str, *, known: Sequence[str] = ()) -> bool:
-    """A quote the note may carry (05 §B.1): no phone (Uzbek or foreign), no
-    Telegram, Instagram or messenger handle, no e-mail, no pseudonym — the
-    body carries the one phone and the company's own handles — no price
-    figure (the note template's «no price figures»), and no person's name
-    (04 §7 item 11: the person appears only on the «Masʼul» line, and only
-    with a legal basis; ``names_a_person``)."""
+    """A quote the note may carry (05 §B.1): ``contactless`` — the body
+    carries the one phone and the company's own handles — no price figure
+    (the note template's «no price figures»), and no person's name (04 §7
+    item 11: the person appears only on the «Masʼul» line, and only with a
+    legal basis; ``names_a_person``)."""
     return not (
-        PHONE_RE.search(text)
-        or _INTL_PHONE.search(text)
-        or _LONG_NUMBER.search(text)
-        or TG_RE.search(text)
-        or IG_RE.search(text)
-        or _MESSENGER_ID.search(text)
-        or EMAIL_RE.search(text)
+        not contactless(text)
         or PRICE_RE.search(text)
-        or _PSEUDONYM.search(text)
         or names_a_person(text, known=known)
     )
+
+
+def masul_line(c: CandidateView) -> str | None:
+    """The «Masʼul» line (05 §B.1: only a person-tier contact with its legal
+    basis), or None — also when the name or the role carries a phone, a
+    handle or a messenger id (a display name «Rustam 90 000 00 07»: 06 §5.1
+    allows no second number, and the body carries the one phone)."""
+    if c.person is None:
+        return None
+    name = clean(c.person.full_name)
+    role = clean(c.person.role)
+    if not name or not contactless(name) or (role and not contactless(role)):
+        return None
+    return f"{MASUL_PREFIX}{name}" + (f" ({role})" if role else "")
 
 
 def _shown(text: str) -> str:
@@ -525,11 +532,9 @@ def render_note(c: CandidateView, *, level: int = 0) -> str:
             sector or None,
         ]
         sections.append("KOMPANIYA: " + " · ".join(b for b in bits if b))
-    if c.person is not None and "masul" not in drop:
-        name = clean(c.person.full_name)
-        role = clean(c.person.role)
-        if name:
-            sections.append(f"  Masʼul: {name}" + (f" ({role})" if role else ""))
+    masul = masul_line(c) if "masul" not in drop else None
+    if masul:
+        sections.append(masul)
     opener = clean(c.opener)
     if opener and "opener" not in drop:
         limit = OPENER_SHORT if "opener_short" in drop else OPENER_MAX

@@ -35,6 +35,10 @@ def _digits(m: re.Match[str]) -> str:
     return "".join(m.groups())
 
 
+def _id(m: re.Match[str]) -> str:
+    return m.group("id")
+
+
 Cases = dict[str, tuple[list[tuple[str, str]], list[str]]]
 
 CASES: dict[str, tuple[re.Pattern[str], Extract, Cases]] = {
@@ -509,6 +513,117 @@ CASES: dict[str, tuple[re.Pattern[str], Extract, Cases]] = {
                     ("WhatsApp 90 000 00 10", "900000010"),
                 ],
                 ["Цена 1 250 000 сум", "ИНН 3012345678", "Заказ №12345"],
+            ),
+        },
+    ),
+    # The E2E review's shapes (2026-10-29): the pseudonymiser's and the push
+    # note's one home (keywords.intl_phones / long_numbers cut them back).
+    "INTL_PHONE_RE": (
+        kw.INTL_PHONE_RE,
+        _whole,
+        {
+            "uz-Latn": (
+                [
+                    ("Qozogʻiston nomer +7 701 000 00 00", "+7 701 000 00 00"),
+                    ("agent +86 138 0000 0000, Guangzhou", "+86 138 0000 0000"),
+                    ("Bishkek: +996 555 000 000", "+996 555 000 000"),
+                ],
+                ["Tel +998 90 000 00 01", "+7 701", "narx +15 000"],
+            ),
+            "uz-Cyrl": (
+                [
+                    ("Қозоғистон рақам +7 (701) 000-00-01", "+7 (701) 000-00-01"),
+                    ("Хитой: +8613800000002", "+8613800000002"),
+                    ("Туркия +90 532 000 00 03", "+90 532 000 00 03"),
+                ],
+                ["Тел +998 90 000 00 02", "+1 234", "чегирма +10%"],
+            ),
+            "ru": (
+                [
+                    ("Звоните +7 916 000-00-04", "+7 916 000-00-04"),
+                    ("Китай +86 138 0000 0005", "+86 138 0000 0005"),
+                    ("Дубай +971 50 000 0006", "+971 50 000 0006"),
+                ],
+                ["Тел: +998 71 200 00 04", "+5 кубов", "скидка +20 000"],
+            ),
+        },
+    ),
+    "LONG_NUMBER_RE": (
+        kw.LONG_NUMBER_RE,
+        _whole,
+        {
+            "uz-Latn": (
+                [
+                    ("tel 8 916 000 00 77", "8 916 000 00 77"),
+                    ("0086 138 0000 0002 ga yozing", "0086 138 0000 0002"),
+                    ("raqam 79161234567", "79161234567"),
+                ],
+                ["25.11.2026 10 kub", "narx 1 250 000 so'm", "Buyurtma №12345"],
+            ),
+            "uz-Cyrl": (
+                [
+                    ("тел 8 701 000 00 01", "8 701 000 00 01"),
+                    ("рақам 77010000002", "77010000002"),
+                    ("Хитой 138-0000-0003", "138-0000-0003"),
+                ],
+                ["25.11.2026 10 куб", "нархи 1 250 000 сўм", "СТИР 301234567"],
+            ),
+            "ru": (
+                [
+                    ("звоните 8 (916) 000-00-04", "8 (916) 000-00-04"),
+                    ("номер 89160000005", "89160000005"),
+                    ("WhatsApp 7 701 000 00 06", "7 701 000 00 06"),
+                ],
+                ["на 25.11.2026 10 кубов", "цена 1 250 000 сум", "ИНН 301234567"],
+            ),
+        },
+    ),
+    "MESSENGER_LABEL_RE": (
+        kw.MESSENGER_LABEL_RE,
+        _whole,
+        {
+            "uz-Latn": (
+                [("WeChat", "WeChat"), ("viber", "viber"), ("Telegram", "Telegram")],
+                ["Rustam", "kanal", "optom"],
+            ),
+            "uz-Cyrl": (
+                [("Телеграм", "Телеграм"), ("вайбер", "вайбер"), ("тг", "тг")],
+                ["Рустам", "канал", "оптом"],
+            ),
+            "ru": (
+                [("Ватсап", "Ватсап"), ("Скайп", "Скайп"), ("Телеграмм", "Телеграмм")],
+                ["Иван", "доставка", "склад"],
+            ),
+        },
+    ),
+    "MESSENGER_ID_RE": (
+        kw.MESSENGER_ID_RE,
+        _id,
+        {
+            "uz-Latn": (
+                [
+                    ("WeChat: rustam_cn88", "rustam_cn88"),
+                    ("viber rustam_88 orqali", "rustam_88"),
+                    ("Telegram: namuna_tekstil", "namuna_tekstil"),
+                    ("tg namuna_tekstil", "namuna_tekstil"),
+                ],
+                ["whatsapp orqali yozing", "tg kanal", "Telegram guruhimiz"],
+            ),
+            "uz-Cyrl": (
+                [
+                    ("Телеграм: namuna_tekstil", "namuna_tekstil"),
+                    ("вайбер rustam_77", "rustam_77"),
+                    ("тг namuna_88", "namuna_88"),
+                ],
+                ["телеграм орқали", "вайбер бор", "тг канал"],
+            ),
+            "ru": (
+                [
+                    ("WeChat ID: rustam_cn88", "rustam_cn88"),
+                    ("Скайп: namuna.savdo", "namuna.savdo"),
+                    ("Ватсап: +77010000000", "+77010000000"),
+                ],
+                ["пишите в телеграм", "ватсап есть", "скайп звонок"],
             ),
         },
     ),

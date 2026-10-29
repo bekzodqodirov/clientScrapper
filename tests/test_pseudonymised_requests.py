@@ -124,9 +124,16 @@ def test_the_fence_sees_a_leak():
     assert fake.leaks == [["PHONE_RE"]]
     assert pii_in({"a": ["x", {"b": "info@namuna.example.uz"}]}) == ["EMAIL_RE"]
     assert pii_in({"k": "t.me/namuna_optom", "j": "31234567890123"}) == [
-        "14 digits",
+        "PINFL_RE",
         "TG_RE",
     ]
+    # The fence is pseudonyms.unmasked: the shapes the E2E review found, and
+    # a labelled STIR left as the company-tier fact it is (04 §4.2).
+    assert pii_in({"a": "WeChat: rustam_cn88", "b": "+7 701 000 00 00"}) == [
+        "INTL_PHONE_RE",
+        "MESSENGER_ID_RE",
+    ]
+    assert pii_in({"a": "Namuna Savdo MChJ, STIR 300000011"}) == []
     fake(httpx.Request("POST", "https://api.anthropic.test/v1/messages", json=masked))
     assert fake.unexpected == 1
 
@@ -207,3 +214,43 @@ async def test_a_capitalised_telegram_link_is_masked(
         "TEXT: Guangzhoudan 2 kub mato kerak. T.me/<TG_1> ga yozing, "
         "kanal TELEGRAM.ME/<TG_2>"
     )
+
+
+async def test_labelled_ids_foreign_numbers_and_the_senders_bare_handle_stay_here(
+    session, enabled, offline, tmp_path, model_api
+):
+    """The E2E review's probe (2026-10-29): a handle written without «@»
+    after a label — the sender's own, which classify knows — a WeChat id and
+    foreign numbers reached the model raw, and the fence, reading the same
+    four patterns, saw nothing. A labelled STIR stays: it is company-tier."""
+    await chat(session)
+    await store(
+        session,
+        "Guangzhoudan 3 kub mato kerak, kim olib keladi? Telegram: namuna_tekstil, "
+        "WeChat: rustam_cn88, Qozogʻiston nomer +7 701 000 00 00, "
+        "yoki namuna_tekstil ga yozing. STIR 300000011",
+        message_id=51,
+        bio="Namuna Tekstil Savdo MChJ direktori, wa: +7 701 000 00 09",
+    )
+    await link(offline, tmp_path)
+    model_api.queue(message(BUYER))
+    assert (await classify.classify_batch(now=NOW)).applied == 1
+    [body] = model_api.requests
+    assert pii_in(body) == []
+    seen = visible(body)
+    for value in ("namuna_tekstil", "rustam_cn88", "701 000 00 00", "701 000 00 09"):
+        assert value not in seen, value
+    lines = body["messages"][0]["content"].splitlines()
+    assert lines[2] == "SENDER_BIO: Namuna Tekstil Savdo MChJ direktori, wa: <PHONE_1>"
+    assert lines[3] == (
+        "TEXT: Guangzhoudan 3 kub mato kerak, kim olib keladi? Telegram: <TG_1>, "
+        "WeChat: <MSG_1>, Qozogʻiston nomer <PHONE_2>, yoki <TG_1> ga yozing. "
+        "STIR 300000011"
+    )
+    [job] = await model_jobs(session)
+    assert job.pseudonyms == {
+        "<PHONE_1>": "+7 701 000 00 09",
+        "<TG_1>": "namuna_tekstil",
+        "<MSG_1>": "rustam_cn88",
+        "<PHONE_2>": "+7 701 000 00 00",
+    }

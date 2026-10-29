@@ -33,6 +33,7 @@ from clientscrapper.collectors.keywords import (
     IG_RE,
     INTENT_RE,
     LEGAL_FORM_RE,
+    MESSENGER_LABEL_RE,
     PHONE_RE,
     PINFL_RE,
     STIR_RE,
@@ -75,6 +76,7 @@ __all__ = [
     "ParsedKind",
     "Phone",
     "canonical_city",
+    "display_name",
     "find_legal_form",
     "find_stir",
     "given_name_shaped",
@@ -673,6 +675,43 @@ def person_names(text: str | None) -> list[str]:
             found += [words[k][0] for k in cluster if kinds[k] in keep]
         i = j + 1
     return list(dict.fromkeys(found))
+
+
+_DISPLAY_WORD: Final = re.compile(r"[^\W\d_]+(?:['ʻʼ‘’`ʹ\-][^\W\d_]+)*")
+_DISPLAY_EDGES: Final = "()[]{}<>,;:!?\"'«»“”„.|•·-—–*~/\\"
+_DISPLAY_NOT_NAME: Final = frozenset(
+    {"tel", "тел", "phone", "nomer", "номер", "raqam", "id", "ид", "insta", "ig", "wa"}
+)
+DISPLAY_WORDS_MAX: Final = 4
+
+
+def display_name(name: str | None) -> str | None:
+    """The name-shaped words of a Telegram display name (06 §5.1: a contact
+    carries one phone and its handle, no second number, handle or messenger
+    id — the display name is free text its owner types: «Rustam 90 000 00
+    07», «Rustam @namuna_boshqa», «Rustam (WeChat rustam_cn88)» are all
+    «Rustam»). A word is kept when it is letters only (an apostrophe or a
+    hyphen inside) once its edge punctuation is cut; a word with a digit,
+    «@», «_», «/» or a dot inside goes, a messenger or phone label goes and
+    so does the id after it. At most ``DISPLAY_WORDS_MAX`` words; None when
+    none is left."""
+    kept: list[str] = []
+    after_label = False
+    for token in (name or "").split():
+        core = token.strip(_DISPLAY_EDGES)
+        label = MESSENGER_LABEL_RE.fullmatch(core) is not None or (
+            core.casefold() in _DISPLAY_NOT_NAME
+        )
+        if label:
+            after_label = True
+            continue
+        if after_label:
+            after_label = False
+            if not _DISPLAY_WORD.fullmatch(core) or not core[:1].isupper():
+                continue
+        if _DISPLAY_WORD.fullmatch(core):
+            kept.append(core)
+    return " ".join(kept[:DISPLAY_WORDS_MAX]) or None
 
 
 # --- Observation (03) → observations.parsed (02 §2.5, 04 §1.6) ---------------------

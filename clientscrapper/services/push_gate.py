@@ -95,7 +95,7 @@ from clientscrapper.services import (
     gates,
     scoring,
 )
-from clientscrapper.services.pseudonyms import TOKEN_TRACE_RE
+from clientscrapper.services.pseudonyms import TOKEN_TRACE_RE, unmasked
 from clientscrapper.services.suppression import CLIENT_KINDS, Hit
 
 log = logging.getLogger(__name__)
@@ -124,6 +124,11 @@ _KUB: Final = re.compile(r"^[1-9][0-9]*(?:\.[0-9]+)?$")
 # 04 §7 item 11: no pseudonym token left (<PHONE_n>, <TG_n>, <NAME_n> …, and
 # 04 §4.2's unnumbered <ID> for a 14-digit run) — pseudonyms' own pattern.
 _PSEUDONYM: Final = TOKEN_TRACE_RE
+# The note's person line (05 §B.1: «  Masʼul: <ism> (<rol>)»), which may name
+# the decision maker and nothing more: no phone, handle or messenger id
+# (crm_push.masul_line drops a line that would carry one; this item refuses
+# a body that carries one anyway).
+MASUL_PREFIX: Final = "  Masʼul: "
 _ILL_FORMED: Final = re.compile("[\x00\ud800-\udfff]")
 PAYLOAD_IDENTITY: Final = ("external_id", "name", "phone", "note")
 STATED_KEYS: Final = frozenset({scoring.STATED_3PLUS, scoring.STATED_1_3})
@@ -323,8 +328,10 @@ def payload_problems(
     identity fields present; ``name`` the company's display name only;
     ``phone`` E.164 and the lead contact's (``phone=None``: item 4 refuses
     the missing contact, not this); a note within ``NOTE_MAX``
-    UTF-16 units; ``kub`` only the stated volume, as a plain number; no
-    pseudonym token, no NUL, no lone surrogate in any value.
+    UTF-16 units whose «Masʼul» line names the person and carries no phone,
+    handle or messenger id (``pseudonyms.unmasked``); ``kub`` only the stated
+    volume, as a plain number; no pseudonym token, no NUL, no lone surrogate
+    in any value.
 
     ``stored``: the body is one this ``external_id`` already claimed and is
     re-sent identical (rule 6) — its name and ``kub`` were measured against
@@ -344,6 +351,12 @@ def payload_problems(
     note = payload.get("note")
     if isinstance(note, str) and not (0 < text_len(note) <= NOTE_MAX):
         problems.append("note")
+    if isinstance(note, str) and any(
+        unmasked(line)
+        for line in note.splitlines()
+        if line.strip().startswith(MASUL_PREFIX.strip())
+    ):
+        problems.append("masul")
     kub = payload.get("kub")
     if kub is not None:
         try:
@@ -874,6 +887,7 @@ async def claim(
 __all__ = [
     "ATTEMPT_DELAYS",
     "LOCK_TRIES",
+    "MASUL_PREFIX",
     "MAX_ATTEMPTS",
     "MIN_SCORE",
     "NOTE_MAX",

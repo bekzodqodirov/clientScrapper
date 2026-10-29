@@ -715,7 +715,7 @@ NEGA TOPILDI: {source_title_uz} · {published_dd.mm.yyyy} · «{quote ≤ 140}»
 NIMA OLIB KELADI: {goods joined ', '} · Xitoy: {ha|ehtimol} ({origin_hint})
 HAJM: {stated «2 kub» | BAND_HAJM: taxminan 1 kubdan 3 kubgacha / taxminan 3 kubdan 10 kubgacha / konteyner (taxminan 28 kub) / fura (taxminan 80 kub)} · {per_month if known}
 KOMPANIYA: {legal_name} · STIR {stir|—} · {city} · {registry_status_uz} · {sector}
-  Masʼul: {full_name} ({role})                                                      ← only tier=person with legal_basis
+  Masʼul: {full_name} ({role})                                                      ← only tier=person with legal_basis; the line is dropped when the name or role carries a phone, handle or messenger id, and item 11 refuses a note that carries one (E2E 2026-10-29)
 NIMA DEYISH: {opener ≤ 220, from 04 or the segment template in docs/sotuv-playbook.md §3}
 BALL: {score}/100 (hajm {v}, Xitoy {o}, firma {s}, yangilik {r}, aloqa {c}, tasdiq {k}{, minus … if any})
 ```

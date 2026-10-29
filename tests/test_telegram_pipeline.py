@@ -175,6 +175,25 @@ async def test_a_buyer_who_asks_for_cargo_ends_as_a_scored_candidate(
     assert cand.score_breakdown["gates"]["not_competitor"] == "pass"
 
 
+async def test_a_display_name_with_a_second_number_stores_the_name_alone(
+    session, enabled, offline, tmp_path
+):
+    """06 §5.1 / 05 §B.1: the poster typed a second number into the display
+    name; the contact keeps «Rustam» and the lead phone the message gives."""
+    text = "Guangzhoudan 2 kub mato kerak, kim olib keladi? Tel +998 90 000 00 01"
+    await _message(session, offline, tmp_path, text, name="Rustam 90 000 00 07")
+    assert (await companies.resolve_batch(now=NOW)).resolved == 1
+    people = list(
+        await session.scalars(
+            sa.select(m.Contact)
+            .where(m.Contact.tier == "person")
+            .execution_options(populate_existing=True)
+        )
+    )
+    assert [(c.full_name, c.role) for c in people] == [("Rustam", "direktori")]
+    assert all("000 00 07" not in (c.phone or "") for c in people)
+
+
 async def test_a_volume_only_the_model_read_scores_the_found_candidate(
     session, enabled, offline, tmp_path, model_api
 ):

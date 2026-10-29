@@ -39,6 +39,7 @@ then finds the row handled (``ingest.handle_edit``). Of each:
   channel, which the gate excludes);
 * **the observation**: a group message by a person → ``kind="post"``
   (``parsed.kind='intent_post'``): the poster's username, first + last name
+  (its name-shaped words, ``normalise.display_name``: no number or handle)
   and, from the bio, the firm a legal form anchors («Namuna Tekstil Savdo
   MChJ direktori» → the firm and the role, 04 §9.1); ``intent_ask``, the
   volume (``VOLUME_RE``, the largest stated: ``volume_m3_3plus`` /
@@ -123,6 +124,7 @@ from clientscrapper.services import evidence as evidence_store
 from clientscrapper.services.companies import role_rank
 from clientscrapper.services.normalise import (
     canonical_city,
+    display_name,
     find_stir,
     instagram_handles,
     parse_phones,
@@ -566,7 +568,9 @@ def parse_post(post: Post) -> Observation | None:
     if speaker.kind == "person":
         firm = firm_in(post.sender_bio)
         obs.company_name_raw = firm.name if firm else None
-        obs.person_name = speaker.name
+        # The display name's name-shaped words only: its owner may type a
+        # second number or handle into it (06 §5.1 allows neither).
+        obs.person_name = display_name(speaker.name)
         obs.person_role = firm.role if firm else None
         obs.person_telegram = speaker.username
         obs.phones = phones_in(post.text, post.sender_bio)

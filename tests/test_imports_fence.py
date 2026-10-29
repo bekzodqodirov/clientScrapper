@@ -88,8 +88,31 @@ def test_the_fence_catches_each_shape():
 
 KEYWORDS = "clientscrapper.collectors.keywords"
 KEYWORDS_HOME = "collectors/keywords.py"
-# 06 §5.2's four, and the PINFL run beside them (keywords.PINFL_RE).
-PII_PATTERNS = ("PHONE_RE", "TG_RE", "IG_RE", "EMAIL_RE", "PINFL_RE")
+# 06 §5.2's four, the PINFL run beside them (keywords.PINFL_RE), and the
+# shapes the E2E review found reaching the model raw: a foreign number, a long
+# digit run, a messenger id after its label (one home since 2026-10-29; the
+# push note's quote filter and the scrubber kept copies).
+PII_PATTERNS = (
+    "PHONE_RE",
+    "TG_RE",
+    "IG_RE",
+    "EMAIL_RE",
+    "PINFL_RE",
+    "INTL_PHONE_RE",
+    "LONG_NUMBER_RE",
+    "MESSENGER_ID_RE",
+)
+# What the pseudonymiser reads the shapes through (a pattern or its function;
+# PHONE_RE through normalise.phone_matches, the labelled-STIR rule).
+PSEUDONYMISER_NEEDS = (
+    "TG_RE",
+    "IG_RE",
+    "EMAIL_RE",
+    "PINFL_RE",
+    "MESSENGER_ID_RE",
+    "intl_phones",
+    "long_numbers",
+)
 PSEUDONYMS = "services/pseudonyms.py"
 # The SDK's homes that send requests (costs.py only prices them).
 MASKING_LANES = ANTHROPIC_HOMES - {"services/costs.py"}
@@ -147,7 +170,7 @@ def test_the_pseudonymiser_imports_the_four_from_keywords():
         for imp in imports(tree, module=dotted_name(path))
         if imp.module == KEYWORDS
     }
-    assert set(PII_PATTERNS) <= imported
+    assert set(PSEUDONYMISER_NEEDS) <= imported
     assert pattern_offences(PSEUDONYMS, tree, dotted_name(path)) == []
 
 

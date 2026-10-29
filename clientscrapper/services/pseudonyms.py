@@ -13,17 +13,30 @@ What is masked, in this order:
    IG_RE's label branch reads «ig 12345678901234» as a handle, and a run
    taken into a reversible ``<IG_n>`` would be stored in the reverse map —
    04's own «never stored» needs this order;
-2. phones (``PHONE_RE``, through ``normalise.phone_matches``: a labelled
-   STIR is the company's tax id, not a phone) → ``<PHONE_n>``; one number is
-   one token however it is written («+998 90 123 45 67» and «90 123-45-67»,
-   ``phone_e164``);
+2. phones → ``<PHONE_n>``; one number is one token however it is written
+   («+998 90 123 45 67» and «90 123-45-67», ``phone_e164``): first a
+   foreign number with its country code (``keywords.intl_phones``: «+7 701
+   000 00 00», «+86 138 0000 0000» — before PHONE_RE, which would take
+   «86 138 0000» out of the Chinese one and leave the rest), then the Uzbek
+   ones (``PHONE_RE`` through ``normalise.phone_matches``: a labelled STIR is
+   the company's tax id, not a phone), then a run of ten digits or more
+   written without «+» (``keywords.long_numbers``: «8 916 000 00 77»);
 3. Telegram handles and links (``TG_RE``) → ``<TG_n>``, the handle only
    («@<TG_1>», «t.me/<TG_1>»: the reader still sees what kind of thing it was);
 4. e-mails (``EMAIL_RE``) → ``<EMAIL_n>``;
-5. Instagram handles (``IG_RE``) → ``<IG_n>`` — last of the four on purpose:
-   its label branch takes the word after «IG »/«Instagram », so run first it
-   would swallow the phone, handle or address that follows the label;
-6. the ``names`` the caller knows (a sender's first and last name, a person a
+5. a messenger id after its label (``MESSENGER_ID_RE``: «WeChat:
+   rustam_cn88», «Telegram: namuna_tekstil», «tg namuna_tekstil») → the id
+   as ``<TG_n>`` after a Telegram label (a username written without «@»),
+   else ``<MSG_n>``; the label stays;
+6. Instagram handles (``IG_RE``) → ``<IG_n>`` — last of the handle patterns
+   on purpose: its label branch takes the word after «IG »/«Instagram », so
+   run first it would swallow the phone, handle or address that follows the
+   label;
+7. the ``handles`` the caller knows (the sender's username and Telegram id,
+   which the text may write bare: «namuna_tekstil da yozing») → ``<TG_n>``,
+   each as a whole word in any case — never a business word
+   (``normalise.trade_word``: a username «optom» is not the word «optom»);
+8. the ``names`` the caller knows (a sender's first and last name, a person a
    bio names) → ``<NAME_n>``: each word as a whole word, any case, in both
    scripts, with any apostrophe a keyboard types for oʻ/gʻ/ʼ or none at all
    («Oʻtkir», «O’tkir», «O'tkir», «Otkir», «Ўткир»), and with its ending kept
@@ -54,14 +67,17 @@ from typing import Final, Literal
 from clientscrapper.collectors.keywords import (
     EMAIL_RE,
     IG_RE,
-    PHONE_RE,
+    MESSENGER_ID_RE,
     PINFL_RE,
     RU_ENDINGS,
     RU_STEM_DROP,
+    TELEGRAM_LABELS,
     TG_RE,
+    intl_phones,
+    long_numbers,
 )
 from clientscrapper.services.keys import phone_e164
-from clientscrapper.services.normalise import phone_matches
+from clientscrapper.services.normalise import phone_matches, trade_word
 from clientscrapper.services.text import (
     ALIAS_SUFFIXES,
     APOSTROPHE_CLASS,
@@ -70,23 +86,31 @@ from clientscrapper.services.text import (
     transliterate,
 )
 
-Kind = Literal["PHONE", "TG", "EMAIL", "IG", "NAME"]
-KINDS: Final[tuple[Kind, ...]] = ("PHONE", "TG", "EMAIL", "IG", "NAME")
-TOKEN_RE: Final = re.compile(r"<(PHONE|TG|EMAIL|IG|NAME)_(\d+)>")
+Kind = Literal["PHONE", "TG", "EMAIL", "MSG", "IG", "NAME"]
+KINDS: Final[tuple[Kind, ...]] = ("PHONE", "TG", "EMAIL", "MSG", "IG", "NAME")
+TOKEN_RE: Final = re.compile(r"<(PHONE|TG|EMAIL|MSG|IG|NAME)_(\d+)>")
 ID_TOKEN: Final = "<ID>"
 # What a text bound for a person (the ERP's lead, its note) may not carry: a
 # token or the start of one, numbered or not — never restored (04 §7 item 11).
-TOKEN_TRACE_RE: Final = re.compile(r"<(?:PHONE|TG|IG|NAME|EMAIL)_|<ID>")
-# What assert_masked refuses, by name: the four patterns of 06 §5.2, and a
-# 14-digit run (a PINFL never reaches a model either; this module masks every
-# one, so a request that still carries one did not come through here).
-GUARDED: Final[tuple[tuple[str, re.Pattern[str]], ...]] = (
-    ("PHONE_RE", PHONE_RE),
-    ("TG_RE", TG_RE),
-    ("IG_RE", IG_RE),
-    ("EMAIL_RE", EMAIL_RE),
-    ("PINFL_RE", PINFL_RE),
+TOKEN_TRACE_RE: Final = re.compile(r"<(?:PHONE|TG|IG|NAME|EMAIL|MSG)_|<ID>")
+# What assert_masked refuses, by name (``unmasked``): the four patterns of 06
+# §5.2, the shapes keywords keeps beside them — a foreign number, a long digit
+# run, a messenger id after its label — and a 14-digit run (a PINFL never
+# reaches a model either; this module masks every one, so a request that
+# still carries one did not come through here). tests/fakes' PII fence asks
+# the same function.
+GUARDED: Final[tuple[str, ...]] = (
+    "INTL_PHONE_RE",
+    "PHONE_RE",
+    "LONG_NUMBER_RE",
+    "TG_RE",
+    "MESSENGER_ID_RE",
+    "IG_RE",
+    "EMAIL_RE",
+    "PINFL_RE",
 )
+# A known handle shorter than this is no handle (Telegram's own minimum is 5).
+HANDLE_MIN: Final = 4
 # A name word shorter than this is a particle or an initial, not a name.
 NAME_MIN: Final = 2
 # A stem shorter than this takes no Russian ending («Ли» + «и»).
@@ -309,31 +333,87 @@ def _mask_names(text: str, words: list[str], tokens: _Tokens, *, stems: list[str
     return pattern.sub(swap, text)
 
 
-def _mask_phones(text: str, tokens: _Tokens) -> str:
+def _mask_spans(text: str, spans: Iterable[tuple[int, int]], tokens: _Tokens) -> str:
+    """Each span of ``text`` (in order, not overlapping) as a phone token."""
     out: list[str] = []
     last = 0
-    for match in phone_matches(text):
-        out += [text[last : match.start()], tokens.token("PHONE", match.group(0))]
-        last = match.end()
+    for start, end in spans:
+        out += [text[last:start], tokens.token("PHONE", text[start:end])]
+        last = end
     return "".join(out) + text[last:]
 
 
+def _mask_phones(text: str, tokens: _Tokens) -> str:
+    """Foreign numbers first, then the Uzbek ones, then the long digit runs
+    (the module docstring, step 2)."""
+    text = _mask_spans(text, intl_phones(text), tokens)
+    text = _mask_spans(text, (m.span() for m in phone_matches(text)), tokens)
+    return _mask_spans(text, long_numbers(text), tokens)
+
+
+def _mask_messenger_ids(text: str, tokens: _Tokens) -> str:
+    """The id after a messenger's label: ``<TG_n>`` after a Telegram one,
+    ``<MSG_n>`` after any other."""
+
+    def swap(match: re.Match[str]) -> str:
+        label = re.sub(r"\s", "", match.group("label")).casefold()
+        kind: Kind = "TG" if label in TELEGRAM_LABELS else "MSG"
+        whole, start = match.group(0), match.start()
+        head = whole[: match.start("id") - start]
+        return head + tokens.token(kind, match.group("id"))
+
+    return MESSENGER_ID_RE.sub(swap, text)
+
+
+def _known_handles(handles: Iterable[str]) -> list[str]:
+    """The handles worth masking verbatim: long enough, not a token, and not
+    a business word (a username «optom» is not the word «optom»)."""
+    kept: list[str] = []
+    for raw in handles:
+        handle = raw.strip().lstrip("@")
+        if (
+            len(handle) < HANDLE_MIN
+            or TOKEN_RE.search(handle)
+            or (not handle.isdigit() and trade_word(handle))
+            or handle.casefold() in {h.casefold() for h in kept}
+        ):
+            continue
+        kept.append(handle)
+    return kept
+
+
+def _mask_handles(text: str, handles: list[str], tokens: _Tokens) -> str:
+    """Each known handle as a whole word, any case, written bare or after an
+    «@» an earlier step did not take."""
+    for handle in sorted(handles, key=len, reverse=True):
+        pattern = re.compile(rf"(?<![\w.<]){re.escape(handle)}(?![\w])", re.I)
+        text = pattern.sub(lambda m: tokens.token("TG", m.group(0)), text)
+    return text
+
+
 _Pass = Callable[[str, _Tokens], str]
-# The order of 04 §4.2 (see the module docstring); names come last.
+# The order of 04 §4.2 (see the module docstring); handles and names last.
 _PASSES: Final[tuple[_Pass, ...]] = (
     lambda t, _: PINFL_RE.sub(ID_TOKEN, t),
     _mask_phones,
     lambda t, k: _mask_group(t, TG_RE, "TG", k, group=1),
     lambda t, k: _mask_group(t, EMAIL_RE, "EMAIL", k, group=0),
+    _mask_messenger_ids,
     lambda t, k: _mask_group(t, IG_RE, "IG", k, group=1),
 )
 
 
 def pseudonymise(
-    text: str, *, names: Iterable[str] = (), prior: Pseudonymised | None = None
+    text: str,
+    *,
+    names: Iterable[str] = (),
+    handles: Iterable[str] = (),
+    prior: Pseudonymised | None = None,
 ) -> Pseudonymised:
     """``text`` with its personal data as tokens (the module docstring has
-    the order); ``reverse`` holds ``prior``'s tokens and the new ones."""
+    the order); ``reverse`` holds ``prior``'s tokens and the new ones.
+    ``handles``: the speaker's own username and Telegram id, masked verbatim
+    wherever the text writes them."""
     tokens = _Tokens(prior)
     stems = _name_words(tokens.names())
     held = {_name_key(stem) for stem in stems}
@@ -341,6 +421,7 @@ def pseudonymise(
     masked = text
     for step in _PASSES:
         masked = step(masked, tokens)
+    masked = _mask_handles(masked, _known_handles(handles), tokens)
     masked = _mask_names(masked, words, tokens, stems=stems)
     return Pseudonymised(masked, tokens.reverse)
 
@@ -351,15 +432,31 @@ def restore(text: str, reverse: Mapping[str, str]) -> str:
     return TOKEN_RE.sub(lambda m: reverse.get(m.group(0), m.group(0)), text)
 
 
+def unmasked(text: str) -> list[str]:
+    """The ``GUARDED`` patterns ``text`` still matches, by name — never the
+    value. A labelled STIR is no phone here (``phone_matches``): it is
+    company-tier and stays."""
+    found = {
+        "PHONE_RE": bool(phone_matches(text)),
+        "INTL_PHONE_RE": bool(intl_phones(text)),
+        "LONG_NUMBER_RE": bool(long_numbers(text)),
+        "TG_RE": TG_RE.search(text) is not None,
+        "MESSENGER_ID_RE": MESSENGER_ID_RE.search(text) is not None,
+        "IG_RE": IG_RE.search(text) is not None,
+        "EMAIL_RE": EMAIL_RE.search(text) is not None,
+        "PINFL_RE": PINFL_RE.search(text) is not None,
+    }
+    return [name for name in GUARDED if found[name]]
+
+
 def assert_masked(text: str) -> None:
-    """Raise ``UnmaskedPayload`` when a phone, a Telegram handle, an
-    Instagram handle or an e-mail is still in ``text`` (06 §5.2: run on every
-    request before it is dispatched). A labelled STIR is no phone here either
-    (``phone_matches``): it is company-tier and stays."""
-    for name, pattern in GUARDED:
-        found = phone_matches(text) if pattern is PHONE_RE else pattern.search(text)
-        if found:
-            raise UnmaskedPayload(name)
+    """Raise ``UnmaskedPayload`` when a phone (Uzbek or foreign), a long
+    digit run, a Telegram, messenger or Instagram handle, an e-mail or a
+    14-digit run is still in ``text`` (06 §5.2: run on every request before
+    it is dispatched)."""
+    left = unmasked(text)
+    if left:
+        raise UnmaskedPayload(left[0])
 
 
 __all__ = [
@@ -371,4 +468,5 @@ __all__ = [
     "assert_masked",
     "pseudonymise",
     "restore",
+    "unmasked",
 ]

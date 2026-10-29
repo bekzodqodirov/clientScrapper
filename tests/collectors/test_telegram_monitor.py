@@ -287,6 +287,26 @@ def test_a_channel_posting_in_a_group_as_itself_speaks_for_that_channel():
     assert to_observation_json(obs)["kind"] == "profile"
 
 
+@pytest.mark.parametrize(
+    ("display", "kept"),
+    [
+        ("Rustam 90 000 00 07", "Rustam"),
+        ("Rustam @namuna_boshqa", "Rustam"),
+        ("Rustam (WeChat rustam_cn88)", "Rustam"),
+        ("Rustam viber rustamk", "Rustam"),
+        ("Oʻtkir Gʻaniyev", "Oʻtkir Gʻaniyev"),
+        ("🇺🇿 Rustam Karimov", "Rustam Karimov"),
+        ("90 000 00 07", None),
+    ],
+)
+def test_the_posters_name_is_its_name_shaped_words(display, kept):
+    """06 §5.1: a contact holds one phone and its handle — a display name is
+    free text, and a second number or handle typed into it is not stored
+    (E2E review 2026-10-29: it reached contacts.full_name and the ERP note)."""
+    obs = tm.parse_post(post(sender_name=display))
+    assert obs is not None and obs.person_name == kept
+
+
 def test_a_chat_with_no_username_is_cited_by_its_t_me_c_link():
     hidden = tm.Chat(GROUP_ID, "group", "Namuna", None)
     obs = tm.parse_post(post(chat=hidden))

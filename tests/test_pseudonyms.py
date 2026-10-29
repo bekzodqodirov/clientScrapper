@@ -262,6 +262,14 @@ def test_company_tier_facts_stay():
         ("T.me/namuna_optom", "TG_RE"),
         ("telegram.me/namuna_optom", "TG_RE"),
         ("JSHSHIR 31234567890123", "PINFL_RE"),
+        # The E2E review's shapes (2026-10-29): foreign numbers, a long run,
+        # a messenger id and a Telegram id written without «@» after a label.
+        ("Qozogʻiston nomer +7 701 000 00 00", "INTL_PHONE_RE"),
+        ("agent +86 138 0000 0000", "INTL_PHONE_RE"),
+        ("tel 8 916 000 00 77", "LONG_NUMBER_RE"),
+        ("WeChat: rustam_cn88", "MESSENGER_ID_RE"),
+        ("Telegram: namuna_tekstil", "MESSENGER_ID_RE"),
+        ("tg namuna_tekstil", "MESSENGER_ID_RE"),
     ],
 )
 def test_assert_masked_refuses_raw_personal_data(text, pattern):
@@ -283,14 +291,23 @@ def test_restore_leaves_unknown_tokens_and_ids():
 def test_the_patterns_are_the_keywords_own():
     """One pattern, one home (06 §5.2): the objects are collectors/keywords'
     (tests/test_imports_fence.py holds that none is redefined here)."""
-    assert dict(p.GUARDED) == {
-        "PHONE_RE": keywords.PHONE_RE,
-        "TG_RE": keywords.TG_RE,
-        "IG_RE": keywords.IG_RE,
-        "EMAIL_RE": keywords.EMAIL_RE,
-        "PINFL_RE": keywords.PINFL_RE,
+    assert set(p.GUARDED) == {
+        "PHONE_RE",
+        "INTL_PHONE_RE",
+        "LONG_NUMBER_RE",
+        "TG_RE",
+        "MESSENGER_ID_RE",
+        "IG_RE",
+        "EMAIL_RE",
+        "PINFL_RE",
     }
-    assert p.PHONE_RE is keywords.PHONE_RE and p.TG_RE is keywords.TG_RE
+    assert all(isinstance(getattr(keywords, name), re.Pattern) for name in p.GUARDED)
+    assert p.MESSENGER_ID_RE is keywords.MESSENGER_ID_RE
+    assert p.intl_phones is keywords.intl_phones
+    assert p.long_numbers is keywords.long_numbers
+    # PHONE_RE through normalise.phone_matches (the labelled-STIR rule).
+    assert p.phone_matches.__module__ == "clientscrapper.services.normalise"
+    assert p.TG_RE is keywords.TG_RE
     assert p.IG_RE is keywords.IG_RE and p.EMAIL_RE is keywords.EMAIL_RE
     assert p.PINFL_RE is keywords.PINFL_RE
 
@@ -300,3 +317,88 @@ def test_the_names_04_and_06_give_are_the_only_ones():
     for gone in ("Masked", "mask", "unmask"):
         assert not hasattr(p, gone)
     assert Pseudonymised("x").reverse == {}
+
+
+# --- the E2E review's shapes (2026-10-29) ---------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("text", "masked", "reverse"),
+    [
+        # Foreign numbers whole, before PHONE_RE could take «86 138 0000».
+        ("+86 138 0000 0000", "<PHONE_1>", {"<PHONE_1>": "+86 138 0000 0000"}),
+        (
+            "Qozogʻiston nomer +7 701 000 00 00",
+            "Qozogʻiston nomer <PHONE_1>",
+            {"<PHONE_1>": "+7 701 000 00 00"},
+        ),
+        # The number ends where its plan does: the volume after it stays.
+        (
+            "+7 701 000 00 00 30 kub kerak",
+            "<PHONE_1> 30 kub kerak",
+            {"<PHONE_1>": "+7 701 000 00 00"},
+        ),
+        (
+            "tel 8 916 000 00 77 3 kub",
+            "tel <PHONE_1> 3 kub",
+            {"<PHONE_1>": "8 916 000 00 77"},
+        ),
+        (
+            "0086 138 0000 0002 ga yozing",
+            "<PHONE_1> ga yozing",
+            {"<PHONE_1>": "0086 138 0000 0002"},
+        ),
+        # A date beside a volume is no number (no dot in a long run).
+        ("Muddat 25.11.2026 10 kub kerak", "Muddat 25.11.2026 10 kub kerak", {}),
+        # A messenger id after its label: the label stays, the id is a token.
+        ("WeChat: rustam_cn88", "WeChat: <MSG_1>", {"<MSG_1>": "rustam_cn88"}),
+        ("viber rustam_88 orqali", "viber <MSG_1> orqali", {"<MSG_1>": "rustam_88"}),
+        ("whatsapp orqali yozing", "whatsapp orqali yozing", {}),
+        # A Telegram username written without «@» after its label is a handle.
+        ("Telegram: namuna_tekstil", "Telegram: <TG_1>", {"<TG_1>": "namuna_tekstil"}),
+        ("tg namuna_tekstil", "tg <TG_1>", {"<TG_1>": "namuna_tekstil"}),
+        ("tg kanal", "tg kanal", {}),
+        # A labelled STIR is company-tier and stays (04 §4.2).
+        ("STIR 300000011", "STIR 300000011", {}),
+    ],
+)
+def test_foreign_numbers_and_labelled_ids_are_masked(text, masked, reverse):
+    result = pseudonymise(text)
+    assert (result.text, result.reverse) == (masked, reverse)
+    assert_masked(result.text)
+    assert restore(result.text, result.reverse) == text
+
+
+def test_the_reviews_message_reaches_no_model_raw():
+    """The E2E probe: classify already knows the sender's username; with it
+    and the label rules nothing personal is left."""
+    text = (
+        "Guangzhoudan 3 kub mato kerak. Telegram: namuna_tekstil, WeChat: "
+        "rustam_cn88, Qozogʻiston nomer +7 701 000 00 00"
+    )
+    bio = "Namuna Tekstil Savdo MChJ direktori, wa: +7 701 000 00 09"
+    told = pseudonymise(bio, handles=["namuna_tekstil", "5100000001"])
+    said = pseudonymise(text, handles=["namuna_tekstil", "5100000001"], prior=told)
+    for part in (told.text, said.text):
+        assert p.unmasked(part) == []
+        for raw in ("namuna_tekstil", "rustam_cn88", "701 000 00 00", "701 000 00 09"):
+            assert raw not in part
+
+
+def test_the_senders_own_handle_is_masked_wherever_it_is_written():
+    result = pseudonymise(
+        "namuna_tekstil ga yozing, NAMUNA_TEKSTIL yoki id 5100000001",
+        handles=["@namuna_tekstil", "5100000001"],
+    )
+    assert result.text == "<TG_1> ga yozing, <TG_1> yoki id <PHONE_1>"
+    # A username that is a business word is never masked as a handle.
+    assert pseudonymise("optom narx", handles=["optom"]).text == "optom narx"
+    assert pseudonymise("namuna_tekstilchi", handles=["namuna_tekstil"]).text == (
+        "namuna_tekstilchi"
+    )
+
+
+def test_a_long_run_that_is_no_number_stays():
+    # A 17-digit 2GIS firm id is longer than any number; a PINFL is <ID>.
+    assert p.unmasked("2GIS: 70000001012345678") == []
+    assert p.unmasked("JSHSHIR 31234567890123") == ["PINFL_RE"]

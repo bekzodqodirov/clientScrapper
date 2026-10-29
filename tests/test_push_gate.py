@@ -840,6 +840,11 @@ def test_the_window_is_tashkent_time(now, opens):
         ({"telegram": "@<TG_1>"}, "pseudonym:telegram"),
         ({"instagram": "<IG_2>"}, "pseudonym:instagram"),
         ({"evidence": "pochta <EMAIL_1>"}, "pseudonym:evidence"),
+        # The person line names the person and nothing more (05 §B.1, 06
+        # §5.1: no second number, handle or messenger id; E2E 2026-10-29).
+        ({"note": "BALL: 74/100\n  Masʼul: Rustam 90 000 00 07 (direktori)"}, "masul"),
+        ({"note": "BALL: 74/100\n  Masʼul: Rustam @namuna_boshqa"}, "masul"),
+        ({"note": "BALL: 74/100\n  Masʼul: Rustam (WeChat rustam_cn88)"}, "masul"),
         ({"firma": "Namuna\x00 MChJ"}, "ill_formed:firma"),
         ({"evidence": "bad \ud83d half"}, "ill_formed:evidence"),
         ({"score": 72}, "type:score"),
