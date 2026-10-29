@@ -414,6 +414,64 @@ async def test_a_purge_executes_what_its_plan_counted_and_the_log_holds_a_hash(
     assert files["ev_shared"].exists() and files["ev_twin_a"].exists()
 
 
+# Wave 4's homes meet the purge: T-30's opener on score_breakdown, T-21's ⏭
+# card (lead_reviews.remind_at) and push note (lead_candidates.push_note).
+OPENER = "Assalomu alaykum! Namuna Savdo uchun Xitoydan yuk tashishni taklif qilamiz."
+
+
+async def test_a_purge_takes_the_opener_the_put_off_card_and_the_push_note(session, root):
+    w = await subject(session, root)
+    cands = w.rows["candidates"]
+    opened = ("pushed", "open", "control")
+    for key in opened:
+        row = await fresh(session, m.LeadCandidate, cands[key].id)
+        row.score_breakdown = {
+            "total": 70,
+            "opener": OPENER,
+            "opener_meta": {"source": "draft", "segment": "A", "lang": "uz"},
+        }
+    refused = await fresh(session, m.LeadCandidate, cands["rejected"].id)
+    refused.push_note = "Telefon yaroqsiz"
+    refused.push_noted_at = now()
+    for cand, chat in ((cands["open"], 7001), (cands["control"], 7002)):
+        session.add(
+            m.LeadReview(
+                candidate_id=cand.id,
+                kind="manager",
+                state="asked",
+                card_chat_id=chat,
+                card_message_id=1,
+                asked_at=now(),
+                expires_at=now(),
+                remind_at=now(),
+            )
+        )
+    await session.commit()
+    plan = await purge.plan_company(session, w.root.id)
+    await purge.record(session, plan, requested_by="owner:1001")
+    await session.commit()
+
+    await purge.execute(session, plan, requested_by="owner:1001", now=now(), root=root)
+
+    # The kept candidates (push history) lose the opener, the one free text
+    # of the breakdown; the points stay. The control firm's is untouched.
+    for key in ("pushed", "open"):
+        breakdown = (await fresh(session, m.LeadCandidate, cands[key].id)).score_breakdown
+        assert breakdown == {"total": 70}, key
+    control = await fresh(session, m.LeadCandidate, cands["control"].id)
+    assert control.score_breakdown["opener"] == OPENER
+    # The refused candidate had no push: it goes, and its note with it.
+    assert await fresh(session, m.LeadCandidate, cands["rejected"].id) is None
+    # The ⏭ card is gone with its row: review_cards_job's resend finds only
+    # the control's.
+    due = await session.scalars(
+        sa.select(m.LeadReview.candidate_id).where(
+            m.LeadReview.state == "asked", m.LeadReview.remind_at <= now()
+        )
+    )
+    assert list(due) == [cands["control"].id]
+
+
 async def test_the_companies_are_tombstoned_and_a_merged_source_keeps_its_own_keys(
     session, root
 ):

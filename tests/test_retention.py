@@ -903,6 +903,46 @@ async def test_r6_ledgers_and_the_hold_sweep_that_keeps_push_history(session, di
     assert await fresh(session, m.Suppression, lasting.id) is not None
 
 
+async def test_r6_s_hold_sweep_takes_wave_4_s_rows_with_the_candidate(session, dirs):
+    # T-21's push note and ⏭ card, T-30's opener, T-35's digest and alert
+    # rows: none outlives R6. The swept candidate takes its card (the FK
+    # cascades) and its note and opener (its own columns); reminder_log ages
+    # by sent_at whatever the kind.
+    swept = await gate_fixtures.candidate(
+        session,
+        await gate_fixtures.firm(session),
+        state="hold",
+        updated_at=ago(366),
+        push_note="Telefon yaroqsiz",
+        push_noted_at=ago(366),
+        score_breakdown={"total": 70, "opener": "Assalomu alaykum!"},
+    )
+    session.add(
+        m.LeadReview(
+            candidate_id=swept.id,
+            kind="manager",
+            state="asked",
+            card_chat_id=7003,
+            card_message_id=1,
+            asked_at=ago(366),
+            expires_at=ago(365),
+            remind_at=ago(365),
+        )
+    )
+    kinds = ("digest", "review_expired", "review_resent", "alert:cost_cap")
+    reminders = [m.ReminderLog(kind=kind, ref="r") for kind in kinds]
+    session.add_all(reminders)
+    await session.commit()
+    for row in reminders:
+        await age(session, "reminder_log", "sent_at", row.id, 91)
+    await session.commit()
+    report = await run(dirs)
+    assert report["R6"]["lead_candidates"] == 1
+    assert report["R6"]["reminder_log"] == len(kinds)
+    assert await fresh(session, m.LeadCandidate, swept.id) is None
+    assert await count(session, m.LeadReview) == 0
+
+
 async def test_r6b_sweeps_client_exports_older_than_a_day(session, dirs):
     _, imports = dirs
     old, today = imports / "clients-old.xlsx", imports / "clients.xlsx"

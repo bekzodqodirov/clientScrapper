@@ -21,11 +21,14 @@ is a slice of the page); ``model_jobs.request``/``pseudonyms`` and the result
 (an unsent or in-flight job ends ``failed`` with ``error='purged'``); the
 evidence rows only the subject's rows cite, their files unlinked last when
 no other row holds them; ``company_aliases``, ``company_ids``; the
-candidates and their review cards — **except a candidate with ``push_log``
-rows**, which ``push_log.candidate_id`` RESTRICT keeps on purpose: an open
-one ends ``suppressed`` (pointing at the ``legal``/``dnc`` row this purge
-wrote) or, for any other reason, ``excluded(owner)``; a terminal one stays as
-it is. ``sheet_rows`` are tombstoned and a monitored chat of the company's
+candidates and their review cards (a ⏭ card's ``remind_at`` with them, so
+nothing is asked again) — **except a candidate with ``push_log`` rows**,
+which ``push_log.candidate_id`` RESTRICT keeps on purpose: an open one ends
+``suppressed`` (pointing at the ``legal``/``dnc`` row this purge wrote) or,
+for any other reason, ``excluded(owner)``; a terminal one stays as it is;
+either loses its opener (``score_breakdown.opener``/``opener_meta``, the one
+free text there — ``push_note`` holds only the gate's coded refusal words).
+``sheet_rows`` are tombstoned and a monitored chat of the company's
 channel is no longer read. A message of the subject's person that resolved to
 another firm is the person's and goes with its observation and signals; that
 firm is not purged, its candidate is scored again (``signals.mark_stale``).
@@ -72,6 +75,7 @@ from pathlib import Path
 from typing import Any, Final
 
 import sqlalchemy as sa
+from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
@@ -823,6 +827,20 @@ async def _stop(
     deleted = await _gone(
         session, sa.delete(LeadCandidate).where(LeadCandidate.id.in_(scope.deleted))
     )
+    # A kept candidate's opener is free text a manager would send — a draft
+    # was asked with the company's name (04 §4.5) and may say it — so it goes
+    # with the name; what stays of score_breakdown is keys, ids and points.
+    if scope.kept:
+        await _gone(
+            session,
+            sa.update(LeadCandidate)
+            .where(LeadCandidate.id.in_(scope.kept))
+            .values(
+                score_breakdown=LeadCandidate.score_breakdown.op("-")(
+                    sa.cast(list(candidates.CARRIED_KEYS), ARRAY(sa.Text))
+                )
+            ),
+        )
     anonymous: dict[str, Any] = {
         "display_name": PURGED_NAME,
         "name_key": PURGED_NAME_KEY,
