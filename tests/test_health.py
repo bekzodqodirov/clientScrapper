@@ -1958,3 +1958,13 @@ def test_an_unproved_drill_is_not_said_when_the_drill_is_off(monkeypatch):
     status.restore_drill = None
     status.backup = replace(status.backup, oldest_at=NOW - timedelta(days=30))
     assert [p.key for p in health.problems(status)] == []
+
+
+def test_a_size_under_a_megabyte_is_not_zero():
+    """The backup caption said «0 MB» for a small file (seam review wave 4)."""
+    assert [health.size_label(n) for n in (None, 900, 5 * 1000**2, 3 * 1000**3)] == [
+        "?",
+        "<1 MB",
+        "5 MB",
+        "3.0 GB",
+    ]

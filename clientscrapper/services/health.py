@@ -429,6 +429,8 @@ def size_label(size: int | None) -> str:
         return "?"
     if size >= _GB:
         return f"{size / _GB:.1f} GB"
+    if size < _MB:
+        return "<1 MB"
     return f"{size // _MB} MB"
 
 

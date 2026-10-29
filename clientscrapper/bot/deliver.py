@@ -191,8 +191,13 @@ async def _edit_markup(
 async def _send_document(
     bot: Bot, chat_id: int, path: Path, caption: str | None
 ) -> Message | None:
+    """The one document is the nightly backup (BACKUP_TIME 03:45, inside the
+    default QUIET_HOURS): it arrives silently — 06 §1.6 keeps the night for
+    critical problems, and a file is never news (seam review wave 4)."""
     try:
-        return await bot.send_document(chat_id, FSInputFile(path), caption=caption)
+        return await bot.send_document(
+            chat_id, FSInputFile(path), caption=caption, disable_notification=True
+        )
     except Exception as exc:
         log.warning("document not sent", extra={"error": type(exc).__name__})
         return None

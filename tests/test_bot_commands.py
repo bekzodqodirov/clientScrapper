@@ -1920,6 +1920,8 @@ async def test_the_worker_hands_the_backup_to_the_owner_through_the_bot(
         assert await send(piece, "zaxira") is True
         [sent] = fake.named("SendDocument")
         assert (sent["chat_id"], sent["caption"]) == (OWNER, "zaxira")
+        # 03:45 is inside QUIET_HOURS: the backup never rings the phone.
+        assert sent["disable_notification"] is True
     finally:
         await worker.disconnect_owner_bot(connected)
     assert worker._seams.send_document is None
