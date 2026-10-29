@@ -451,7 +451,7 @@ async def test_tel_over_a_persons_older_number_keeps_it_person_tier(session, set
     see (seam review wave 4)."""
     cand, manager = await held_lead(session)
     [person] = await contacts_of(session, cand)
-    person.phone, person.phone_kind = "+998901110022", "mobile"
+    person.phone, person.phone_kind = "+998900000022", "mobile"
     person.legal_basis = "public_source"
     person.source_url = "https://t.me/namuna_tg"
     person.collected_at = NOW - timedelta(days=3)
