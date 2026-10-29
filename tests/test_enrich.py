@@ -533,7 +533,15 @@ async def test_a_site_fetched_within_30_days_is_not_fetched_again(session, tmp_p
 
 
 def test_enrichment_imports_no_telethon_and_no_http_client():
-    for name in ("services/enrich.py", "services/registry.py"):
+    # No model client either: E0-E6 make no model call, so nothing reaches a
+    # model unpseudonymised (E5/E6's own clients carry that rule, T-25/T-26).
+    for name in (
+        "services/enrich.py",
+        "services/registry.py",
+        "services/markup.py",
+        "collectors/company_site.py",
+        "collectors/telegram_page.py",
+    ):
         path = PACKAGE / name
         module = "clientscrapper." + name.removesuffix(".py").replace("/", ".")
         found = imported_modules(tree_of(path), module=module)

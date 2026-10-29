@@ -16,7 +16,11 @@
    on a candidate that is usually in ``review`` or ``hold`` (06 §1.2 «E4
    re-runs»); an open candidate outside ``enriching`` with ``next_enrich_at
    ≤ now`` gets step E4 alone, its state left to ``score_job`` (the signals
-   mark it stale), and ``next_enrich_at`` cleared;
+   mark it stale), and ``next_enrich_at`` cleared. The clock alone is no
+   ``/stir`` — a warm hold keeps its enrichment clock (``candidates``): the
+   re-run is the candidate whose owner ``/stir`` evidence
+   (``owner:/stir:<company_id>``) was written at that very ``next_enrich_at``
+   (``_stir_asked``);
 3. **attempts**: ``state='enriching' AND next_enrich_at ≤ now``, oldest due
    first.
 
