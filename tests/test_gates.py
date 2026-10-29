@@ -316,6 +316,17 @@ def test_b2c_words_without_volume_exclude_and_with_volume_hold():
         # A Telegram poster telegram_monitor judged a tout within 7 days after
         # the post (integration T-14 → T-19; tests/test_telegram_pipeline.py).
         (replace(PASSING, tout_poster=True), (), None, "tout"),
+        # The classifier's tout the validators kept (04 §4.3, §4.7): an
+        # ask-shaped offer the collector's text rule let through.
+        (
+            replace(
+                PASSING,
+                import_signals=(ImportView(speaker_role="tout", confidence=0.9),),
+            ),
+            (),
+            None,
+            "model",
+        ),
     ],
 )
 def test_a_competitor_is_excluded(company, signals, verdict, why):

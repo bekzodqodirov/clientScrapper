@@ -196,6 +196,41 @@ CASES: dict[str, tuple[re.Pattern[str], Extract, Cases]] = {
             ),
         },
     ),
+    # The tout filter's ask (03 §2.3 / 04 §6): «kim kargo qiladi?» is a buyer.
+    "QUESTION_RE": (
+        kw.QUESTION_RE,
+        _whole,
+        {
+            "uz-Latn": (
+                [
+                    ("2 kub mato bor, kim kargo qiladi", "kim"),
+                    ("qaysi kargo yaxshi", "qaysi"),
+                    ("narxi qancha bo'ladi", "qancha"),
+                    ("necha kunda keladi", "necha"),
+                    ("kargo kerakmi?", "?"),
+                ],
+                ["Kargo Xitoy-Toshkent: 1 kub 250$", "kimyo mahsulotlari", "Qaysar odam"],
+            ),
+            "uz-Cyrl": (
+                [
+                    ("ким карго қилади", "ким"),
+                    ("қайси карго яхши", "қайси"),
+                    ("нархи қанча", "қанча"),
+                    ("неча кунда келади", "неча"),
+                ],
+                ["кимё маҳсулотлари", "Карго Хитой-Тошкент: 1 куб 250$", "Қайсар одам"],
+            ),
+            "ru": (
+                [
+                    ("посоветуйте карго", "посоветуйте"),
+                    ("кто возит из Китая", "кто"),
+                    ("какая доставка лучше", "какая"),
+                    ("сколько стоит 1 куб", "сколько"),
+                ],
+                ["Карго из Китая: 1 куб 250$", "Какао оптом", "Доставка по Ташкенту"],
+            ),
+        },
+    ),
     "SUPPLY_RE": (
         kw.SUPPLY_RE,
         _whole,

@@ -26,10 +26,12 @@ A schema-valid answer is still only a claim. Before anything is stored:
   left with no volume is ``none`` (with no quote); a quoted container,
   truck or weight keeps its basis and quote with no number — the unit is
   what the text says;
-* **role consistency** (``role_consistent``): a weak ``tout`` with no
-  ``COMPETITOR_RE`` in the text is ``unknown`` — the collector's tout filter
-  already caught the plain ones, and a doubtful model flag must not exclude a
-  buyer;
+* **role consistency** (``role_consistent``): a weak ``tout`` whose text
+  offers no cargo service (``keywords.cargo_offer``, the tout filter's own
+  text rule: a buyer's «kim kargo qiladi?» names the service, it does not
+  offer it) is ``unknown`` — the collector's tout filter already caught the
+  plain ones, and a doubtful model flag must not exclude a buyer (a tout
+  that stands excludes the company, ``gates.gate_competitor``);
 * **goods** (``clean_goods``): lower-cased, deduplicated, at most three words
   and 30 characters each, Latin or Cyrillic letters only.
 """
@@ -44,12 +46,12 @@ from dataclasses import dataclass, field
 from typing import Any, Final
 
 from clientscrapper.collectors.keywords import (
-    COMPETITOR_RE,
     CONTAINER_RE,
     EMAIL_RE,
     PHONE_RE,
     PINFL_RE,
     TG_RE,
+    cargo_offer,
 )
 from clientscrapper.collectors.telegram_monitor import stated_volume
 from clientscrapper.services.pseudonyms import restore
@@ -206,9 +208,9 @@ def sane_volume(value: Any, basis: str, quote: str | None) -> float | None:
 
 
 def role_consistent(role: SpeakerRole, *, text: str, confidence: float) -> SpeakerRole:
-    """A ``tout`` the text does not support (no ``COMPETITOR_RE``) and the
-    model is not sure of (confidence < 0.8) is ``unknown``."""
-    if role == "tout" and confidence < TOUT_CONFIDENCE and not COMPETITOR_RE.search(text):
+    """A ``tout`` the text does not support (no cargo offer: ``cargo_offer``)
+    and the model is not sure of (confidence < 0.8) is ``unknown``."""
+    if role == "tout" and confidence < TOUT_CONFIDENCE and not cargo_offer(text):
         return "unknown"
     return role
 

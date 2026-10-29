@@ -26,6 +26,9 @@ forced a change — each is named in a comment beside it:
 * PINFL_RE (a 14-digit run) is new: the normaliser, the pseudonymiser and
   the output hygiene ask the one pattern;
 * LEGAL_FORM_RE gained МЧЖ, ХЧК and СП, the Cyrillic forms of MChJ, XChK, SP;
+* QUESTION_RE is new, and so are ``buyer_question`` and ``cargo_offer``: the
+  tout filter's text rule (03 §2.3) reads a message for the cargo core only
+  when it is not a buyer's ask — «kim kargo qiladi?» is a buyer (04 §6);
 * TONNES_RE, VACANCY_IMPORT_RE, NON_CN_ORIGIN_RE and STATE_BODY_RE are not
   03 §1.4's: they are 04 §5.1's detections of ``vol_stated_*`` (tonnes),
   ``vol_vacancy_import``, ``neg_non_cn_origin`` and ``neg_state_body``, kept
@@ -536,6 +539,18 @@ INTENT_RE = re.compile(
     r"закуп(?:аю|аем|ает|ают|ить|ками|кой|ка|ки|ку|ок))(?!\w)",
     re.I,
 )
+# A question (the tout filter's «ask-shaped» half, 03 §2.3 / 04 §6): a
+# question mark, or an interrogative a buyer opens with when he leaves it out
+# — «kim kargo qiladi», «qaysi kargo yaxshi», «кто доставит», «посоветуйте
+# карго». Not 03 §1.4's: a buyer who names the service he looks for writes
+# its competitor word in a question, and the filter must not read that as an
+# offer.
+QUESTION_RE = re.compile(
+    r"\?|(?<!\w)(?:kim|qaysi|qancha|qanday|qanaqa|qayer\w*|necha\w*|nechpul|"
+    r"ким|[қк]айси|[қк]анча|[қк]андай|[қк]аер\w*|неча\w*|"
+    r"кто|как(?:ой|ая|ие|ую|ого|ом)|сколько|где|посоветуйте|подскажите)(?!\w)",
+    re.I,
+)
 # Supply-side posts by a wholesaler (channel posts): arrival of stock. The
 # Uzbek Cyrillic line spells the Latin one (not in 03 §1.4); plurals and endings
 # are 03's words as written («Yangi tovarlar keldi», «Konteynerlar keldi»,
@@ -733,6 +748,29 @@ def pricelist_shaped(text: str) -> bool:
     """03 §2.3's price-list shape, which the tout rule counts per sender:
     PRICELIST_MIN_PRICES prices or more, or longer than PRICELIST_MIN_CHARS."""
     return price_count(text) >= PRICELIST_MIN_PRICES or len(text) > PRICELIST_MIN_CHARS
+
+
+def buyer_question(text: str) -> bool:
+    """A buyer's ask (03 §2.3, 04 §6: «kim kargo qiladi?» is a buyer): buyer
+    intent (``INTENT_RE``) or a question form (``QUESTION_RE``), and no price
+    figure (``PRICE_RE``) — a forwarder states its tariff («1 kub 250$, 3 kub
+    kerakmi?»), a buyer asks for one («narxi qancha?»). A volume alone is no
+    ask: a tout's offer states one too («1 kub 250$»)."""
+    asks = INTENT_RE.search(text) is not None or QUESTION_RE.search(text) is not None
+    return asks and PRICE_RE.search(text) is None
+
+
+def cargo_offer(text: str, *, may_ask: bool = True) -> bool:
+    """A text that offers the cargo service — read as 04 §6 reads a
+    self-description: ``COMPETITOR_SELF_RE`` (the cargo core: «Kargo
+    Xitoy-Toshkent», «Доставка из Китая», never «Доставка по Ташкенту»), in a
+    text that is not a buyer's ask (``buyer_question``). ``may_ask=False``:
+    the speaker never asks (a chat posting as itself), so its words are its
+    offer. The tout filter's text rule (03 §2.3) and the model's tout check
+    (04 §4.7) are this one rule."""
+    if may_ask and buyer_question(text):
+        return False
+    return COMPETITOR_SELF_RE.search(text) is not None
 
 
 # The normaliser validates operator codes (services/keys.phone_e164 / phone_kind).

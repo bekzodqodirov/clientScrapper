@@ -294,6 +294,10 @@ def test_a_bound_the_grammar_cannot_hold_is_applied_not_refused():
         ("tout", "Xitoydan mebel kerak, 5 kub", 0.8, "tout"),
         ("tout", "Kargo xizmati: Xitoydan yuk olib kelamiz", 0.3, "tout"),
         ("tout", "Доставка из Китая, недорого", 0.5, "tout"),
+        # A buyer's ask names the service, it does not offer it (04 §6): the
+        # tout filter's text rule, keywords.cargo_offer, decides here too.
+        ("tout", "Guangzhoudan 2 kub mato bor, kim kargo qiladi?", 0.5, "unknown"),
+        ("tout", "Kargo Xitoy-Toshkent: 1 kub 250$, 3 kub kerakmi?", 0.5, "tout"),
         ("buyer", "Kargo kerak", 0.2, "buyer"),
         ("seller", "Optom narx", 0.1, "seller"),
     ],

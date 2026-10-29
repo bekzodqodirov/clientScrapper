@@ -12,7 +12,9 @@ order:
    ``hold`` — it may become B2B after enrichment, so ``GateResult.decide``
    defers this one hold until the candidate is bound for a card or a push.
 2. ``not_competitor`` → ``excluded(competitor)``, ``is_competitor`` and a
-   ``suppression(competitor, company_id, source='resolver')`` row. A
+   ``suppression(competitor, company_id, source='resolver')`` row; a
+   classification of one of the company's messages as a tout's (the
+   ImportSignal's ``speaker_role='tout'`` the validators kept) is one. A
    Telegram poster is a tout's company too when ``telegram_monitor`` judged
    one of the poster's later messages a tout's within ``TOUT_WINDOW`` of a
    post the company stands on (``tout_poster``): the collector counts price
@@ -383,6 +385,13 @@ def gate_competitor(
         why = "words"
     elif verdict is not None and verdict.get("is_competitor") is True:
         why = "verdict"
+    elif any(s.speaker_role == "tout" for s in company.import_signals):
+        # The classifier's tout (04 §4.3: ImportSignal ``competitor`` is
+        # ``speaker_role='tout'``), as the validators left it: a weak one
+        # whose text offers no cargo is ``unknown`` by then (04 §4.7), so the
+        # tout that stands is the one an ask-shaped offer the tout filter
+        # let through carries («Xitoydan yuk olib kelmoqchimisiz? Kargo …»).
+        why = "model"
     elif any(s.key == COMPETITOR_FLAG for s in signals_):
         why = "signal"
     elif company.competitor_channel:

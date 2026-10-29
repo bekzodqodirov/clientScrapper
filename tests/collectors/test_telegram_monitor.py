@@ -351,6 +351,68 @@ def test_below_each_threshold_the_ask_stands(fields):
     assert obs.signal_types == ["intent_ask", "volume_m3_3plus", "china_origin"]
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        # A buyer who names the service he looks for is GSR's customer (04
+        # §6: «kim kargo qiladi?» is a buyer) — the E2E review's four asks
+        # and the delivery words a buyer writes.
+        "Guangzhoudan 2 kub mato bor, kim kargo qiladi?",
+        "Yiwudan 3 kub yuk bor, qaysi kargo yaxshi? Tel +998 90 000 00 01",
+        "Xitoydan 5 kub mebel olib kelish kerak, kargo kerak, narxi qancha?",
+        "Нужно доставить 4 куба из Гуанчжоу, посоветуйте карго",
+        "Guangzhoudan 3 kub mato kim kargo qiladi",  # no «?»: the interrogative
+        "rastamojka bilan kim yordam beradi? 5 kub",
+        "Нужна доставка 3 куба из Китая",
+        "3 kub logistika kerak",
+        "express kerak 2 kub",
+        "broker kerak 2 kub",
+        "Guangzhoudan 3 kub mato, dostavka bilan",  # no cargo core: no offer
+    ],
+)
+def test_a_buyers_ask_that_names_the_service_is_no_tout(text):
+    obs = tm.parse_post(post(text))
+    assert obs is not None
+    assert "tout" not in obs.attrs
+    assert obs.person_telegram == "namuna_tekstil"
+    assert obs.signal_types and "competitor" not in obs.signal_types
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Kargo Xitoy-Toshkent: 1 kub 250$, 3-5 kunda yetkazib beramiz",
+        # A tariff beside a rhetorical question is still the forwarder's
+        # (keywords.buyer_question: a buyer asks for a price, never states one).
+        "Kargo Xitoy-Toshkent: 1 kub 250$, 3 kub kerakmi?",
+        "Доставка из Китая: 1 куб 230$, 10 дней",
+        "Xitoydan yuk tashish xizmati, 1 kub 240$",
+    ],
+)
+def test_an_offer_of_the_cargo_service_is_a_tout(text):
+    obs = tm.parse_post(post(text, sender_bio=None))
+    assert obs is not None
+    assert obs.attrs["tout"] == ["competitor_text"]
+
+
+def test_a_wholesalers_delivery_words_are_no_cargo_offer():
+    """A channel's own post is its self-description, read as gate 2 reads one
+    (COMPETITOR_SELF_RE): every importer delivers."""
+    speaking = {
+        "sender_id": CHANNEL_ID,
+        "sender_username": "namuna_mebel",
+        "sender_name": "Namuna Mebel Optom",
+        "sender_bio": None,
+    }
+    own = "Yangi konteyner keldi! Optom mebel, Toshkent bo'ylab dostavka bepul"
+    assert tm.tout_reasons(post(own, chat=CHANNEL, **speaking)) == ()
+    cargo = "Kargo xizmati: Xitoydan yuk olib kelamiz, 1 kub 250$"
+    assert tm.tout_reasons(post(cargo, chat=CHANNEL, **speaking)) == ("competitor_text",)
+    # A chat never asks: its question is its offer.
+    asked = "Xitoydan yuk olib kelmoqchimisiz? Kargo xizmati"
+    assert tm.tout_reasons(post(asked, chat=CHANNEL, **speaking)) == ("competitor_text",)
+
+
 def test_a_chat_posting_as_itself_is_judged_by_its_words_and_role_only():
     """A wholesaler channel's price lists copied into its discussion group are
     not a poster's spam: the price-list and forward rules are about people."""
@@ -507,6 +569,19 @@ def test_a_competitors_about_is_kept_as_a_competitor():
     quiet = about.about_body(_monitor(), about.About(text="Mebel"), read_at=T0)
     [seeded] = tm.parse_about(quiet, url="u", fetched_at=T0, competitor_chat=True)
     assert seeded.attrs["tout"] == ["competitor_chat"]
+
+
+def test_a_wholesalers_about_that_delivers_is_no_competitor():
+    """An about is a self-description: gate 2's cargo core reads it, so
+    «Toshkent boʻylab dostavka» is a wholesaler's selling point, not a tout."""
+    body = about.about_body(
+        _monitor(),
+        about.About(text="Optom mebel Xitoydan. Toshkent bo'ylab dostavka bepul"),
+        read_at=T0,
+    )
+    [obs] = tm.parse_about(body, url="https://t.me/s/namuna_mebel", fetched_at=T0)
+    assert "tout" not in obs.attrs
+    assert "competitor" not in obs.signal_types
 
 
 # --- the runs (Postgres) --------------------------------------------------------------

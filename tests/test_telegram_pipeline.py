@@ -152,6 +152,29 @@ async def test_the_company_first_order_ends_the_same(
     assert (cand.score, cand.tier, cand.state) == (54, "warm", "enriching")
 
 
+async def test_a_buyer_who_asks_for_cargo_ends_as_a_scored_candidate(
+    session, enabled, offline, tmp_path, model_api
+):
+    """04 §6: «kim kargo qiladi?» is a buyer. The tout filter reads a
+    message for competitor words only when it offers the service
+    (keywords.cargo_offer), so the ask reaches the classifier, the resolver,
+    the gates and the scorer like any other — the customer GSR looks for."""
+    text = "Guangzhoudan 2 kub mato bor, kim kargo qiladi?"
+    row_id = await _message(session, offline, tmp_path, text)
+    row = await interaction(session, row_id)
+    assert row.processed_at is None  # standing: the classifier's queue
+    model_api.queue(message(BUYER))
+    assert (await classify.classify_batch(now=NOW)).applied == 1
+    report = await companies.resolve_batch(now=NOW)
+    assert (report.resolved, report.rejected) == (1, 0)
+    found = await _signals(session)
+    assert found["vol_stated_1_3"].quote == "2 kub mato"
+    assert (await candidates.score_batch(now=NOW)).scored == 1
+    cand = await _candidate(session)
+    assert (cand.score, cand.tier, cand.state) == (54, "warm", "enriching")
+    assert cand.score_breakdown["gates"]["not_competitor"] == "pass"
+
+
 async def test_a_volume_only_the_model_read_scores_the_found_candidate(
     session, enabled, offline, tmp_path, model_api
 ):

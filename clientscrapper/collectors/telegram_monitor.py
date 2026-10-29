@@ -15,7 +15,12 @@ then finds the row handled (``ingest.handle_edit``). Of each:
 * **the tout filter**, before any model call (03 §2.3): ``COMPETITOR_RE`` on
   the speaker's username (its words: ``fx_express`` is «fx express»; a glued
   one by ``keywords.competitor_handle``: «halolcargo»), name (camel case
-  split: «HalolCargo») and bio, or on the message. The bio is
+  split: «HalolCargo») and bio; on the message only when it is offer-shaped,
+  and then with ``COMPETITOR_SELF_RE``, the cargo core gate 2 reads in a
+  self-description (``offers_cargo``, 04 §6): a person's or a poster's ask —
+  buyer intent or a question form, «kim kargo qiladi?» — is a buyer's,
+  whatever service it names, and «Доставка по Ташкенту» is no offer of
+  cargo. The bio is
   ``interactions.sender_bio``, which only ``userbot/about.py`` fills — some
   hours after the message, for a poster seen for the first time — so a row
   that has none yet takes the sender's newest bio from any of their rows
@@ -106,6 +111,7 @@ from clientscrapper.collectors.keywords import (
     SUPPLY_RE,
     VOLUME_RE,
     bulky_categories,
+    cargo_offer,
     competitor_handle,
     pricelist_shaped,
 )
@@ -287,7 +293,7 @@ def tout_reasons(post: Post) -> tuple[Tout, ...]:
     )
     if (said_by and COMPETITOR_RE.search(said_by)) or competitor_handle(speaker.username):
         reasons.append("competitor_sender")
-    if COMPETITOR_RE.search(post.text):
+    if offers_cargo(post.text, speaker=speaker.kind):
         reasons.append("competitor_text")
     if speaker.kind == "chat":
         if post.competitor_sender or (
@@ -300,6 +306,15 @@ def tout_reasons(post: Post) -> tuple[Tout, ...]:
     if is_channel_forward(post):
         reasons.append("forwarded_channel")
     return tuple(reasons)
+
+
+def offers_cargo(text: str, *, speaker: SpeakerKind) -> bool:
+    """The text rule of the tout filter (03 §2.3, read as 04 §6 reads a
+    self-description; ``keywords.cargo_offer``): a person's or a classifieds
+    poster's ask is a buyer's whatever service it names («Guangzhoudan 2 kub
+    mato bor, kim kargo qiladi?» is the customer GSR looks for); a chat
+    speaking as itself never asks — its post is its self-description."""
+    return cargo_offer(text, may_ask=speaker != "chat")
 
 
 def buyer_trigger(text: str) -> bool:
@@ -641,7 +656,7 @@ def parse_about(
     reasons: list[Tout] = []
     if (said_by and COMPETITOR_RE.search(said_by)) or competitor_handle(username):
         reasons.append("competitor_sender")
-    if COMPETITOR_RE.search(text):
+    if offers_cargo(text, speaker="chat"):
         reasons.append("competitor_text")
     if competitor_chat:
         reasons.append("competitor_chat")
