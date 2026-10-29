@@ -37,6 +37,7 @@ TZ = ZoneInfo("Asia/Tashkent")
 _SEQ = itertools.count(1)
 # The sources columns the precision job writes: snapshotted and put back.
 SOURCE_FIELDS = (
+    "enabled",
     "auto_push",
     "precision_30d",
     "positives_30d",

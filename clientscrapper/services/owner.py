@@ -218,11 +218,16 @@ async def _locked_source(session: AsyncSession, key: str) -> Source | None:
 async def toggle_source(session: AsyncSession, key: str) -> bool | None:
     """``src:<key>:t``: the switch flipped under the row's lock (a tap that
     arrives twice flips it twice, as two taps would). The new value, or None
-    when the row is gone."""
+    when the row is gone. Switching a source ON ends the precision job's
+    week-long pause (06 §4.2 «/manbalar bilan yoqiladi»); a breaker's pause
+    is the breaker's and stays."""
     row = await _locked_source(session, key)
     if row is None:
         return None
     row.enabled = not row.enabled
+    if row.enabled and row.paused_reason == erp_feeds.LOW_PRECISION_REASON:
+        row.paused_until = None
+        row.paused_reason = None
     await session.flush()
     return row.enabled
 

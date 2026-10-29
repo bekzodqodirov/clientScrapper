@@ -11,3 +11,9 @@ Tadqiqot va taklif (asos):
 - `docs/ochiq-internet.md` — ochiq internetdan (Instagram, OLX, Google, Telegram, marketplace, kataloglar) qidirish usuli; `docs/namuna-nomzodlar.md` — jonli sinov namunasi (118 nomzod); `docs/ochiq-internet-api-memo.md` — API/cheklov/narxlar.
 - `docs/QURILISH-REJASI.md` — egasi javoblari asosidagi qurilish rejasi (nima quriladi, ERP o'zgarishlari, bepul stek, bostirish ro'yxati); `docs/erp-ozgarishlar-memo.md`, `docs/bepul-qidiruv-memo.md` — tekshiruv memolari.
 - `docs/manbalar.json` — tekshirilgan manbalar va dalil URL'lari.
+
+## Serverda ishlatish
+
+- `docs/OPS.md` — serverda ishga tushirish roʻyxati, buyruqlar, nosozliklar jadvali, haftalik aniqlik ishi va pilot koʻrsatkichlari (inglizcha).
+- Asosiy buyruqlar: `make up`, `make doctor`, `make migrate`, `make userbot-login`, `make backup` / `make restore FILE=…`, `make import-clients FILE=clients.xlsx`, `make test`.
+- Pilot natijasi: botda `/holat` (oxirgi 30 kun) va `make mvp-report [START=YYYY-MM-DD]` — 2-haftadagi ≥60 ballik pushlar, haqiqiy importyor ulushi, 1 ish kunida bogʻlanish (faqat ERP koʻrgani), Claude xarajati; «narx aytildi» taxminiy (`QUOTE_STAGE_NAMES`), «yutildi» birinchi yuk oʻrniga (taxminiy).

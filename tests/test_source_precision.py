@@ -330,3 +330,28 @@ async def test_the_worker_slot_runs_the_job(session):
         }
     ]
     assert (await row(session, "telegram_monitor")).auto_push is True
+
+
+async def test_switching_a_source_back_on_ends_the_low_precision_pause(session):
+    """06 §4.2: «/manbalar bilan yoqiladi» — off, then on, and it runs again;
+    a breaker's pause is not the owner's switch to end."""
+    await pushes(session, "olx_business", good=1, bad=29)
+    await erp_feeds.source_precision_job(SessionLocal, NOW)
+    await session.execute(
+        sa.update(Source)
+        .where(Source.key.in_(["olx_business", "hh_vacancies"]))
+        .values(enabled=True)
+    )
+    await session.execute(
+        sa.update(Source)
+        .where(Source.key == "hh_vacancies")
+        .values(paused_until=NOW + DAY, paused_reason="host_blocked:hh.uz")
+    )
+    await session.commit()
+    for key in ("olx_business", "hh_vacancies"):
+        assert await owner.toggle_source(session, key) is False
+        assert await owner.toggle_source(session, key) is True
+    await session.commit()
+    olx, hh = await row(session, "olx_business"), await row(session, "hh_vacancies")
+    assert (olx.enabled, olx.paused_until, olx.paused_reason) == (True, None, None)
+    assert (hh.paused_until, hh.paused_reason) == (NOW + DAY, "host_blocked:hh.uz")
