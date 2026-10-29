@@ -245,6 +245,8 @@ of the least-loaded rule is month-2 backlog (07 §4.1).
 [📞 Bogʻlandim] [🙅 Yozmang dedi] [❌ Notoʻgʻri / B2C] [⏭ Keyinroq]
 ```
 
+As built (T-20; seam review wave 4 records it): line 1 reads «📨 Nomzod · {score}/100 · {segment}» — «Telegram orqali» did not fit the first line of a 360 px phone, and the 📨 and the «👤 Yozish: t.me/…» line already say it (`cards.render_manager`, pinned by `tests/test_manager_handoff.py`).
+
 | Tap | Effect |
 |---|---|
 | 📞 Bogʻlandim | `answer='contacted'`; candidate stays `hold`; digest counts it; the manager may then send `/tel <review_id> +998…` — stored as the company's person-tier phone with `legal_basis='pre_contract_request'`, `source_url=message_url`, `collected_at=now()` (as built, seam review wave 4: a person who already holds another number takes the given one in its place on the same row — never a company-tier copy, which R4 and the person-tier rules would not see; a number the firm already lists stays the firm's); the new phone re-scores the candidate at once: `hold → scored → approved(approved_by='manager:<tg_id>')` (02 §2.9 — the owner's earlier `handoff` answer was the owner's approval; `approved_by` takes exactly `'owner:<id>'`, `'auto:<source>'` or `'manager:<tg_id>'`) → normal push gate → ERP lead with phone |

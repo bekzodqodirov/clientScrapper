@@ -222,6 +222,9 @@ class Flip:
     # the owner has none).
     pct: int | None = None
     pushes: int | None = None
+    # The source (sources.key): a flip the digest could not show is told
+    # again by the next one (``told``).
+    key: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -360,6 +363,32 @@ def _erp_lines(erp: ErpLine, unclassed: Sequence[Unclassed]) -> list[str]:
     return lines
 
 
+def _flip_line(flip: Flip) -> str:
+    return erp_feeds.flip_line(
+        _clip(flip.title, NAME_MAX), on=flip.on, pct=flip.pct, pushes=flip.pushes
+    )
+
+
+def _more_flips_line(flips: Sequence[Flip]) -> str:
+    return f"🔁 … yana {len(flips) - MAX_FLIPS} ta oʻzgarish — /manbalar"
+
+
+def told(flips: Sequence[Flip], text: str, seen: Mapping[str, bool]) -> dict[str, bool]:
+    """What a delivered digest may remember of each source's auto_push
+    (seam review wave 4): ``seen``, except a flip whose line ``fit`` dropped
+    from ``text`` (or whose «… yana» count it dropped) — that source keeps
+    the state the last digest told, so the next digest says the flip."""
+    shown = set(text.split("\n"))
+    remembered = dict(seen)
+    missed = [f for f in flips[:MAX_FLIPS] if _flip_line(f) not in shown]
+    if len(flips) > MAX_FLIPS and _more_flips_line(flips) not in shown:
+        missed += flips[MAX_FLIPS:]
+    for flip in missed:
+        if flip.key:
+            remembered[flip.key] = not flip.on
+    return remembered
+
+
 def _source_lines(
     sources: Sequence[SourceRow],
     flips: Sequence[Flip],
@@ -378,16 +407,9 @@ def _source_lines(
         if len(sources) > MAX_SOURCES:
             lines.append(f"  … yana {len(sources) - MAX_SOURCES} ta")
     for flip in flips[:MAX_FLIPS]:
-        lines.append(
-            erp_feeds.flip_line(
-                _clip(flip.title, NAME_MAX),
-                on=flip.on,
-                pct=flip.pct,
-                pushes=flip.pushes,
-            )
-        )
+        lines.append(_flip_line(flip))
     if len(flips) > MAX_FLIPS:
-        lines.append(f"🔁 … yana {len(flips) - MAX_FLIPS} ta oʻzgarish — /manbalar")
+        lines.append(_more_flips_line(flips))
     if erp_feeds.flips_not_live((f.on for f in flips), auto_approve=auto_approve):
         lines.append(erp_feeds.FLIPS_NOT_LIVE_UZ)
     for low in paused[:MAX_PAUSED]:
@@ -725,6 +747,7 @@ async def _sources(
                     on,
                     pct=job.pct if job is not None else None,
                     pushes=job.pushes if job is not None else None,
+                    key=key,
                 )
             )
         flips = tuple(found)
@@ -946,7 +969,7 @@ async def send(notify: Notify, *, now: datetime) -> SendOutcome:
     finally:
         async with session_scope() as own:
             if delivered:
-                await _remember(own, loaded.auto_push)
+                await _remember(own, told(loaded.view.flips, text, loaded.auto_push))
             else:
                 await own.execute(sa.delete(ReminderLog).where(ReminderLog.id == claim))
     if not delivered:
@@ -982,6 +1005,7 @@ __all__ = [
     "render_digest",
     "send",
     "sent_today",
+    "told",
     "unclassed_labels",
     "units",
     "yesterday_window",

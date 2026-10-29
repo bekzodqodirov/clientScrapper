@@ -651,7 +651,7 @@ async def test_an_auto_push_flip_is_one_line_once(session, sources_kept):
     title = await session.scalar(
         sa.select(Source.title_uz).where(Source.key == "hh_vacancies")
     )
-    assert flips == (digest.Flip(title, True),)
+    assert flips == (digest.Flip(title, True, key="hh_vacancies"),)
     await digest._remember(session, seen)
     await session.commit()
     assert (await digest._sources(session, NOW))[1] == ()
@@ -1127,3 +1127,46 @@ async def test_a_refused_dead_man_ping_reaches_the_digest(session, monkeypatch):
         "⚠️ Tashqi kuzatuvchi oxirgi signalni olmadi (HTTP 404) — manzilni tekshiring"
         in digest.render_digest(view).split("\n")
     )
+
+
+def test_a_flip_the_digest_could_not_show_is_told_again():
+    """``fit`` may drop a flip's line from a long digest; what is remembered
+    keeps that source's last-told state, so the next digest says the flip
+    (seam review wave 4). A shown flip is remembered as it now stands."""
+    shown = digest.Flip("Namuna OLX", True, key="olx_business")
+    dropped = digest.Flip("Namuna Maps", False, key="maps")
+    seen = {"olx_business": True, "maps": False, "hh_vacancies": True}
+    text = "\n".join(["Kunlik hisobot", digest._flip_line(shown), "  …", "Tizim"])
+    assert digest.told([shown, dropped], text, seen) == {
+        "olx_business": True,
+        "maps": True,
+        "hh_vacancies": True,
+    }
+    full = text + "\n" + digest._flip_line(dropped)
+    assert digest.told([shown, dropped], full, seen) == seen
+    many = [digest.Flip(f"S{i}", True, key=f"s{i}") for i in range(digest.MAX_FLIPS + 2)]
+    told = digest.told(many, "\n".join(digest._flip_line(f) for f in many), {})
+    assert {k for k, on in told.items() if on is False} == {
+        f"s{i}" for i in range(digest.MAX_FLIPS, digest.MAX_FLIPS + 2)
+    }
+
+
+async def test_a_sent_digest_that_dropped_a_flip_tells_it_tomorrow(
+    session, sources_kept, monkeypatch
+):
+    await session.execute(sa.update(Source).values(auto_push=False))
+    await session.commit()
+    _, _, seen = await digest._sources(session, NOW)
+    await digest._remember(session, seen)
+    await session.execute(
+        sa.update(Source).where(Source.key == "hh_vacancies").values(auto_push=True)
+    )
+    await session.commit()
+    # A digest so long that fit dropped the flip's line.
+    monkeypatch.setattr(digest, "render_digest", lambda view: "☀️ 29.10.2026\n  …\nTizim")
+    assert await digest.send(Owner(), now=NOW) == "sent"
+    session.expire_all()
+    flag = await session.get(RuntimeFlag, digest.AUTO_PUSH_FLAG)
+    assert flag is not None and flag.value["hh_vacancies"] is False
+    _, flips, _ = await digest._sources(session, NOW + timedelta(days=1))
+    assert [f.key for f in flips] == ["hh_vacancies"]

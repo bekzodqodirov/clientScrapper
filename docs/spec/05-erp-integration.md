@@ -1037,7 +1037,7 @@ for that source. `auto_push = pushes_30d ≥ 15 AND precision_30d ≥ 0.60`, fli
 (Sunday 04:00) — **except that the job never turns `auto_push` on while the owner has forbidden it**
 (`/manbalar` → `src:<key>:a` sets `config.auto_push_forbidden=true`, 06 §1.2): the UPDATE reads
 `SET auto_push = (pushes_30d >= 15 AND precision_30d >= 0.60) AND NOT coalesce(config->>'auto_push_forbidden','false')::bool`.
-A flip is one digest line. `/holat` prints the three numbers per source.
+A flip is one digest line. `/holat` prints the three numbers per source. As built (seam review wave 4): a flip whose line the digest's length cut dropped is not remembered as told (`digest.told`), so the next digest says it.
 
 ### B.3 Fallback while the `agent` door is not deployed
 
