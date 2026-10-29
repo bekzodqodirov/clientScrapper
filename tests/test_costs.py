@@ -1134,7 +1134,13 @@ async def test_an_undelivered_cost_cap_is_not_marked(session):
         await classify(session)
     with pytest.raises(CostCapReached):
         await classify(session, now=NOW.replace(hour=15))
-    assert len(owner.told) == 2 and await alert_rows(session) == []
+    # No alert row (the next refusal tries again); each failed delivery is
+    # noted, so the health sweep says what its teller could not (06 §4.2).
+    assert len(owner.told) == 2
+    assert [(kind, ref) for kind, ref, _ in await alert_rows(session)] == [
+        ("undelivered:cost_cap", "cost_cap"),
+        ("undelivered:cost_cap", "cost_cap"),
+    ]
 
 
 class SlowOwner(Owner):

@@ -113,6 +113,9 @@ files = [
     # T-21
     "clientscrapper/services/reviews.py",
     "clientscrapper/bot/cards_out.py",
+    # T-35
+    "clientscrapper/services/smoke.py",
+    "clientscrapper/services/digest.py",
 ]
 
 # APScheduler 3 ships no type information.
@@ -126,6 +129,7 @@ asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 filterwarnings = ["error::DeprecationWarning:clientscrapper.*"]
 markers = [
-    "live: real network, run only from the VPS with LIVE=1 (make smoke)",
+    "live: real network, run only from the VPS with LIVE=1 (make smoke); live(source=<sources.key>)",
+    "quarterly: a live test the weekly make smoke leaves out (make smoke FULL=1 runs it)",
     "slow: seeds large data; runs only with CS_RUN_SLOW=1",
 ]

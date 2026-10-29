@@ -113,6 +113,7 @@ from clientscrapper.services import (
     costs,
     crm_push,
     crontab,
+    digest,
     erp_feeds,
     health,
     model_jobs,
@@ -365,7 +366,7 @@ def job_table() -> tuple[JobSlot, ...]:
         JobSlot("reconcile", ("every 10m",), "T-28", crm_push.reconcile_slot),
         JobSlot("source_precision", ("0 4 * * 0",), "T-36"),
         # --- 06: digest, retention --------------------------------------------------
-        JobSlot("digest", (_at(settings.digest_time_parsed),), "T-35"),
+        JobSlot("digest", (_at(settings.digest_time_parsed),), "T-35", digest_job),
         JobSlot("retention", ("15 4 * * *",), "T-31"),
     )
 
@@ -690,6 +691,10 @@ async def prune_job_heartbeats(registered: list[str]) -> int:
 @dataclass(slots=True)
 class _Deadman:
     last: float | None = None
+    # The last ping's answer, carried in the next «worker» beat (``seen``) so
+    # /holat and the digest can say the outside watcher is not taking pings
+    # — a wrong URL is otherwise silent until the day it should have alarmed.
+    seen: dict[str, Any] | None = None
 
 
 _deadman = _Deadman()
@@ -706,7 +711,13 @@ async def deadman_ping(*, transport: httpx.AsyncBaseTransport | None = None) -> 
         return False
     _deadman.last = now
     status = await http_layer.ping(url, transport=transport)
-    return status is not None and 200 <= status < 300
+    ok = status is not None and 200 <= status < 300
+    _deadman.seen = {
+        "at": datetime.now(settings.tz).isoformat(),
+        "ok": ok,
+        "status": status,
+    }
+    return ok
 
 
 async def heartbeat_job(
@@ -718,8 +729,11 @@ async def heartbeat_job(
     only after the beat is durable, so a dead database stops the ping too and
     the outside watcher notices."""
     jobs = len(scheduler.get_jobs()) if scheduler is not None else 0
+    detail: dict[str, Any] = {"jobs": jobs}
+    if _deadman.seen is not None:
+        detail["deadman"] = dict(_deadman.seen)
     async with session_scope() as session:
-        await health.beat(session, "worker", detail={"jobs": jobs})
+        await health.beat(session, "worker", detail=detail)
     await deadman_ping(transport=transport)
 
 
@@ -789,6 +803,41 @@ async def health_job(
     _log_problems(found, now)
     await health.tell_offline(found, speak, now=now, memo=_offline_alerted_at)
     return None
+
+
+# --- the digest (06 §1.8) --------------------------------------------------------------
+
+
+async def digest_job(
+    *, now: datetime | None = None, notify: health.OwnerNotify | None = None
+) -> digest.SendOutcome:
+    """The owner's morning digest at DIGEST_TIME, once per Tashkent day
+    (``reminder_log(kind='digest')``), through the owner seam."""
+    return await digest.send(
+        notify or _seams.notify, now=now or datetime.now(settings.tz)
+    )
+
+
+def digest_due(now: datetime) -> bool:
+    """Past today's DIGEST_TIME and still inside REVIEW_HOURS (DIGEST_TIME's
+    own window, 06 §1.6): a digest the worker missed — down at 09:00, or the
+    owner's Telegram unreachable then — is still worth sending."""
+    local = now.astimezone(settings.tz)
+    start, end = settings.review_hours_parsed
+    return settings.digest_time_parsed <= local.time() < end and local.time() >= start
+
+
+async def _catch_up_digest(now: datetime, scheduler: AsyncIOScheduler | None) -> None:
+    """Today's digest when it is due and not sent yet (``digest_due``)."""
+    if not digest_due(now):
+        return
+    try:
+        async with session_scope() as session:
+            sent = await digest.sent_today(session, now)
+        if not sent and _run_now(scheduler, "digest", now):
+            log.info("catch-up: today's digest was not sent; sending it")
+    except Exception as exc:
+        log.error("catch-up of the digest failed", extra={"error": type(exc).__name__})
 
 
 # --- backups -------------------------------------------------------------------------
@@ -946,10 +995,11 @@ async def catch_up(
     and one spanning 03:00 that night's outcomes walks (the next delta does
     not make them). Through ``scheduler`` the job is moved to now rather than
     called here. Every branch is guarded: a startup path that can raise is a
-    crash loop under ``restart: unless-stopped``. (The digest's catch-up is
-    T-35's.)"""
+    crash loop under ``restart: unless-stopped``. Today's digest too, when
+    DIGEST_TIME went by unsent (``digest_due``)."""
     now = now or datetime.now(settings.tz)
     await _catch_up_outcomes(now, scheduler)
+    await _catch_up_digest(now, scheduler)
     if not settings.backup_age_recipient:
         return
     try:

@@ -111,6 +111,8 @@ BUILT = {
     # T-28: the push and its reconcile.
     "crm_push",
     "reconcile",
+    # T-35: the owner's morning digest.
+    "digest",
 }
 # The ERP slots and the ErpSync variant each runs (03 §3, 05 §B.2).
 ERP_VARIANTS = {
@@ -450,6 +452,7 @@ def _with_job(slot: worker.JobSlot) -> worker.JobSlot:
 def _isolated(monkeypatch, tmp_path):
     monkeypatch.setattr(settings, "backup_dir", str(tmp_path / "backups"))
     monkeypatch.setattr(worker._deadman, "last", None)
+    monkeypatch.setattr(worker._deadman, "seen", None)
     worker._offline_alerted_at.clear()
     yield
     worker.set_owner_notifier(None)
@@ -480,9 +483,16 @@ async def test_heartbeat_beats_the_worker_and_pings_the_dead_man(session, monkey
     monkeypatch.setattr(settings, "deadman_ping_url", "https://hc.example.uz/ping/namuna")
     scheduler = worker.build_scheduler()
     await worker.heartbeat_job(scheduler, transport=transport)
+    row = (await health.beats(session))["worker"]
+    # The first beat goes out before any ping: nothing to say about it yet.
+    assert row.detail == {"jobs": len(BUILT)}
     await worker.heartbeat_job(scheduler, transport=transport)  # within 5 minutes
     row = (await health.beats(session))["worker"]
-    assert row.detail == {"jobs": len(BUILT)}
+    # The ping the monitor observed is carried in the next beat (the digest
+    # and /holat read it there).
+    assert row.detail["jobs"] == len(BUILT)
+    assert row.detail["deadman"]["ok"] is True
+    assert row.detail["deadman"]["status"] == 200
     assert seen == ["https://hc.example.uz/ping/namuna"]
     monkeypatch.setattr(worker._deadman, "last", worker._deadman.last - 301)
     await worker.heartbeat_job(scheduler, transport=transport)

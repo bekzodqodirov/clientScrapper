@@ -87,7 +87,7 @@ from clientscrapper.db.models import (
     UsageLog,
 )
 from clientscrapper.db.session import session_scope
-from clientscrapper.services import backup, costs, crontab
+from clientscrapper.services import backup, costs, crontab, smoke
 
 log = logging.getLogger(__name__)
 
@@ -109,6 +109,8 @@ _VARIANT = re.compile(r"[a-z][a-z0-9_]{0,30}")
 # cost_cap with the same prefix, so the two share one memory.
 ALERT_KIND: Final = costs.ALERT_KIND
 RECOVERED_KIND: Final = "recovered:"
+# A told-first key its own job could not deliver (costs.UNDELIVERED_KIND).
+UNDELIVERED_KIND: Final = costs.UNDELIVERED_KIND
 
 Severity = Literal["critical", "warning"]
 
@@ -761,9 +763,11 @@ async def reported_problems(session: AsyncSession, now: datetime) -> dict[str, R
 
 
 async def _sources(session: AsyncSession) -> tuple[SourceState, ...]:
+    # A smoke test's row is ``skipped`` too, but the scheduler never fired the
+    # source: it must not restart a silent collector's clock (services/smoke).
     found = await session.execute(
         sa.select(CollectorRun.source_key, sa.func.max(CollectorRun.started_at))
-        .where(CollectorRun.status == "skipped")
+        .where(CollectorRun.status == "skipped", smoke.not_smoke())
         .group_by(CollectorRun.source_key)
     )
     skipped: dict[str, datetime] = {str(key): at for key, at in found.all()}
@@ -1276,6 +1280,58 @@ def _streak(component: Component) -> int:
     return failures if isinstance(failures, int) else 0
 
 
+# The sweep's own scheduler id: when it is the job that keeps raising, it
+# cannot say so itself (06 §4.3), so the bot's watchdog reads its beat.
+HEALTH_JOB: Final = "health"
+
+
+def failing_job_line(job: Component, runs: int) -> str:
+    """job_failing's line for one scheduler job (the sweep and the watchdog
+    say it in these words)."""
+    return (
+        f"⚠️ <code>{escape(job.name)}</code> ishi oxirgi {runs} marta xato bilan "
+        f"tugadi ({escape(job.detail.get('error') or '?')}) — "
+        "<code>make worker</code> loglari"
+    )
+
+
+def sweep_failing(status: Status) -> Problem | None:
+    """job_failing for the health sweep alone: its ``job:health`` beat says it
+    raised ``JOB_FAILING_STREAK`` times or more in a row (the worker is up —
+    a dead worker is worker_silent). The bot's watchdog says it, since a
+    sweep that crashes never reaches its own judgement."""
+    job = status.jobs.get(HEALTH_JOB)
+    if job is None or not worker_fresh(status):
+        return None
+    runs = _streak(job)
+    if runs < JOB_FAILING_STREAK:
+        return None
+    return Problem("job_failing", "warning", failing_job_line(job, runs))
+
+
+def status_from_beats(rows: Mapping[str, Heartbeat], now: datetime) -> Status:
+    """What the heartbeats alone say — the processes and the jobs — for a
+    reader whose ``gather`` failed with the database up (the watchdog): its
+    worker_silent and :func:`sweep_failing` hold on it; nothing else is
+    judged from it."""
+    return Status(
+        now=now,
+        db_ok=True,
+        disk_free_bytes=None,
+        disk_total_bytes=None,
+        disk_low=False,
+        backup=BackupInfo(configured=True),
+        components={
+            name: component_of(name, rows.get(name), now=now) for name in COMPONENTS
+        },
+        jobs={
+            key[len(JOB_PREFIX) :]: component_of(key[len(JOB_PREFIX) :], row, now=now)
+            for key, row in rows.items()
+            if key.startswith(JOB_PREFIX)
+        },
+    )
+
+
 def failing_jobs(status: Status) -> list[tuple[Component, int]]:
     """06 §4.2 job_failing, the scheduler half: a ``job:<id>`` whose last
     ``JOB_FAILING_STREAK`` runs or more raised (``failures`` in its beat)."""
@@ -1498,12 +1554,7 @@ def problems(status: Status) -> list[Problem]:
     ]
     if silent:
         add("collector_silent", _lines(silent))
-    failing = [
-        f"⚠️ <code>{escape(job.name)}</code> ishi oxirgi {n} marta xato bilan "
-        f"tugadi ({escape(job.detail.get('error') or '?')}) — "
-        "<code>make worker</code> loglari"
-        for job, n in failing_jobs(status)
-    ]
+    failing = [failing_job_line(job, n) for job, n in failing_jobs(status)]
     failing += [
         f"⚠️ {escape(source.title_uz)}"
         f"{' · ' + escape(run.variant) if run.variant else ''}: oxirgi {run.runs} ta "
@@ -1772,8 +1823,30 @@ def _repeat(key: str) -> timedelta:
     return REPEAT_OVERRIDES.get(key, timedelta(hours=settings.alert_repeat_hours))
 
 
+def _undelivered(last: Mapping[str, datetime], key: str, now: datetime) -> bool:
+    """The key's own teller gave up on this episode: an ``undelivered:<key>``
+    row newer than the key's last recovery and inside its repeat window (a
+    ``DAILY_KEYS`` key: this Tashkent day) — an older one is another
+    episode's."""
+    at = last.get(UNDELIVERED_KIND + key)
+    if at is None:
+        return False
+    cleared = last.get(RECOVERED_KIND + key)
+    if cleared is not None and cleared >= at:
+        return False
+    if key in DAILY_KEYS:
+        return at >= costs.day_start(now)
+    return now - at <= _repeat(key)
+
+
 def _alert_due(last: Mapping[str, datetime], key: str, now: datetime) -> bool:
-    if key in TOLD_FIRST_ELSEWHERE and not _told(last, key):
+    # Said first by its own job — unless that job could not deliver it: then
+    # the sweep says it, or nobody ever would (06 §4.2).
+    if (
+        key in TOLD_FIRST_ELSEWHERE
+        and not _told(last, key)
+        and not _undelivered(last, key, now)
+    ):
         return False
     alerted = last.get(ALERT_KIND + key)
     if alerted is None:
@@ -1819,6 +1892,7 @@ def _narrowed(problem: Problem, subjects: tuple[tuple[str, str], ...]) -> Proble
 async def _ledger(session: AsyncSession, keys: Iterable[str]) -> dict[str, datetime]:
     wanted = list(keys)
     kinds = [ALERT_KIND + k for k in wanted] + [RECOVERED_KIND + k for k in wanted]
+    kinds += [UNDELIVERED_KIND + k for k in wanted if k in TOLD_FIRST_ELSEWHERE]
     rows = await session.execute(
         sa.select(ReminderLog.kind, sa.func.max(ReminderLog.sent_at))
         .where(ReminderLog.kind.in_(kinds))
