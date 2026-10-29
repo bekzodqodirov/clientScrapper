@@ -2024,3 +2024,22 @@ async def test_the_erp_client_of_a_tap_is_closed_and_a_refused_url_is_none(
     monkeypatch.setattr(settings, "crm_agent_key", "")
     async with common._erp() as keyless:
         assert keyless is None
+
+
+async def test_an_error_on_a_strangers_update_answers_nobody(configured):
+    """The error answer goes only where deliver.to_person would send — the
+    owner or a listed manager in their own chat (seam review wave 4): a
+    handler that raises on a stranger's update answers nobody."""
+    bot, fake = fake_bot()
+    dp = bot_main.build_dispatcher(Deps(clock=lambda: NOW))
+
+    async def boom(*_: Any) -> None:
+        raise RuntimeError("bug")
+
+    dp.message.register(boom)
+    dp.callback_query.register(boom)
+    await dp.feed_update(bot, message(bot, "salom", user_id=STRANGER))
+    await dp.feed_update(bot, tap(bot, cb.resume("y"), user_id=STRANGER))
+    assert fake.named("SendMessage") == [] and fake.named("AnswerCallbackQuery") == []
+    await dp.feed_update(bot, message(bot, "salom", user_id=OWNER))
+    assert fake.texts() == [t("error")]

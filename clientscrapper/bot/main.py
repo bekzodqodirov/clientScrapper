@@ -49,7 +49,7 @@ from aiogram.types.error_event import ErrorEvent
 from sqlalchemy import exc as sa_exc
 
 from clientscrapper.bot import deliver, handlers
-from clientscrapper.bot.handlers.common import Deps
+from clientscrapper.bot.handlers.common import Deps, is_manager, is_owner
 from clientscrapper.bot.texts import COMMAND_MENU, MANAGER_MENU, t
 from clientscrapper.config import settings
 from clientscrapper.db.session import engine, session_scope
@@ -110,6 +110,8 @@ def build_dispatcher(deps: Deps | None = None) -> Dispatcher:
         query = update.callback_query
         try:
             if query is not None:
+                if not _ours(query.from_user.id, query.message):
+                    return
                 try:
                     await query.answer(text, show_alert=True)
                 except TelegramAPIError:
@@ -118,11 +120,23 @@ def build_dispatcher(deps: Deps | None = None) -> Dispatcher:
                     if isinstance(query.message, Message):
                         await query.message.answer(text, parse_mode=None)
             elif update.message is not None:
-                await update.message.answer(text, parse_mode=None)
+                sender = update.message.from_user
+                if sender is not None and _ours(sender.id, update.message):
+                    await update.message.answer(text, parse_mode=None)
         except Exception:
             log.warning("could not even report the error")
 
     return dp
+
+
+def _ours(user_id: int, message: object) -> bool:
+    """The error answer goes where ``deliver.to_person`` would send: to the
+    owner or a listed manager, in their own private chat (seam review wave
+    4 — a handler that raises on a stranger's update answers nobody)."""
+    if not (is_owner(user_id) or is_manager(user_id)):
+        return False
+    chat = getattr(message, "chat", None)
+    return chat is None or (chat.type == "private" and chat.id == user_id)
 
 
 # --- the seams ------------------------------------------------------------------------
