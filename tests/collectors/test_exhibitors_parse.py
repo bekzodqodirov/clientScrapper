@@ -12,6 +12,7 @@ red here.
 from __future__ import annotations
 
 import hashlib
+import json
 from datetime import date, datetime
 from pathlib import Path
 
@@ -21,11 +22,15 @@ from clientscrapper.collectors.base import Observation
 from clientscrapper.collectors.exhibitors import (
     Edition,
     Exhibitors,
+    Row,
+    _observation,
     edition_dates,
+    held_on,
     is_uzbek,
     slug,
     uz_form,
 )
+from clientscrapper.services import signals
 from clientscrapper.services.normalise import to_observation_json
 from tests.fakes import TASHKENT
 
@@ -61,14 +66,17 @@ def endpoint(show: str, start: int = 0, length: int = 500, draw: int = 1) -> str
 
 
 def era_rows(show: str, name: str | None = None, **kw):  # type: ignore[no-untyped-def]
+    """The 2026 answer of ``show``, read as the crawl reads it: the edition
+    with the dates its index prints (``EDITIONS``)."""
     host, edition = ERA[show]
+    [end] = [e for i, _, e in EDITIONS[show] if i == edition]
     fixture = name or f"{show}_2026_companies_all.json"
     return Exhibitors.parse_era_rows(
         raw(fixture),
         url=endpoint(show),
         fetched_at=AT,
         show=show,
-        edition=Edition(edition, 2026),
+        edition=Edition(edition, 2026, end),
         **kw,
     )
 
@@ -154,6 +162,11 @@ def test_edition_dates_read_both_shapes_and_nothing_else():
     assert edition_dates("2027") is None
     assert edition_dates("2026 (10 - 12 Fevral 2026)") is None
     assert edition_dates("2026 (30 - 31 February 2026)") is None
+    # A show over the new year starts in the year before the one printed.
+    assert edition_dates("2027 (30 December - 2 January 2027)") == (
+        date(2026, 12, 30),
+        date(2027, 1, 2),
+    )
 
 
 # --- ERA: the rows ----------------------------------------------------------------------
@@ -166,13 +179,22 @@ COUNTS = {
     "mebelexpo": (80, 25, 55, 80),
     "textileexpo": (144, 57, 87, 144),
 }
+# The Uzbek rows that are a brand's own office (README item 12): skipped.
+OFFICES = {"power": {"DAHUA TECHNOLOGY", "HUAWEI DIGITAL POWER"}}
 
 
 @pytest.mark.parametrize("show", sorted(COUNTS))
 def test_each_show_keeps_its_uzbek_rows_and_counts_the_foreign_ones(show):
     page = era_rows(show)
-    assert (page.seen, len(page.kept), page.foreign, page.total) == COUNTS[show]
-    assert page.skipped == 0
+    offices = OFFICES.get(show, set())
+    assert (
+        page.seen,
+        len(page.kept) + page.skipped,
+        page.foreign,
+        page.total,
+    ) == COUNTS[show]
+    assert page.skipped == len(offices)
+    assert not offices & {o.company_name_raw for o in page.kept}
     assert all(o.attrs["country"] == "Uzbekistan" for o in page.kept)
     assert all(o.kind == "exhibitor" and o.source == "exhibitors" for o in page.kept)
     assert all(o.raw_sha256 == sha(f"{show}_2026_companies_all.json") for o in page.kept)
@@ -201,6 +223,8 @@ def test_an_uzbek_era_row_with_its_exact_fields():
             "country": "Uzbekistan",
             "venue": "Uzexpocentre NEC",
         },
+        # The show's last day, as its index prints it (10 - 12 February 2026).
+        published_at=datetime(2026, 2, 12, tzinfo=TASHKENT),
     )
 
 
@@ -247,6 +271,50 @@ def test_the_names_the_calendar_excludes_are_skipped():
     assert "GOLDEN PAGES" not in {o.company_name_raw for o in page.kept}
 
 
+def era_synthetic(data: list[object], **kw):  # type: ignore[no-untyped-def]
+    """An ERA answer written here, not recorded: the shapes no recorded
+    answer shows (a row that is no row, an excluded name abroad)."""
+    body = json.dumps(
+        {"draw": 1, "recordsTotal": len(data), "recordsFiltered": len(data), "data": data}
+    ).encode()
+    return Exhibitors.parse_era_rows(
+        body,
+        url="https://uzbuild.uz/ERAForms/companies_list.php?l=en&exhibition=999",
+        fetched_at=AT,
+        show="uzbuild",
+        edition=Edition("999", 2026),
+        **kw,
+    )
+
+
+def era_cell(company_id: int, name: str) -> str:
+    return f'<a href="/en/exhibitor-info-999-{company_id}">{name}</a>'
+
+
+def test_a_row_no_name_reads_in_is_counted_seen_and_skipped():
+    page = era_synthetic(
+        [
+            [era_cell(1, "NAMUNA"), "Uzbekistan", "A 1", "Hall 1", ""],
+            [12345],
+            ["<a href='/en/exhibitor-info-999-3'> </a>", "Uzbekistan", "A 3", "", ""],
+        ]
+    )
+    assert (page.seen, len(page.kept), page.skipped, page.foreign) == (3, 1, 2, 0)
+
+
+def test_an_excluded_name_abroad_is_foreign_not_skipped():
+    """The country is read first: «GOLDEN PAGES» of another country is the
+    supply side, and only an Uzbek row of the calendar's names is skipped."""
+    page = era_synthetic(
+        [
+            [era_cell(1, "GOLDEN PAGES"), "Kazakhstan", "A 1", "", ""],
+            [era_cell(2, "GOLDEN PAGES"), "Uzbekistan", "A 2", "", ""],
+        ],
+        exclude=("GOLDEN PAGES",),
+    )
+    assert (page.seen, page.kept, page.foreign, page.skipped) == (2, (), 1, 1)
+
+
 def test_a_foreign_only_edition_keeps_nothing():
     """NEGATIVE (README): Power 2027 has one Russian Federation row."""
     page = Exhibitors.parse_era_rows(
@@ -282,26 +350,131 @@ def test_an_answer_that_is_no_datatables_json_is_refused(name):
         era_rows("uzbuild", name)
 
 
-def test_brands_on_a_row_are_a_dealership_never_an_official_one():
-    """03 §2.8: brand names in the profile → brand_distributor(official=False)."""
-    by_name = {o.company_name_raw: o for o in era_rows("power").kept}
-    dahua = by_name["DAHUA TECHNOLOGY"]
-    assert dahua.signal_types == ["exhibitor", "brand_distributor"]
-    assert {
-        k: dahua.attrs[k] for k in ("brand", "brand_group", "official", "brands")
-    } == {
-        "brand": "Dahua",
-        "brand_group": "electronics",
-        "official": False,
-        "brands": ["Dahua"],
-    }
-    huawei = by_name["HUAWEI DIGITAL POWER"]
-    assert (huawei.attrs["brand"], huawei.attrs["brand_group"]) == (
-        "Huawei FusionSolar",
-        "solar_power",
+def uzbek_row(
+    name: str, description: str | None = None, company_id: str | None = "777"
+) -> Row:
+    return Row(
+        name=name,
+        country="Uzbekistan",
+        stand="A 1",
+        company_id=company_id,
+        card_url=None,
+        description=description,
     )
-    plain = by_name["AKKUENERGO, LLC"]
+
+
+def observe(row: Row, *, edition: Edition = AM_2026, held: date | None = None):  # type: ignore[no-untyped-def]
+    return _observation(
+        row,
+        show="automechanika",
+        edition=edition,
+        platform="expodat",
+        url=CATALOGUE,
+        fetched_at=AT,
+        sha="0" * 64,
+        cells=(row.name, row.stand, row.country, row.description),
+        held=held,
+    )
+
+
+def rule_signals(obs: Observation) -> dict[str, signals.SignalDraft]:
+    """The signals the rules derive from ``obs`` as stored (04 §5.3)."""
+    parsed = to_observation_json(obs, collector_version="exhibitors@1")
+    evidence = signals.EvidenceRef(id=1, source_key="exhibitors", fetched_at=AT)
+    return {
+        d.key: d for d in signals.from_rules(evidence, parsed, signals.CompanyFacts())
+    }
+
+
+def test_a_brand_s_own_office_on_the_list_is_the_supply_side_not_a_dealer():
+    """README item 12: DAHUA TECHNOLOGY and HUAWEI DIGITAL POWER at Power are
+    local offices of foreign brands, no lead — not stored, counted skipped
+    (03 §2.8: «foreign rows are not stored as companies (supply side)»)."""
+    page = era_rows("power")
+    names = {o.company_name_raw for o in page.kept}
+    assert "DAHUA TECHNOLOGY" not in names and "HUAWEI DIGITAL POWER" not in names
+    assert page.skipped == 2
+    plain = next(o for o in page.kept if o.company_name_raw == "AKKUENERGO, LLC")
     assert plain.signal_types == ["exhibitor"] and "brand" not in plain.attrs
+
+
+def test_brands_on_a_row_are_a_dealership_never_an_official_one():
+    """03 §2.8: brand names in the profile → brand_distributor(official=False);
+    ``attrs.brand`` is the brand as the row spells it, so the signal rule's
+    quote is a fragment of the excerpt (a card cites it)."""
+    obs = observe(uzbek_row("AKFA GREE, LLC"))
+    assert obs.signal_types == ["exhibitor", "brand_distributor"]
+    assert {k: obs.attrs[k] for k in ("brand", "brand_group", "official", "brands")} == {
+        "brand": "GREE",
+        "brand_group": "hvac_appliances",
+        "official": False,
+        "brands": ["Gree"],
+    }
+    found = rule_signals(obs)
+    assert found["vol_wholesale_bulky"].quote == "GREE"
+    assert found["cn_origin"].quote == "GREE"
+    assert "GREE" in obs.excerpt
+
+
+def test_a_brand_named_by_an_alias_is_quoted_as_the_row_writes_it():
+    """«HOWO» is 03 §2.10's «Sinotruk HOWO»: the quote is «HOWO»."""
+    obs = observe(
+        uzbek_row("NAMUNA AVTO", "HOWO va Shacman yuk mashinalari, ehtiyot qismlar")
+    )
+    assert (obs.attrs["brand"], obs.attrs["brands"]) == (
+        "HOWO",
+        ["Sinotruk HOWO", "Shacman"],
+    )
+    assert rule_signals(obs)["cn_origin"].quote == "HOWO"
+
+
+def test_a_brand_in_the_description_alone_is_read():
+    obs = observe(uzbek_row("NAMUNA SAVDO", "Chery va Haval ehtiyot qismlari optom"))
+    assert "brand_distributor" in obs.signal_types
+    assert obs.attrs["brands"] == ["Chery", "Haval"]
+
+
+def test_a_common_word_in_a_shouted_name_is_no_brand():
+    """«GREAT WALL MEBEL, LLC» is a furniture maker: no dealership."""
+    obs = observe(uzbek_row("GREAT WALL MEBEL, LLC", "Mebel ishlab chiqaramiz"))
+    assert obs.signal_types == ["exhibitor"] and "brand" not in obs.attrs
+
+
+def test_a_cargo_firm_by_its_own_words_is_marked_competitor():
+    """COMPETITOR_SELF_RE on the description: a row whose profile offers the
+    cargo service is a forwarder, whatever its name."""
+    obs = observe(
+        uzbek_row("NAMUNA TRADE", "Xitoydan yuk tashish xizmati: kargo va rastamojka")
+    )
+    assert obs.signal_types == ["exhibitor", "competitor"]
+    # «reliable logistics» in a parts distributor's profile is no cargo offer.
+    autozip = expodat("automechanika_catalog_2026_p1.html").kept[1]
+    assert "competitor" not in autozip.signal_types
+
+
+def test_a_name_with_no_latin_slug_is_keyed_by_its_company_id():
+    obs = observe(uzbek_row("有限公司", company_id="150498"))
+    assert obs.source_ref == "automechanika:2026:id150498"
+
+
+def test_a_row_is_dated_by_its_show_not_by_the_crawl():
+    """An archive read a year on is last year's evidence: ``published_at`` is
+    the show's last day — the calendar's, else the printed one, else the
+    year's last — never after the read."""
+    archive = Edition("401", 2024, date(2024, 3, 1))
+    assert observe(uzbek_row("NAMUNA"), edition=archive).published_at == datetime(
+        2024, 3, 1, tzinfo=TASHKENT
+    )
+    assert observe(uzbek_row("NAMUNA"), held=date(2026, 10, 23)).published_at == (
+        datetime(2026, 10, 23, tzinfo=TASHKENT)
+    )
+    undated = Edition("6400", 2025)
+    assert held_on(undated, AT) == datetime(2025, 12, 31, tzinfo=TASHKENT)
+    assert held_on(AM_2026, AT) == datetime(2026, 10, 29, tzinfo=TASHKENT)
+    parsed = to_observation_json(
+        observe(uzbek_row("NAMUNA"), edition=archive), collector_version="exhibitors@1"
+    )
+    assert parsed["observed_at"] == "2024-03-01T00:00:00+05:00"
 
 
 def test_a_cargo_firm_on_the_list_is_marked_competitor():
@@ -445,7 +618,9 @@ def test_catalogue_page_1_with_its_pager():
 
 
 def test_an_uzbek_catalogue_row_with_its_exact_fields():
-    autozip = expodat("automechanika_catalog_2026_p1.html").kept[1]
+    autozip = expodat("automechanika_catalog_2026_p1.html", held=date(2026, 10, 23)).kept[
+        1
+    ]
     assert autozip == Observation(
         source="exhibitors",
         source_ref="automechanika:2026:autozip",
@@ -474,6 +649,8 @@ def test_an_uzbek_catalogue_row_with_its_exact_fields():
             "pavilion": None,
             "country": "Uzbekistan",
         },
+        # The calendar's last day of Automechanika 2026 (21–23 October).
+        published_at=datetime(2026, 10, 23, tzinfo=TASHKENT),
     )
 
 
@@ -528,6 +705,33 @@ def test_a_removed_catalogue_is_told_apart_from_an_empty_page():
         url="https://catalog.automechanika.uz/automechanika-main.html",
     )
     assert (page.kept, page.seen, page.removed) == ((), 0, True)
+
+
+def test_a_page_with_no_list_that_is_still_the_exposition_is_not_removed():
+    """Only a page that left the exposition says the catalogue is gone; the
+    same body at the exposition's own address is a page this parser cannot
+    read (a redesign, an error page)."""
+    page = expodat("automechanika_catalog_2025_p1.html", url=CATALOGUE)
+    assert (page.kept, page.no_list, page.removed) == ((), True, False)
+    later = expodat("automechanika_catalog_2025_p1.html", url=f"{PAGES}?start=48")
+    assert (later.no_list, later.removed) == (True, False)
+
+
+def test_only_the_rows_inside_the_list_are_rows():
+    """A company link elsewhere on the page (a sponsor strip, a sidebar) is
+    no row of the catalogue. Written here, not recorded."""
+    body = (
+        b'<div class="sponsors"><a href="/en/companies/company/1-x.html" '
+        b'title="SPONSOR FIRM"><img class="img_country" title="Uzbekistan"></a></div>'
+        b'<div id="scroll_list"><a href="/en/companies/company/2-y.html" '
+        b'title="LIST FIRM"><span class="numb_stand"><b>A1</b></span>'
+        b'<img class="img_country" title="Uzbekistan"></a></div>'
+    )
+    page = Exhibitors.parse_expodat_page(
+        body, url=CATALOGUE, fetched_at=AT, show="automechanika", edition=AM_2026
+    )
+    assert [o.company_name_raw for o in page.kept] == ["LIST FIRM"]
+    assert page.seen == 1
 
 
 def test_no_catalogue_row_is_cut_mid_word_and_none_is_over_600():

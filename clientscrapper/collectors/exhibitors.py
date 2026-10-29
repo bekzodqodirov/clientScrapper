@@ -28,7 +28,11 @@ no dates: its index is read only for a calendar entry in its window or the
 archive sweep. **The archive** — every edition the index lists whose window
 is over — is swept once a year per show (``ARCHIVE_EVERY``): a run that read
 every archive of a show names it in ``meta.archived``, and the next sweep of
-that show waits 365 days from that run.
+that show waits 365 days from that run. A run reads every index first, then
+every list in its window, then the archives, so a budget that runs out stops
+an archive, never a show in its window. An ERA index whose select lists no
+edition is a page the parser no longer reads (``index_empty``), never a
+sweep done.
 
 **Two platforms, one parser each** (``tests/fixtures/exhibitors/README.md``,
 «Day-1 answers»): the expodat catalogue (Automechanika, Joomla ``com_expo``,
@@ -56,10 +60,15 @@ None and ``goods_text`` empty), ``external_ids.exhibitor_slug`` =
 ``era:<company id>`` / ``expodat:<company id>`` (ERA ids are one register
 across the Iteca sites: «GOLDEN PAGES» is 1341 on four of them), signal
 ``exhibitor``; a brand of ``collectors/brands.py`` in the name or the
-description → ``brand_distributor`` with ``attrs.official=False``; a cargo
-firm's name (``COMPETITOR_NAME_RE``) or self-description
-(``COMPETITOR_SELF_RE``) → ``competitor``. The excerpt is the row's own cells
-joined by « · », each as printed.
+description → ``brand_distributor`` with ``attrs.official=False`` and
+``attrs.brand`` the brand as the row spells it (the signal rule's quote is
+that fragment of the excerpt); a cargo firm's name (``COMPETITOR_NAME_RE``)
+or self-description (``COMPETITOR_SELF_RE``) → ``competitor``. A name that
+is a brand's own office (``brands.own_office``: «DAHUA TECHNOLOGY», «HUAWEI
+DIGITAL POWER») is the supply side, like a foreign row: not stored, counted
+``skipped``. The excerpt is the row's own cells joined by « · », each as
+printed; ``published_at`` is the show's last day (``held_on``), so a row of
+a past edition ages from the show, not from the crawl.
 
 **Counts against the organiser.** A list walked to its end with fewer than
 half the organiser's figure (``expected``), or an in-window list the site no
@@ -67,7 +76,10 @@ longer has, ends the run ``partial`` (``Collector.incomplete``) and raises
 ``exhibitor_list_short`` (06 §4.2) for the owner; a later run that reads the
 same show whole clears its line, and a line expires with its window. A walk
 the budget, the deadline or the breaker cut short is ``partial`` the
-runner's way and is never judged short.
+runner's way and is never judged short. Only the catalogue's own first page
+can say a list is gone (it left the exposition, README «Files»); a captcha
+or challenge page is no page at all (``served``: ``failed``, error
+``captcha``).
 
 Rate: every request goes through the Fetcher — robots.txt, 1 request per
 3.3 s per host (``COLLECTOR_RPS_DEFAULT``), ≤ 100 pages a day (the row's
@@ -91,7 +103,7 @@ from urllib.parse import parse_qs, urljoin, urlsplit
 import sqlalchemy as sa
 
 from clientscrapper.collectors.base import Budget, Collector, Observation, Placed
-from clientscrapper.collectors.brands import brands_in
+from clientscrapper.collectors.brands import BrandHit, brand_hits, own_office
 from clientscrapper.collectors.keywords import (
     COMPETITOR_NAME_RE,
     COMPETITOR_SELF_RE,
@@ -742,11 +754,14 @@ class ListPage:
 
     ``kept`` are the observations of its Uzbek rows; ``seen`` counts every
     row; ``foreign`` the rows of another country (the supply side, not
-    stored); ``skipped`` the rows the calendar excludes or no name reads in;
+    stored); ``skipped`` the rows the calendar excludes, a brand's own office
+    (``brands.own_office``: the supply side too) or no name reads in;
     ``refs`` every row's id, for the repeat stop. ERA: ``total`` is the
-    site's ``recordsTotal``. Expodat: ``removed`` — the catalogue is gone
-    (no ``#scroll_list``, README: the 2025 one); ``page_size``, the next
-    pages' address (``base``) and the «End» link's offset (``end_start``)."""
+    site's ``recordsTotal``. Expodat: ``no_list`` — the page has no
+    ``#scroll_list``; ``removed`` — and it is no longer the exposition's
+    page (README: the 2025 catalogue lands on the login page, «The event was
+    not found»); ``page_size``, the next pages' address (``base``) and the
+    «End» link's offset (``end_start``)."""
 
     kept: tuple[Observation, ...] = ()
     seen: int = 0
@@ -754,10 +769,33 @@ class ListPage:
     skipped: int = 0
     refs: tuple[str, ...] = ()
     total: int | None = None
+    no_list: bool = False
     removed: bool = False
     page_size: int | None = None
     base: str | None = None
     end_start: int | None = None
+
+
+def held_on(edition: Edition, fetched_at: datetime, held: date | None = None) -> datetime:
+    """When the show was (``Observation.published_at``): its last day —
+    ``held`` (the calendar entry's), else the date the site prints, else the
+    year's last day — never after the page was read. A list read a year on
+    is last year's evidence, and its signal ages from the show, not from
+    the crawl."""
+    read_on = fetched_at.astimezone(settings.tz).date()
+    day = held or edition.end or date(edition.year, 12, 31)
+    return datetime.combine(min(day, read_on), time(), tzinfo=settings.tz)
+
+
+def _brands(row: Row) -> list[BrandHit]:
+    """The brands the row names — its name, then its description, each read
+    on its own (a common-word brand needs its goods in the same text)."""
+    hits: list[BrandHit] = []
+    for text in (row.name, row.description):
+        for hit in brand_hits(text or ""):
+            if all(h.brand != hit.brand for h in hits):
+                hits.append(hit)
+    return hits
 
 
 def _observation(
@@ -770,6 +808,7 @@ def _observation(
     fetched_at: datetime,
     sha: str,
     cells: Sequence[str | None],
+    held: date | None = None,
 ) -> Observation:
     attrs: dict[str, Any] = {
         "show": show,
@@ -782,14 +821,19 @@ def _observation(
     if row.venue:
         attrs["venue"] = row.venue
     signals = ["exhibitor"]
-    brands = brands_in(" ".join(t for t in (row.name, row.description) if t))
-    if brands:
+    excerpt = _excerpt(cells)
+    hits = _brands(row)
+    if hits:
+        # ``attrs.brand`` is the brand as the row spells it, so the signal
+        # rule's quote (signals._brand) is a fragment of the excerpt: the
+        # first brand the excerpt still holds.
+        hit = next((h for h in hits if h.written in excerpt), hits[0])
         signals.append("brand_distributor")
         attrs.update(
-            brand=brands[0].name,
-            brand_group=brands[0].group,
+            brand=hit.written,
+            brand_group=hit.brand.group,
             official=False,
-            brands=[b.name for b in brands],
+            brands=[h.brand.name for h in hits],
         )
     if COMPETITOR_NAME_RE.search(row.name) or (
         row.description and COMPETITOR_SELF_RE.search(row.description)
@@ -807,11 +851,12 @@ def _observation(
         company_name_raw=row.name,
         legal_form=form.group(1) if form else None,
         signal_types=signals,
-        excerpt=_excerpt(cells),
+        excerpt=excerpt,
         external_ids=(
             {"exhibitor_slug": f"{platform}:{row.company_id}"} if row.company_id else {}
         ),
         attrs=attrs,
+        published_at=held_on(edition, fetched_at, held),
     )
 
 
@@ -825,6 +870,7 @@ def _sort_rows(
     fetched_at: datetime,
     sha: str,
     exclude: Iterable[str],
+    held: date | None = None,
 ) -> tuple[list[Observation], int, int, int, list[str]]:
     excluded = {_key(name) for name in exclude}
     kept: list[Observation] = []
@@ -836,7 +882,7 @@ def _sort_rows(
         if not is_uzbek(row.country, row.name):
             foreign += 1
             continue
-        if _key(row.name) in excluded:
+        if _key(row.name) in excluded or own_office(row.name) is not None:
             skipped += 1
             continue
         kept.append(
@@ -849,6 +895,7 @@ def _sort_rows(
                 fetched_at=fetched_at,
                 sha=sha,
                 cells=cells,
+                held=held,
             )
         )
     return kept, seen, foreign, skipped, refs
@@ -867,6 +914,13 @@ def _int(value: Any) -> int | None:
     if isinstance(value, str) and value.strip().isdigit():
         return int(value.strip())
     return None
+
+
+def _on_exposition(url: str, edition: str) -> bool:
+    """``url`` is still the exposition page of ``edition`` (any of its
+    pages: «…/exposition/7012-automechanika-….html?start=48»)."""
+    match = _EXPODAT_EXPOSITION_RE.search(urlsplit(url).path)
+    return match is not None and match.group(1) == edition
 
 
 def _start_of(href: str) -> int | None:
@@ -924,13 +978,16 @@ class Exhibitors(Collector):
         show: str,
         edition: Edition,
         exclude: Iterable[str] = (),
+        held: date | None = None,
     ) -> ListPage:
         """One answer of ``ERAForms/companies_list.php``: ``{draw,
         recordsTotal, recordsFiltered, data: [[company_html, country, stand,
         location, favourite_html], …]}`` (served as ``text/html``). The name
         is the text of the cell's ``<a>``, the card its ``href``
         (``/en/exhibitor-info-<edition>-<company id>``). Raises ``ValueError``
-        on anything else (the bare endpoint answers HTTP 500, empty body)."""
+        on anything else (the bare endpoint answers HTTP 500, empty body).
+        ``held``: the show's last day when the calendar knows it
+        (``held_on``)."""
         answer = json.loads(body.decode("utf-8-sig"))
         if not isinstance(answer, dict) or not isinstance(answer.get("data"), list):
             raise ValueError("not a DataTables answer")
@@ -966,6 +1023,7 @@ class Exhibitors(Collector):
             fetched_at=fetched_at,
             sha=hashlib.sha256(body).hexdigest(),
             exclude=exclude,
+            held=held,
         )
         return ListPage(
             kept=tuple(kept),
@@ -1010,18 +1068,21 @@ class Exhibitors(Collector):
         show: str,
         edition: Edition,
         exclude: Iterable[str] = (),
+        held: date | None = None,
     ) -> ListPage:
         """One page of an expodat catalogue (``url`` = the address the page
         was served from). Row = ``#scroll_list a[href*="/companies/company/"]``:
         the name is the anchor's ``title`` (entities unescaped), the stand
         ``.numb_stand b`` (absent on some rows), the country
         ``.img_country[title]``, the description ``.short_opis``. A page past
-        the end says «no results found» (0 rows); a removed catalogue has no
-        ``#scroll_list`` at all (``removed``)."""
+        the end says «no results found» (0 rows); a page with no
+        ``#scroll_list`` at all is ``no_list``, and ``removed`` when ``url``
+        is no longer the edition's exposition (README: «final URL ≠ the
+        exposition, no ``#scroll_list``»)."""
         tree = _tree(body)
         scroll = tree.find(id="scroll_list")
         if scroll is None:
-            return ListPage(removed=True)
+            return ListPage(no_list=True, removed=not _on_exposition(url, edition.id))
         rows: list[tuple[Row, Sequence[str | None]]] = []
         unreadable = 0
         for anchor in scroll.find_all("a"):
@@ -1059,6 +1120,7 @@ class Exhibitors(Collector):
             fetched_at=fetched_at,
             sha=hashlib.sha256(body).hexdigest(),
             exclude=exclude,
+            held=held,
         )
         base: str | None = None
         end_start: int | None = None
@@ -1099,28 +1161,63 @@ class Exhibitors(Collector):
         self.run_meta["lists"] = []
         self.run_meta["archived"] = archived
         swept = await archived_shows(session, now=now)
+        # Every index first, then this week's lists of every show, then the
+        # archives: a budget that runs out stops an archive, never a show in
+        # its window — whichever show the archive belongs to.
+        plans: list[tuple[Visit, list[Target]]] = []
         for visit in plan_visits(calendar, today, swept):
-            if await self._visit(visit, budget, today):
+            targets = await self._index(visit, budget, today)
+            if targets is not None:
+                plans.append((visit, targets))
+        for visit, targets in plans:
+            for target in targets:
+                if target.why == "window":
+                    self._record(await self._read(visit, target, budget))
+        for visit, targets in plans:
+            done = True
+            for target in targets:
+                if target.why != "archive":
+                    continue
+                result = await self._read(visit, target, budget)
+                self._record(result)
+                # A removed archive is as read as it will ever be; a failed
+                # or cut one is asked again next week.
+                if result.status not in ("complete", "removed"):
+                    done = False
+            if visit.archive and done:
                 archived.append(visit.show)
         return self.found
 
-    async def _visit(self, visit: Visit, budget: Budget, today: date) -> bool:
-        """Read one show; True when its archive sweep was due and is done."""
+    async def _index(
+        self, visit: Visit, budget: Budget, today: date
+    ) -> list[Target] | None:
+        """Read one show's index: the lists to read of it, or None when the
+        index failed (said in ``meta.lists``). An in-window entry the index
+        lists no edition for is recorded ``missing`` here."""
         try:
             index = await self.fetcher.get(
                 visit.index_url, source=self.key, budget=budget
             )
         except RobotsDisallowed:
             self._index_failed(visit, "robots")
-            return False
+            return None
         if not served(index):
-            self._index_failed(visit, "failed", error=f"http_{index.status}")
-            return False
+            self._index_failed(visit, "failed", error=unserved(index))
+            return None
         if visit.platform == "era":
             editions = self.parse_era_editions(
                 index.body, url=index.final_url, fetched_at=index.fetched_at
             )
+            if not editions:
+                # Every recorded ERA index lists its past editions in the
+                # ChangeYear select (README «Files»): none is a page this
+                # parser no longer reads, never a show with no archive.
+                self._index_failed(visit, "failed", error="index_empty")
+                return None
         else:
+            # A Tilda page links the current catalogue only, or none (the
+            # 2024 list is a JS feed, README item 5): no link is a state the
+            # site is recorded in; in a window it is the entry «missing».
             editions = self.parse_expodat_links(
                 index.body, url=index.final_url, fetched_at=index.fetched_at
             )
@@ -1133,15 +1230,7 @@ class Exhibitors(Collector):
                     visit.show, entry.end_date.year, None, "window", "missing", entry
                 )
             )
-        archive_ok = True
-        for target in targets:
-            result = await self._read(visit, target, budget)
-            self._record(result)
-            # A removed archive is as read as it will ever be; a failed or cut
-            # one is asked again next week.
-            if target.why == "archive" and result.status not in ("complete", "removed"):
-                archive_ok = False
-        return visit.archive and archive_ok
+        return targets
 
     def _index_failed(
         self, visit: Visit, status: ListStatus, *, error: str | None = None
@@ -1182,11 +1271,12 @@ class Exhibitors(Collector):
             entry,
         )
         exclude = entry.exclude if entry is not None else _exclude_of(visit)
+        held = entry.end_date if entry is not None else None
         try:
             if visit.platform == "era":
-                await self._read_era(visit, target, budget, result, exclude)
+                await self._read_era(visit, target, budget, result, exclude, held)
             else:
-                await self._read_expodat(visit, target, budget, result, exclude)
+                await self._read_expodat(visit, target, budget, result, exclude, held)
         except RobotsDisallowed:
             result.status = "robots"
         except ValueError as exc:
@@ -1218,6 +1308,7 @@ class Exhibitors(Collector):
         budget: Budget,
         result: ListResult,
         exclude: Sequence[str],
+        held: date | None,
     ) -> None:
         url = rows_url(visit.rows_pattern, target.edition.id)
         start = 0
@@ -1230,7 +1321,7 @@ class Exhibitors(Collector):
                 params={"draw": draw, "start": start, "length": ERA_PAGE},
             )
             if not served(answer):
-                result.status, result.error = "failed", f"http_{answer.status}"
+                result.status, result.error = "failed", unserved(answer)
                 return
             page = self.parse_era_rows(
                 answer.body,
@@ -1239,6 +1330,7 @@ class Exhibitors(Collector):
                 show=target.show,
                 edition=target.edition,
                 exclude=exclude,
+                held=held,
             )
             result.total = page.total
             if page.seen == 0 or (page.refs and set(page.refs) <= seen):
@@ -1261,18 +1353,19 @@ class Exhibitors(Collector):
         budget: Budget,
         result: ListResult,
         exclude: Sequence[str],
+        held: date | None,
     ) -> None:
         url = target.edition.url or rows_url(visit.rows_pattern, target.edition.id)
         params: dict[str, int] | None = None
         start = 0
         end_start: int | None = None
         seen: set[str] = set()
-        for _ in range(MAX_PAGES_PER_LIST):
+        for number in range(MAX_PAGES_PER_LIST):
             answer = await self.fetcher.get(
                 url, source=self.key, budget=budget, params=params
             )
             if not served(answer):
-                result.status, result.error = "failed", f"http_{answer.status}"
+                result.status, result.error = "failed", unserved(answer)
                 return
             page = self.parse_expodat_page(
                 answer.body,
@@ -1281,9 +1374,19 @@ class Exhibitors(Collector):
                 show=target.show,
                 edition=target.edition,
                 exclude=exclude,
+                held=held,
             )
-            if page.removed:
-                result.status = "removed"
+            if page.no_list:
+                # Only the catalogue's own first page can say it is gone; a
+                # page with no list that is still the exposition is a page
+                # this parser cannot read, and a later page with none cuts
+                # the walk short — neither is judged against the organiser.
+                if number > 0:
+                    result.status, result.error = "truncated", "no_list"
+                elif page.removed:
+                    result.status = "removed"
+                else:
+                    result.status, result.error = "failed", "no_list"
                 return
             end_start = page.end_start if page.end_start is not None else end_start
             if page.seen == 0 or (page.refs and set(page.refs) <= seen):
@@ -1322,8 +1425,15 @@ def rows_url(pattern: str, edition: str) -> str:
 
 def served(result: FetchResult) -> bool:
     """A page to read: a 200, or a 304 whose body is the stored copy (the
-    Fetcher's conditional GET, 03 §1.1)."""
-    return result.status == 200 or result.not_modified
+    Fetcher's conditional GET, 03 §1.1) — never a captcha or challenge page
+    (``FetchResult.captcha``), which holds no list and says nothing of
+    one."""
+    return (result.status == 200 or result.not_modified) and not result.captcha
+
+
+def unserved(result: FetchResult) -> str:
+    """Why a page was no page to read (``ListResult.error``)."""
+    return "captcha" if result.captcha else f"http_{result.status}"
 
 
 def _exclude_of(visit: Visit) -> tuple[str, ...]:
@@ -1369,8 +1479,13 @@ class ListResult:
         return self.why == "window" and self.status in ("complete", "removed", "missing")
 
     def incomplete(self) -> str | None:
-        """The run's ``meta.incomplete`` line for this list, if any."""
-        where = f"{self.show}:{self.year}" if self.year is not None else self.show
+        """The run's ``meta.incomplete`` line for this list, if any: the show,
+        the year and the site's edition id where they are known
+        («textileexpo:2024:442:failed» — TextileExpo had two editions in
+        2024)."""
+        where = ":".join(
+            str(part) for part in (self.show, self.year, self.edition) if part is not None
+        )
         if self.status != "complete":
             return f"{where}:{self.status}"
         if self.short():
@@ -1404,7 +1519,12 @@ class ListResult:
 
 async def archived_shows(session: AsyncSession, *, now: datetime) -> frozenset[str]:
     """The shows whose archive a run swept in the last ``ARCHIVE_EVERY`` (an
-    ``ok`` or ``partial`` run: a failed one kept nothing it read)."""
+    ``ok`` or ``partial`` run). A failed run is not counted: one that raised
+    or whose write failed kept nothing it read, and the runner's status
+    cannot tell those apart from a breaker stop, which keeps what it read
+    (``runner``: ``HostPaused`` writes ``Collector.found``) — so a sweep in a
+    run the breaker failed is read again the next Monday, at the cost of one
+    sweep's pages."""
     rows = await session.scalars(
         sa.select(CollectorRun.meta["archived"]).where(
             CollectorRun.source_key == SOURCE,
@@ -1419,6 +1539,12 @@ async def archived_shows(session: AsyncSession, *, now: datetime) -> frozenset[s
     return frozenset(found)
 
 
+def _until(entry: ShowEntry) -> str:
+    """When an entry's window ends: a line's end, and with its show the
+    line's key (a show may hold two entries in one year)."""
+    return (entry.end_date + WINDOW_CLOSES).isoformat()
+
+
 def _line(result: ListResult) -> dict[str, Any] | None:
     entry = result.entry
     if entry is None or not result.short():
@@ -1430,7 +1556,7 @@ def _line(result: ListResult) -> dict[str, Any] | None:
         "rows": result.rows,
         "expected": entry.expected,
         "status": result.status,
-        "until": (entry.end_date + WINDOW_CLOSES).isoformat(),
+        "until": _until(entry),
     }
 
 
@@ -1440,15 +1566,20 @@ async def note_short_lists(
     """Raise, narrow or clear ``exhibitor_list_short``: the lines open from
     earlier runs, less the shows this run read again and those whose window
     is over, plus this run's short in-window lists. A line ends with its
-    window (``until``): after it nothing is left to crawl."""
+    window (``until``): after it nothing is left to crawl. A line is one
+    calendar entry's (its show and its ``until``): a list read of another
+    edition of the same show and year — one the calendar does not name —
+    leaves it standing."""
     today = now.astimezone(settings.tz).date()
-    judged = {(r.show, r.year) for r in results if r.judged()}
+    judged = {
+        (r.show, _until(r.entry)) for r in results if r.judged() and r.entry is not None
+    }
     open_ = (await health.reported_problems(session, now)).get(SHORT_PROBLEM)
     held: list[dict[str, Any]] = []
     for item in open_.detail.get("lists", []) if open_ is not None else []:
         if not isinstance(item, Mapping):
             continue
-        if (item.get("show"), item.get("year")) in judged:
+        if (item.get("show"), item.get("until")) in judged:
             continue
         try:
             if date.fromisoformat(str(item.get("until"))) <= today:

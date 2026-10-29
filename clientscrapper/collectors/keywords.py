@@ -625,9 +625,18 @@ COMPETITOR_SELF_RE = re.compile(rf"(?<!\w)(?:{_CARGO_CORE})(?!\w)", re.I)
 # logistics is a forwarder («Namuna Logistika MChJ», «Namuna Logistics»). Not
 # «Express» (a furniture shop is «Mebel Express»; the cargo channels named
 # «… Express» are seeds, gate 2 reads them as ``chat_monitors`` competitors).
+# The Turkish carriers' words the exhibitor lists print in capitals
+# («MARTRADE DENIZCILIK TASIMACILIK A.S.» on Power Uzbekistan 2026: a
+# shipping and forwarding firm, tests/fixtures/exhibitors README item 12):
+# taşımacılık, lojistik, nakliyat/nakliye, denizcilik — with the dotted and
+# dotless i written either way — and the English freight forwarder's own.
+_TR_I = "[iıİI]"
 COMPETITOR_NAME_RE = re.compile(
     rf"(?<!\w)(?:{_CARGO_CORE}|logistika{_UZ_LATN}|logistik|logistics?|"
-    rf"логистика{_UZ_CYRL}|логистик(?:ами|ах|ам|ой|а|е|и|у)?|логистическ\w*)(?!\w)",
+    rf"логистика{_UZ_CYRL}|логистик(?:ами|ах|ам|ой|а|е|и|у)?|логистическ\w*|"
+    rf"ta[sş]{_TR_I}mac{_TR_I}l{_TR_I}[kğ]\w*|loj{_TR_I}st{_TR_I}[kğ]\w*|"
+    rf"nakl{_TR_I}y(?:at|e)\w*|den{_TR_I}zc{_TR_I}l{_TR_I}[kğ]\w*|"
+    r"freight|forwarding|forwarders?)(?!\w)",
     re.I,
 )
 # The same said by a Telegram username glued into one word («halolcargo»,
@@ -703,6 +712,12 @@ STATE_BODY_RE = re.compile(
 # агентство»); a numbered school («5-maktab», «12-son maktab», «школа № 5»);
 # a hospital in the possessive or numbered («… shifoxonasi», «3-son
 # shifoxona»). A word that is no name of a body stays the text negative.
+# The English names the exhibitor lists print (tests/fixtures/exhibitors
+# README item 12): «… UNDER THE CABINET OF MINISTERS …», «MINISTRY OF …»,
+# «SAMARKAND STATE ARCHITECTURE AND CONSTRUCTION INSTITUTE» — «State» and an
+# institution's own noun (committee, inspection, agency, enterprise,
+# institute, university) within four words; «Real State» (a realtor's
+# misspelling) is no state.
 _WORD = rf"(?:\w|{_A})+"
 STATE_BODY_NAME_RE = re.compile(
     r"(?<!\w)(?:ГУП|ДУК|DUK|МВД|IIB|ИИБ|министер\w*|vazirlig\w*|вазирлиг\w*|"
@@ -717,7 +732,10 @@ STATE_BODY_NAME_RE = re.compile(
     rf"\d+\s*(?:-\s*|\s+(?=son))(?:son(?:li)?\s+)?(?:{_WORD}\s+){{0,2}}?"
     r"(?:maktab|shifoxona)\w*|"
     r"\d+\s*(?:-\s*|\s+(?=сон))(?:сон(?:ли)?\s+)?(?:\w+\s+){0,2}?(?:мактаб|шифохона)\w*|"
-    r"школ\w*\s*№\s*\d+|shifoxonasi\w*|шифохонаси\w*)(?!\w)"
+    r"школ\w*\s*№\s*\d+|shifoxonasi\w*|шифохонаси\w*|"
+    r"ministr(?:y|ies)|cabinet\s+of\s+ministers|"
+    r"(?<!real\s)state\s+(?:\w+\s+){0,4}?(?:committee|inspection|inspectorate|"
+    r"agency|enterprise|unitary|institute|university))(?!\w)"
     rf"{_NOT_STATE_BODY}",
     re.I,
 )

@@ -250,14 +250,14 @@ def test_an_owner_s_pattern_takes_the_edition_and_nothing_else():
 def test_judging_a_list_against_its_organiser():
     entry = ENTRY["caitme2026"]  # expected 210
     result = ListResult("caitme", 2026, "480", "window", "complete", entry, rows=104)
-    assert result.short() and result.incomplete() == "caitme:2026:short:104/210"
+    assert result.short() and result.incomplete() == "caitme:2026:480:short:104/210"
     result.rows = 105
     assert not result.short() and result.incomplete() is None
     gone = ListResult("caitme", 2026, None, "window", "missing", entry)
     assert gone.short() and gone.incomplete() == "caitme:2026:missing"
     # A walk the site cut short is incomplete, never judged short.
     cut = ListResult("caitme", 2026, "480", "window", "truncated", entry, rows=3)
-    assert not cut.short() and cut.incomplete() == "caitme:2026:truncated"
+    assert not cut.short() and cut.incomplete() == "caitme:2026:480:truncated"
     # An archive has no organiser count to fall under.
     archive = ListResult("caitme", 2024, "362", "archive", "complete", None, rows=1)
     assert not archive.short() and not archive.judged()
@@ -459,7 +459,7 @@ async def test_a_list_under_half_its_organiser_s_count_is_partial_and_alerts(
 
     assert report.status == "partial"
     row = await last_run(session)
-    assert row.meta["incomplete"] == ["caitme:2026:short:170/400"]
+    assert row.meta["incomplete"] == ["caitme:2026:480:short:170/400"]
     found = await problem(session, clock.now())
     assert found is not None
     assert found.detail == {
@@ -521,7 +521,7 @@ async def test_a_removed_in_window_catalogue_is_partial_and_alerts(
 
     assert report.status == "partial"
     row = await last_run(session)
-    assert row.meta["incomplete"] == ["automechanika:2026:removed"]
+    assert row.meta["incomplete"] == ["automechanika:2026:7012:removed"]
     assert row.new_observations == 0
     found = await problem(session, clock.now())
     assert found is not None and found.detail["lists"][0]["status"] == "removed"
@@ -557,7 +557,7 @@ async def test_the_catalogue_is_read_page_by_page_until_a_short_page(
         f"{PAGES}?start=96",
     ]
     row = await last_run(session)
-    assert row.meta["incomplete"] == ["automechanika:2026:truncated"]
+    assert row.meta["incomplete"] == ["automechanika:2026:7012:truncated"]
     [listed] = row.meta["lists"]
     assert (listed["rows"], listed["kept"], listed["pages"], listed["total"]) == (
         102,
@@ -631,7 +631,7 @@ async def test_an_era_answer_that_repeats_stops_the_walk(
     row = await last_run(session)
     [listed] = row.meta["lists"]
     assert (listed["status"], listed["rows"], listed["total"]) == ("truncated", 100, 341)
-    assert row.meta["incomplete"] == ["uzbuild:2026:truncated"]
+    assert row.meta["incomplete"] == ["uzbuild:2026:461:truncated"]
 
 
 async def test_the_archive_is_swept_once_a_year(session, exhibitors_row, tmp_path):
@@ -713,7 +713,10 @@ async def test_a_list_the_site_will_not_serve_is_failed_and_the_run_goes_on(
         ("362", "failed", "http_500"),
         ("446", "failed", "http_500"),
     ]
-    assert row.meta["incomplete"] == ["caitme:2024:failed", "caitme:2025:failed"]
+    assert row.meta["incomplete"] == [
+        "caitme:2024:362:failed",
+        "caitme:2025:446:failed",
+    ]
     assert row.meta["archived"] == []
     assert row.new_observations == 40
 
