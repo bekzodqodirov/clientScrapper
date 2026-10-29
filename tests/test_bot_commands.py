@@ -44,6 +44,7 @@ from clientscrapper.bot.texts import COMMAND_MENU, MANAGER_MENU, t
 from clientscrapper.config import settings
 from clientscrapper.db.models import (
     ChatMonitor,
+    CollectorRun,
     Company,
     Contact,
     Evidence,
@@ -664,6 +665,49 @@ async def test_holat_shows_the_layout_and_the_problems(w):
     lines = w.last().splitlines()
     assert lines[0].startswith("🩺 Agent holati — ")
     assert any(line.startswith("Muammolar: ") for line in lines)
+
+
+async def test_holat_prints_each_source_s_numbers(w):
+    """06 §1.4 / 05 §B.2: today's new companies, the 30-day precision with
+    its pushes, and «avto» while auto-push is on."""
+    async with w.db() as s:
+        await s.execute(
+            sa.update(Source).values(
+                enabled=False, precision_30d=None, pushes_30d=0, auto_push=False
+            )
+        )
+        await s.execute(
+            sa.update(Source)
+            .where(Source.key == "telegram_monitor")
+            .values(
+                enabled=True,
+                last_run_at=None,
+                paused_until=None,
+                breaker_until=None,
+                precision_30d=Decimal("0.6000"),
+                pushes_30d=15,
+                auto_push=True,
+            )
+        )
+        for started, found in (
+            (NOW - timedelta(hours=1), 3),
+            (NOW - timedelta(days=1), 9),
+        ):
+            s.add(
+                CollectorRun(
+                    source_key="telegram_monitor",
+                    started_at=started,
+                    status="ok",
+                    new_companies=found,
+                )
+            )
+        title = await s.scalar(
+            sa.select(Source.title_uz).where(Source.key == "telegram_monitor")
+        )
+    await w.say("/holat")
+    lines = w.last().splitlines()
+    start = lines.index("Manbalar:")
+    assert lines[start + 1] == f"  {title} ✅ — · bugun 3 yangi · aniqlik 60% (15) · avto"
 
 
 async def test_holat_shows_the_pilot_s_numbers_and_the_unclassed_labels(w):
