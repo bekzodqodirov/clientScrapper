@@ -989,12 +989,51 @@ async def test_a_fallback_that_raises_is_passed_over_and_the_run_fails_after(
 
     monkeypatch.setattr(extraction, "call", flaky)
     model_api.queue(message(LIKELY, model=VERDICT))
-    at = NIGHT + timedelta(days=3, hours=1)
+    at = NIGHT + timedelta(days=3)  # the 23:30 run takes the fallbacks
     with pytest.raises(RuntimeError, match="synthetic bug"):
-        await model_jobs.model_batch_collect_job(now=at)
+        await model_jobs.model_batch_submit_job(now=at)
     bad, good, instant = await jobs(session)
     assert (bad.status, bad.applied_at) == ("fallback", None)  # the next run asks
     assert (good.applied_at, instant.status, instant.result) == (at, "applied", LIKELY)
+
+
+async def test_fallbacks_wait_for_the_days_end_and_never_spend_the_next_day(
+    session, model_api, monkeypatch
+):
+    """A fallback claims what an instant verdict claims, from the same
+    allocation (04 §8), and the day's cards need theirs (01 N-06): the
+    00:30–08:00 collects leave the fallbacks, and the 23:30 run takes them
+    out of what the day has left — stopping at Tashkent midnight, the rest
+    waiting for the next evening."""
+    first = await enqueue(session, "Namuna Bir: optom")
+    second = await enqueue(session, "Namuna Ikki: optom")
+    await to_fallback(session, model_api, [first, second])
+    model_api.queue(message(LIKELY, model=VERDICT))
+    model_api.queue(message(UNLIKELY, model=VERDICT))
+    morning = await model_jobs.model_batch_collect_job(now=COLLECT + timedelta(days=3))
+    assert (morning["taken"], model_api.requests) == (0, [])
+
+    evening = NIGHT + timedelta(days=3)
+    # The wall clock: the run starts at 23:30, the first fallback is taken at
+    # 23:59 and the next would be at 00:01 — the next day's money.
+    ticks = [evening, evening + timedelta(minutes=29), evening + timedelta(minutes=31)]
+
+    def wall() -> datetime:
+        return ticks.pop(0) if len(ticks) > 1 else ticks[0]
+
+    monkeypatch.setattr(model_jobs, "_wall", wall)
+    counts = await model_jobs.model_batch_submit_job()
+    assert (counts["taken"], counts["applied"], counts["errors"]) == (1, 1, 0)
+    assert len(model_api.requests) == 1
+    one, two, instant = await jobs(session)
+    assert (one.applied_at, two.applied_at) == (evening + timedelta(minutes=29), None)
+    assert instant.request["fallback_of"] == first
+    usage = [row for row in await ledger(session) if row.model_job_id == instant.id]
+    assert [row.created_at.astimezone(TZ).date() for row in usage] == [evening.date()]
+
+    nextday = await model_jobs.model_batch_submit_job(now=evening + timedelta(days=1))
+    assert (nextday["taken"], nextday["applied"]) == (1, 1)
+    assert (await job(session, second)).applied_at == evening + timedelta(days=1)
 
 
 @pytest.mark.parametrize(

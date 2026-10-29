@@ -55,8 +55,12 @@ there (``company_verdict``) — is this module:
 5. ``take_fallbacks`` — each fallback job not yet taken goes through
    ``extraction.call`` on the instant operation of ``FALLBACK_OP`` (the
    verdict model, within its own cap), its request naming the batch job
-   (``fallback_of``). A budget refusal sends and keeps nothing: the job is
-   taken once the cap has room. An API failure keeps its record and stops
+   (``fallback_of``). Only the 23:30 run takes them, and it stops at Tashkent
+   midnight (``FALLBACK_UNTIL``): a fallback spends the verdict allocation the
+   day's instant verdicts need (01 N-06), so it takes what the day has left
+   at its end and never the next day's — the 00:30–08:00 collects, which open
+   that next day, leave them. A budget refusal sends and keeps nothing: the
+   job is taken once the cap has room. An API failure keeps its record and stops
    the run; the job is given up after ``FALLBACK_TRIES`` of them. A final
    answer — applied with its effects, or a final failure — marks the
    fallback job taken: its ``applied_at``, the moment it was done with
@@ -149,6 +153,14 @@ ATTEMPTS_MAX: Final = extraction.ATTEMPTS_MAX
 FALLBACK_TRIES: Final = 3
 # How many fallback jobs one run hands to the instant lane.
 FALLBACK_MAX: Final = BATCH_MAX
+# When the 23:30 run stops handing fallbacks over: the end of the Tashkent day
+# it started in (04 §8: the allocations are per business day). The verdict
+# allocation is the instant verdicts' too (01 N-06), and a fallback claims as
+# much as one of them ($0.046 at a 16 KB bundle: 32 under $1.50, 49 with the
+# whole model_reserve) — three bad batch nights put about as many fallbacks in
+# one night, which taken at the 00:30 collect would leave the day's cards with
+# no verdicts. Taken at 23:30, they spend what the day did not.
+FALLBACK_UNTIL: Final = costs.day_end
 ENDED: Final = "ended"
 # The key of an instant job's request that names the batch job it took.
 FALLBACK_OF: Final = "fallback_of"
@@ -1251,19 +1263,23 @@ async def take_fallbacks(
     now: datetime,
     clock: Clock | None = None,
     limit: int = FALLBACK_MAX,
+    until: datetime | None = None,
     report: LaneReport | None = None,
 ) -> LaneReport:
     """Hand the fallback jobs to the instant lane (step 5), one transaction
     each, the oldest first, each at ``clock()`` (default ``now``). The run
-    stops at a budget refusal or an API failure. A job whose handing raised
-    is passed over for this run (``report.noted``), so it cannot hold the
-    fallbacks behind it."""
+    stops at a budget refusal, an API failure, or a clock that has reached
+    ``until``. A job whose handing raised is passed over for this run
+    (``report.noted``), so it cannot hold the fallbacks behind it."""
     report = report or LaneReport()
     if not extraction.available():
         return report
     skip: set[int] = set()
     for _ in range(limit):
         at = max(clock(), now) if clock is not None else now
+        if until is not None and at >= until:
+            log.info("fallbacks stopped: the day is over")
+            break
         claimed: int | None = None
         try:
             async with session_factory() as session, session.begin():
@@ -1322,13 +1338,19 @@ def _finish(report: LaneReport) -> dict[str, int]:
 async def model_batch_submit_job(*, now: datetime | None = None) -> dict[str, int]:
     """The worker's ``model_batch_submit`` slot (23:30, 04 §0): the stuck
     batches given up, the night's batch sent, then the fallbacks handed to
-    the instant lane. Counts only are logged (06 §4.5)."""
+    the instant lane until the day ends (``FALLBACK_UNTIL``). Counts only are
+    logged (06 §4.5)."""
     start = now or _wall()
     report = LaneReport()
     await _step(give_up_stuck(now=start, report=report), report, "give_up_stuck")
     await _step(submit_batch(now=start, report=report), report, "submit_batch")
     await _step(
-        take_fallbacks(now=start, clock=None if now else _wall, report=report),
+        take_fallbacks(
+            now=start,
+            clock=None if now else _wall,
+            until=FALLBACK_UNTIL(start),
+            report=report,
+        ),
         report,
         "take_fallbacks",
     )
@@ -1338,23 +1360,12 @@ async def model_batch_submit_job(*, now: datetime | None = None) -> dict[str, in
 
 async def model_batch_collect_job(*, now: datetime | None = None) -> dict[str, int]:
     """The worker's ``model_batch_collect`` slot (every 30 minutes
-    00:30–08:00, 04 §0): every ended batch collected, then the fallbacks
-    handed to the instant lane."""
+    00:30–08:00, 04 §0): every ended batch collected. The fallbacks its
+    results make wait for the 23:30 run (``FALLBACK_UNTIL``)."""
     start = now or _wall()
     report = LaneReport()
     await _step(collect(now=start, report=report), report, "collect")
-    await _step(
-        take_fallbacks(now=start, clock=None if now else _wall, report=report),
-        report,
-        "take_fallbacks",
-    )
-    if (
-        report.batches
-        or report.taken
-        or report.refused
-        or report.unreadable
-        or report.errors
-    ):
+    if report.batches or report.refused or report.unreadable or report.errors:
         log.info("model_batch_collect", extra={"counts": report.as_dict()})
     return _finish(report)
 
@@ -1367,6 +1378,7 @@ __all__ = [
     "FALLBACK_OF",
     "FALLBACK_OP",
     "FALLBACK_TRIES",
+    "FALLBACK_UNTIL",
     "KINDS",
     "UNREADABLE_GIVE_UP",
     "BatchKind",
