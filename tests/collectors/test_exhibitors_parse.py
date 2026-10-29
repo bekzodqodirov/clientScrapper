@@ -488,6 +488,16 @@ def test_a_cargo_firm_on_the_list_is_marked_competitor():
     assert by_name["4D OPALUBKA"].signal_types == ["exhibitor"]
 
 
+def test_the_turkish_shipping_firm_on_power_s_list_is_marked_competitor():
+    """README item 12: «MARTRADE DENIZCILIK TASIMACILIK A.S.» (Power 2026) is a
+    shipping and forwarding firm — competitor, never a lead."""
+    by_name = {o.company_name_raw: o for o in era_rows("power").kept}
+    assert by_name["MARTRADE DENIZCILIK TASIMACILIK A.S."].signal_types == [
+        "exhibitor",
+        "competitor",
+    ]
+
+
 @pytest.mark.parametrize("show", sorted(ERA))
 def test_every_kept_row_stores_its_country_where_gate_3_reads_it(show):
     """04 §6 gate 3 reads ``parsed.hints.collector.attrs.country`` of an

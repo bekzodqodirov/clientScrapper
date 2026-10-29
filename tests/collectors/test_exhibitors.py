@@ -28,10 +28,12 @@ from clientscrapper.collectors.exhibitors import (
     ListResult,
     ShowEntry,
     _excerpt,
+    archived_shows,
     calendar_from,
     entry_config,
     in_window,
     match_entry,
+    note_short_lists,
     pick_targets,
     plan_visits,
     rows_url,
@@ -662,6 +664,11 @@ async def test_the_archive_is_swept_once_a_year(session, exhibitors_row, tmp_pat
         ("461", "archive", "complete"),
     ]
     assert first.new_observations == 77  # UzBuild 2026's Uzbek rows less GOLDEN PAGES
+    # Each row is dated by its show (10 - 12 February 2026), not by this
+    # crawl eight months on: its signal ages from February.
+    assert {p["observed_at"] for p in await stored(session)} == {
+        "2026-02-12T00:00:00+05:00"
+    }
 
     # The next Monday only the index is read (its printed dates), no list.
     clock = FakeClock(TODAY + timedelta(days=4))
@@ -878,3 +885,287 @@ async def test_an_era_index_that_fails_its_weekly_read_is_said(
         }
     ]
     assert row.meta["incomplete"] == ["uzbuild:failed"]
+
+
+# --- what a page that is no list says, and the order of a run -------------------------
+
+CAPTCHA = (
+    b"<html><head><title>Are you a robot?</title></head>"
+    b"<body><h1>Are you a robot?</h1><p>captcha</p></body></html>"
+)
+
+
+async def test_a_captcha_page_is_no_list_and_tells_the_owner_nothing(
+    session, exhibitors_row, tmp_path
+):
+    """A challenge page where the in-window catalogue was (a body written
+    here, not recorded: no site refused the recorder): the list failed —
+    never «removed from the site», which would send the owner to look for a
+    list that is there."""
+    await exhibitors_row([ENTRY["automechanika2026"]])
+    clock = FakeClock(MONDAY)
+    await swept(session, "automechanika", at=MONDAY - timedelta(days=30))
+    site = automechanika_site(clock, {}, **{CATALOGUE: ok(CAPTCHA)})
+    report = await run(site, clock, tmp_path)
+
+    assert report.status == "partial"
+    row = await last_run(session)
+    [listed] = row.meta["lists"]
+    assert (listed["status"], listed.get("error")) == ("failed", "captcha")
+    assert row.meta["incomplete"] == ["automechanika:2026:7012:failed"]
+    assert row.meta["captcha"] == 1
+    assert await problem(session, clock.now()) is None
+
+
+async def test_a_later_page_with_no_list_cuts_the_walk_and_removes_nothing(
+    session, exhibitors_row, tmp_path
+):
+    """Page 1 read, page 2 an error page with no ``#scroll_list``: the walk
+    is truncated (never judged), not a catalogue gone."""
+    await exhibitors_row([ENTRY["automechanika2026"]])
+    clock = FakeClock(MONDAY)
+    await swept(session, "automechanika", at=MONDAY - timedelta(days=30))
+    site = automechanika_site(clock, {48: raw("automechanika_catalog_2025_p1.html")})
+    report = await run(site, clock, tmp_path)
+
+    assert report.status == "partial"
+    row = await last_run(session)
+    [listed] = row.meta["lists"]
+    assert (listed["status"], listed.get("error"), listed["rows"]) == (
+        "truncated",
+        "no_list",
+        48,
+    )
+    assert row.new_observations == 4
+    assert await problem(session, clock.now()) is None
+
+
+async def test_a_first_page_with_no_list_on_the_exposition_is_failed_not_removed(
+    session, exhibitors_row, tmp_path
+):
+    """The exposition's own address answering a page with no list (a
+    redesign): failed, no «removed» alert."""
+    await exhibitors_row([ENTRY["automechanika2026"]])
+    clock = FakeClock(MONDAY)
+    await swept(session, "automechanika", at=MONDAY - timedelta(days=30))
+    site = automechanika_site(
+        clock, {}, **{CATALOGUE: ok(raw("automechanika_catalog_2025_p1.html"))}
+    )
+    await run(site, clock, tmp_path)
+
+    row = await last_run(session)
+    [listed] = row.meta["lists"]
+    assert (listed["status"], listed.get("error")) == ("failed", "no_list")
+    assert await problem(session, clock.now()) is None
+
+
+async def test_an_era_index_that_lists_no_edition_is_no_sweep(
+    session, exhibitors_row, tmp_path
+):
+    """A redesign that drops the ChangeYear select: the index is
+    ``index_empty`` — the run is partial and the sweep is asked again next
+    Monday, never «swept» with nothing read (and silent for a year)."""
+    await exhibitors_row([ENTRY["uzbuild2027"]])
+    clock = FakeClock(MONDAY)
+    site = Site(
+        clock,
+        {
+            "https://uzbuild.uz/en/exhibitors-list": ok(
+                b"<html><body><h1>Exhibitors</h1></body></html>"
+            )
+        },
+    )
+    report = await run(site, clock, tmp_path)
+
+    assert report.status == "partial"
+    row = await last_run(session)
+    assert row.meta["archived"] == []
+    [listed] = row.meta["lists"]
+    assert (listed["why"], listed["status"], listed.get("error")) == (
+        "archive",
+        "failed",
+        "index_empty",
+    )
+    assert row.meta["incomplete"] == ["uzbuild:failed"]
+    assert await archived_shows(session, now=clock.now() + timedelta(days=7)) == (
+        frozenset()
+    )
+
+
+async def test_the_budget_takes_an_archive_never_another_show_s_window(
+    session, exhibitors_row, tmp_path
+):
+    """Power 2026 and TextileExpo 2026 both in their window, both archives
+    due, five pages: both indexes, both in-window lists, then archives until
+    the pages run out — Power's archives never cost TextileExpo's list."""
+    await exhibitors_row(
+        [ENTRY["power2026"], ENTRY["textileexpo2026"]], daily_page_budget=5
+    )
+    clock = FakeClock(datetime(2026, 5, 25, 9, 0, tzinfo=TASHKENT))
+    foreign = raw("power_2027_companies_foreign_only.json")
+    site = Site(
+        clock,
+        {
+            "https://power-uzbekistan.uz/en/exhibitors-list": ok(
+                raw("power_list_en.html")
+            ),
+            "https://power-uzbekistan.uz/ERAForms/companies_list.php": era_answer(
+                {
+                    "409": foreign,
+                    "440": foreign,
+                    "474": raw("power_2026_companies_all.json"),
+                }
+            ),
+            "https://textileexpo.uz/en/exhibitors-list": ok(
+                raw("textileexpo_list_en.html")
+            ),
+            "https://textileexpo.uz/ERAForms/companies_list.php": era_answer(
+                {
+                    "478": raw("textileexpo_2026_companies_all.json"),
+                    **dict.fromkeys(("410", "442", "452", "472"), foreign),
+                }
+            ),
+        },
+    )
+    report = await run(site, clock, tmp_path)
+
+    assert report.status == "partial"
+    row = await last_run(session)
+    assert row.meta["exhausted"] == "pages"
+    assert [(x["show"], x["edition"], x["why"]) for x in row.meta["lists"]] == [
+        ("power", "474", "window"),
+        ("textileexpo", "478", "window"),
+        ("power", "409", "archive"),
+    ]
+    assert row.meta["archived"] == []
+
+
+async def test_an_in_window_era_entry_the_index_does_not_list_raises_the_alert(
+    session, exhibitors_row, tmp_path
+):
+    """The calendar says a CAITME edition ended 30 October; the site's select
+    prints none near it (the list removed after the show, or never
+    published): «missing», judged, and the owner is told."""
+    entry = replace_end(ENTRY["caitme2026"], date(2026, 10, 30))
+    await exhibitors_row([entry])
+    clock = FakeClock(MONDAY)
+    await swept(session, "caitme", at=MONDAY - timedelta(days=30))
+    report = await run(caitme_site(clock), clock, tmp_path)
+
+    assert report.status == "partial"
+    row = await last_run(session)
+    assert row.meta["incomplete"] == ["caitme:2026:missing"]
+    found = await problem(session, clock.now())
+    assert found is not None
+    assert [(x["show"], x["status"], x["until"]) for x in found.detail["lists"]] == [
+        ("caitme", "missing", "2026-12-29")
+    ]
+    [line] = health.exhibitor_list_lines(found)
+    assert "roʻyxati saytda topilmadi" in line
+
+
+async def test_a_catalogue_link_to_another_host_is_no_edition(
+    session, exhibitors_row, tmp_path
+):
+    """The participants page linking an exposition on another catalogue host
+    (written here, not recorded): no request goes there, and the in-window
+    entry is «missing» from the show's own catalogue."""
+    await exhibitors_row([ENTRY["automechanika2026"]])
+    clock = FakeClock(MONDAY)
+    await swept(session, "automechanika", at=MONDAY - timedelta(days=30))
+    foreign_link = (
+        b'<a href="https://catalog.example-expo.uz/en/expositions/exposition/9999">'
+        b"Exhibitors Catalogue 2026</a>"
+    )
+    site = automechanika_site(
+        clock, {}, **{"https://automechanika.uz/eng/participants": ok(foreign_link)}
+    )
+    await run(site, clock, tmp_path)
+
+    assert not [s for s in site.seen if s.request.url.host == "catalog.example-expo.uz"]
+    row = await last_run(session)
+    assert [(x["status"], x["edition"]) for x in row.meta["lists"]] == [("missing", None)]
+
+
+async def test_a_failed_run_s_sweep_is_asked_again(session):
+    """A run that failed may have kept nothing it read: its ``meta.archived``
+    is not a sweep done; an ok or partial run's is."""
+    at = TODAY - timedelta(days=1)
+    for status, show in (("failed", "power"), ("partial", "uzbuild"), ("ok", "caitme")):
+        session.add(
+            CollectorRun(
+                source_key="exhibitors",
+                started_at=at,
+                finished_at=at,
+                status=status,
+                meta={"archived": [show]},
+            )
+        )
+    await session.commit()
+    assert await archived_shows(session, now=TODAY) == frozenset({"uzbuild", "caitme"})
+    # A sweep a year old is due again.
+    assert await archived_shows(session, now=at + timedelta(days=366)) == frozenset()
+
+
+def short_line(show: str, year: int, until: str, **extra: Any) -> dict[str, Any]:
+    return {
+        "show": show,
+        "title": show,
+        "year": year,
+        "rows": 3,
+        "expected": 210,
+        "status": "complete",
+        "until": until,
+        **extra,
+    }
+
+
+async def test_a_line_past_its_window_is_dropped_while_another_stands(session):
+    """Two open lines, one of them past its window: the next run keeps the
+    other and drops it, though the problem itself still stands."""
+    await health.raise_problem(
+        session,
+        SHORT_PROBLEM,
+        now=TODAY - timedelta(days=60),
+        by="collector:exhibitors",
+        detail={
+            "lists": [
+                short_line("power", 2026, "2026-07-13"),
+                short_line("caitme", 2026, "2026-11-09"),
+            ]
+        },
+        until=datetime(2026, 11, 9, tzinfo=TASHKENT),
+    )
+    await session.commit()
+    await note_short_lists(session, [], now=TODAY)
+    await session.commit()
+    found = await problem(session, TODAY)
+    assert found is not None
+    assert [x["show"] for x in found.detail["lists"]] == ["caitme"]
+
+
+async def test_a_line_is_its_calendar_entry_s_not_its_year_s(session):
+    """TextileExpo had two editions in 2025: the September one read whole
+    (no calendar entry) leaves the May entry's short line standing; the May
+    entry's own read clears it."""
+    may = replace_end(ENTRY["textileexpo2026"], date(2025, 5, 16))
+    now = datetime(2025, 6, 2, 9, 0, tzinfo=TASHKENT)
+    await health.raise_problem(
+        session,
+        SHORT_PROBLEM,
+        now=now - timedelta(days=7),
+        by="collector:exhibitors",
+        detail={"lists": [short_line("textileexpo", 2025, "2025-07-15")]},
+        until=datetime(2025, 7, 15, tzinfo=TASHKENT),
+    )
+    await session.commit()
+    other = ListResult("textileexpo", 2025, "472", "window", "complete", None, rows=50)
+    await note_short_lists(session, [other], now=now)
+    await session.commit()
+    found = await problem(session, now)
+    assert found is not None and len(found.detail["lists"]) == 1
+
+    whole = ListResult("textileexpo", 2025, "452", "window", "complete", may, rows=150)
+    await note_short_lists(session, [whole], now=now)
+    await session.commit()
+    assert await problem(session, now) is None
