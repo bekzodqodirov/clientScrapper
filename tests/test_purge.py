@@ -1042,3 +1042,34 @@ async def test_an_excluded_company_is_purged_without_its_old_reason(session, roo
     await purge.execute(session, plan, requested_by="owner:1001", now=now(), root=root)
     found = await fresh(session, m.Company, company.id)
     assert (found.state, found.exclude_reason) == ("purged", None)
+
+
+async def test_make_purge_reads_a_phone_as_written_and_answers_in_uzbek(
+    session, root, monkeypatch
+):
+    monkeypatch.setattr(settings, "evidence_dir", str(root))
+    w = await subject(session, root)
+    code, lines = await purge_tool.run(args(phone="+998 90 000 00 42"))
+    assert code == 0 and lines[-1] == purge_tool.DRY_RUN_TEXT
+    assert "🏢 Kompaniya: 2 · kontakt: 2" in lines
+    for raw, text in (
+        ("+7 999 000 00 42", purge_tool.FOREIGN_PHONE_TEXT),
+        ("123", purge_tool.BAD_PHONE_TEXT),
+        ("90000004x", purge_tool.BAD_PHONE_TEXT),
+    ):
+        assert await purge_tool.run(args(phone=raw)) == (1, [text]), raw
+
+    async def broken(*a: Any, **kw: Any) -> dict[str, int]:
+        raise RuntimeError("disk")
+
+    monkeypatch.setattr(purge, "_people", broken)
+    code, lines = await purge_tool.run(args(phone=tail(42), apply=True), now=now())
+    assert (code, lines[-1]) == (1, purge_tool.FAILED_TEXT)
+    monkeypatch.undo()
+    monkeypatch.setattr(settings, "evidence_dir", str(root))
+    # The same command again finishes it: the tail is still on a contact.
+    code, lines = await purge_tool.run(args(phone=tail(42), apply=True), now=now())
+    assert code == 0 and lines[-1] == purge.FILES_LINE.format(removed=2)
+    assert await count(session, m.Contact, m.Contact.company_id == w.root.id) == 0
+    for state, text in purge_tool.REFUSED_TEXTS.items():
+        assert "Oʻchirilmadi" in text, state

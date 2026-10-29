@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import logging
 import sys
 import uuid
 from collections.abc import Sequence
@@ -26,13 +27,56 @@ from typing import Final
 from clientscrapper.collectors.runner import SessionFactory
 from clientscrapper.config import settings
 from clientscrapper.db.session import SessionLocal, engine
-from clientscrapper.services import purge
+from clientscrapper.services import normalise, purge
 from clientscrapper.services.owner import owner_ref
+
+log = logging.getLogger(__name__)
 
 DRY_RUN_TEXT: Final = "Sinov: hech narsa oʻchirilmadi. Oʻchirish uchun APPLY=1 qoʻshing."
 UNKNOWN_TEXT: Final = "Bunday kompaniya topilmadi: {subject}"
-REFUSED_TEXT: Final = "Oʻchirilmadi: {code}"
+BAD_PHONE_TEXT: Final = (
+    "Telefon tushunilmadi: PHONE=+998901234567 yoki oxirgi 9 raqamini yozing."
+)
+FOREIGN_PHONE_TEXT: Final = (
+    "Faqat Oʻzbekiston raqami (+998…): boshqa davlat raqamining oxirgi 9 raqami "
+    "oʻzbek raqamiga toʻgʻri kelib qolishi mumkin."
+)
+# A refused execute, by what the plan's log row says (purge.row_state).
+REFUSED_TEXTS: Final = {
+    purge.ROW_DONE: "Oʻchirilmadi: bu reja allaqachon bajarilgan.",
+    purge.ROW_RUNNING: "Oʻchirilmadi: bu reja hozir bajarilmoqda.",
+    purge.ROW_FAILED: "Oʻchirilmadi: bu reja oxirigacha yetmagan.",
+    purge.ROW_CLOSED: "Oʻchirilmadi: bu reja yopilgan.",
+}
+REFUSED_TEXT: Final = "Oʻchirilmadi: reja topilmadi."
+FAILED_TEXT: Final = (
+    "⚠️ Oʻchirish oxirigacha yetmadi — buyruqni qaytadan ishga tushiring: "
+    "qolgan maʼlumot oʻchiriladi."
+)
 CLI_REQUESTER: Final = "owner:cli"
+
+
+class Refused(ValueError):
+    """The subject cannot be planned; ``text`` says why, in Uzbek."""
+
+    def __init__(self, text: str) -> None:
+        super().__init__(text)
+        self.text = text
+
+
+def phone_tail_of(raw: str) -> str:
+    """``PHONE=``: an Uzbek number however it is written (``+998 90 …``,
+    ``90 123 45 67``) or its last nine digits — the ``/dnc`` rule: another
+    country's number is refused, its tail could be an Uzbek one's."""
+    text = raw.strip()
+    phone = normalise.make_phone(text)
+    if phone is not None:
+        if phone.country != "UZ":
+            raise Refused(FOREIGN_PHONE_TEXT)
+        return phone.tail
+    if len(text) == 9 and text.isascii() and text.isdigit():
+        return text
+    raise Refused(BAD_PHONE_TEXT)
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -68,14 +112,14 @@ async def run(
             else:
                 plan = await purge.plan_contact(
                     session,
-                    phone_tail=args.phone,
+                    phone_tail=phone_tail_of(args.phone) if args.phone else None,
                     tg_user_id=args.tg_user,
                     reason=args.reason,
                 )
         except purge.PurgeRefused:
             return 1, [UNKNOWN_TEXT.format(subject=args.company)]
-        except ValueError as bad:
-            return 1, [REFUSED_TEXT.format(code=bad)]
+        except Refused as bad:
+            return 1, [bad.text]
         lines = purge.plan_lines(plan)
         if not args.apply:
             lines.append(DRY_RUN_TEXT)
@@ -88,7 +132,12 @@ async def run(
                 now=now or datetime.now(settings.tz),
             )
         except purge.PurgeRefused as refused:
-            return 1, [*lines, REFUSED_TEXT.format(code=refused.code)]
+            return 1, [*lines, REFUSED_TEXTS.get(refused.code, REFUSED_TEXT)]
+        except Exception as exc:
+            # A group failed after the ones before it committed (06 §5.4): the
+            # same command again plans what is left and finishes it.
+            log.warning("purge stopped", extra={"error": type(exc).__name__})
+            return 1, [*lines, FAILED_TEXT]
     return 0, [*lines, *purge.result_lines(result, reason=plan.reason)]
 
 
