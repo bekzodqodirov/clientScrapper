@@ -28,7 +28,9 @@ there (``company_verdict``) — is this module:
    ``messages.batches.create`` with one ``{custom_id, params}`` per job, built
    by the instant lane's own ``extraction.build_params`` (04 §4.4: one
    builder, comparable answers); each job stamped ``batch_id``,
-   ``submitted``, ``submitted_at`` and ``attempts + 1``;
+   ``submitted``, ``submitted_at`` and ``attempts + 1``. The create is not
+   idempotent, so it goes out without the SDK's own retries and is sent
+   again only after an answer that says it was not taken (``CREATE_TRIES``);
 3. ``collect`` (``model_batch_collect``, every 30 minutes 00:30–08:00) — each
    batch holding submitted jobs: ``batches.retrieve`` until
    ``processing_status == 'ended'``, the result stream drained before the
@@ -96,6 +98,7 @@ transaction attributes each row while the batch's jobs are held.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import functools
 import logging
@@ -115,7 +118,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from clientscrapper.config import settings
 from clientscrapper.db.models import ModelJob, UsageLog
 from clientscrapper.db.session import SessionLocal
-from clientscrapper.services import costs, extraction, health
+from clientscrapper.services import costs, extraction, health, retry
 from clientscrapper.services.prompts import JSON_NUDGE
 from clientscrapper.services.pseudonyms import (
     Pseudonymised,
@@ -191,6 +194,17 @@ APPLY: Final = "apply"
 # job an attempt. Any other failure (the network, a 5xx, 429, the key) leaves
 # the jobs pending for the next night as they were.
 REQUEST_REFUSED: Final = frozenset({400, 413, 422})
+# A batch create is not idempotent: the SDK sends no idempotency key, and a
+# create that timed out or lost its connection may have been taken — the
+# SDK's own retry would then make a second batch, which nobody collects and
+# no claim counts (04 §8). So the create goes out with the SDK's retries off,
+# and is sent again only when the API answered that it turned the request
+# away before taking it: a rate limit or an overload. Anything else waits for
+# the next night as it was (or, refused for its body, costs an attempt).
+CREATE_TRIES: Final = 3
+CREATE_RETRY_STATUSES: Final = frozenset({429, 529})
+CREATE_BACKOFF_BASE_S: Final = 2.0
+CREATE_BACKOFF_CAP_S: Final = 30.0
 
 
 # --- kinds ---------------------------------------------------------------------
@@ -513,12 +527,38 @@ async def _effects(
 # --- 2. submit -------------------------------------------------------------------
 
 
+def _not_taken(exc: BaseException) -> bool:
+    """The API turned the create away before taking it: sending it again
+    cannot make a second batch."""
+    return (
+        isinstance(exc, anthropic.APIStatusError)
+        and exc.status_code in CREATE_RETRY_STATUSES
+    )
+
+
+# The wait between two tries of a create (a test replaces it).
+_sleep: retry.Sleep = asyncio.sleep
+
+
 async def _create_batch(
     client: anthropic.AsyncAnthropic, requests: list[dict[str, Any]]
 ) -> Any:
     """The batch create itself: reached only through ``costs.ask``'s
-    ``call=``."""
-    return await client.messages.batches.create(requests=cast(Any, requests))
+    ``call=``, so the claim covers every try. Each try is one request (the
+    SDK's retries off); a try is repeated only after ``_not_taken``."""
+    once = client.with_options(max_retries=0)
+
+    async def create() -> Any:
+        return await once.messages.batches.create(requests=cast(Any, requests))
+
+    return await retry.with_backoff(
+        create,
+        attempts=CREATE_TRIES,
+        base=CREATE_BACKOFF_BASE_S,
+        cap=CREATE_BACKOFF_CAP_S,
+        retry_on=_not_taken,
+        sleep=_sleep,
+    )
 
 
 async def _claim_pending(
@@ -1323,6 +1363,7 @@ __all__ = [
     "ATTEMPTS_MAX",
     "BATCH_MAX",
     "BATCH_ROUTES",
+    "CREATE_TRIES",
     "FALLBACK_OF",
     "FALLBACK_OP",
     "FALLBACK_TRIES",

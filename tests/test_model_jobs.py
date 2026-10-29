@@ -134,6 +134,18 @@ def kind(monkeypatch: pytest.MonkeyPatch) -> Any:
     costs.clear_refusals()
 
 
+@pytest.fixture(autouse=True)
+def pauses(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    """The waits between two tries of a batch create, recorded, not slept."""
+    waited: list[float] = []
+
+    async def pause(seconds: float) -> None:
+        waited.append(seconds)
+
+    monkeypatch.setattr(model_jobs, "_sleep", pause)
+    return waited
+
+
 # --- helpers ------------------------------------------------------------------
 
 
@@ -733,7 +745,8 @@ async def test_a_create_the_api_refuses_costs_an_attempt_and_an_outage_does_not(
     row = await job(session, first)
     assert (row.status, row.attempts, row.error) == ("pending", 1, "submit:400")
     costs.clear_refusals()
-    model_api.refuse_batch(overloaded())
+    for _ in range(model_jobs.CREATE_TRIES):
+        model_api.refuse_batch(overloaded())
     outage = await model_jobs.submit_batch(now=NIGHT + timedelta(days=1))
     assert (outage.not_sent, outage.retried) == (1, 0)
     row = await job(session, first)
@@ -1318,15 +1331,24 @@ async def test_a_laddered_job_s_answer_settles_the_newest_provisional_row(
 
 
 @pytest.mark.parametrize(
-    ("status", "costs_an_attempt"),
-    [(400, True), (413, True), (422, True), (429, False), (500, False), (529, False)],
+    ("status", "costs_an_attempt", "tries"),
+    [
+        (400, True, 1),
+        (413, True, 1),
+        (422, True, 1),
+        (429, False, 3),  # turned away before it was taken: sent again
+        (500, False, 1),  # may have been taken: never sent again blind
+        (529, False, 3),
+    ],
 )
 async def test_which_refused_creates_cost_an_attempt(
-    session, model_api, status, costs_an_attempt
+    session, model_api, status, costs_an_attempt, tries
 ):
     first = await enqueue(session)
-    model_api.refuse_batch(api_error(status, "synthetic_error", "synthetic"))
+    for _ in range(tries):
+        model_api.refuse_batch(api_error(status, "synthetic_error", "synthetic"))
     report = await model_jobs.submit_batch(now=NIGHT)
+    assert (len(model_api.batch_bodies), model_api.batches) == (tries, {})
     row = await job(session, first)
     if costs_an_attempt:
         assert (report.retried, report.not_sent) == (1, 0)
@@ -1425,6 +1447,66 @@ async def test_a_fallback_the_api_failed_three_times_is_given_up_without_a_reque
     assert (report.given_up, report.taken) == (1, 0)
     assert model_api.requests == []
     assert (await job(session, first)).applied_at == at
+
+
+# --- review fixes: the create goes out once --------------------------------------
+
+
+async def test_a_create_whose_answer_was_lost_is_never_sent_again_blind(
+    session, model_api
+):
+    # The production client retries by itself (connection errors, timeouts,
+    # 5xx); a create the API took and whose answer never came back must not
+    # be sent again: a second batch would be one nobody collects and no claim
+    # counts (04 §8).
+    first = await enqueue(session)
+    extraction.set_client(model_api.client(max_retries=2))
+    model_api.lose_batch_answer(httpx.ReadTimeout("synthetic: the answer is lost"))
+    report = await model_jobs.submit_batch(now=NIGHT)
+    [body] = model_api.batch_bodies
+    assert list(model_api.batches) == ["msgbatch_namuna01"]  # taken, unanswered
+    assert (report.not_sent, report.submitted, report.retried) == (1, 0, 0)
+    row = await job(session, first)
+    assert (row.status, row.attempts, row.batch_id, row.error) == (
+        "pending",
+        0,
+        None,
+        None,
+    )
+    # The batch it may have made is counted once, at its claim.
+    [claim] = await ledger(session)
+    assert (claim.model, claim.cost_usd) == (
+        "failed:APITimeoutError",
+        estimate(body["requests"][0]["params"]),
+    )
+
+
+@pytest.mark.parametrize(
+    "refusal",
+    [overloaded(), api_error(429, "rate_limit_error", "synthetic")],
+    ids=["overloaded", "rate_limited"],
+)
+async def test_a_create_the_api_refused_before_taking_it_is_sent_again(
+    session, model_api, pauses, refusal
+):
+    first = await enqueue(session)
+    model_api.refuse_batch(refusal).accept_batches()
+    report = await model_jobs.submit_batch(now=NIGHT)
+    assert (report.submitted, report.not_sent) == (1, 0)
+    assert (len(model_api.batch_bodies), list(model_api.batches)) == (
+        2,
+        ["msgbatch_namuna01"],
+    )
+    assert len(pauses) == 1
+    row = await job(session, first)
+    assert (row.status, row.batch_id, row.attempts) == (
+        "submitted",
+        "msgbatch_namuna01",
+        1,
+    )
+    # One claim for the create, however many tries it took.
+    [claim] = await ledger(session)
+    assert (claim.model_job_id, claim.model) == (first, BATCH)
 
 
 # --- review fixes: the nits -------------------------------------------------------

@@ -18,8 +18,9 @@ and fails the test that leaked or called unscripted.
 
 Its Message Batches half (T-16) keeps batches by id: ``create`` mints one only
 when the test allowed it (``accept_batches``, or a scripted refusal with
-``refuse_batch``) — an unplanned submit is an unscripted request like any
-other — ``retrieve`` reads a batch as the test left it (``in_progress`` until
+``refuse_batch``, or a create taken whose answer is lost with
+``lose_batch_answer``) — an unplanned submit is an unscripted request like
+any other — ``retrieve`` reads a batch as the test left it (``in_progress`` until
 ``end``), ``results`` streams the JSONL the test wrote (``succeeded`` /
 ``errored`` / ``expired`` / ``canceled`` lines, in whatever order it gave) —
 or breaks off part way when the test said so (``drop_results``: the
@@ -372,8 +373,10 @@ class FakeAnthropic:
         self.batches: dict[str, FakeBatch] = {}
         # Every batch create's body (its requests), refused ones included.
         self.batch_bodies: list[dict[str, Any]] = []
-        # Scripted answers to batch creates: None accepts and mints a batch.
-        self.batch_answers: list[httpx.Response | None] = []
+        # Scripted answers to batch creates: None accepts and mints a batch;
+        # an exception mints it and is raised instead of the answer (taken,
+        # the answer lost — ``lose_batch_answer``).
+        self.batch_answers: list[httpx.Response | Exception | None] = []
         # Scripted failures of retrieve / results, per batch id, used first.
         self.retrieve_failures: dict[str, list[httpx.Response]] = {}
         self.results_failures: dict[str, list[httpx.Response]] = {}
@@ -393,6 +396,13 @@ class FakeAnthropic:
 
     def refuse_batch(self, response: httpx.Response) -> FakeAnthropic:
         self.batch_answers.append(response)
+        return self
+
+    def lose_batch_answer(self, error: Exception) -> FakeAnthropic:
+        """The next batch create is taken — the batch exists — and its
+        answer never arrives: ``error`` is raised on the transport (a read
+        timeout, a dropped connection), so the caller cannot tell."""
+        self.batch_answers.append(error)
         return self
 
     def drop_results(
@@ -431,7 +441,7 @@ class FakeAnthropic:
                 self.unexpected += 1
                 return api_error(500, "api_error", "no scripted batch")
             answer = self.batch_answers.pop(0)
-            if answer is not None:
+            if isinstance(answer, httpx.Response):
                 return httpx.Response(
                     answer.status_code, headers=answer.headers, content=answer.content
                 )
@@ -439,6 +449,8 @@ class FakeAnthropic:
             self.batches[batch_id] = FakeBatch(
                 batch_id, list(body.get("requests") or []), T0
             )
+            if answer is not None:
+                raise answer
             return httpx.Response(200, json=self.batches[batch_id].json())
         matched = _BATCH_PATH.match(path)
         if matched is None:
@@ -494,11 +506,12 @@ class FakeAnthropic:
             answer.status_code, headers=answer.headers, content=answer.content
         )
 
-    def client(self) -> anthropic.AsyncAnthropic:
-        """An SDK client over this transport. No retries of the SDK's own: a
-        scripted 5xx is one request, so a test counts what it planted."""
+    def client(self, *, max_retries: int = 0) -> anthropic.AsyncAnthropic:
+        """An SDK client over this transport. No retries of the SDK's own by
+        default: a scripted 5xx is one request, so a test counts what it
+        planted (a test of what the SDK's retries would do asks for some)."""
         return anthropic.AsyncAnthropic(
             api_key="test-key-not-a-credential",
-            max_retries=0,
+            max_retries=max_retries,
             http_client=httpx.AsyncClient(transport=httpx.MockTransport(self)),
         )
