@@ -344,6 +344,7 @@ EXPECTED = {
     "push_payloads": 2,
     "sheet_rows": 2,
     "chats": 1,
+    "erp_leads": 1,
 }
 
 
@@ -702,7 +703,11 @@ async def test_another_reason_ends_a_pushed_candidate_excluded_and_writes_no_key
     # from directly (02 §2.9).
     assert (ended.state, ended.exclude_reason) == ("excluded", "owner")
     assert await count(session, m.Suppression) == 0
-    assert "Bostirish kaliti yozilmaydi" in purge.plan_lines(plan)[-2]
+    lines = purge.plan_lines(plan)
+    assert "Bostirish kaliti yozilmaydi" in lines[-3]
+    # The lead the ERP received stays there: the owner is told to erase it
+    # in the ERP (seam review wave 4).
+    assert lines[-2] == purge.ERP_LINE.format(erp_leads=1)
 
 
 # --- by phone, by Telegram id --------------------------------------------------------

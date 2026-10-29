@@ -796,6 +796,8 @@ As built (seam review wave 4): the `model_jobs` a purge clears are also every re
 
 As built (seam review wave 4): `execute` locks the plan's lineages (`FOR UPDATE`, id order) before it reads the scope, in the transaction of group 1 — a push that committed between the read and the lock made a candidate with push history the stale scope still deleted, and `push_log`'s RESTRICT failed the purge part-way; a push or a verdict holding the company now finishes first and the next waits for the purge. Group 2 also clears the company's jobs written since the scope was read.
 
+As built (seam review wave 4): the plan and the result cards count the leads the ERP received (`erp_leads`: a `sent` or `unknown` push) and say «⚠️ ERPʼga yuborilgan lid: N ta — ism va telefoni ERPda qoladi: uni ERPning oʻzida oʻchiring.» — 05 has no erasure call, so a purge here never reaches the lead the managers work in the ERP.
+
 ### 5.5 Suppression precedence and overrides
 
 `services/suppression.is_suppressed()` (02 §2.8) orders hits by

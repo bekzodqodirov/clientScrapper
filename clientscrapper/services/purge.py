@@ -160,6 +160,7 @@ COUNT_KEYS: Final = (
     "sheet_rows",
     "chats",
     "suppression",
+    "erp_leads",
 )
 # What groups 2 and 3 remove (group 1's candidates, cards, sheet rows and chats
 # are gone once the company reads 'purged'): a purged lineage that still holds
@@ -255,6 +256,10 @@ class Scope:
     sheet_rows: int = 0
     chats: tuple[int, ...] = ()
     keys: tuple[Key, ...] = ()
+    # Leads the ERP received (a sent or unknown push): what the agent sent
+    # stays there — the owner is told to erase it in the ERP (seam review
+    # wave 4; 05 has no erasure call).
+    erp_leads: int = 0
     # Other companies whose observations or signals go with the subject's
     # messages (a post its person wrote that resolved elsewhere): scored again.
     bystanders: tuple[uuid.UUID, ...] = ()
@@ -278,6 +283,7 @@ class Scope:
             "sheet_rows": self.sheet_rows,
             "chats": len(self.chats),
             "suppression": len(self.keys),
+            "erp_leads": self.erp_leads,
         }
 
 
@@ -522,7 +528,11 @@ async def collect(
     ]
     pushes = (
         await session.execute(
-            sa.select(PushLog.id, PushLog.payload.is_not(None).label("held"))
+            sa.select(
+                PushLog.id,
+                PushLog.payload.is_not(None).label("held"),
+                PushLog.status.in_(("sent", "unknown")).label("landed"),
+            )
             .where(PushLog.company_id.in_(members))
             .order_by(PushLog.id)
         )
@@ -589,6 +599,7 @@ async def collect(
         ),
         payloads=tuple(p.id for p in pushes if p.held),
         pushes=tuple(p.id for p in pushes),
+        erp_leads=sum(1 for p in pushes if p.landed),
         sheet_rows=await _count(
             session,
             sa.select(SheetRow.id).where(sheet_match, SheetRow.state != SHEET_TOMBSTONE),
@@ -1134,6 +1145,7 @@ async def _stop(
         "chats": chats,
         "sheet_rows": sheet,
         "suppression": written,
+        "erp_leads": scope.erp_leads,
     }
 
 
@@ -1346,6 +1358,10 @@ COUNT_LINES: Final = (
 SUPPRESSION_LINE: Final = "🔒 Abadiy bostirish kaliti: {suppression} ta"
 NO_SUPPRESSION_LINE: Final = "Bostirish kaliti yozilmaydi (sabab: {reason})"
 KEPT_LINE: Final = "Qoladi: ERP natijalari, push jurnali (matnsiz), xarajat jurnali."
+ERP_LINE: Final = (
+    "⚠️ ERPʼga yuborilgan lid: {erp_leads} ta — ism va telefoni ERPda qoladi: "
+    "uni ERPning oʻzida oʻchiring."
+)
 DONE_TITLE: Final = "✅ Oʻchirildi · {reason}"
 FILES_LINE: Final = "Diskdan oʻchirilgan fayl: {removed}"
 
@@ -1361,6 +1377,8 @@ def count_lines(counts: dict[str, int], *, reason: str) -> list[str]:
         lines.append(SUPPRESSION_LINE.format(**values))
     else:
         lines.append(NO_SUPPRESSION_LINE.format(reason=REASON_UZ[reason]))
+    if values.get("erp_leads"):
+        lines.append(ERP_LINE.format(**values))
     return lines
 
 
