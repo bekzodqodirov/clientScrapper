@@ -1055,6 +1055,114 @@ async def test_a_worker_that_loses_the_lock_pauses_its_scheduler(session, monkey
         await theirs.release()
 
 
+class _Paused:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def pause(self) -> None:
+        self.calls.append("pause")
+
+    def resume(self) -> None:
+        self.calls.append("resume")
+
+
+async def test_a_leader_that_takes_the_lock_back_does_a_new_leaders_work(
+    session, monkeypatch
+):
+    """Seam review wave 4: A paused for B (a database blip), B is killed.
+    A's resume closes B's ``running`` runs (they held the source's slot
+    ~2 h 30, every ERP cadence ``already_running``) before the scheduler
+    runs, and hands B's missed jobs to the scheduler (``catch_up``)."""
+    monkeypatch.setattr(worker, "LEADER_CHECK", timedelta(milliseconds=50))
+    monkeypatch.setattr(worker, "LEADER_RETRY", timedelta(milliseconds=50))
+    order: list[str] = []
+    real_reclaim = worker.reclaim_runs
+
+    async def reclaim(*args, **kw):
+        order.append("reclaim")
+        return await real_reclaim(*args, **kw)
+
+    async def catch_up(**kw):
+        order.append("catch_up")
+
+    monkeypatch.setattr(worker, "reclaim_runs", reclaim)
+    monkeypatch.setattr(worker, "catch_up", catch_up)
+    scheduler = _Paused()
+    real_resume = scheduler.resume
+    scheduler.resume = lambda: (order.append("resume"), real_resume())[1]  # type: ignore[method-assign]
+    mine, theirs = worker.Leadership(), worker.Leadership()
+    stop = asyncio.Event()
+    try:
+        assert await theirs.acquire()
+        keeping = asyncio.ensure_future(worker.keep_leadership(mine, scheduler, stop))
+        await asyncio.sleep(0.3)
+        assert scheduler.calls == ["pause"]
+        session.add(
+            m.CollectorRun(
+                source_key="erp_sync",
+                status="running",
+                started_at=NOW,
+                meta={"variant": "delta"},
+            )
+        )
+        await session.commit()
+        await theirs.release()  # B is gone, its run still «running»
+        await asyncio.sleep(0.4)
+        assert order == ["reclaim", "resume", "catch_up"]
+        [run] = await session.scalars(
+            sa.select(m.CollectorRun).execution_options(populate_existing=True)
+        )
+        assert (run.status, run.error) == ("failed", "abandoned")
+    finally:
+        stop.set()
+        await asyncio.wait_for(keeping, 5)
+        await mine.release()
+        await theirs.release()
+
+
+async def test_a_paused_worker_does_not_resume_on_a_failed_lock_check(
+    session, monkeypatch
+):
+    """One connect error while standing by is no proof the other worker is
+    gone (the «cannot be asked → run» rule is the process start's): the
+    paused worker asks again, and stays paused while the other holds it."""
+    monkeypatch.setattr(worker, "LEADER_CHECK", timedelta(milliseconds=50))
+    monkeypatch.setattr(worker, "LEADER_RETRY", timedelta(milliseconds=50))
+
+    async def nothing(**kw):
+        return None
+
+    monkeypatch.setattr(worker, "catch_up", nothing)
+    mine, theirs = worker.Leadership(), worker.Leadership()
+    scheduler = _Paused()
+    stop = asyncio.Event()
+    real_acquire = worker.Leadership.acquire
+    blips = {"left": 0}
+
+    async def acquire(self):
+        if self is mine and blips["left"]:
+            blips["left"] -= 1
+            raise OSError("connection refused")
+        return await real_acquire(self)
+
+    monkeypatch.setattr(worker.Leadership, "acquire", acquire)
+    try:
+        assert await theirs.acquire()
+        keeping = asyncio.ensure_future(worker.keep_leadership(mine, scheduler, stop))
+        await asyncio.sleep(0.3)
+        assert scheduler.calls == ["pause"]
+        blips["left"] = 1
+        await asyncio.sleep(0.4)
+        assert blips["left"] == 0  # the blip was met
+        assert scheduler.calls == ["pause"]  # and nothing resumed
+        assert await theirs.held()
+    finally:
+        stop.set()
+        await asyncio.wait_for(keeping, 5)
+        await mine.release()
+        await theirs.release()
+
+
 async def test_the_new_leader_closes_a_dead_workers_runs_only(session):
     """An OOM-killed worker's 'running' erp_sync row held the source's one
     running slot for 2 h 30 min: every ERP cadence was skipped

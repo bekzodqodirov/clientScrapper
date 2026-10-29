@@ -1269,11 +1269,18 @@ async def _wait(stop: asyncio.Event, delay: timedelta) -> bool:
     return True
 
 
-async def wait_for_leadership(leader: Leadership, stop: asyncio.Event) -> bool:
+async def wait_for_leadership(
+    leader: Leadership, stop: asyncio.Event, *, blind_runs: bool = True
+) -> bool:
     """Return True once this process may schedule, False if stopped first.
-    A database that cannot be asked is no other leader (the lock lives in
-    it): the worker then runs, so health_job can say «Baza javob
-    bermayapti», and :func:`keep_leadership` takes the lock later."""
+    At process start (``blind_runs``) a database that cannot be asked is no
+    other leader (the lock lives in it): the worker then runs, so health_job
+    can say «Baza javob bermayapti», and :func:`keep_leadership` takes the
+    lock later. A worker that paused because another one took the lock
+    (``blind_runs=False``) asks again instead: one failed connect while it
+    stands by is no proof the other is gone — resumed beside the live leader,
+    both would schedule, and the resume fires every job that came due within
+    the hour's misfire grace (seam review wave 4)."""
     told = False
     while not stop.is_set():
         try:
@@ -1282,6 +1289,14 @@ async def wait_for_leadership(leader: Leadership, stop: asyncio.Event) -> bool:
                     log.info("scheduler lock taken: this worker now schedules")
                 return True
         except Exception as exc:
+            if not blind_runs:
+                log.warning(
+                    "scheduler lock not asked; staying paused",
+                    extra={"error": type(exc).__name__},
+                )
+                if await _wait(stop, LEADER_RETRY):
+                    return False
+                continue
             log.warning(
                 "scheduler lock not asked; running without it for now",
                 extra={"error": type(exc).__name__},
@@ -1300,7 +1315,11 @@ async def keep_leadership(
 ) -> None:
     """Until ``stop``: every ``LEADER_CHECK`` make sure the lock is still
     this process's. Lost to another process (this one's connection went and
-    the other took it), the scheduler pauses until it is ours again."""
+    the other took it), the scheduler pauses until it is ours again — and
+    only an answered ``acquire`` gives it back (``blind_runs=False``). Taken
+    back, the leader does what a new leader does (:func:`take_over`): the
+    other worker may have died with its runs ``running`` and its Sunday jobs
+    unmade."""
     while not await _wait(stop, LEADER_CHECK):
         try:
             if await leader.acquire():
@@ -1310,10 +1329,33 @@ async def keep_leadership(
             continue
         log.error("scheduler lock held by another worker: pausing this one")
         scheduler.pause()
-        if not await wait_for_leadership(leader, stop):
+        if not await wait_for_leadership(leader, stop, blind_runs=False):
             return
+        await reclaim_dead_runs()
         scheduler.resume()
         log.info("scheduler resumed")
+        await take_over(scheduler)
+
+
+async def reclaim_dead_runs() -> None:
+    """:func:`reclaim_runs`, guarded: a startup or a resume never raises."""
+    try:
+        await reclaim_runs()
+    except Exception as exc:
+        log.warning("dead runs not reclaimed", extra={"error": type(exc).__name__})
+
+
+async def take_over(scheduler: AsyncIOScheduler) -> None:
+    """What a leader does once it schedules, after the dead leader's runs are
+    closed (:func:`reclaim_dead_runs`, before the scheduler runs or resumes):
+    the missed jobs handed to the scheduler (:func:`catch_up`). The first
+    start and a resume after a pause alike (seam review wave 4: a resumed
+    leader left a dead standby's ``running`` erp_sync row holding the
+    source's slot ~2 h 30 and its missed backup or digest unmade)."""
+    try:
+        await catch_up(scheduler=scheduler)
+    except Exception as exc:
+        log.error("catch-up failed", extra={"error": type(exc).__name__})
 
 
 # --- the process ---------------------------------------------------------------------
@@ -1371,10 +1413,7 @@ async def run() -> None:
         remove_stop_signals(installed)
         log.info("worker stopped before it led")
         return
-    try:
-        await reclaim_runs()
-    except Exception as exc:
-        log.warning("dead runs not reclaimed", extra={"error": type(exc).__name__})
+    await reclaim_dead_runs()
     try:
         crons = await source_crons()
     except Exception as exc:
@@ -1411,10 +1450,7 @@ async def run() -> None:
         await heartbeat_job(scheduler)
     except Exception as exc:
         log.error("startup heartbeat failed", extra={"error": type(exc).__name__})
-    try:
-        await catch_up(scheduler=scheduler)
-    except Exception as exc:
-        log.error("startup catch-up failed", extra={"error": type(exc).__name__})
+    await take_over(scheduler)
     try:
         await keep_leadership(leader, scheduler, stop)
     finally:
