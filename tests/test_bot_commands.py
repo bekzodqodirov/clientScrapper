@@ -39,7 +39,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from clientscrapper.bot import callbacks as cb
 from clientscrapper.bot import deliver, handlers
 from clientscrapper.bot import main as bot_main
-from clientscrapper.bot.handlers.common import Deps, Plans
+from clientscrapper.bot.handlers import review as review_handlers
+from clientscrapper.bot.handlers.common import Deps, Plans, toast
 from clientscrapper.bot.texts import COMMAND_MENU, MANAGER_MENU, t
 from clientscrapper.config import settings
 from clientscrapper.db.models import (
@@ -536,7 +537,7 @@ async def test_lidlar_holat_counts_the_states(w):
     assert "topildi: 0" in lines
 
 
-async def test_the_card_buttons_menus_and_the_answer_seam(w):
+async def test_the_card_buttons_menus_and_the_answer(w):
     async with w.db() as s:
         cand = await lead(s)
         review = await pending_card(s, cand, state="asked")
@@ -544,14 +545,22 @@ async def test_the_card_buttons_menus_and_the_answer_seam(w):
     assert w.buttons()[-4:] == [cb.review(review.id, a) for a in ("b", "c", "e", "k")]
     await w.press(cb.review(review.id, "k"))
     assert w.buttons()[-1] == cb.review(review.id, "o")
-    # The answers are the review flow's (T-21): not wired, nothing changes.
-    await w.press(cb.review(review.id, "p"))
-    assert w.fake.answers() == [t("review.not_ready")]
     await w.press(cb.review(review.id, "m"))
     assert w.fake.answers() == [t("review.no_targets")]
+    # ✅ is the review flow's (T-21): the candidate approved by the owner, the
+    # card edited in place — keyboard gone, the footer last (06 §1.3).
+    await w.press(cb.review(review.id, "p"))
+    assert w.fake.answers() == ["✅ Navbatda — CRMʼga yuboriladi"]
+    [edited] = w.fake.named("EditMessageText")
+    assert edited["text"].splitlines()[-1] == "✅ Navbatda — CRMʼga yuboriladi"
+    assert "reply_markup" not in edited
     async with w.db() as s:
         row = await s.get(LeadReview, review.id, populate_existing=True)
-        assert row is not None and (row.state, row.answer) == ("asked", None)
+        found = await s.get(LeadCandidate, cand.id, populate_existing=True)
+        assert row is not None and found is not None
+        assert (row.state, row.answer, row.by_telegram_id) == ("approved", "push", OWNER)
+        assert (found.state, found.approved_by) == ("approved", f"owner:{OWNER}")
+        assert row.card_hash == cards.card_hash(edited["text"], None)
 
 
 async def test_a_tap_on_a_card_that_no_longer_waits_is_stale(w):
@@ -571,7 +580,7 @@ async def test_a_manager_presses_only_their_own_card(w):
     await w.press(cb.manager(review.id, "c"), user=OTHER_MANAGER)
     assert w.fake.answers() == [t("not_yours")]
     await w.press(cb.manager(review.id, "c"), user=MANAGER)
-    assert w.fake.answers() == [t("review.not_ready")]
+    assert w.fake.answers() == [f"📞 Bogʻlandim · raqam olsangiz: /tel {review.id} +998…"]
 
 
 # --- /manbalar --------------------------------------------------------------------------
@@ -1183,15 +1192,16 @@ async def test_each_card_answers_only_its_own_kind_of_button(w):
 
 
 async def test_a_letter_the_cards_layout_lacks_never_reaches_the_review_flow(
-    db, configured
+    db, configured, monkeypatch
 ):
-    seen: list[tuple[str, str | None]] = []
+    seen: list[tuple[str, str, uuid.UUID | None]] = []
 
-    async def answer(tap_: Any, _: Any) -> str:
-        seen.append((tap_.data.kind, tap_.data.action))
-        return "qabul"
+    async def answer(tap_: Any, code: str, *, target: uuid.UUID | None = None) -> None:
+        seen.append((tap_.data.kind, code, target))
+        await toast(tap_.query, "qabul")
 
-    w = world(db, review_answer=answer)
+    monkeypatch.setattr(review_handlers, "apply_answer", answer)
+    w = world(db)
     async with w.db() as s:
         normal = await pending_card(s, await lead(s, 61), state="asked")
         cand = await lead(s, 62)
@@ -1211,13 +1221,19 @@ async def test_a_letter_the_cards_layout_lacks_never_reaches_the_review_flow(
         assert w.fake.answers() == [t("stale_button")], data
     for data in (
         cb.review(normal.id, "p"),
-        cb.review(normal.id, "e"),
         cb.review(handoff.id, "h"),
         cb.merge(normal.id, uuid.UUID(int=7)),
     ):
         await w.press(data)
         assert w.fake.answers() == ["qabul"], data
-    assert seen == [("rv", "p"), ("rv", "e"), ("rv", "h"), ("mg", None)]
+    # ✏️ waits for the owner's next message (06 §1.3), the flow not yet asked.
+    await w.press(cb.review(normal.id, "e"))
+    assert w.fake.answers() == [t("review.phone_ask")]
+    assert seen == [
+        ("rv", "push", None),
+        ("rv", "handoff", None),
+        ("mg", "merge", uuid.UUID(int=7)),
+    ]
 
 
 async def test_forbidding_auto_push_switches_it_off(w):
