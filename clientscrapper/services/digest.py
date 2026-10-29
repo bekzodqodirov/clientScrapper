@@ -287,6 +287,9 @@ class DigestView:
     no_lost_list: bool = False
     waiting_cards: int = 0
     now: datetime | None = None
+    # settings.auto_approve when the digest was read: an «on» flip says its
+    # cards still reach the owner while it is off (erp_feeds.flips_not_live).
+    auto_approve: bool = False
 
 
 # --- rendering (pure) ------------------------------------------------------------
@@ -361,6 +364,8 @@ def _source_lines(
     sources: Sequence[SourceRow],
     flips: Sequence[Flip],
     paused: Sequence[LowPause] = (),
+    *,
+    auto_approve: bool = False,
 ) -> list[str]:
     lines: list[str] = []
     if sources:
@@ -383,6 +388,8 @@ def _source_lines(
         )
     if len(flips) > MAX_FLIPS:
         lines.append(f"🔁 … yana {len(flips) - MAX_FLIPS} ta oʻzgarish — /manbalar")
+    if erp_feeds.flips_not_live((f.on for f in flips), auto_approve=auto_approve):
+        lines.append(erp_feeds.FLIPS_NOT_LIVE_UZ)
     for low in paused[:MAX_PAUSED]:
         lines.append(
             f"⏸ {esc(_clip(low.title, NAME_MAX))}: aniqlik {esc(low.pct)}% — bir "
@@ -471,7 +478,9 @@ def render_digest(view: DigestView) -> str:
             "ERP: yoʻqotilgan lidlar roʻyxati yoʻq — faqat mijozlar XLSX importi "
             "tekshiriladi («Boshqa» eshigi)"
         )
-    lines += _source_lines(view.sources, view.flips, view.paused_low)
+    lines += _source_lines(
+        view.sources, view.flips, view.paused_low, auto_approve=view.auto_approve
+    )
     lines += _manager_lines(view.managers)
     reader = view.reader
     if reader is not None:
@@ -849,6 +858,7 @@ async def load(session: AsyncSession, *, now: datetime) -> Loaded:
         unclassed=await unclassed_labels(session),
         sources=sources,
         flips=flips,
+        auto_approve=settings.auto_approve,
         paused_low=tuple(
             LowPause(low.title, low.pct) for low in health.low_precision_sources(status)
         ),

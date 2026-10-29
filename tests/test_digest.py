@@ -27,7 +27,7 @@ from clientscrapper.db.models import (
     Source,
     Suppression,
 )
-from clientscrapper.services import digest, health, metrics, smoke
+from clientscrapper.services import digest, erp_feeds, health, metrics, smoke
 from tests import gate_fixtures as gf
 from tests.fixtures import digest_views as dv
 from tests.test_cards import BUBBLE_PX, width_px
@@ -54,10 +54,11 @@ def test_the_digest_fits_one_message_and_follows_the_text_rules(make):
 def test_the_longest_digest_still_has_room():
     # Every list at its cap: the caps, not the clip, keep it in one message —
     # measured as Telegram can count it at its widest (UTF-16 of the HTML).
-    # 4,000 of 4,096 since the flips carry the precision job's numbers and
-    # the low-precision pauses their own lines (wave-4 integration).
+    # 4,070 of 4,096 since the flips carry the precision job's numbers, the
+    # low-precision pauses their own lines (wave-4 integration) and an «on»
+    # flip the AUTO_APPROVE sentence (seam review wave 4).
     text = digest.render_digest(dv.longest())
-    assert digest.units(text) <= 4000
+    assert digest.units(text) <= 4070
     assert "  …" not in text.splitlines()
 
 
@@ -89,6 +90,7 @@ def test_a_busy_morning_is_06_s_layout():
         "  OLX sotuvchilari 0 yangi · — (0) ⏸",
         "  Telegram chatlari 12 yangi · 41% (22) ✅",
         "🔁 Avtomatik push yoqildi: hh.uz vakansiyalari",
+        "  AUTO_APPROVE oʻchiq — bu manbalarning kartalari hali ham sizga keladi",
         "Menejerlar kecha: bogʻlandi 2 · «Yozmang» dedi 1 (Namuna Tekstil Savdo) · "
         "notoʻgʻri/B2C 1",
         "Menejer javob bermadi: 1",
@@ -101,6 +103,18 @@ def test_a_busy_morning_is_06_s_layout():
         "Tizim: 2 ta muammo — /holat",
         "Sizni 9 ta karta kutmoqda → /lidlar",
     ]
+
+
+def test_an_on_flip_says_its_cards_still_come_while_auto_approve_is_off():
+    """The alert's sentence, one rule (erp_feeds.flips_not_live): with
+    AUTO_APPROVE off a source that earned auto_push still sends its cards to
+    the owner (seam review: the digest said «yoqildi» and nothing else)."""
+    caveat = erp_feeds.FLIPS_NOT_LIVE_UZ
+    assert caveat in digest.render_digest(dv.busy()).splitlines()
+    live = replace_view(dv.busy(), auto_approve=True)
+    assert caveat not in digest.render_digest(live).splitlines()
+    off_only = replace_view(dv.busy(), flips=(digest.Flip("OLX sotuvchilari", False),))
+    assert caveat not in digest.render_digest(off_only).splitlines()
 
 
 def test_skipped_live_tests_are_listed_and_never_counted_green():
@@ -447,6 +461,14 @@ async def test_slow_managers_reach_the_owner_as_menejer_javobi(session):
         "(faqat ERP koʻrgani) — menejerlar bilan gaplashing; ERPda arizalar kimga "
         "tushayotganini tekshiring",
     ]
+
+
+async def test_the_loaded_digest_reads_auto_approve(session, monkeypatch):
+    """The view carries settings.auto_approve, so the «on» flip's sentence
+    follows the owner's switch (erp_feeds.flips_not_live)."""
+    for value in (False, True):
+        monkeypatch.setattr(settings, "auto_approve", value)
+        assert (await digest.load(session, now=NOW)).view.auto_approve is value
 
 
 async def test_every_unclassed_label_reaches_the_digest(session):

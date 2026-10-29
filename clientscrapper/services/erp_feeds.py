@@ -60,7 +60,7 @@ import hashlib
 import html
 import logging
 import re
-from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
+from collections.abc import AsyncGenerator, Callable, Iterable, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager
 from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime, timedelta
@@ -2054,13 +2054,21 @@ def flip_line(title: str, *, on: bool, pct: int | None, pushes: int | None) -> s
     return f"🔁 Avtomatik push {word}: {html.escape(title, quote=False)}{numbers}"
 
 
+def flips_not_live(ons: Iterable[bool], *, auto_approve: bool) -> bool:
+    """A flip turned a source's ``auto_push`` on while ``AUTO_APPROVE`` is
+    off: its cards still reach the owner (``candidates.auto_approves``), and
+    every place that says the flip says that too (``FLIPS_NOT_LIVE_UZ``: the
+    alert and the digest, one rule)."""
+    return not auto_approve and any(ons)
+
+
 def flips_alert(flips: Sequence[PrecisionFlip], *, auto_approve: bool) -> str:
     """The owner's message for a week's flips."""
     lines = [FLIPS_HEAD_UZ]
     lines += [
         "  " + flip_line(f.title, on=f.on, pct=f.pct, pushes=f.pushes) for f in flips
     ]
-    if not auto_approve and any(f.on for f in flips):
+    if flips_not_live((f.on for f in flips), auto_approve=auto_approve):
         lines.append(FLIPS_NOT_LIVE_UZ)
     return "\n".join(lines)
 
