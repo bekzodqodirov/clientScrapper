@@ -744,3 +744,40 @@ async def test_a_short_line_from_an_earlier_run_survives_a_run_of_another_show(
     assert [x["show"] for x in found.detail["lists"]] == ["caitme"]
     # Past CAITME's window the line expires by itself.
     assert await problem(session, datetime(2026, 11, 10, tzinfo=TASHKENT)) is None
+
+
+async def test_a_stored_row_resolves_to_a_company_gate_3_reads_the_country_of(
+    session, exhibitors_row, tmp_path
+):
+    """The carried item (07 T-32): every kept row stores ``attrs.country``
+    and gate 3 reads it off the company's resolved exhibitor observations —
+    an Uzbek one passes «not a supplier»; the ERA id becomes the company's
+    ``exhibitor_slug``."""
+    from clientscrapper.db.models import CompanyId
+    from clientscrapper.services import companies, gates
+
+    await exhibitors_row([ENTRY["caitme2026"]])
+    clock = FakeClock(TODAY)
+    await swept(session, "caitme", at=TODAY - timedelta(days=30))
+    await run(caitme_site(clock), clock, tmp_path)
+    counts = await companies.resolve_job(now=clock.now())
+    assert counts["claimed"] == 40
+
+    company_id = await session.scalar(
+        sa.select(CompanyId.company_id).where(
+            CompanyId.id_type == "exhibitor_slug", CompanyId.id_value == "era:25848"
+        )
+    )
+    assert company_id is not None  # ADVANTEX, OOO
+    got = await gates.inputs_for(session, company_id, now=clock.now())
+    assert got.company.exhibitor_countries == frozenset({"UZBEKISTAN"})
+    result = gates.run_gates(
+        got.company,
+        got.contacts,
+        got.signals,
+        got.verdict,
+        got.hit,
+        got.recent,
+        clock.now(),
+    )
+    assert not result.marks["not_supplier"].startswith("fail")
