@@ -530,7 +530,8 @@ session); `MODEL_PRICES` and `CLAUDE_DAILY_CAP_USD` appear nowhere (their homes 
   0.75 GB, bot 0.5 GB, searxng 0.5 GB, OS 1 GB ≈ 6.3 GB. Co-location with MIYA is allowed only
   as a separate compose project, database container, port, backup key, bot token and Telegram
   account (audit memo §4: the owner's private ledger never shares a container or a key with a
-  sales database).
+  sales database). **As deployed (2026-10-29, Q6 «a»):** co-located with MIYA and a LogisticsERP
+  installation on one 23 GB host — see Open question 6 for the ports and firewall as found.
 - Outbound hosts (document every addition in this table, MIYA «Documented egress» rule):
   `api.anthropic.com` (pseudonymised text), `api.telegram.org` (bot), Telegram MTProto (reader),
   `CRM_BASE_URL`, `api.search.brave.com`, `searchapi.api.cloud.yandex.net`, `places.googleapis.com`,
@@ -867,7 +868,7 @@ weights, 02 AC 1); nothing here waits for a `0002`. The table says where 06 read
 3. Manager-provided phones (`/tel`) use `legal_basis='pre_contract_request'`; is a phone the prospect typed to a manager in Telegram a pre-contract request under ЗРУ-547 Art. 18 (huquqiy-memo §5 q.1), or should it stay `public_source` with the chat URL?
 4. Telegram Premium for the reader account ($5/month): buy, or stay at the free 500-chat cap given `USERBOT_MAX_CHATS=60`? Recommended: skip until a FloodWait pattern appears.
 5. Healthchecks.io (or equivalent) free tier for `DEADMAN_PING_URL` — UNVERIFIED; alternative is a cron on the owner's laptop that curls nothing (no) or MIYA's worker pinging this one's heartbeat table (couples the two systems; not recommended).
-6. Co-location with MIYA on one VPS: acceptable with separate projects (§3.5), or a second VPS from day 1?
+6. ~~Co-location with MIYA on one VPS: acceptable with separate projects (§3.5), or a second VPS from day 1?~~ **Answered by Bekzod on 2026-10-29 — «a»: co-located.** The production host is his existing Contabo VPS (23 GB RAM, 4 GB swap, 290 GB disk), already running MIYA (`miya-*`, db on `127.0.0.1:5432`, api on `127.0.0.1:8000`) and a LogisticsERP installation (`logisticserp-*`, Caddy on public 80/443). This repo is cloned at `/opt/clientScrapper`; compose project `clientscrapper`, db on `127.0.0.1:5433` (checked free), no public port. `ufw` allows OpenSSH, 80/tcp and 443/tcp (the last two for LogisticsERP's Caddy; Docker-published ports bypass `ufw` anyway); `fail2ban` guards sshd. SSH is still password-based — key-only (§3.5) is owed. Every `make` target runs from `/opt/clientScrapper` and touches only its own project; never `docker compose down -v` anywhere on this host.
 7. Should `/qidir` be available to managers (shows suppression kind, which reveals «client of ours» for a phone)? Recommended: yes — that is exactly what stops a wrong call.
 8. `QUIET_HOURS=21:00-08:00` for warnings; the owner may prefer MIYA's `23:30-07:30` so evening pushes' failures are seen the same night.
 9. **App-service healthchecks (T-08).** §3.1's compose gives only `db` a healthcheck; «healthy» for worker, userbot and bot is «running + a fresh heartbeat». Add a heartbeat-based container healthcheck per app service (`tools/healthcheck <component>` reading `heartbeats.last_seen_at`) so `make ps` and `docker compose up --wait` say it — recommended once each process beats — or keep the heartbeat as the only signal?
