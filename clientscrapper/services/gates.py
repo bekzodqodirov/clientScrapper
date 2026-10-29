@@ -12,7 +12,13 @@ order:
    ``hold`` — it may become B2B after enrichment, so ``GateResult.decide``
    defers this one hold until the candidate is bound for a card or a push.
 2. ``not_competitor`` → ``excluded(competitor)``, ``is_competitor`` and a
-   ``suppression(competitor, company_id, source='resolver')`` row.
+   ``suppression(competitor, company_id, source='resolver')`` row. A
+   Telegram poster is a tout's company too when ``telegram_monitor`` judged
+   one of the poster's later messages a tout's within ``TOUT_WINDOW`` of a
+   post the company stands on (``tout_poster``): the collector counts price
+   lists up to each message, so a live tout's first two lists stand as asks
+   and only the third is caught (03 §2.3) — the gate, at card and push
+   time, reads the windows that end after the post.
 3. ``not_supplier`` → ``excluded(supplier_cn)``, ``is_supplier_cn``.
 4. ``not_client`` → ``suppressed`` by the client row, ``companies.state =
    'client'``.
@@ -67,6 +73,7 @@ from clientscrapper.collectors.keywords import (
     STATE_BODY_NAME_RE,
     SUPPLIER_NAME_RE,
 )
+from clientscrapper.collectors.telegram_monitor import TOUT_WINDOW
 from clientscrapper.config import settings
 from clientscrapper.db import enums as e
 from clientscrapper.db.models import (
@@ -75,6 +82,7 @@ from clientscrapper.db.models import (
     CompanyAlias,
     CompanyId,
     Contact,
+    Interaction,
     LeadCandidate,
     ModelJob,
     Observation,
@@ -210,6 +218,7 @@ class GateCompany:
     urls: tuple[str, ...] = ()
     import_signals: tuple[ImportView, ...] = ()
     competitor_channel: bool = False
+    tout_poster: bool = False
     repeat_count_60d: int = 0
     exhibitor_countries: frozenset[str] = frozenset()
 
@@ -378,6 +387,8 @@ def gate_competitor(
         why = "signal"
     elif company.competitor_channel:
         why = "channel"
+    elif company.tout_poster:
+        why = "tout"
     if why is None:
         return _Verdict("pass", "raqobatchi emas ✓")
     return _Verdict(
@@ -668,6 +679,45 @@ async def recent_pushes(
     )
 
 
+async def _tout_poster(session: AsyncSession, lineage: Sequence[uuid.UUID]) -> bool:
+    """Whether a Telegram person the lineage's posts come from had a later
+    message ``telegram_monitor`` judged a tout's (``companies.tout_refusal``
+    reads its mark) within ``TOUT_WINDOW`` after one of those posts: a
+    window that holds the post, as 03 §2.3 counts them. The collector's
+    verdict is the one home of the tout rule; the gate only reads it."""
+    posts = (
+        await session.execute(
+            sa.select(Interaction.sender_id, Interaction.occurred_at)
+            .join(Observation, Observation.id == Interaction.observation_id)
+            .where(
+                Observation.company_id.in_(lineage),
+                Observation.status == "resolved",
+                Interaction.sender_id > 0,
+            )
+        )
+    ).all()
+    if not posts:
+        return False
+    times: dict[int, list[datetime]] = {}
+    for sender, at in posts:
+        times.setdefault(int(sender), []).append(at)
+    later = await session.execute(
+        sa.select(Interaction.sender_id, Interaction.occurred_at, Observation.parsed)
+        .join(Observation, Observation.id == Interaction.observation_id)
+        .where(
+            Interaction.sender_id.in_(sorted(times)),
+            Interaction.occurred_at > min(at for _, at in posts),
+            Interaction.occurred_at < max(at for _, at in posts) + TOUT_WINDOW,
+        )
+    )
+    for sender, at, parsed in later.all():
+        if not isinstance(parsed, Mapping) or companies.tout_refusal(parsed) is None:
+            continue
+        if any(t < at < t + TOUT_WINDOW for t in times.get(int(sender), ())):
+            return True
+    return False
+
+
 async def inputs_for(
     session: AsyncSession,
     company_id: uuid.UUID,
@@ -713,6 +763,7 @@ async def inputs_for(
                 )
             )
         )
+    tout_poster = await _tout_poster(session, lineage)
     own: list[OwnText] = []
     urls: list[str] = []
     repeat = 0
@@ -794,6 +845,7 @@ async def inputs_for(
         urls=tuple(urls),
         import_signals=tuple(imports),
         competitor_channel=competitor_channel,
+        tout_poster=tout_poster,
         repeat_count_60d=repeat,
         exhibitor_countries=frozenset(countries),
     )

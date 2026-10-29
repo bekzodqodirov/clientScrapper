@@ -313,6 +313,9 @@ def test_b2c_words_without_volume_exclude_and_with_volume_hold():
         (PASSING, (GateSignal("flag_competitor", 1, NOW),), None, "signal"),
         # 04 §6 fixture: a cargo channel owner
         (replace(PASSING, competitor_channel=True), (), None, "channel"),
+        # A Telegram poster telegram_monitor judged a tout within 7 days after
+        # the post (integration T-14 → T-19; tests/test_telegram_pipeline.py).
+        (replace(PASSING, tout_poster=True), (), None, "tout"),
     ],
 )
 def test_a_competitor_is_excluded(company, signals, verdict, why):

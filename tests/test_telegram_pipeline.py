@@ -15,6 +15,7 @@ All data is synthetic (07 §1.0); every model answer is SYNTHETIC
 
 from __future__ import annotations
 
+from datetime import timedelta
 from decimal import Decimal
 
 import sqlalchemy as sa
@@ -235,3 +236,51 @@ async def test_a_weight_quote_takes_rule_one_on_the_quoted_tonnes(
     cand = await _candidate(session)
     # volume 30 + origin 20 + recency 10 + contact 4 = 64, no phone → warm.
     assert (cand.score, cand.tier, cand.state) == (64, "warm", "enriching")
+
+
+PRICE_LIST = "Xitoydan yuk: 1 kub 250$, 100 kg 300$, 20 fut 2500$"
+
+
+async def _price_lists(session, offline, tmp_path, days: tuple[int, ...]) -> None:
+    await chat(session)
+    for n, day in enumerate(days):
+        await store(
+            session,
+            PRICE_LIST,
+            message_id=300 + n,
+            at=cf.T0 + timedelta(days=day),
+            username="namuna_narx",
+            name="Namuna",
+            bio=None,
+        )
+    await link(offline, tmp_path, now=cf.T0 + timedelta(days=days[-1], hours=1))
+
+
+async def test_a_live_touts_first_price_lists_do_not_stay_a_lead(
+    session, enabled, offline, tmp_path
+):
+    """03 §2.3 counts price lists up to each message, so a tout's first two
+    lists stand as asks and become a lead before the third arrives (T-14
+    S2). Gate 2 reads the collector's later verdict: a person whose message
+    within 7 days after the post was a tout's is a competitor."""
+    await _price_lists(session, offline, tmp_path, (0, 2, 5))
+    report = await companies.resolve_batch(now=cf.T0 + timedelta(days=5, hours=2))
+    assert (report.resolved, report.rejected) == (2, 1)  # the third is the tout's
+    await candidates.score_batch(now=cf.T0 + timedelta(days=5, hours=2))
+    cand = await _candidate(session)
+    assert (cand.state, cand.exclude_reason) == ("excluded", "competitor")
+    assert cand.score_breakdown["gates"]["not_competitor"] == "fail:tout"
+    company = await session.get(m.Company, cand.company_id, populate_existing=True)
+    assert company is not None and company.is_competitor
+
+
+async def test_price_lists_a_week_apart_stay_a_lead(session, enabled, offline, tmp_path):
+    """The same lists eight days apart: no 7-day window holds three, the
+    collector judges none a tout's, and the gate has nothing to read."""
+    await _price_lists(session, offline, tmp_path, (0, 8, 16))
+    report = await companies.resolve_batch(now=cf.T0 + timedelta(days=16, hours=2))
+    assert (report.resolved, report.rejected) == (3, 0)
+    await candidates.score_batch(now=cf.T0 + timedelta(days=16, hours=2))
+    cand = await _candidate(session)
+    assert cand.state == "enriching"
+    assert cand.score_breakdown["gates"]["not_competitor"] == "pass"
