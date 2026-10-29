@@ -120,6 +120,8 @@ BUILT = {
     "retention",
     # T-36: the weekly precision job (05 §B.2).
     "source_precision",
+    # T-24: enrichment (services/enrich, 04 §3).
+    "enrich",
 }
 # The ERP slots and the ErpSync variant each runs (03 §3, 05 §B.2).
 ERP_VARIANTS = {
@@ -262,6 +264,28 @@ def test_the_push_and_reconcile_slots_are_crm_push_s_jobs():
     ):
         job = scheduler.get_job(job_id)
         assert job is not None and job.func is func
+
+
+async def test_the_enrich_slot_runs_enrichment_with_the_shared_fetcher(monkeypatch):
+    """T-24: the ``enrich`` slot (every 10 min 07:00–22:00) is
+    ``services/enrich.enrich_job`` handed the worker's one Fetcher."""
+    from clientscrapper.services import enrich
+
+    table = {s.id: s for s in worker.job_table()}
+    assert table["enrich"].job is worker.enrich_job
+    assert table["enrich"].triggers == ("*/10 7-21 * * *",)
+    seen: dict[str, object] = {}
+
+    async def fake(**kwargs):
+        seen.update(kwargs)
+        return {"attempts": 0}
+
+    monkeypatch.setattr(enrich, "enrich_job", fake)
+    assert await worker.enrich_job() == {"attempts": 0}
+    assert seen["fetcher"] is worker.shared_fetcher()
+    assert seen["now"].tzinfo is not None
+    job = worker.build_scheduler().get_job("enrich")
+    assert job is not None and job.func is worker.enrich_job
 
 
 def test_the_retention_slot_is_retention_s_job_at_04_15_tashkent():

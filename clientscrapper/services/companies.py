@@ -141,7 +141,15 @@ SELF_DOMAINS: Final = frozenset({"gsrlogistics.uz", "gsrwms.uz"})
 SELF_CHANNELS: Final = frozenset({"gsrlogistics", "gsrgroupchat"})
 
 How = Literal[
-    "stir", "phone", "telegram", "domain", "instagram", "external_id", "fuzzy", "new"
+    "stir",
+    "phone",
+    "telegram",
+    "domain",
+    "instagram",
+    "external_id",
+    "fuzzy",
+    "new",
+    "enrich",
 ]
 
 # observations.parsed.handles key → company_ids.id_type (04 §1.6 renames). A
@@ -964,6 +972,60 @@ async def resolve_company(
         score=score,
         created=created,
         duplicate_of=duplicate_of,
+        conflict=conflicts[0] if conflicts else None,
+        contact=contact,
+        conflicts=tuple(conflicts),
+    )
+
+
+async def resolve_into(
+    session: AsyncSession, obs: Observation, company: Company, *, now: datetime
+) -> Resolution:
+    """Give ``company`` the identity of an observation enrichment fetched
+    *for it* (04 §3): its own site, its channel's page, its registry card —
+    pages reached through the company's own keys, so the company is the
+    winner by construction and the name ladder is not asked. The exact-key
+    rule still holds: a key the observation carries that names another
+    company (outside ``company``'s lineage) is that company's — never
+    carried, logged as a conflict, and the other company marked ``dup_of``
+    when the names are close (04 §2.1). The spelling is learnt only when it
+    reads as the company's own (``_name_agrees``). Runs in the caller's
+    transaction, which holds ``company`` (``companies`` first, 04 §0);
+    raises ``ObservationRejected`` for GSR itself or a purged company."""
+    keys = identity_keys(obs.parsed)
+    if (reason := self_refusal(keys)) is not None:
+        raise ObservationRejected(reason)
+    if company.state == "purged":
+        raise ObservationRejected("purged")
+    await _lock(session, keys)
+    lineage = await company_lineage(session, company.id)
+    conflicts: list[tuple[str, uuid.UUID]] = []
+    foreign: set[str] = set()
+    for hit in await _exact_hits(session, keys):
+        if hit.company.id in lineage:
+            continue
+        foreign.add(hit.key)
+        if hit.company.state == "purged":
+            continue
+        if (hit.how, hit.company.id) not in conflicts:
+            conflicts.append((hit.how, hit.company.id))
+            await _note_conflict(session, company, hit)
+    learn_name = await _name_agrees(session, company, keys.name_key)
+    contact = await _carry_identity(
+        session,
+        company,
+        keys,
+        foreign=foreign,
+        learn_name=learn_name,
+        source_key=obs.source_key,
+        now=now,
+    )
+    return Resolution(
+        company=company,
+        how="enrich",
+        score=100.0,
+        created=False,
+        duplicate_of=None,
         conflict=conflicts[0] if conflicts else None,
         contact=contact,
         conflicts=tuple(conflicts),

@@ -39,7 +39,10 @@ never the batch lane's fallbacks, which only the 23:30 run takes);
 once on ``cs_interaction``); ``review_cards`` (T-21,
 ``services/reviews.review_cards_job``, every 2 minutes: the expiry sweep at
 any hour, the cards inside ``REVIEW_HOURS``, through the owner bot's
-``BotCards`` that ``connect_owner_bot`` wires); ``crm_push`` (T-28,
+``BotCards`` that ``connect_owner_bot`` wires); ``enrich`` (T-24,
+``services/enrich.enrich_job`` with the shared Fetcher, every 10 minutes
+07:00–22:00: the warm re-asks, the ``/stir`` re-runs, the E0–E6 attempts);
+``crm_push`` (T-28,
 ``services/crm_push.crm_push_job``, every minute, sending only inside the
 push window) and ``reconcile`` (T-28, ``crm_push.reconcile_job``, every 10
 minutes: a crashed claim, the ``unknown`` outcomes walk, rule 5's re-push);
@@ -128,6 +131,7 @@ from clientscrapper.services import (
     crm_push,
     crontab,
     digest,
+    enrich,
     erp_feeds,
     health,
     model_jobs,
@@ -369,7 +373,13 @@ def job_table() -> tuple[JobSlot, ...]:
             reviews.review_cards_job,
             note="sends inside REVIEW_HOURS",
         ),
-        JobSlot("enrich", ("*/10 7-21 * * *",), "T-24", note="every 10 min 07:00–22:00"),
+        JobSlot(
+            "enrich",
+            ("*/10 7-21 * * *",),
+            "T-24",
+            enrich_job,
+            note="every 10 min 07:00–22:00",
+        ),
         JobSlot("verdict", ("every 10m",), "T-30", verdict.verdict_job),
         # --- 05: push, reconcile, precision ---------------------------------------
         JobSlot(
@@ -500,6 +510,15 @@ def collector_job(cls: type[Collector], variant: str | None = None) -> Job:
 
     job.__name__ = f"collector_{cls.key}{'_' + variant if variant else ''}"
     return job
+
+
+async def enrich_job() -> dict[str, Any]:
+    """The ``enrich`` slot (T-24, 04 §0/§3): ``services/enrich.enrich_job``
+    with the shared Fetcher (one breaker, one robots cache with the
+    collectors), at the wall clock of the run."""
+    return await enrich.enrich_job(
+        fetcher=shared_fetcher(), now=datetime.now(settings.tz)
+    )
 
 
 # --- the event-driven path (04 §0) -------------------------------------------------

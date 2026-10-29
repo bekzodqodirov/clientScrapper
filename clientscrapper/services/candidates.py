@@ -278,18 +278,45 @@ def card_bound(state: str, walk: tuple[str, ...]) -> bool:
 
 
 def gated_walk(
-    state: str, walk: tuple[str, ...], failure: gates.Failure | None
+    state: str,
+    walk: tuple[str, ...],
+    failure: gates.Failure | None,
+    *,
+    enrich_left: bool = False,
 ) -> tuple[str, ...]:
     """The walk once the deciding gate has spoken (04 §6): an exclusion or
     a suppression at once; a hold instead of the route (``found`` passes
-    through ``scored``; a held candidate stays held)."""
+    through ``scored``; a held candidate stays held).
+
+    Gate 1's «not yet B2B» (no B2C either) on a candidate bound for a card
+    goes to enrichment instead while attempts are left (``enrich_left``,
+    T-24): enrichment is what may make it B2B (04 §6 gate 1 «may become B2B
+    after enrichment»). A candidate in ``enriching`` stays there; a
+    ``review`` row has no step to ``enriching`` (02 §2.9) and is held."""
     if failure is None:
         return walk
     if failure.decision in ("excluded", "suppressed"):
         return (failure.decision,)
+    if (
+        enrich_left
+        and failure.gate == "is_b2b"
+        and failure.decision == "hold"
+        and state in ENRICHABLE_STATES
+    ):
+        return ENRICHABLE_STATES[state]
     if state == "hold":
         return ()
     return ("scored", "hold") if state == "found" else ("hold",)
+
+
+# Gate 1's «not yet B2B» sends a card-bound candidate to enrichment from
+# these states, by these steps of 02 §2.9's table.
+ENRICHABLE_STATES: Final[Mapping[str, tuple[str, ...]]] = {
+    "found": ("scored", "enriching"),
+    "scored": ("enriching",),
+    "hold": ("scored", "enriching"),
+    "enriching": (),
+}
 
 
 def _later(a: datetime | None, b: datetime | None) -> datetime | None:
@@ -806,10 +833,12 @@ async def apply_score(
     now: datetime,
     auto_push: bool,
     gate: gates.GateResult | None = None,
+    walk: tuple[str, ...] | None = None,
 ) -> tuple[str, ...]:
-    """Walk ``candidate`` through ``route``'s states — or, when ``gate``
-    has a deciding failure, through ``gated_walk``'s — and record every
-    gate's mark in ``score_breakdown.gates``; returns the walk."""
+    """Walk ``candidate`` through ``route``'s states — or the ``walk`` the
+    caller decided (enrichment's warm re-ask, T-24) — or, when ``gate`` has
+    a deciding failure, through ``gated_walk``'s, and record every gate's
+    mark in ``score_breakdown.gates``; returns the walk."""
     facts = RouteFacts(
         auto_push=auto_push,
         hold_until=candidate.hold_until,
@@ -818,11 +847,17 @@ async def apply_score(
         no_phone=_handoff(candidate.score_breakdown),
     )
     state = candidate.state
-    walk = route(state, result.tier, facts, now=now)
+    if walk is None:
+        walk = route(state, result.tier, facts, now=now)
     failure: gates.Failure | None = None
     if gate is not None:
         failure = gate.decide(card=card_bound(state, walk))
-        walk = gated_walk(state, walk, failure)
+        walk = gated_walk(
+            state,
+            walk,
+            failure,
+            enrich_left=candidate.enrich_attempts < MAX_ENRICH_ATTEMPTS,
+        )
         breakdown = dict(candidate.score_breakdown or {})
         breakdown["gates"] = {**dict(breakdown.get("gates") or {}), **gate.marks}
         candidate.score_breakdown = breakdown
