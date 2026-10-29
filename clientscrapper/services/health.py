@@ -1320,6 +1320,33 @@ def _streak(component: Component) -> int:
     return failures if isinstance(failures, int) else 0
 
 
+# A short-interval job whose skipped runs span this long is hung (its streak
+# of STILL_RUNNING carries ``every``, ``worker.on_job_skipped``).
+JOB_STUCK_AFTER: Final = timedelta(minutes=15)
+
+
+def job_failing_streak(job: Component) -> int | None:
+    """The job's failing streak once it counts as job_failing, else None:
+    ``JOB_FAILING_STREAK`` raises in a row; or, for skipped runs of a
+    short-interval job (``every`` in its beat), as many as span
+    ``JOB_STUCK_AFTER`` and at least ``JOB_FAILING_STREAK`` — a 2-minute job
+    hung on a lock is said after 16 minutes, a 15-minute one after three
+    skips."""
+    runs = _streak(job)
+    if runs < JOB_FAILING_STREAK:
+        return None
+    every = job.detail.get("every")
+    if (
+        job.detail.get("error") == STILL_RUNNING
+        and isinstance(every, int)
+        and not isinstance(every, bool)
+        and every > 0
+        and runs * every < JOB_STUCK_AFTER.total_seconds()
+    ):
+        return None
+    return runs
+
+
 # The sweep's own scheduler id: when it is the job that keeps raising, it
 # cannot say so itself (06 §4.3), so the bot's watchdog reads its beat.
 HEALTH_JOB: Final = "health"
@@ -1398,7 +1425,7 @@ def failing_jobs(status: Status) -> list[tuple[Component, int]]:
     return [
         (job, n)
         for _, job in sorted(status.jobs.items())
-        if (n := _streak(job)) >= JOB_FAILING_STREAK
+        if (n := job_failing_streak(job)) is not None
     ]
 
 

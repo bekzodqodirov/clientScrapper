@@ -1163,6 +1163,16 @@ async def test_a_paused_worker_does_not_resume_on_a_failed_lock_check(
         await theirs.release()
 
 
+async def test_an_app_connection_waits_on_a_lock_at_most_lock_timeout(session):
+    """A job blocked on a row lock raises after LOCK_TIMEOUT instead of
+    hanging while max_instances=1 refuses every later run (seam review wave
+    4); the skips meanwhile are health's (job_failing_streak)."""
+    from clientscrapper.db import session as db_session
+
+    assert db_session.LOCK_TIMEOUT == "300s"
+    assert await session.scalar(sa.text("SHOW lock_timeout")) == "5min"
+
+
 async def test_the_new_leader_closes_a_dead_workers_runs_only(session):
     """An OOM-killed worker's 'running' erp_sync row held the source's one
     running slot for 2 h 30 min: every ERP cadence was skipped

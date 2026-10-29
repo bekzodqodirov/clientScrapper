@@ -355,9 +355,50 @@ async def test_a_hung_sweep_s_skipped_runs_reach_the_watchdog(session):
         "⚠️ <code>health</code> ishi tugamayapti: oxirgi 3 ta navbati oʻtkazib "
         "yuborildi — <code>make worker</code> loglari"
     ]
-    # A slow job other than the sweep is no failure: its skips are not counted.
+    # One skip of a 15-minute job is counted with its interval and is no
+    # failure yet (health.job_failing_streak: three, spanning ≥ 15 min).
     beats = await health.beats(session)
-    assert health.JOB_PREFIX + "score" not in beats
+    score = beats[health.JOB_PREFIX + "score"].detail
+    assert (score["error"], score["failures"], score["every"]) == (
+        health.STILL_RUNNING,
+        1,
+        900,
+    )
+    # A collector cadence may outlast its interval: its skips are not counted.
+    event = JobSubmissionEvent(EVENT_JOB_MAX_INSTANCES, "hh_vacancies", None, [NOW])
+    assert worker.on_job_skipped(event, loop=loop) is None
+
+
+async def test_a_job_hung_on_a_lock_is_said_once_its_skips_span_15_minutes(session):
+    """Seam review wave 4: review_cards blocked for ever on a row lock (a
+    forgotten `make psql` FOR UPDATE) — max_instances=1 refuses every later
+    run, nothing raised, and /holat said «hammasi joyida». Its skips are
+    counted with its interval: seven (14 min) are not yet a hang, eight are."""
+    import asyncio
+
+    from apscheduler.events import EVENT_JOB_MAX_INSTANCES, JobSubmissionEvent
+
+    assert worker.skip_interval("review_cards") == 120
+    assert worker.skip_interval("crm_push") == 60
+    assert worker.skip_interval("restore_drill") is None  # a cron, not a cadence
+    assert worker.skip_interval("telegram_monitor") is None  # a collector
+    loop = asyncio.get_running_loop()
+    for n in range(1, 9):
+        event = JobSubmissionEvent(EVENT_JOB_MAX_INSTANCES, "review_cards", None, [NOW])
+        await asyncio.wrap_future(worker.on_job_skipped(event, loop=loop))
+        await health.beat(session, "worker", detail={"jobs": 20}, now=NOW)
+        await session.commit()
+        status = await health.gather(session, now=NOW)
+        failing = [j.name for j, _ in health.failing_jobs(status)]
+        assert ("review_cards" in failing) is (n >= 8), n
+    [problem] = [p for p in health.problems(status) if p.key == "job_failing"]
+    assert "<code>review_cards</code> ishi tugamayapti: oxirgi 8 ta navbati" in (
+        problem.text
+    )
+    # A run that ends clears it.
+    await worker.record_job_event("review_cards", ok=True, error=None)
+    status = await health.gather(session, now=NOW)
+    assert health.failing_jobs(status) == []
 
 
 async def test_two_raises_are_not_yet_a_failing_sweep(session):

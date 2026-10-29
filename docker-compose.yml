@@ -29,7 +29,7 @@ services:
     mem_limit: 1536m
     logging: *log
     environment: { POSTGRES_USER: "${POSTGRES_USER:-clientscrapper}", POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?required}", POSTGRES_DB: "${POSTGRES_DB:-clientscrapper}", TZ: "${TIMEZONE:-Asia/Tashkent}" }
-    command: ["postgres", "-c", "shared_buffers=384MB", "-c", "work_mem=16MB", "-c", "timezone=Asia/Tashkent", "-c", "log_min_duration_statement=2000"]
+    command: ["postgres", "-c", "shared_buffers=384MB", "-c", "work_mem=16MB", "-c", "timezone=Asia/Tashkent", "-c", "log_min_duration_statement=2000", "-c", "idle_in_transaction_session_timeout=15min"]
     volumes: [ "db_data:/var/lib/postgresql/data" ]
     ports: [ "127.0.0.1:${DB_PORT:-5433}:5432" ]   # localhost only; 5433 because MIYA may hold 5432 on the same VPS
     healthcheck: { test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-clientscrapper} -d ${POSTGRES_DB:-clientscrapper}"], interval: 5s, timeout: 5s, retries: 20 }

@@ -84,6 +84,15 @@ def test_the_database_is_capped_waited_on_and_kept():
     assert db["volumes"] == ["db_data:/var/lib/postgresql/data"]
 
 
+def test_postgres_ends_a_session_left_idle_in_a_transaction():
+    """A forgotten `make psql` holding FOR UPDATE would stop the card job for
+    ever (seam review wave 4): the server ends a session idle in a
+    transaction after 15 minutes — longer than any model or Telegram call an
+    app transaction waits on."""
+    command = _services()["db"]["command"]
+    assert "idle_in_transaction_session_timeout=15min" in command
+
+
 def test_init_migrates_once_as_the_app_user():
     init = _services()["init"]
     assert init["restart"] == "no"

@@ -653,13 +653,17 @@ async def listen_for_wakes(
 # --- self-monitoring -----------------------------------------------------------------
 
 
-async def record_job_event(job_id: str, *, ok: bool, error: str | None) -> None:
+async def record_job_event(
+    job_id: str, *, ok: bool, error: str | None, every: int | None = None
+) -> None:
     """Upsert the ``job:<id>`` heartbeat for one finished scheduler run:
     ``{ok, error, failures}``, ``failures`` being how many runs in a row have
     raised (06 §4.2 job_failing; a success resets it). Its own session, and it
     never raises: a heartbeat that cannot be written is a log line, not a
     second failure on top of the job's own. The error is the exception's
-    class: a message may carry what a row said."""
+    class: a message may carry what a row said. ``every`` (seconds) rides on
+    a skipped run of a short-interval job (``on_job_skipped``): health judges
+    such a streak by the time it spans (``health.job_failing_streak``)."""
     component = health.JOB_PREFIX + job_id
     try:
         async with session_scope() as session:
@@ -672,11 +676,10 @@ async def record_job_event(job_id: str, *, ok: bool, error: str | None) -> None:
                 if isinstance(count, bool) or not isinstance(count, int):
                     count = 0
                 failures = count + 1
-            await health.beat(
-                session,
-                component,
-                detail={"ok": ok, "error": error, "failures": failures},
-            )
+            detail: dict[str, Any] = {"ok": ok, "error": error, "failures": failures}
+            if every is not None and not ok:
+                detail["every"] = every
+            await health.beat(session, component, detail=detail)
     except Exception as exc:
         log.error(
             "job outcome not recorded",
@@ -697,19 +700,55 @@ def on_job_event(
     )
 
 
+# A skipped run counts for an in-process job on a short interval: a hung
+# review_cards (a row lock it waits on for ever) stops every card while
+# max_instances=1 refuses the later runs, and nothing else would say so
+# (seam review wave 4). A collector cadence may outlast its interval
+# legitimately (a long run) — its skip is no failure.
+SKIP_JUDGED_MAX: Final = timedelta(minutes=15)
+
+
+def skip_interval(job_id: str, slots: tuple[JobSlot, ...] | None = None) -> int | None:
+    """The interval in seconds of an in-process ``every <n>m|s`` job whose
+    skipped runs count (``SKIP_JUDGED_MAX`` at most, no collector), else
+    None."""
+    for slot in slots if slots is not None else job_table():
+        if slot.id != job_id:
+            continue
+        if slot.job is None or slot.source_key is not None or len(slot.triggers) != 1:
+            return None
+        spec = slot.triggers[0]
+        if not spec.startswith("every "):
+            return None
+        amount, unit = spec[len("every ") : -1], spec[-1]
+        if not amount.isdigit() or unit not in {"m", "s"}:
+            return None
+        seconds = int(amount) * (60 if unit == "m" else 1)
+        return seconds if seconds <= SKIP_JUDGED_MAX.total_seconds() else None
+    return None
+
+
 def on_job_skipped(
     event: JobSubmissionEvent, *, loop: asyncio.AbstractEventLoop
 ) -> asyncio.Future[None] | Any | None:
     """APScheduler listener (EVENT_JOB_MAX_INSTANCES): a run skipped because
-    the previous one of the same job has not ended. Only the health sweep's
-    skip is a failed run (``health.STILL_RUNNING``): a hung sweep raises
-    nothing and says nothing, and the bot's watchdog reads its streak
-    (``health.sweep_failing``). Any other job may outlast its interval
-    legitimately (a long collector run) — its skip is no failure."""
-    if event.job_id != health.HEALTH_JOB:
-        return None
+    the previous one of the same job has not ended (``health.STILL_RUNNING``).
+    The health sweep's skip is a failed run: a hung sweep raises nothing and
+    says nothing, and the bot's watchdog reads its streak
+    (``health.sweep_failing``). An in-process short-interval job's skip
+    (``skip_interval``) is counted with its interval, and health judges the
+    streak by the time it spans (``health.job_failing_streak``: three skips
+    and at least 15 minutes). A collector cadence may outlast its interval
+    legitimately — its skip is no failure."""
+    if event.job_id == health.HEALTH_JOB:
+        every = None
+    else:
+        every = skip_interval(event.job_id)
+        if every is None:
+            return None
     return asyncio.run_coroutine_threadsafe(
-        record_job_event(event.job_id, ok=False, error=health.STILL_RUNNING), loop
+        record_job_event(event.job_id, ok=False, error=health.STILL_RUNNING, every=every),
+        loop,
     )
 
 
