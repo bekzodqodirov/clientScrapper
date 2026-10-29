@@ -82,6 +82,9 @@ SPEC_KEYS = (
     "ig_token_expired",
     "source_low_precision",
     "evidence_over_cap",
+    # T-32 (03 §2.8 «a crawl under 50 % of the figure is partial and
+    # alerts»): the 06 §4.2 row is a spec note.
+    "exhibitor_list_short",
 )
 SPEC_CRITICAL = {
     "db_down",
@@ -386,7 +389,49 @@ TRIGGERS: dict[str, tuple[Callable[[Status], None], str]] = {
         _reported("evidence_over_cap", gb=31.2),
         "Dalil papkasi 31.2 GB",
     ),
+    "exhibitor_list_short": (
+        _reported(
+            "exhibitor_list_short",
+            lists=[
+                {
+                    "show": "caitme",
+                    "title": "CAITME",
+                    "year": 2026,
+                    "rows": 80,
+                    "expected": 210,
+                    "status": "complete",
+                },
+                {
+                    "show": "automechanika",
+                    "title": "Automechanika Tashkent",
+                    "year": 2026,
+                    "rows": 0,
+                    "expected": 489,
+                    "status": "removed",
+                },
+            ],
+        ),
+        "CAITME 2026: koʻrgazma roʻyxatida 80 ta ishtirokchi, tashkilotchi 210 ta "
+        "deydi (38%)",
+    ),
 }
+
+
+def test_the_exhibitor_line_names_each_short_or_missing_list():
+    """One line per list (03 §2.8): a short one with its count against the
+    organiser's, a gone one in words."""
+    status = healthy_status()
+    TRIGGERS["exhibitor_list_short"][0](status)
+    [problem] = health.problems(status)
+    assert problem.text.splitlines() == [
+        "⚠️ CAITME 2026: koʻrgazma roʻyxatida 80 ta ishtirokchi, tashkilotchi 210 "
+        "ta deydi (38%) — roʻyxat chala, sayt oʻzgargan boʻlishi mumkin",
+        "⚠️ Automechanika Tashkent 2026: koʻrgazma ishtirokchilari roʻyxati saytda "
+        "topilmadi — olib tashlangan yoki hali chiqmagan; manzilni qoʻlda tekshiring",
+    ]
+    assert health.recovery_text("exhibitor_list_short") == (
+        "✅ Koʻrgazma roʻyxatlari yana toʻliq — tiklandi"
+    )
 
 
 def test_a_healthy_status_has_no_problem():

@@ -100,6 +100,8 @@ BUILT = {
     "resolve",
     # T-14: the Telegram collector, woken by NOTIFY cs_interaction too.
     "telegram_monitor",
+    # T-32: the exhibitor lists, Monday 09:00 on sources.exhibitors.cron.
+    "exhibitors",
     # T-15: the classifier, woken by the collector's NOTIFY.
     "classify",
     # T-16: the batch lane (services/model_jobs).
@@ -209,6 +211,33 @@ async def test_the_telegram_slot_runs_the_telegram_collector(monkeypatch):
         await worker.shared_fetcher().aclose()
         worker._shared.fetcher = None
     assert ran == [(TelegramMonitor, None)]
+
+
+async def test_the_exhibitors_slot_runs_the_exhibitors_collector(monkeypatch):
+    """T-32 fills the slot T-08 left: run_collector(Exhibitors), no variant,
+    primary on sources.exhibitors.cron (03 §3: Monday 09:00)."""
+    from clientscrapper.collectors.exhibitors import Exhibitors
+
+    ran: list[tuple[type, str | None]] = []
+
+    async def record(cls, *, fetcher, now, variant=None, **kw):
+        ran.append((cls, variant))
+
+    monkeypatch.setattr(worker, "run_collector", record)
+    [slot] = [s for s in worker.job_table() if s.id == "exhibitors"]
+    assert (slot.source_key, slot.variant, slot.primary, slot.wakes_on) == (
+        "exhibitors",
+        None,
+        True,
+        None,
+    )
+    assert slot.job is not None
+    try:
+        await slot.job()
+    finally:
+        await worker.shared_fetcher().aclose()
+        worker._shared.fetcher = None
+    assert ran == [(Exhibitors, None)]
 
 
 def test_the_resolver_is_the_resolve_slot_s_job():

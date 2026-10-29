@@ -19,10 +19,13 @@ is skipped and named in ``meta.calendar``.
 
 **The window rule** (03 §2.8): a show is crawled every Monday while
 ``end_date + 10 d ≤ today < end_date + 60 d``. Where the site prints an
-edition's dates (the ERA edition ``<select>``) those dates are read too: an
-edition the site lists inside its window is crawled even when the calendar
-does not name it (TextileExpo had two editions a year in 2024 and 2025 and
-one in 2026 — the site, not a fixed May-and-autumn pair, says when). **The
+edition's dates (the ERA edition ``<select>``) those dates are read too: the
+index of an ERA show is read every Monday (one request a show), and an
+edition it lists inside its window is crawled even when the calendar does
+not name it (TextileExpo had two editions a year in 2024 and 2025 and one in
+2026 — the site, not a fixed May-and-autumn pair, says when). Expodat prints
+no dates: its index is read only for a calendar entry in its window or the
+archive sweep. **The
 archive** — every edition the index lists whose window is over — is swept
 once a year per show (``ARCHIVE_EVERY``): a run that read every archive of a
 show names it in ``meta.archived``, and the next sweep of that show waits 365
@@ -449,7 +452,9 @@ def plan_visits(
     calendar: Sequence[ShowEntry], today: date, archived: Iterable[str]
 ) -> list[Visit]:
     """The shows to read today, in-window ones first (pure). ``archived`` are
-    the shows whose archive was swept in the last ``ARCHIVE_EVERY``."""
+    the shows whose archive was swept in the last ``ARCHIVE_EVERY``. An ERA
+    show is read every week: its index prints the dates of editions the
+    calendar may not name."""
     swept = frozenset(archived)
     groups: dict[tuple[str, str, str], list[ShowEntry]] = {}
     for entry in calendar:
@@ -459,14 +464,15 @@ def plan_visits(
     for (show, index, rows), entries in groups.items():
         due = tuple(e for e in entries if in_window(e.end_date, today))
         archive = show not in swept
-        if not due and not archive:
+        platform = entries[0].platform
+        if not due and not archive and platform != "era":
             continue
         visits.append(
             Visit(
                 show=show,
                 index_url=index,
                 rows_pattern=rows,
-                platform=entries[0].platform,
+                platform=platform,
                 entries=tuple(entries),
                 due=due,
                 archive=archive,
@@ -557,7 +563,9 @@ def pick_targets(
         ):
             targets.append(Target(visit.show, edition, "archive", entry))
     missing = [e for e in visit.due if e not in matched]
-    return targets, missing
+    # The lists in their window first: a budget that runs out stops an
+    # archive, never this week's show.
+    return sorted(targets, key=lambda t: t.why != "window"), missing
 
 
 # --- a small HTML tree (the standard library's tokenizer) --------------------------
