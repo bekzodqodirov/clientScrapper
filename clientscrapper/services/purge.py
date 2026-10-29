@@ -1171,10 +1171,21 @@ async def _people(
         session, sa.delete(Contact).where(Contact.company_id.in_(members))
     )
     live = ModelJob.status.in_(LIVE_JOB_STATUSES)
+    # And a request of the subject's company written since group 1 (a draft
+    # or a verdict whose model call was in flight, seam review wave 4).
+    late = sa.and_(
+        ModelJob.company_id.in_(members),
+        sa.or_(
+            ModelJob.request.is_not(None),
+            ModelJob.pseudonyms.is_not(None),
+            ModelJob.result.is_not(None),
+            live,
+        ),
+    )
     jobs = await _gone(
         session,
         sa.update(ModelJob)
-        .where(ModelJob.id.in_(scope.model_jobs))
+        .where(sa.or_(ModelJob.id.in_(scope.model_jobs), late))
         .values(
             request=sa.null(),
             pseudonyms=sa.null(),
@@ -1238,6 +1249,21 @@ async def _identity(
     return counts, files
 
 
+async def _lock_lineage(session: AsyncSession, company_ids: Sequence[uuid.UUID]) -> None:
+    """``FOR UPDATE`` on every company of the plan's lineages, in id order
+    (companies → lead_candidates → lead_reviews)."""
+    if not company_ids:
+        return
+    groups = await companies.lineages(session, sorted(set(company_ids)))
+    members = sorted({m for group in groups.values() for m in group})
+    await session.execute(
+        sa.select(Company.id)
+        .where(Company.id.in_(members))
+        .order_by(Company.id)
+        .with_for_update()
+    )
+
+
 async def execute(
     session: AsyncSession,
     plan: PurgePlan,
@@ -1257,6 +1283,12 @@ async def execute(
     assert purge_log_id is not None
     try:
         await _claim(session, purge_log_id)
+        # The lineage is locked before its scope is read (seam review wave
+        # 4): a push that commits between the read and group 1 made a
+        # candidate the stale scope still deleted (push_log RESTRICT), and a
+        # job written meanwhile was missed. A push or a verdict holding the
+        # company finishes first; the next one waits for the purge.
+        await _lock_lineage(session, plan.company_ids)
         scope = await _scope_of(session, plan)
         done = await _stop(session, plan, scope, now=now)
         await session.commit()

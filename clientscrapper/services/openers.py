@@ -47,7 +47,7 @@ import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from clientscrapper.config import settings
-from clientscrapper.db.models import ChatMonitor, Company, LeadCandidate
+from clientscrapper.db.models import ChatMonitor, Company, LeadCandidate, ModelJob
 from clientscrapper.services import candidates, crm_push, extraction, playbook, validators
 from clientscrapper.services.candidates import CandidateView, SignalEvidence
 from clientscrapper.services.prompts import DRAFT_PROMPT_VERSION, DRAFT_SYSTEM
@@ -252,6 +252,35 @@ async def make(
     return Made(text, lang, template.segment, "draft", model_job_id=result.job_id)
 
 
+# A company whose candidate gets no opener: purged (its data is gone) or
+# merged (the root's candidate is the one a manager reads).
+NO_OPENER_STATES: Final = frozenset({"purged", "merged"})
+
+
+async def _gone(session: AsyncSession, candidate: LeadCandidate) -> bool:
+    """The candidate left the funnel, or its company was purged or merged."""
+    if candidate.state in candidates.TERMINAL_STATES:
+        return True
+    state = await session.scalar(
+        sa.select(Company.state)
+        .where(Company.id == candidate.company_id)
+        .execution_options(populate_existing=True)
+    )
+    return state is None or state in NO_OPENER_STATES
+
+
+async def forget_job(session: AsyncSession, job_id: int | None) -> None:
+    """A draft's request, reverse map and answer dropped: the opener it was
+    for will not be stored."""
+    if job_id is None:
+        return
+    await session.execute(
+        sa.update(ModelJob)
+        .where(ModelJob.id == job_id)
+        .values(request=sa.null(), pseudonyms=sa.null(), result=sa.null())
+    )
+
+
 async def ensure_opener(
     session: AsyncSession,
     candidate_id: uuid.UUID,
@@ -266,6 +295,10 @@ async def ensure_opener(
     its company is gone."""
     candidate = await session.get(LeadCandidate, candidate_id, populate_existing=True)
     if candidate is None:
+        return None
+    if await _gone(session, candidate):
+        # A purged firm, or a candidate that left the funnel: no draft is
+        # paid for and nothing is written (seam review wave 4).
         return None
     have = stored(candidate.score_breakdown)
     if have is not None and _template_meta(candidate.score_breakdown) is None:
@@ -296,6 +329,12 @@ async def ensure_opener(
     )
     if locked is None:
         return None
+    if await _gone(session, locked):
+        # Purged or closed while the draft was being made: the company's
+        # row now reads so (the purge held it; this lock waited). The draft's
+        # own request goes too — the purge could not see it uncommitted.
+        await forget_job(session, made.model_job_id)
+        return None
     if not due(locked.score_breakdown, segment=segment, hot=paid):
         # Another run stored one meanwhile: it stands.
         return stored(locked.score_breakdown)
@@ -319,11 +358,13 @@ async def ensure_opener(
 __all__ = [
     "META_KEY",
     "NOT_HOT",
+    "NO_OPENER_STATES",
     "OPENER_KEY",
     "Made",
     "competitor_names",
     "due",
     "ensure_opener",
+    "forget_job",
     "make",
     "stored",
     "user_content",
