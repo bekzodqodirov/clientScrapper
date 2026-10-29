@@ -551,6 +551,16 @@ def mark_backfill_failed(monitor: ChatMonitor) -> None:
 # --- the owner's /chats (06 §1.2) ----------------------------------------------------
 
 
+def _list_order() -> tuple[Any, ...]:
+    """/chats' order, one home for the page and a row's place in it."""
+    return (
+        ChatMonitor.monitor_enabled.desc(),
+        ChatMonitor.status,
+        ChatMonitor.title.nulls_last(),
+        ChatMonitor.id,
+    )
+
+
 async def list_monitors(
     session: AsyncSession, *, offset: int = 0, limit: int = 8
 ) -> tuple[list[ChatMonitor], int]:
@@ -559,17 +569,44 @@ async def list_monitors(
     rows = list(
         await session.scalars(
             sa.select(ChatMonitor)
-            .order_by(
-                ChatMonitor.monitor_enabled.desc(),
-                ChatMonitor.status,
-                ChatMonitor.title.nulls_last(),
-                ChatMonitor.id,
-            )
+            .order_by(*_list_order())
             .offset(offset)
             .limit(limit)
+            .execution_options(populate_existing=True)
         )
     )
     return rows, int(total or 0)
+
+
+async def get_monitor_by_id(session: AsyncSession, monitor_id: int) -> ChatMonitor | None:
+    found: ChatMonitor | None = await session.get(
+        ChatMonitor, monitor_id, populate_existing=True
+    )
+    return found
+
+
+async def position_of(session: AsyncSession, monitor_id: int) -> int:
+    """A chat's index in /chats' order (0 when it is gone), so the page it
+    now stands on can be shown after a toggle moved it."""
+    ids = list(await session.scalars(sa.select(ChatMonitor.id).order_by(*_list_order())))
+    return ids.index(monitor_id) if monitor_id in ids else 0
+
+
+async def hits_since(
+    session: AsyncSession, tg_chat_ids: Iterable[int], *, since: datetime
+) -> dict[int, int]:
+    """/chats' signal count: the stored prefilter hits (``interactions``)
+    of each chat since ``since`` — one grouped query for the page. A chat
+    with none is absent."""
+    ids = sorted(set(tg_chat_ids))
+    if not ids:
+        return {}
+    rows = await session.execute(
+        sa.select(Interaction.tg_chat_id, sa.func.count())
+        .where(Interaction.tg_chat_id.in_(ids), Interaction.occurred_at >= since)
+        .group_by(Interaction.tg_chat_id)
+    )
+    return {int(chat): int(n) for chat, n in rows.all()}
 
 
 async def set_monitor(

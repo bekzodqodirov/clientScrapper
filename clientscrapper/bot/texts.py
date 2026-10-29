@@ -40,15 +40,15 @@ UZ: Final[Mapping[str, str]] = MappingProxyType(
             "/yoq — davom ettirish (/yoq crm — CRM toʻsigʻini olish)\n"
             "/import — ERP mijozlar faylini yuklash (fayl bilan)\n"
             "/unut — kompaniyani butunlay oʻchirish\n"
-            "/qidir <soʻz> — kompaniyani qidirish\n"
-            "/dnc <+998… | @user> — bu raqam yoki akkauntga yozilmasin\n"
+            "/qidir &lt;soʻz&gt; — kompaniyani qidirish\n"
+            "/dnc &lt;+998… | @user&gt; — bu raqam yoki akkauntga yozilmasin\n"
             "/vazn [kalit ball] — ball vaznlari\n"
-            "/push tekshir <id> — CRMʼda koʻrinmagan pushni tekshirish\n"
-            "/stir <nomzod_id> <9 raqam> — STIRni qoʻlda yozish\n"
+            "/push tekshir &lt;id&gt; — CRMʼda koʻrinmagan pushni tekshirish\n"
+            "/stir &lt;nomzod_id&gt; &lt;9 raqam&gt; — STIRni qoʻlda yozish\n"
             "/yordam — shu roʻyxat"
         ),
         "help_manager": (
-            "/qidir <soʻz> — kompaniyani qidirish\n"
+            "/qidir &lt;soʻz&gt; — kompaniyani qidirish\n"
             "/yordam — shu roʻyxat\n"
             "Kartadagi tugmalar: 📞 Bogʻlandim · 🙅 Yozmang dedi · "
             "❌ Notoʻgʻri / B2C · ⏭ Keyinroq"
@@ -88,6 +88,10 @@ UZ: Final[Mapping[str, str]] = MappingProxyType(
         "manbalar.gone": "Bu manba topilmadi",
         "manbalar.forbidden": "🚫 {title}: avtomatik push taqiqlandi",
         "manbalar.already_forbidden": "{title}: avtomatik push allaqachon taqiqlangan",
+        "manbalar.line": (
+            "{icon} {title} · oxirgi {age} · bugun {pages}/{budget} sahifa · {cost} · "
+            "aniqlik {precision} ({pushes}) · {mode}"
+        ),
         "manbalar.info_title": "ℹ️ {title} ({key})",
         "manbalar.info_runs": "Oxirgi ishga tushirishlar:",
         "manbalar.info_run": "  {at} · {status} · {pages} sahifa · {new} yangi{error}",
@@ -104,6 +108,7 @@ UZ: Final[Mapping[str, str]] = MappingProxyType(
         # --- /chats ------------------------------------------------------------
         "chats.title": "💬 Telegram chatlar ({page}/{pages}) · {total} ta",
         "chats.empty": "Hali chat yoʻq. Qoʻshish: /chats qoʻsh @username",
+        "chats.line": "{state} {icon} {title} · {hits} signal (7 kun) / {seen} xabar",
         "chats.on": "✅ {title} oʻqiladi",
         "chats.off": "❌ {title} endi oʻqilmaydi (chatdan chiqilmaydi)",
         "chats.never_read": "Shaxsiy yoki GSR chatini oʻqib boʻlmaydi",
@@ -121,6 +126,7 @@ UZ: Final[Mapping[str, str]] = MappingProxyType(
         "yoq.no_breaker": "CRM toʻsigʻi yoʻq.",
         "yoq.resumed": "▶️ Davom etmoqda.",
         "yoq.kept": "⏸ Toʻxtatilgan holicha qoldi.",
+        "yoq.unchanged": "Hech narsa oʻzgarmadi.",
         "yoq.breaker_cleared": "✅ CRM toʻsigʻi olindi — push davom etadi.",
         # --- /import -----------------------------------------------------------
         "import.how": (
@@ -138,7 +144,9 @@ UZ: Final[Mapping[str, str]] = MappingProxyType(
         # --- /unut (services/purge, T-31) ---------------------------------------
         "unut.not_ready": "⏳ /unut hali ulanmagan — keyingi yangilanishda ishlaydi.",
         # --- /qidir ------------------------------------------------------------
-        "qidir.how": "Nimani qidiray? /qidir <telefon | @username | STIR | sayt | nom>",
+        "qidir.how": (
+            "Nimani qidiray? /qidir &lt;telefon | @username | STIR | sayt | nom&gt;"
+        ),
         "qidir.none": "Hech narsa topilmadi: «{query}»",
         # --- /dnc --------------------------------------------------------------
         "dnc.how": "Telefon yoki @username kerak: /dnc +998901234567 yoki /dnc @username",
@@ -153,7 +161,7 @@ UZ: Final[Mapping[str, str]] = MappingProxyType(
         # --- /vazn -------------------------------------------------------------
         "vazn.title": "⚖️ Ball vaznlari — {version}-versiya",
         "vazn.line": "{key}: {points} ({group}, chegara {cap})",
-        "vazn.how": "Oʻzgartirish: /vazn <kalit> <ball>",
+        "vazn.how": "Oʻzgartirish: /vazn &lt;kalit&gt; &lt;ball&gt;",
         "vazn.done": "⚖️ {key}: {old} → {new} · {version}-versiya",
         "vazn.unknown": "«{key}» kaliti faol versiyada yoʻq. Roʻyxat: /vazn",
         "vazn.bad_points": "Ball butun son boʻlishi kerak.",
@@ -163,7 +171,7 @@ UZ: Final[Mapping[str, str]] = MappingProxyType(
         "vazn.range_gate": "0",
         "vazn.invalid": "Rad etildi: {problems}",
         # --- /push tekshir -----------------------------------------------------
-        "push.how": "/push tekshir <external_id> — masalan cs:…:202610",
+        "push.how": "/push tekshir &lt;external_id&gt; — masalan cs:…:202610",
         "push.sent": "✅ Qayta yuborildi — {attempt}-urinish, ERP qabul qildi.",
         "push.unknown": "⏳ Qayta yuborildi — {attempt}-urinish, ERP javobi nomaʼlum.",
         "push.failed": "⚠️ Qayta yuborilmadi — ERP javob bermadi ({error}).",
@@ -171,7 +179,7 @@ UZ: Final[Mapping[str, str]] = MappingProxyType(
         "push.cancelled": "Bekor qilindi — qayta yuborilmadi.",
         "push.no_erp": "CRM sozlanmagan (CRM_AGENT_KEY) — qayta yuborib boʻlmaydi.",
         # --- /stir -------------------------------------------------------------
-        "stir.how": "/stir <nomzod_id> <9 raqamli STIR>",
+        "stir.how": "/stir &lt;nomzod_id&gt; &lt;9 raqamli STIR&gt;",
         "stir.bad_id": "Nomzod identifikatori notoʻgʻri.",
         "stir.bad_stir": "STIR 9 raqam boʻlishi kerak (2–6 bilan boshlanadi).",
         "stir.no_candidate": "Bunday nomzod topilmadi.",
@@ -215,9 +223,9 @@ MANAGER_MENU: Final[tuple[tuple[str, str], ...]] = (
 )
 
 
-def t(key: str, **values: object) -> str:
-    """The text under ``key``, its ``{name}`` placeholders filled."""
-    text = UZ[key]
+def t(name: str, /, **values: object) -> str:
+    """The text under ``name``, its ``{placeholders}`` filled."""
+    text = UZ[name]
     return text.format(**values) if values else text
 
 

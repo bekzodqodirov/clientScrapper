@@ -436,6 +436,22 @@ async def review_view(
     )
 
 
+async def card_layout(session: AsyncSession, review: LeadReview) -> CardLayout:
+    """The keyboard a card was drawn with: a manager card's; the handoff
+    variant's when the candidate has no phone and carries
+    ``gates.no_phone`` (``render_review``'s own rule); else the review's."""
+    if review.kind == "manager":
+        return "manager"
+    candidate = await session.get(LeadCandidate, review.candidate_id)
+    if candidate is None:
+        return "review"
+    lead = await push_gate.lead_contact(session, candidate)
+    phoneless = lead is None or lead.phone is None
+    if phoneless and candidates.is_handoff(candidate.score_breakdown):
+        return "handoff"
+    return "review"
+
+
 async def reroute(
     session: AsyncSession, candidate_id: uuid.UUID, gate: GateResult, *, now: datetime
 ) -> tuple[str, ...]:
@@ -742,7 +758,7 @@ async def company_card(
     )
 
 
-def _uuid(text: str) -> uuid.UUID | None:
+def parse_uuid(text: str) -> uuid.UUID | None:
     try:
         return uuid.UUID(text)
     except ValueError:
@@ -762,7 +778,7 @@ async def search(
     number is tried as a STIR and as a tail. Roots only, each once."""
     text = query.strip()
     found: list[uuid.UUID] = []
-    if (as_id := _uuid(text)) is not None:
+    if (as_id := parse_uuid(text)) is not None:
         owner = await session.scalar(
             sa.select(LeadCandidate.company_id).where(LeadCandidate.id == as_id)
         )
@@ -1014,6 +1030,7 @@ __all__ = [
     "ManagerView",
     "ReviewView",
     "card_hash",
+    "card_layout",
     "company_card",
     "lidlar_holat",
     "live_review",
@@ -1021,6 +1038,7 @@ __all__ = [
     "merge_targets",
     "money",
     "next_owner_reviews",
+    "parse_uuid",
     "pending_owner_count",
     "phone_shown",
     "render_company",
