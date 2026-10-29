@@ -51,6 +51,7 @@ UZ: Final[Mapping[str, str]] = MappingProxyType(
             "/vazn [kalit ball] — ball vaznlari\n"
             "/push tekshir &lt;id&gt; — CRMʼda koʻrinmagan pushni tekshirish\n"
             "/stir &lt;nomzod_id&gt; &lt;9 raqam&gt; — STIRni qoʻlda yozish\n"
+            "/tel &lt;karta&gt; &lt;+998…&gt; — menejer kartasiga raqam yozish\n"
             "/yordam — shu roʻyxat"
         ),
         "help_manager": (

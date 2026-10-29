@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import re
 import uuid
 from collections.abc import AsyncIterator, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
@@ -33,6 +34,7 @@ import pytest
 import sqlalchemy as sa
 from aiogram import Bot, Dispatcher
 from aiogram.exceptions import TelegramBadRequest
+from aiogram.filters import Command
 from aiogram.methods import SendMessage
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -269,6 +271,50 @@ async def test_a_manager_reaches_only_their_commands(w):
     assert w.fake.answers() == [t("stale_button")]
     await w.say("/yordam", user=MANAGER)
     assert w.last() == t("help_manager")
+
+
+# /start greets and /help is /yordam's other name: neither is a line of /yordam.
+HELP_ALIASES = frozenset({"start", "help"})
+
+
+def _registered(router) -> list[str]:
+    names: list[str] = []
+    for handler in router.message.handlers:
+        for f in handler.filters or ():
+            if isinstance(f.callback, Command):
+                names.extend(str(c) for c in f.callback.commands)
+    return names
+
+
+def _listed(help_text: str) -> set[str]:
+    return set(re.findall(r"^/(\w+)", help_text, flags=re.MULTILINE))
+
+
+def test_every_command_is_registered_once_and_listed_in_its_yordam():
+    owner, manager, reject = handlers.build_routers()
+    for router, commands, help_key in (
+        (owner, handlers.OWNER_COMMANDS, "help_owner"),
+        (manager, handlers.MANAGER_COMMANDS, "help_manager"),
+    ):
+        names = _registered(router)
+        assert sorted(names) == sorted(commands), router.name
+        assert len(names) == len(set(names)), router.name
+        assert _listed(t(help_key)) == set(commands) - HELP_ALIASES, help_key
+    assert _registered(reject) == []
+    assert {c for c, _ in COMMAND_MENU} <= set(handlers.OWNER_COMMANDS)
+    assert {c for c, _ in MANAGER_MENU} <= set(handlers.MANAGER_COMMANDS)
+    assert set(handlers.MANAGER_COMMANDS) <= set(handlers.OWNER_COMMANDS)
+
+
+async def test_no_command_answers_a_stranger_and_a_manager_only_their_own(w):
+    handlers._rejected.clear()
+    for name in handlers.OWNER_COMMANDS:
+        await w.say(f"/{name}", user=STRANGER)
+    assert w.fake.calls == []
+    for name in set(handlers.OWNER_COMMANDS) - set(handlers.MANAGER_COMMANDS):
+        w.fake.clear()
+        await w.say(f"/{name}", user=MANAGER)
+        assert w.fake.texts() == [t("help_manager")], name
 
 
 async def test_start_and_yordam(w):
