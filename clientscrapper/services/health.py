@@ -697,12 +697,20 @@ async def anthropic_facts(session: AsyncSession) -> AnthropicFacts:
     last_failed = await session.scalar(
         base.where(UsageLog.model.startswith(costs.FAILED_PREFIX, autoescape=True))
     )
+    # The work that waits for an answer now: the Telegram messages classify
+    # has still to ask about (its queue — an instant-lane job is never left
+    # pending once its transaction commits, so the queue is where the
+    # waiting work is) and any instant job left pending. The batch lane's
+    # pending jobs wait for 23:30 by design; batch_stuck is their alarm.
+    from clientscrapper.services import classify  # it imports this module
+
     pending = await session.scalar(
         sa.select(sa.func.count())
         .select_from(ModelJob)
-        .where(ModelJob.status == "pending")
+        .where(ModelJob.status == "pending", ModelJob.lane == "instant")
     )
-    return AnthropicFacts(last_ok, last_failed, int(pending or 0))
+    waiting = await classify.waiting(session)
+    return AnthropicFacts(last_ok, last_failed, int(pending or 0) + waiting)
 
 
 async def stuck_batches(

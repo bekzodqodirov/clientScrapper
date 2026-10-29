@@ -22,7 +22,7 @@ import sqlalchemy as sa
 
 from clientscrapper.config import settings
 from clientscrapper.db import models as m
-from clientscrapper.services import candidates, classify, companies
+from clientscrapper.services import candidates, classify, companies, health
 from tests import classify_fixtures as cf
 from tests.classify_fixtures import ASK, NOW, chat, interaction, link, store
 from tests.fakes import message, model_fixture
@@ -284,3 +284,21 @@ async def test_price_lists_a_week_apart_stay_a_lead(session, enabled, offline, t
     cand = await _candidate(session)
     assert cand.state == "enriching"
     assert cand.score_breakdown["gates"]["not_competitor"] == "pass"
+
+
+async def test_the_classify_queue_is_the_work_anthropic_silence_counts(
+    session, enabled, offline, tmp_path, model_api
+):
+    """06 §4.2 anthropic_silence fires «while jobs wait» and says «tasnif
+    navbatda (n ta)»: the waiting work of the Telegram path is classify's
+    queue (an instant job is never left pending), while a batch job waits
+    for 23:30 by design and is batch_stuck's to report (T-08 ↔ T-15/T-16)."""
+    await _message(session, offline, tmp_path)
+    session.add(
+        m.ModelJob(kind="company_verdict", lane="batch", model="m", custom_id="cs-b-1")
+    )
+    await session.commit()
+    assert (await health.anthropic_facts(session)).pending_jobs == 1
+    model_api.queue(message(BUYER))
+    assert (await classify.classify_batch(now=NOW)).applied == 1
+    assert (await health.anthropic_facts(session)).pending_jobs == 0

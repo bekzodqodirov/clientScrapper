@@ -292,6 +292,16 @@ def _queue(readable: list[int]) -> sa.Select[Any]:
     )
 
 
+async def waiting(session: AsyncSession) -> int:
+    """How many messages wait for the classifier (the queue ``_claim``
+    takes from): 06 §4.2 anthropic_silence's «tasnif navbatda (n ta)»."""
+    readable = await chats.readable_ids(session)
+    if not readable:
+        return 0
+    queue = _queue(readable).with_only_columns(sa.func.count()).order_by(None)
+    return int(await session.scalar(queue) or 0)
+
+
 async def _claim(session: AsyncSession, skip: set[int]) -> _Claim | None:
     """The oldest message waiting for the classifier, held until commit —
     the message row and its observation's. Holding the observation is what
@@ -657,4 +667,5 @@ __all__ = [
     "name_words",
     "register_after_classify",
     "user_content",
+    "waiting",
 ]
