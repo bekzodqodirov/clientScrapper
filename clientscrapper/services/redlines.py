@@ -264,6 +264,21 @@ def ends_with_optout(text: str, lang: Lang) -> bool:
 # other Cyrillic letter («і», «ї», «є», «ә», «ө», «ү», «ң») writes another
 # language (MIYA).
 _UZ_CYRILLIC: Final = frozenset("ўқғҳЎҚҒҲ")
+# MIYA's rule for Uzbek Cyrillic typed without its four letters: a letter
+# only Russian has decides Russian; else an Uzbek word or an ending Russian
+# words do not have («берамиз», «етказиб», «келади») decides Uzbek.
+_RU_ONLY: Final = frozenset("ыщЫЩ")
+_UZ_ENDING: Final = re.compile(
+    r"(?:миз|сиз|ингиз|нинг|иб|ган|япти|ябди|моқчи|моқда|дими|дингиз|лар\w+"
+    r"|ади|йди|майди|ишади|пти|бди|тти|кти|шти|[бвгзйклмнпрстфхчш]дим?"
+    r"|вом(?:из|ан|миз|ман)|[бвгджзклмнпрстфхчш]ми|[бдмнптфхч]ли)$"
+)
+_UZ_CYRILLIC_WORDS: Final = frozenset(
+    """
+    ва бу ака опа нима керак бор салом ассалому яхши рахмат юк сиз мен шу билан
+    учун ҳам эмас йук канча качон нарх нархи борми керакми ассалом алайкум
+    """.split()
+)
 _OWN_CYRILLIC: Final = frozenset("абвгдеёжзийклмнопрстуфхцчшщъыьэюяўқғҳ")
 _CYRILLIC_RANGE: Final = ("Ѐ", "ӿ")
 # MIYA's English allowlist, cut to the words an opener would carry.
@@ -302,7 +317,7 @@ _WORD: Final = re.compile(r"[^\W\d_]+(?:'[^\W\d_]+)*")
 
 def script_of(text: str) -> Script | None:
     """Latin, Uzbek Cyrillic or Russian: what most of the letters are
-    written in. None when there are no letters."""
+    written in (MIYA's rule). None when there are no letters."""
     letters = [ch for ch in text if ch.isalpha()]
     latin = sum(1 for ch in letters if ch.isascii())
     cyrillic = sum(1 for ch in letters if _CYRILLIC_RANGE[0] <= ch <= _CYRILLIC_RANGE[1])
@@ -310,7 +325,14 @@ def script_of(text: str) -> Script | None:
         return None
     if latin >= cyrillic:
         return "latin"
-    return "cyrillic" if any(ch in _UZ_CYRILLIC for ch in letters) else "russian"
+    if any(ch in _UZ_CYRILLIC for ch in letters):
+        return "cyrillic"
+    if any(ch in _RU_ONLY for ch in letters):
+        return "russian"
+    words = [w.strip(".,!?;:«»\"'()").lower() for w in text.split()]
+    if set(words) & _UZ_CYRILLIC_WORDS or any(_UZ_ENDING.search(w) for w in words):
+        return "cyrillic"
+    return "russian"
 
 
 def _english_word(word: str) -> bool:
