@@ -51,7 +51,9 @@ result for the scorer) and wakes the jobs **after** it on the channel — the
 table lists a channel's slots upstream first (telegram_monitor, classify,
 score), and each stage wakes the next (04 §0) — never the one that said it
 nor a stage before it: an applied classification has nothing for the
-collector to read.
+collector to read. ``resolve`` announces on the channel without waking on it
+(``resolve:<id>``, a resolved Telegram row for the scorer): it stands after
+``classify`` (``ANNOUNCES_AFTER``), so it wakes the scorer alone.
 
 Every job's outcome is also recorded as a ``job:<id>`` heartbeat by an
 APScheduler listener (04 §0: «every job … beats job:<id>»). Crons are
@@ -449,6 +451,10 @@ def plain_dsn(url: str) -> str:
 WAKE_RETRY: Final = timedelta(seconds=10)
 # How long one wait for notifications lasts before ``stop`` is looked at again.
 WAKE_POLL_SECONDS: Final = 1.0
+# A stage that announces on a channel it does not wake on → the woken slot it
+# follows there (04 §0: classify → resolve_job → score). Its payload wakes
+# the slots after that one; any other unknown origin wakes them all.
+ANNOUNCES_AFTER: Final[Mapping[str, str]] = {"resolve": "classify"}
 
 
 @dataclass(slots=True)
@@ -510,6 +516,8 @@ def wake(
     comes from, only the slots listed after it (downstream); the ids woken."""
     now = now or datetime.now(settings.tz)
     origin = origin_of(payload)
+    if origin is not None:
+        origin = ANNOUNCES_AFTER.get(origin, origin)
     if origin in slot_ids:
         slot_ids = slot_ids[slot_ids.index(origin) + 1 :]
     woken: list[str] = []

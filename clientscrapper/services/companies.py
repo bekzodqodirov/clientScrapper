@@ -123,6 +123,10 @@ LABEL_PREFIX: Final = "#"
 _ROOT_HOPS: Final = 16
 RESOLVE_LIMIT: Final = 200
 TELEGRAM_SOURCE: Final = "telegram_monitor"
+# How a resolved Telegram row is announced on ``cs_interaction``: the worker
+# reads the prefix as this stage's (``worker.ANNOUNCES_AFTER``) and wakes the
+# scorer only — the collector and the classifier have nothing new to read.
+NOTIFY_PREFIX: Final = "resolve:"
 # A candidate the merge must leave alone: a push may be claiming it.
 _OPEN_STATES: Final = ("found", "enriching", "scored", "review", "approved", "hold")
 
@@ -2122,10 +2126,10 @@ async def _resolve_one(
                 # Wake score_job (04 §0): the notify is delivered at commit.
                 await session.execute(
                     sa.text(
-                        "SELECT pg_notify('cs_interaction', id::text) "
+                        "SELECT pg_notify('cs_interaction', :prefix || id::text) "
                         "FROM interactions WHERE observation_id = :o"
                     ),
-                    {"o": obs_id},
+                    {"prefix": NOTIFY_PREFIX, "o": obs_id},
                 )
         await session.execute(
             sa.update(Observation).where(Observation.id == obs_id).values(**values)
