@@ -1,0 +1,439 @@
+Fancybox.bind('[data-fancybox="gallery"]', {
+	hideScrollbar: false,
+});
+
+if ( typeof dataTableURL !== 'undefined' && dataTableURL != '' )
+{
+	// Initialize DataTables API object and configure table
+	var ERAtable = $('#ERADataTable').DataTable({
+		"responsive": true,
+		"language": {
+			"lengthMenu": "",
+			"zeroRecords": "...",
+			//"info": "_TOTAL_ &nbsp; _PAGE_ / _PAGES_",
+			"info": "",
+			"infoEmpty": "...",
+			"infoFiltered": "(_MAX_)",
+			"loadingRecords": '<i class="fa-regular fa-loader fa-spin"></i>',
+			"processing":     '<i class="fa-regular fa-loader fa-spin"></i>',
+			"search":         '<i class="fas fa-search"></i>',
+			"paginate": {
+				"first":      '<i class="fa-solid fa-chevrons-left"></i>',
+				"last":       '<i class="fa-solid fa-chevrons-right"></i>',
+				"next":       '<i class="fa-regular fa-circle-arrow-right"></i>',
+				"previous":   '<i class="fa-regular fa-circle-arrow-left"></i>',
+			},
+			"select": {
+				"rows": "(%d <i class=\"fas fa-check\"></i>)"
+			}
+		},
+		"lengthMenu": [ 10, 25, 50, 75, 100, 500, 1000, 5000 ],
+		"pageLength": 10,
+		"searching": false,
+		"sort": false,
+		"processing": true,
+		"serverSide": true,
+		"ajax" : {
+			url: dataTableURL,
+			cache: false,
+			type: "post",
+			data: function(data){
+				// Append to data
+				data.field1 = $('#field1').val();
+				data.field2 = $('#field2').val();
+				data.field3 = $('#field3').val();
+				data.field4 = $('#field4').val();
+			},
+			error: function(){
+				$("#ERADataTable_processing").css("display","none");
+			}
+		},
+		"createdRow": (row, data, dataIndex, cells) => {
+			const length = row.children.length;
+			for (let i = 0; i < length; i++) {
+                if(data[i]){
+                    var this_class = data[i].indexOf("group-head") !== -1 ? "group-head" : "";
+                    $(row).addClass(this_class);
+                }
+			}
+		},
+		"fnDrawCallback": function() {
+			var total_count = this.fnSettings().fnRecordsTotal();
+			$("#total_show").html(total_count);
+		}
+	});
+
+	$(document).ready(function(){
+		// Redraw the table
+		ERAtable.draw();
+		
+		// Redraw the table based on the custom input
+		$('#field1, #field2, #field3, #field4').bind("keyup change", function(){
+			ERAtable.draw();
+		});
+	});
+}
+
+//
+// Navbar
+//
+("use strict");
+
+var NavbarCollapse = (function () {
+	// Variables
+
+	var $nav = $("#navbar-main"),
+		$collapse = $("#navbar-main-collapse"),
+		$navTop = $("#navbar-top-main");
+
+	// Methods
+
+	function showNavbarCollapse($this) {
+		$nav.addClass("navbar-collapsed");
+		$navTop.addClass("navbar-collapsed");
+		$("#header-main").addClass("header-collapse-show");
+	}
+
+	function hideNavbarCollapse($this) {
+		$this.removeClass("collapsing").addClass("collapsing-out");
+		$nav.removeClass("navbar-collapsed").addClass("navbar-collapsed-out");
+		$navTop.removeClass("navbar-collapsed").addClass("navbar-collapsed-out");
+	}
+
+	function hiddenNavbarCollapse($this) {
+		$this.removeClass("collapsing-out");
+		$nav.removeClass("navbar-collapsed-out");
+		$navTop.removeClass("navbar-collapsed-out");
+		$("#header-main").removeClass("header-collapse-show");
+	}
+
+	// Events
+
+	if ($collapse.length) {
+		$collapse.on({
+			"show.bs.collapse": function () {
+				showNavbarCollapse($collapse);
+			},
+		});
+
+		$collapse.on({
+			"hide.bs.collapse": function () {
+				hideNavbarCollapse($collapse);
+			},
+		});
+
+		$collapse.on({
+			"hidden.bs.collapse": function () {
+				hiddenNavbarCollapse($collapse);
+			},
+		});
+	}
+})();
+
+//
+// Sticky Navbar
+//
+
+var NavbarSticky = (function () {
+	// Variables
+
+	var $nav = $(".navbar-sticky");
+
+	// Methods
+
+	function init($this) {
+		var scrollTop = $(window).scrollTop(); // our current vertical position from the top
+
+		// if we've scrolled more than the navigation, change its position to fixed to stick to top,
+		// otherwise change it back to relative
+		if (scrollTop > navOffsetTop + 200) {
+			$this.addClass("sticky");
+		} else {
+			$this.removeClass("sticky");
+		}
+	}
+
+	// Events
+
+	if ($nav.length) {
+		var navOffsetTop = $nav.offset().top;
+
+		// Init sticky navbar
+		init($nav);
+
+		// re-calculate stickyness on scroll
+		$(window).on({
+			scroll: function () {
+				init($nav);
+			},
+		});
+	}
+})();
+
+//
+// Dropdown
+//
+
+("use strict");
+
+var Dropdown = (function () {
+	// Variables
+
+	var $dropdown = $(".dropdown-animate"),
+		$dropdownSubmenu = $('.dropdown-submenu [data-bs-toggle="dropdown"]');
+
+	// Methods
+
+	function hideDropdown($this) {
+		// Add additional .hide class for animated dropdown menus in order to apply some css behind
+		// var $dropdownMenu = $this.find('.dropdown-menu');
+		//
+		// $dropdownMenu.addClass('hide');
+		//
+		// setTimeout(function(){
+		//     $dropdownMenu.removeClass('hide');
+		// }, 300);
+	}
+
+	function initSubmenu($this) {
+		if (!$this.next().hasClass("show")) {
+			$this.parents(".dropdown-menu").first().find(".show").removeClass("show");
+		}
+
+		var $submenu = $this.next(".dropdown-menu");
+
+		$submenu.toggleClass("show-child");
+		$submenu.parent().toggleClass("show-parent");
+
+		$this.parents(".nav-item.dropdown.show").on("hidden.bs.dropdown", function (e) {
+			$(".dropdown-submenu .show").removeClass("show");
+		});
+	}
+
+	// Events
+
+	if ($dropdown.length) {
+		$dropdown.on({
+			"hide.bs.dropdown": function () {
+				hideDropdown($dropdown);
+			},
+		});
+	}
+
+	if ($dropdownSubmenu.length) {
+		$dropdownSubmenu.on("click", function (e) {
+			initSubmenu($(this));
+
+			return false;
+		});
+	}
+})();
+
+const menuBtn = document.querySelector(".menu-btn");
+//const body = document.querySelector("body");
+let menuOpen = false;
+menuBtn.addEventListener("click", () => {
+	if (!menuOpen) {
+		menuBtn.classList.add("open");
+		//body.classList.add("overflow-hidden");
+		menuOpen = true;
+	} else {
+		menuBtn.classList.remove("open");
+		//body.classList.remove("overflow-hidden");
+		menuOpen = false;
+	}
+});
+
+//
+// Countdown
+//
+
+function timingCalc(endtime) {
+	"use strict";
+
+	var timeTotal = Date.parse(endtime) - Date.now(),
+		timeSeconds = Math.floor((timeTotal / 1000) % 60),
+		timeMinutes = Math.floor((timeTotal / 1000 / 60) % 60),
+		timeHours = Math.floor((timeTotal / (1000 * 60 * 60)) % 24),
+		timeDays = Math.floor(timeTotal / (1000 * 60 * 60 * 24));
+
+	if (timeSeconds < "10") {
+		timeSeconds = "0" + timeSeconds;
+	}
+
+	return {
+		total: timeTotal,
+		seconds: timeSeconds,
+		minutes: timeMinutes,
+		hours: timeHours,
+		days: timeDays,
+	};
+}
+
+function animateCounter(selector, targetValue) {
+	var $element = $(selector);
+	var currentValue = parseInt($element.text(), 10);
+
+	if (currentValue === targetValue) {
+		return;
+	}
+
+	$element.addClass("counter-animate");
+	$element.text(targetValue);
+
+	setTimeout(function () {
+		$element.addClass("show");
+	}, 10);
+
+	setTimeout(function () {
+		$element.removeClass("counter-animate show");
+	}, 500);
+}
+
+function startCalc(endtime) {
+	var timeTotal = timingCalc(endtime);
+
+	animateCounter(".days", timeTotal.days);
+	animateCounter(".hours", timeTotal.hours);
+	animateCounter(".minutes", timeTotal.minutes);
+	animateCounter(".seconds", timeTotal.seconds);
+
+	if (timeTotal.total <= 0) {
+		if (typeof timingNow !== 'undefined') {
+			clearInterval(timingNow);
+		}
+	}
+}
+
+setInterval(function () {
+	startCalc(DeadLine);
+}, 1000);
+
+
+// Scroll animation on working hours
+$(document).ready(function () {
+	var sections = $(".wh-section");
+	var line = $(".vertical-line");
+	var currentSection = -1;
+
+	$(window).scroll(function () {
+		const windowHeight = $(window).height();
+		const scrollTop = $(window).scrollTop();
+		// const totalHeight = windowHeight * sections.length;
+		const totalHeight = 100;
+
+		// console.log(scrollTop);
+		// console.log(sections.length);
+		// console.log(totalHeight);
+
+		const gradientPercentage = (scrollTop / totalHeight) * 100;
+
+		var scrollPos = $(window).scrollTop();
+
+
+		// Loop through each section
+		line.each(function (index) {
+			var sectionOffset = $(this).offset().top;
+			var sectionOffset1 = sectionOffset - 150;
+
+			// Check if the user has scrolled to this section
+			if (scrollPos >= sectionOffset1) {
+				// Add the "scrolled" class to the current section
+				$(this).css("background", `linear-gradient(180deg, ` + LineColor + ` ${gradientPercentage}%, rgba(255, 110, 28, 0.00) 100%)`);
+				currentSection = index;
+			} else {
+				// Remove the "scrolled" class from other sections
+				$(this).css("background", `linear-gradient(180deg, rgba(217, 217, 217, 1) 100%, rgba(217, 217, 217, 0.00) 100%)`);
+			}
+		});
+
+
+		// Loop through each section
+		sections.each(function (index) {
+			var sectionOffset = $(this).offset().top;
+			var sectionOffset1 = sectionOffset - 200;
+
+			// Check if the user has scrolled to this section
+			if (scrollPos > sectionOffset1) {
+				// Add the "scrolled" class to the current section
+				$(this).addClass("active");
+				currentSection = index;
+			} else {
+				// Remove the "scrolled" class from other sections
+				$(this).removeClass("active");
+			}
+		});
+	});
+});
+
+$(document).ready(function () {
+	var sections = $(".wh-section");
+	var line = $(".vertical-line");
+	var currentSection = -1;
+
+	$(window).scroll(function () {
+		const windowHeight = $(window).height();
+		const scrollTop = $(window).scrollTop();
+		// const totalHeight = windowHeight * sections.length;
+		const totalHeight = 100;
+
+		// console.log(scrollTop);
+		// console.log(sections.length);
+		// console.log(totalHeight);
+
+		const gradientPercentage = (scrollTop / totalHeight) * 100;
+
+		var scrollPos = $(window).scrollTop();
+
+
+		// Loop through each section
+		line.each(function (index) {
+			var sectionOffset = $(this).offset().top;
+			var sectionOffset1 = sectionOffset - 150;
+
+			// Check if the user has scrolled to this section
+			if (scrollPos >= sectionOffset1) {
+				// Add the "scrolled" class to the current section
+				$(this).css("background", `linear-gradient(180deg, ` + LineColor + ` ${gradientPercentage}%, rgba(255, 110, 28, 0.00) 100%)`);
+				currentSection = index;
+			} else {
+				// Remove the "scrolled" class from other sections
+				$(this).css("background", `linear-gradient(180deg, rgba(217, 217, 217, 1) 100%, rgba(217, 217, 217, 0.00) 100%)`);
+			}
+		});
+
+
+		// Loop through each section
+		sections.each(function (index) {
+			var sectionOffset = $(this).offset().top;
+			var sectionOffset1 = sectionOffset - 200;
+
+			// Check if the user has scrolled to this section
+			if (scrollPos > sectionOffset1) {
+				// Add the "scrolled" class to the current section
+				$(this).addClass("active");
+				currentSection = index;
+			} else {
+				// Remove the "scrolled" class from other sections
+				$(this).removeClass("active");
+			}
+		});
+	});
+});
+
+
+/*******************************
+ * ACCORDION WITH TOGGLE ICONS
+ *******************************/
+// function toggleIcon(e) {
+// 	$(e.target)
+// 		.prev('.accordion-button')
+// 		.find('.circle-plus')
+// 		.toggleClass('opened closed');
+// }
+//
+// const myCollapsible = document.querySelectorAll('.accordion__list ')
+// myCollapsible.addEventListener('hidden.bs.collapse', event => {
+// 	toggleIcon(event);
+// })
+

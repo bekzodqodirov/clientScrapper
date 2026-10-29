@@ -1,0 +1,67 @@
+# Orginfo.uz — robots.txt
+#
+# Qidiruv va AI botlari sahifalarni cheklovsiz o'qiydi. Crawl-delay ataylab yo'q:
+# Google va Yandex uni e'tiborsiz qoldiradi, Anthropic esa unga amal qilib
+# kuniga ~8 600 URL bilan cheklanadi. Yuklama nginx va CheckAccessMiddleware'da.
+# O'qitish botlari (GPTBot, ClaudeBot, CCBot, Google-Extended) ham ochiq —
+# foydalanuvchi qarori, 2026-10-20.
+
+User-agent: *
+Disallow: /media/files/
+Disallow: /media/user-files/
+Disallow: /*.pdf$
+Disallow: /*.zip$
+Disallow: /*.rar$
+Disallow: /*.doc$
+Disallow: /*.docx$
+Disallow: /*/organization/*/pdf/
+Disallow: /*/trademark/*/pdf/
+Disallow: /*/organization/requests/
+Disallow: /*/user/
+Disallow: /*/blogs/create/
+Disallow: /*/blogs/my-posts/
+Disallow: /api/
+Disallow: /i18n/
+Disallow: /tgoiadmin/
+
+# Yandex Alice AI / Neuro — bu tokenlar `*` guruhiga bo'ysunmaydi
+User-agent: YandexAdditional
+User-agent: YandexAdditionalBot
+Disallow: /media/files/
+Disallow: /media/user-files/
+Disallow: /*.pdf$
+Disallow: /*.zip$
+Disallow: /*.rar$
+Disallow: /*.doc$
+Disallow: /*.docx$
+Disallow: /*/organization/*/pdf/
+Disallow: /*/trademark/*/pdf/
+Disallow: /*/organization/requests/
+Disallow: /*/user/
+Disallow: /*/blogs/create/
+Disallow: /*/blogs/my-posts/
+Disallow: /api/
+Disallow: /i18n/
+Disallow: /tgoiadmin/
+
+# SEO-skanerlar: saytga trafik olib kelmaydi, faqat resurs sarflaydi.
+User-agent: SemrushBot
+Disallow: /
+
+User-agent: AhrefsBot
+Disallow: /
+
+User-agent: MJ12bot
+Disallow: /
+
+User-agent: BLEXBot
+Disallow: /
+
+User-agent: DotBot
+Disallow: /
+
+User-agent: SeekportBot
+Disallow: /
+
+User-agent: Seekport Crawler
+Disallow: /

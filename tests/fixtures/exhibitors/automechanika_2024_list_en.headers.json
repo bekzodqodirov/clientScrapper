@@ -1,0 +1,23 @@
+{
+  "fetched_at": "2026-10-29T19:48:59.824111+05:00",
+  "final_url": "https://automechanika.uz/exhibitors-eng2024",
+  "headers": {
+    "accept-ranges": "bytes",
+    "connection": "keep-alive",
+    "content-encoding": "gzip",
+    "content-type": "text/html; charset=UTF-8",
+    "date": "Thu, 29 Oct 2026 14:48:59 GMT",
+    "etag": "\"2295a-65e7eb075326d-gzip\"",
+    "keep-alive": "timeout=60",
+    "last-modified": "Fri, 23 Oct 2026 09:34:39 GMT",
+    "server": "ddos-guard",
+    "x-content-type-options": "nosniff",
+    "x-frame-options": "SAMEORIGIN",
+    "x-host": "automechanika.uz",
+    "x-tilda-imprint": "ca5c2715-af1b-49c3-9c85-27be845f5cce",
+    "x-tilda-server": "27",
+    "x-xss-protection": "1; mode=block"
+  },
+  "status": 200,
+  "url": "https://automechanika.uz/exhibitors-eng2024"
+}

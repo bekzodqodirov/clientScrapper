@@ -1,0 +1,17 @@
+{
+  "fetched_at": "2026-10-29T20:06:41.368648+05:00",
+  "final_url": "https://orginfo.uz/robots.txt",
+  "headers": {
+    "connection": "keep-alive",
+    "content-language": "ru",
+    "content-type": "text/plain",
+    "date": "Thu, 29 Oct 2026 15:06:28 GMT",
+    "referrer-policy": "same-origin",
+    "server": "nginx/1.29.5",
+    "vary": "Accept-Language",
+    "x-content-type-options": "nosniff",
+    "x-frame-options": "DENY"
+  },
+  "status": 200,
+  "url": "https://orginfo.uz/robots.txt"
+}

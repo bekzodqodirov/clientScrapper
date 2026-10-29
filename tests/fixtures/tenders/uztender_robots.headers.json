@@ -1,0 +1,23 @@
+{
+  "fetched_at": "2026-10-29T20:06:44.783763+05:00",
+  "final_url": "https://uztender.com/robots.txt",
+  "headers": {
+    "age": "6864",
+    "alt-svc": "h3=\":443\"; ma=86400",
+    "cf-cache-status": "HIT",
+    "cf-ray": "a52315fd988f1dec-ATL",
+    "connection": "keep-alive",
+    "content-encoding": "gzip",
+    "content-type": "text/plain; charset=utf-8",
+    "date": "Thu, 29 Oct 2026 15:06:44 GMT",
+    "etag": "W/\"6ae34068-180\"",
+    "last-modified": "Thu, 29 Oct 2026 12:47:36 GMT",
+    "nel": "{\"report_to\":\"cf-nel\",\"success_fraction\":0.0,\"max_age\":604800}",
+    "report-to": "{\"group\":\"cf-nel\",\"max_age\":604800,\"endpoints\":[{\"url\":\"https://a.nel.cloudflare.com/report/v4?s=DKdEkdVfhoIC15AI9ej06AfJ4l5%2BslBkxRJ37wpcEIVAzDf7tm%2FKg%2FXNpjklLChB53e9SxgnZ5WviBi%2Fbll4aCVj3kHxQguxDlMz85zmArYm79kxVg3gS2tT%2FQburIM%3D\"}]}",
+    "server": "cloudflare",
+    "transfer-encoding": "chunked",
+    "x-content-type-options": "nosniff"
+  },
+  "status": 200,
+  "url": "https://uztender.com/robots.txt"
+}

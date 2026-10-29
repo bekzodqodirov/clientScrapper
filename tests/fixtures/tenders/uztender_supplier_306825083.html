@@ -1,0 +1,351 @@
+<!--prerender v1 build=fb4bdd7d5c833bf0 stamp=ttl24.20755-->
+<!--prerender v2 render=c628e95ccb2935bc asset=eb09b11db0cf07af stamp=ttl24.20755-->
+<!doctype html>
+<!-- Default lang is `ru` (a real site language + the routing DEFAULT_LOCALE), NOT
+     `en` which the site doesn't support. Prerendered pages get this rewritten to
+     their true per-locale value (see scripts/prerender.ts); the @spa fallback
+     shell keeps this default, and the client re-syncs it to the route locale on
+     hydration (LocaleProvider) so /uz/* routes read lang="uz". -->
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, interactive-widget=resizes-content"
+    />
+
+    <!-- ⚠️ FIRST script in the document, ON PURPOSE. The login-code letter links
+         to `/login#email=…&code=…`; a fragment is never put on the wire, so the
+         code reaches no access log — but EVERYTHING below this line reads the
+         full URL out of the browser: gtag('config') sends it as page_location,
+         fbq('track','PageView') as the event source URL, and PostHog captures
+         $current_url on init. React strips the fragment far too late to matter.
+         Lift it into sessionStorage and replaceState it away here, before any of
+         them exist; /login reads it from there (src/routes/login.tsx).
+         A code is a bearer credential for ten minutes — one click of the letter
+         used to copy it into four third-party systems and the log. -->
+    <script>
+      try {
+        if (location.hash.indexOf('code=') !== -1) {
+          var p = new URLSearchParams(location.hash.slice(1));
+          sessionStorage.setItem(
+            'uzt.login-prefill',
+            JSON.stringify({ email: p.get('email') || '', code: p.get('code') || '' }),
+          );
+          history.replaceState(null, '', location.pathname + location.search);
+        }
+      } catch (e) {
+        /* sessionStorage/URL unavailable (private mode, sandboxed) — /login
+           falls back to reading location.hash itself. */
+      }
+    </script>
+
+    <!-- Same reason, second credential: the Telegram bot's one-time sign-in
+         link `/auth/tg/<code>` (2026-10-18). The code signs any browser in for
+         fifteen minutes, and here it sits in the PATH, which everything below
+         reads as page_location / the event source URL / $current_url. Lift it
+         into sessionStorage and replaceState the URL down to `/auth/tg` before
+         any of them exist; src/routes/telegram-magic.tsx reads it from there.
+         If storage is blocked nothing is touched and the page reads the path. -->
+    <script>
+      try {
+        var tgMagic = /^((?:\/[a-z]{2})?\/auth\/tg)\/([A-Za-z0-9_-]{32})\/?$/.exec(
+          location.pathname,
+        );
+        if (tgMagic) {
+          sessionStorage.setItem('uzt.tg-magic', tgMagic[2]);
+          history.replaceState(null, '', tgMagic[1] + location.search + location.hash);
+        }
+      } catch (e) {
+        /* sessionStorage/History unavailable — the route reads the path itself. */
+      }
+    </script>
+
+    <!-- «This browser has a session» before the app can know it. The API sets a
+         readable `uzt_authed=1` next to its httpOnly session cookie (see
+         services/api/src/modules/auth/session-cookie.ts). Every public page is
+         prerendered as a GUEST's page, so guest-only UI marked
+         `data-spotlight-pending` would flash at a signed-in reader until
+         /auth/me answers; with this class on <html>, globals.css keeps it
+         invisible from the first paint. React never reads the class, so the
+         hydrated markup still matches the prerender (no #418). -->
+    <script>
+      try {
+        if (/(^|;\s*)uzt_authed=1(;|$)/.test(document.cookie))
+          document.documentElement.classList.add('uzt-session');
+      } catch (e) {
+        /* cookies unavailable — behave as a guest, as before */
+      }
+    </script>
+
+    <!-- Warm the connection to the catalog API (content-critical: the tender data
+         fetch gates first meaningful paint on client-rendered navigations). Cheap
+         DNS hints for the deferred analytics origins so they resolve fast on load. -->
+    <link rel="preconnect" href="https://api.uztender.com" crossorigin />
+    <link rel="dns-prefetch" href="https://www.googletagmanager.com" />
+    <link rel="dns-prefetch" href="https://connect.facebook.net" />
+
+    <!-- Fallback for client-only shell routes; prerender strips this on public pages.
+         UzTender — Госзакупки Узбекистана/Каталог государственных тендеров и госзакупок Узбекистана: AI-сводки, умный поиск и оповещения. Узбекский и русский. are filled per country by the brand-tokens Vite plugin. -->
+    <title data-rh="true">«MUQAYYAS GROUP» — ИНН 306825083: госзакупки, контракты, победы — UzTender.com</title>
+<meta data-rh="true" name="description" content="MUQAYYAS GROUP, ИНН 306825083 — 47 госконтрактов на 6,1 млрд сум, 7 заказчиков, 2022–2026. Категории и регионы поставок — UzTender.com."/><meta data-rh="true" name="robots" content="index, follow"/><meta data-rh="true" property="og:title" content="«MUQAYYAS GROUP» — ИНН 306825083: госзакупки, контракты, победы — UzTender.com"/><meta data-rh="true" property="og:description" content="MUQAYYAS GROUP, ИНН 306825083 — 47 госконтрактов на 6,1 млрд сум, 7 заказчиков, 2022–2026. Категории и регионы поставок — UzTender.com."/><meta data-rh="true" property="og:site_name" content="UzTender.com"/><meta data-rh="true" property="og:url" content="https://uztender.com/supplier/306825083"/><meta data-rh="true" property="og:image" content="https://uztender.com/og-image.png"/><meta data-rh="true" property="og:image:width" content="1200"/><meta data-rh="true" property="og:image:height" content="630"/><meta data-rh="true" property="og:type" content="website"/><meta data-rh="true" property="og:locale" content="ru_RU"/><meta data-rh="true" property="og:locale:alternate" content="uz_UZ"/><meta data-rh="true" name="twitter:card" content="summary_large_image"/><meta data-rh="true" name="twitter:title" content="«MUQAYYAS GROUP» — ИНН 306825083: госзакупки, контракты, победы — UzTender.com"/><meta data-rh="true" name="twitter:description" content="MUQAYYAS GROUP, ИНН 306825083 — 47 госконтрактов на 6,1 млрд сум, 7 заказчиков, 2022–2026. Категории и регионы поставок — UzTender.com."/><meta data-rh="true" name="twitter:image" content="https://uztender.com/og-image.png"/>
+<link data-rh="true" rel="canonical" href="https://uztender.com/supplier/306825083"/><link data-rh="true" rel="alternate" hrefLang="uz" href="https://uztender.com/uz/supplier/306825083"/><link data-rh="true" rel="alternate" hrefLang="ru" href="https://uztender.com/supplier/306825083"/><link data-rh="true" rel="alternate" hrefLang="x-default" href="https://uztender.com/uz/supplier/306825083"/>
+<script data-rh="true" type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"Organization","name":"\"MUQAYYAS GROUP\" XUSUSIY KORXONA","identifier":{"@type":"PropertyValue","propertyID":"INN","value":"306825083"},"url":"https://uztender.com/supplier/306825083","areaServed":{"@type":"AdministrativeArea","name":"Samarqand viloyati"},"subjectOf":{"@type":"Dataset","name":"«MUQAYYAS GROUP» — ИНН 306825083: госзакупки, контракты, победы","description":"MUQAYYAS GROUP, ИНН 306825083 — 47 госконтрактов на 6,1 млрд сум, 7 заказчиков, 2022–2026. Категории и регионы поставок — UzTender.com.","url":"https://uztender.com/supplier/306825083","license":"https://uztender.com/offer","spatialCoverage":{"@type":"Place","name":"Uzbekistan"},"isAccessibleForFree":true,"inLanguage":"ru","creator":{"@type":"Organization","name":"UzTender.com","url":"https://uztender.com/"}}},{"@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Каталог","item":"https://uztender.com/"},{"@type":"ListItem","position":2,"name":"\"MUQAYYAS GROUP\" XUSUSIY KORXONA","item":"https://uztender.com/supplier/306825083"}]}]}</script>
+
+    <!-- Analytics (GA4 + Meta Pixel), deferred. The queuing STUBS are defined
+         synchronously (a few bytes) so any early gtag()/fbq() calls queue, but the
+         heavy external scripts (gtag.js ~90KB, fbevents.js ~70KB) are loaded only
+         once the page is idle or the user first interacts — they must not compete
+         with first paint / hydration (they were a top LCP/TBT offender). Queued
+         calls (incl. the initial PageView) flush automatically when the scripts load. -->
+    <script>
+      // Staff / test browsers (`uzt:internal`, set by auth-context from
+      // /auth/me `user.internal`, see lib/internal-viewer.ts) get NO analytics
+      // at all — not even the initial GA config / Pixel PageView below, which
+      // fire before the app bundle can gate anything.
+      var uztInternal = false;
+      try {
+        uztInternal = localStorage.getItem('uzt:internal') === '1';
+      } catch (e) {
+        /* storage unavailable — treat as a real visitor */
+      }
+      // Per-country GA4 id (filled by the brand-tokens Vite plugin). Empty string
+      // = GA4 disabled for this deployment (KZ) — no config, no gtag.js load, so
+      // KZ page views never reach UZ's property.
+      var ga4Id = 'G-06TE1QP5JR';
+      window.dataLayer = window.dataLayer || [];
+      function gtag() {
+        dataLayer.push(arguments);
+      }
+      if (!uztInternal && ga4Id) {
+        gtag('js', new Date());
+        /* A visit that began with a GOOGLE ADS click reports its first page_view
+           with the LANDING address, captured here at document-start.
+
+           Google learns which ad a visitor came from in exactly one way: the
+           `gclid` (`gbraid`/`wbraid` on iOS) in the page address of the session's
+           first hit. Measured 2026-10-04 on a production build: the GA4 hit
+           carries the click id in `dl` and nowhere else — the `_gcl_aw` cookie is
+           not sent. But gtag.js is loaded lazily (below) and reads the address
+           only when it finally starts, by which time the visitor's first click
+           may already have moved the SPA elsewhere: with the tag 400 ms late and
+           a navigation at 700 ms the click id was gone, and with it the campaign
+           on the session and every conversion Google Ads would have been told
+           about.
+
+           So for these visitors the automatic page_view is switched off and the
+           same event is queued by hand with the address as it was on arrival.
+           The address also waits in sessionStorage until Google confirms the hit
+           (`event_callback`), so a FULL page load that beats the tag — a link
+           clicked before hydration — replays it from the next page instead of
+           losing it. Every visit without a Google click id takes the old line,
+           unchanged. */
+        var gadsLanding = null;
+        try {
+          if (/[?&](gclid|gbraid|wbraid)=/.test(location.search)) {
+            sessionStorage.setItem('uzt.gads-landing', location.href);
+          }
+          gadsLanding = sessionStorage.getItem('uzt.gads-landing');
+        } catch (e) {
+          /* storage unavailable — fall through to the ordinary config. */
+        }
+        if (gadsLanding) {
+          gtag('config', ga4Id, { send_page_view: false });
+          gtag('event', 'page_view', {
+            page_location: gadsLanding,
+            event_callback: function () {
+              try {
+                sessionStorage.removeItem('uzt.gads-landing');
+              } catch (e) {
+                /* nothing to clean up. */
+              }
+            },
+          });
+        } else {
+          gtag('config', ga4Id);
+        }
+      }
+
+      !(function (f, b, e, v, n) {
+        if (f.fbq) return;
+        n = f.fbq = function () {
+          n.callMethod ? n.callMethod.apply(n, arguments) : n.queue.push(arguments);
+        };
+        if (!f._fbq) f._fbq = n;
+        n.push = n;
+        n.loaded = !0;
+        n.version = '2.0';
+        n.queue = [];
+      })(window, document, 'script');
+      /* Seed Advanced Matching on the FIRST (and only) init, before PageView.
+         The pixel adopts user data only while its stored userData is still
+         empty and reports DUPLICATE_PIXEL_ID for any later init, so a second
+         call cannot add identity afterwards — this is the one chance.
+
+         Previously this init was empty and `external_id` arrived from the app
+         bundle a moment later, which meant the initial PageView (the only
+         event a bouncing visitor ever produces) carried no match key at all,
+         and could not feed the Website Custom Audience it exists to populate.
+
+         Kept byte-for-byte equivalent to getOrCreateVisitorId() in
+         src/lib/meta-cookies.ts — same key, same crypto.randomUUID(), same
+         silent failure in private mode. The pixel SHA-256s it for us. */
+      var tendersVid;
+      try {
+        tendersVid = localStorage.getItem('tenders_vid');
+        if (!tendersVid) {
+          tendersVid = crypto.randomUUID();
+          localStorage.setItem('tenders_vid', tendersVid);
+        }
+      } catch (e) {
+        tendersVid = undefined;
+      }
+      /* Capture the ad Click ID (fbclid) HERE, at document-start — the only
+         place guaranteed to see it. Two independent losses, both observed on
+         the live site, make a later capture unreliable:
+           1. fbevents.js is lazy-loaded (on first interaction) AND blocked for a
+              large share of our visitors, so the Pixel frequently never runs to
+              write its own `_fbc`.
+           2. the SPA router strips `?fbclid` from the URL during hydration,
+              before the app bundle's own capture can read it.
+         This inline script runs before both, and regardless of any blocker.
+
+         Written in Meta's first-party cookie shape `fb.1.<clickMs>.<fbclid>` so
+         (a) the Pixel, once it loads, attaches it to the queued PageView and
+         every later event — lifting match quality on browser events — (b) it
+         rides to the API origin on the Cookie header (domain=.<site apex>),
+         letting the server persist it onto the account at signup, and (c)
+         getMetaContext() reads it for the CAPI body. A fresh click refreshes it
+         (Meta attributes to the most recent click); fbclid is case-sensitive, so
+         it is never normalised. */
+      var siteApex = 'uztender.com';
+      try {
+        var fbclid = new URLSearchParams(window.location.search).get('fbclid');
+        if (fbclid) {
+          var fbcDomain =
+            location.hostname === siteApex || location.hostname.endsWith('.' + siteApex)
+              ? '; domain=.' + siteApex
+              : '';
+          var fbcSecure = location.protocol === 'https:' ? '; Secure' : '';
+          document.cookie =
+            '_fbc=fb.1.' +
+            Date.now() +
+            '.' +
+            fbclid +
+            '; path=/; max-age=7776000' +
+            fbcDomain +
+            fbcSecure +
+            '; SameSite=Lax';
+        }
+      } catch (e) {
+        /* URL/cookie unavailable (very old browser, sandboxed) — skip. */
+      }
+      /* First-party fallback for `_fbp`, the browser-pixel id. Same reasoning as
+         `_fbc` above: fbevents.js is blocked for a large share of our visitors, so
+         the Pixel never runs to mint its own `_fbp`, and ~87% of events reach Meta
+         server-side with no fbp at all — which is why the Website Custom Audiences
+         sit near-empty. Mint one here, at document-start, in Meta's cookie shape
+         `fb.1.<createdMs>.<random>` so (a) it rides to the API origin on the
+         Cookie header (domain=.<site apex>) and the server persists it onto the
+         account / payment order, (b) getMetaContext() reads it for the CAPI body,
+         and (c) the Pixel, if it ever loads, reuses this exact cookie rather than
+         creating a competing one. If `_fbp` already exists (the Pixel beat us to
+         it), leave it untouched. */
+      try {
+        if (!/(^|;\s*)_fbp=/.test(document.cookie)) {
+          var fbpDomain =
+            location.hostname === siteApex || location.hostname.endsWith('.' + siteApex)
+              ? '; domain=.' + siteApex
+              : '';
+          var fbpSecure = location.protocol === 'https:' ? '; Secure' : '';
+          var fbpRand = String(Math.floor(Math.random() * 9e9) + 1e9); // 10 digits
+          document.cookie =
+            '_fbp=fb.1.' +
+            Date.now() +
+            '.' +
+            fbpRand +
+            '; path=/; max-age=7776000' +
+            fbpDomain +
+            fbpSecure +
+            '; SameSite=Lax';
+        }
+      } catch (e) {
+        /* cookie unavailable (sandboxed / very old browser) — skip. */
+      }
+      if (!uztInternal) {
+        fbq('init', '1194754032777047', tendersVid ? { external_id: tendersVid } : {});
+        fbq('track', 'PageView');
+      }
+
+      (function () {
+        var loaded = false;
+        var events = ['pointerdown', 'keydown', 'scroll', 'touchstart'];
+        function inject(src) {
+          var s = document.createElement('script');
+          s.async = true;
+          s.src = src;
+          document.head.appendChild(s);
+        }
+        function load() {
+          if (loaded) return;
+          loaded = true;
+          events.forEach(function (ev) {
+            window.removeEventListener(ev, load);
+          });
+          if (ga4Id) inject('https://www.googletagmanager.com/gtag/js?id=' + ga4Id);
+          inject('https://connect.facebook.net/en_US/fbevents.js');
+        }
+        events.forEach(function (ev) {
+          window.addEventListener(ev, load, { passive: true, once: true });
+        });
+        // Fallback so bounced (no-interaction) visits still register a PageView.
+        if ('requestIdleCallback' in window) {
+          requestIdleCallback(load, { timeout: 3500 });
+        } else {
+          setTimeout(load, 3000);
+        }
+      })();
+    </script>
+
+    <meta name="theme-color" content="#0a5c5c" />
+
+    <!-- Icons / PWA -->
+    <link rel="icon" href="/favicon.ico" sizes="any" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png" />
+    <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
+    <link rel="manifest" href="/site.webmanifest" />
+
+    <!-- No static og:*/twitter:* defaults here on purpose.
+         components/seo.tsx emits EVERY one of these via react-helmet, so a second
+         hardcoded set shipped in the same document with DIFFERENT text
+         (the static fallback title vs the per-page title). Most parsers
+         take the first occurrence — helmet's, injected at SSR_HEAD above — but that
+         is a coin flip across Telegram/WhatsApp/Facebook scrapers, and it produced
+         link previews that disagreed with the page. Client-only routes (/app,
+         /login, /register) are the only ones left without social tags, and those
+         are private and noindex anyway. -->
+
+    <!-- Fonts are self-hosted via @namuna_01 (see src/styles/globals.css), so they
+         load same-origin with the main CSS bundle instead of a third-party
+         DNS/TLS/round-trip on the critical path. -->
+    <script type="module" crossorigin src="/assets/main-BBPSaab1.js"></script>
+    <link rel="modulepreload" crossorigin href="/assets/vendor-react-B2-y3Toj.js">
+    <link rel="modulepreload" crossorigin href="/assets/vendor-DCOCBYZm.js">
+    <link rel="modulepreload" crossorigin href="/assets/vendor-data-CK80n7TQ.js">
+    <link rel="stylesheet" crossorigin href="/assets/main-DbhONR0F.css">
+  </head>
+  <body>
+    <!-- Meta Pixel (noscript fallback) -->
+    <noscript
+      ><img
+        height="1"
+        width="1"
+        style="display: none"
+        src="https://www.facebook.com/tr?id=1194754032777047&ev=PageView&noscript=1"
+        alt=""
+    /></noscript>
+    <div id="root"><div class="grid h-[100dvh] grid-cols-1 overflow-hidden lg:grid-cols-[240px_1fr]"><aside class="h-[100dvh] flex-col overflow-hidden border-r border-edge bg-bone-surface hidden lg:flex"><div class="flex items-center gap-2 border-b border-edge-light px-5 pb-[18px] pt-5"><a class="flex items-center gap-2" href="/" data-discover="true"><span class="flex h-7 w-7 shrink-0 items-center justify-center rounded-[7px] bg-brand"><svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 fill-white/90"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg></span><span class="font-brand text-[17px] font-extrabold leading-none tracking-[-0.3px] text-ink">UzTender.com</span></a><span class="ml-auto rounded bg-brand-dim px-[5px] py-0.5 text-[9px] font-bold uppercase tracking-[0.04em] text-brand">uz</span></div><nav class="flex-1 overflow-y-auto overflow-x-hidden pb-2"><div class="px-5 pb-1.5 pt-[18px] text-[10px] font-bold uppercase tracking-[0.08em] text-ink-muted">Каталог</div><a class="relative flex items-center gap-2 px-5 py-[7px] text-[13.5px] font-medium transition-colors text-ink-soft hover:bg-bone hover:text-ink" href="/catalog" data-discover="true"><span class="h-4 w-4 shrink-0 opacity-70"><svg viewBox="0 0 20 20" fill="currentColor" class="h-full w-full"><path d="M3 4h14v2H3V4zm0 5h14v2H3V9zm0 5h14v2H3v-2z"></path></svg></span><span class="truncate">Все тендеры</span></a><a class="relative flex items-center gap-2 px-5 py-[7px] text-[13.5px] font-medium transition-colors text-ink-soft hover:bg-bone hover:text-ink" href="/ifi" data-discover="true"><span class="h-4 w-4 shrink-0 opacity-70"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" class="h-full w-full"><path stroke-linecap="round" stroke-linejoin="round" d="M2.5 8 10 3.5 17.5 8"></path><path stroke-linecap="round" d="M5.5 9.5v5M8.5 9.5v5M11.5 9.5v5M14.5 9.5v5"></path><path stroke-linecap="round" d="M3 16.5h14"></path></svg></span><span class="truncate">Проекты МФИ</span></a><a class="relative flex items-center gap-2 px-5 py-[7px] text-[13.5px] font-medium transition-colors text-ink-soft hover:bg-bone hover:text-ink" href="/supply" data-discover="true"><span class="h-4 w-4 shrink-0 opacity-70"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" class="h-full w-full"><path stroke-linecap="round" stroke-linejoin="round" d="M10 2 3 5.5v9L10 18l7-3.5v-9L10 2Z"></path><path stroke-linecap="round" stroke-linejoin="round" d="M3 5.5 10 9l7-3.5M10 9v9"></path></svg></span><span class="truncate">Кооперация</span></a><a class="relative flex items-center gap-2 px-5 py-[7px] text-[13.5px] font-medium transition-colors text-ink-soft hover:bg-bone hover:text-ink" href="/results" data-discover="true"><span class="h-4 w-4 shrink-0 opacity-70"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" class="h-full w-full"><path d="M6 3h8v4a4 4 0 0 1-8 0V3Z"></path><path d="M6 4H4v1.5A2.5 2.5 0 0 0 6.5 8"></path><path d="M14 4h2v1.5A2.5 2.5 0 0 1 13.5 8"></path><path d="M10 11v3M7.5 17h5M8 17c0-1.5.7-3 2-3s2 1.5 2 3"></path></svg></span><span class="truncate">Результаты</span></a><div class="px-5 pb-1.5 pt-[18px] text-[10px] font-bold uppercase tracking-[0.08em] text-ink-muted">Аналитика</div><a class="relative flex items-center gap-2 px-5 py-[7px] text-[13.5px] font-medium transition-colors text-ink-soft hover:bg-bone hover:text-ink" href="/market" data-discover="true"><span class="h-4 w-4 shrink-0 opacity-70"><svg viewBox="0 0 20 20" fill="currentColor" class="h-full w-full"><path d="M3 3h2v14H3V3zm12 4h2v10h-2V7zM7 9h2v8H7V9zm4-3h2v11h-2V6z"></path></svg></span><span class="truncate">Рынок</span></a><a class="relative flex items-center gap-2 px-5 py-[7px] text-[13.5px] font-medium transition-colors text-ink-soft hover:bg-bone hover:text-ink" href="/prices" data-discover="true"><span class="h-4 w-4 shrink-0 opacity-70"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" class="h-full w-full"><rect x="3" y="3" width="14" height="14" rx="2"></rect><path d="M7 8h6M7 12h4"></path></svg></span><span class="truncate">Цены</span></a><a class="relative flex items-center gap-2 px-5 py-[7px] text-[13.5px] font-medium transition-colors text-ink-soft hover:bg-bone hover:text-ink" href="/companies" data-discover="true"><span class="h-4 w-4 shrink-0 opacity-70"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" class="h-full w-full"><path stroke-linejoin="round" d="M4 16.5V4.2a.7.7 0 0 1 .7-.7h5.6a.7.7 0 0 1 .7.7v12.3"></path><path stroke-linejoin="round" d="M11 9h4.3a.7.7 0 0 1 .7.7v6.8"></path><path stroke-linecap="round" d="M6 6.5h0M9 6.5h0M6 9.5h0M9 9.5h0M6 12.5h0M9 12.5h0M13.5 12h0"></path><path stroke-linecap="round" d="M2.5 16.5h15"></path></svg></span><span class="truncate">Компании</span></a><div class="px-5 pb-1.5 pt-[18px] text-[10px] font-bold uppercase tracking-[0.08em] text-ink-muted">Справка</div><a class="relative flex items-center gap-2 px-5 py-[7px] text-[13.5px] font-medium transition-colors text-ink-soft hover:bg-bone hover:text-ink" href="/guide" data-discover="true"><span class="h-4 w-4 shrink-0 opacity-70"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" class="h-full w-full"><path stroke-linecap="round" stroke-linejoin="round" d="M10 5.5C8.7 4.6 6.9 4 5 4H3v11h2c1.9 0 3.7.6 5 1.5 1.3-.9 3.1-1.5 5-1.5h2V4h-2c-1.9 0-3.7.6-5 1.5Z"></path><path stroke-linecap="round" d="M10 5.5v11"></path></svg></span><span class="truncate">Как участвовать</span></a><button type="button" class="relative flex items-center gap-2 px-5 py-[7px] text-[13.5px] font-medium transition-colors w-full text-left text-ink-soft hover:bg-bone hover:text-ink"><span class="h-4 w-4 shrink-0 opacity-70" aria-hidden="true"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" class="h-full w-full"><path stroke-linecap="round" stroke-linejoin="round" d="M17 9.8a6.6 6.6 0 0 1-9.4 6L3 17l1.2-4.3A6.6 6.6 0 1 1 17 9.8z"></path></svg></span><span class="truncate">Помощь и поддержка</span></button><a class="relative flex items-center gap-2 px-5 py-[7px] text-[13.5px] font-medium transition-colors text-ink-soft hover:bg-bone hover:text-ink" href="/about" data-discover="true"><span class="h-4 w-4 shrink-0 opacity-70" aria-hidden="true"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" class="h-full w-full"><circle cx="10" cy="10" r="7.25"></circle><path stroke-linecap="round" d="M10 9.25v4.25"></path><path stroke-linecap="round" d="M10 6.6h.01"></path></svg></span><span class="truncate">О сервисе</span></a><div class="mx-4 my-2 h-px bg-edge-light"></div><a class="mt-1 flex items-center gap-2 px-5 py-1.5 text-[12.5px] font-semibold text-brand transition-colors hover:bg-bone" href="/register" data-discover="true"><span aria-hidden="true">+</span>Сохранить свой поиск</a></nav><div class="border-t border-edge bg-bone-surface p-4"><div class="flex flex-col gap-1.5"><a class="inline-flex h-9 items-center justify-center rounded-md bg-brand px-3 text-[12.5px] font-bold text-white transition-colors hover:bg-brand-mid" href="/register" data-discover="true">Создать аккаунт</a><a class="inline-flex h-8 items-center justify-center rounded-md text-[12px] font-semibold text-ink-soft transition-colors hover:bg-bone hover:text-ink" href="/login" data-discover="true">Войти</a></div><a class="mt-2 block cursor-pointer rounded-lg border border-brand/25 bg-gradient-to-br from-brand/[0.09] to-[#0d7070]/[0.06] p-4 transition-colors hover:border-brand/40 hover:bg-brand/[0.12]" href="/plans" data-discover="true"><div class="mb-1.5 flex items-center gap-1.5"><span class="font-brand text-[14px] font-extrabold tracking-[-0.1px] text-brand">Перейти на Pro</span><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" class="h-3.5 w-3.5 shrink-0 text-brand" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M3 8h10M9 4l4 4-4 4"></path></svg></div><div class="text-[12px] leading-[1.45] text-ink-muted">Откройте контакты заказчиков, документы и аналитику</div></a></div></aside><div class="flex h-[100dvh] min-w-0 flex-col overflow-hidden bg-bone"><header class="shrink-0 border-b border-edge bg-bone-surface"><div class="flex h-14 items-center gap-3 px-4 sm:px-6 lg:h-[60px] lg:gap-4"><button type="button" aria-label="Открыть меню" class="-ml-1.5 flex h-11 w-11 shrink-0 items-center justify-center rounded-md text-ink-soft transition-colors hover:bg-bone hover:text-ink lg:hidden" aria-haspopup="dialog" aria-expanded="false" data-state="closed"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" class="h-[22px] w-[22px]"><path stroke-linecap="round" d="M3 5.5h14M3 10h14M3 14.5h14"></path></svg></button><a class="font-brand text-[17px] font-extrabold tracking-[-0.3px] text-ink" href="/" data-discover="true">UzTender.com</a><form class="relative mx-auto hidden w-full max-w-[520px] lg:block"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" class="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-ink-muted"><circle cx="8.5" cy="8.5" r="5.5"></circle><path stroke-linecap="round" d="M14.5 14.5l3 3"></path></svg><input type="text" placeholder="Поиск тендеров по смыслу…" aria-label="Поиск тендеров по смыслу…" class="w-full truncate rounded-md border-1.5 border-edge bg-bone pl-10 pr-[68px] text-ink outline-none transition-colors placeholder:text-ink-muted focus:border-brand focus:bg-bone-surface focus:shadow-[0_0_0_3px_rgba(10,92,92,0.1)] h-[38px] text-[13.5px]" value=""/><span class="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 rounded bg-brand-light px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-[0.04em] text-brand">AI</span></form><div class="ml-auto flex shrink-0 items-center gap-2 lg:gap-3 lg:ml-0"><div role="group" aria-label="Language switcher" class="flex items-center overflow-hidden rounded-sm border border-edge bg-bone"><button aria-pressed="false" aria-label="O&#x27;zbekcha" title="O&#x27;zbekcha" class="flex min-h-10 items-center px-3 py-2 transition-colors hover:bg-bone-surface"><svg viewBox="0 0 20 14" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" class="h-3.5 w-5 rounded-[3px] transition-opacity opacity-55"><defs><clipPath id="uz-flag-clip"><rect width="20" height="14" rx="2.4"></rect></clipPath></defs><g clip-path="url(#uz-flag-clip)"><rect width="20" height="14" fill="#0099B5"></rect><rect y="4.4" width="20" height="5.2" fill="#fff"></rect><rect y="9.6" width="20" height="4.4" fill="#1EB53A"></rect><rect y="4.2" width="20" height="0.4" fill="#CE1126"></rect><rect y="9.4" width="20" height="0.4" fill="#CE1126"></rect><circle cx="3.7" cy="2.2" r="1.35" fill="#fff"></circle><circle cx="4.45" cy="2.2" r="1.35" fill="#0099B5"></circle></g><rect x="0.4" y="0.4" width="19.2" height="13.2" rx="2" fill="none" stroke="#000" stroke-opacity="0.1"></rect></svg><span class="sr-only">O&#x27;zbekcha</span></button><span aria-hidden="true" class="h-3.5 w-px shrink-0 bg-edge"></span><button aria-pressed="true" aria-label="Русский" title="Русский" class="flex min-h-10 items-center px-3 py-2 transition-colors bg-bone-surface"><svg viewBox="0 0 20 14" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" class="h-3.5 w-5 rounded-[3px] transition-opacity opacity-100"><defs><clipPath id="ru-flag-clip"><rect width="20" height="14" rx="2.4"></rect></clipPath></defs><g clip-path="url(#ru-flag-clip)"><rect width="20" height="14" fill="#fff"></rect><rect y="4.667" width="20" height="4.667" fill="#0039A6"></rect><rect y="9.333" width="20" height="4.667" fill="#D52B1E"></rect></g><rect x="0.4" y="0.4" width="19.2" height="13.2" rx="2" fill="none" stroke="#000" stroke-opacity="0.1"></rect></svg><span class="sr-only">Русский</span></button></div><div class="flex items-center gap-1.5"><a class="hidden h-[34px] items-center rounded-md px-3 text-[13px] font-semibold text-ink-soft transition-colors hover:bg-bone hover:text-ink sm:inline-flex" href="/login" data-discover="true">Войти</a><a class="inline-flex h-[34px] items-center whitespace-nowrap rounded-md bg-brand px-3 text-[13px] font-semibold text-white transition-colors hover:bg-brand-mid" href="/register" data-discover="true">Создать аккаунт</a></div></div></div><div class="px-4 pb-3 sm:px-6 lg:hidden"><form class="relative w-full"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" class="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-ink-muted"><circle cx="8.5" cy="8.5" r="5.5"></circle><path stroke-linecap="round" d="M14.5 14.5l3 3"></path></svg><input type="text" placeholder="Поиск тендеров по смыслу…" aria-label="Поиск тендеров по смыслу…" class="w-full truncate rounded-md border-1.5 border-edge bg-bone pl-10 pr-[68px] text-ink outline-none transition-colors placeholder:text-ink-muted focus:border-brand focus:bg-bone-surface focus:shadow-[0_0_0_3px_rgba(10,92,92,0.1)] h-11 text-base" value=""/><span class="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 rounded bg-brand-light px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-[0.04em] text-brand">AI</span></form></div></header><main class="flex flex-1 flex-col overflow-y-auto overflow-x-hidden px-4 pb-[calc(2rem+var(--kb-pad,0px))] pt-5 sm:px-6"><div class="flex-1"><div class="mx-auto max-w-3xl lg:max-w-6xl"><button type="button" class="mb-4 inline-flex items-center gap-1 text-[13px] font-semibold text-ink-muted hover:text-brand">← Назад</button><div class="flex flex-col gap-5"><section class="rounded-lg border border-edge bg-bone-surface p-5 shadow-m-sm sm:p-6"><p class="text-[11px] font-bold uppercase tracking-[0.05em] text-ink-soft">Профиль поставщика</p><h1 class="mt-1 text-[20px] font-bold leading-tight text-ink [overflow-wrap:anywhere]">&quot;MUQAYYAS GROUP&quot; XUSUSIY KORXONA</h1><p class="mt-1 text-[13px] text-ink-muted">ИНН 306825083<!-- --> · ДЕЯТЕЛЬНОСТЬ В ОБЛАСТИ АРХИТЕКТУРЫ<!-- --> · Самаркандская область</p><span class="inline-flex items-center gap-1 rounded-pill border px-2.5 py-0.5 text-[12px] leading-tight border-status-active-text/25 bg-status-active-bg text-status-active-text mt-2">Действующий поставщик</span><div class="mt-3 empty:hidden"><section class="rounded-lg border border-edge bg-bone-surface p-5 shadow-m-sm sm:p-6"><h2 class="mb-3 text-[11px] font-bold uppercase tracking-[0.05em] text-ink-muted">О поставщике</h2><dl class="divide-y divide-edge-light"><div class="flex gap-3.5 py-2.5 first:pt-0"><dt class="w-[112px] shrink-0 pt-px text-[13px] font-semibold text-ink-muted">Статус</dt><dd class="flex items-start gap-1.5 text-[13.5px] font-semibold [overflow-wrap:anywhere] text-brand"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" class="mt-0.5 shrink-0" aria-hidden="true"><path d="M20 6 9 17l-5-5"></path></svg><span>Действующее, есть налоговые обязательства</span></dd></div><div class="flex gap-3.5 py-2.5 first:pt-0"><dt class="w-[112px] shrink-0 pt-px text-[13px] font-semibold text-ink-muted">НДС</dt><dd class="flex items-start gap-1.5 text-[13.5px] font-semibold [overflow-wrap:anywhere] text-ink"><span>Плательщик</span></dd></div><div class="flex gap-3.5 py-2.5 first:pt-0"><dt class="w-[112px] shrink-0 pt-px text-[13px] font-semibold text-ink-muted">Уставный фонд</dt><dd class="flex items-start gap-1.5 text-[13.5px] font-semibold [overflow-wrap:anywhere] text-ink"><span>169,1 млн сум</span></dd></div><div class="flex gap-3.5 py-2.5 first:pt-0"><dt class="w-[112px] shrink-0 pt-px text-[13px] font-semibold text-ink-muted">Seller 01</dt><dd class="flex items-start gap-1.5 text-[13.5px] font-semibold [overflow-wrap:anywhere] text-ink"><span>2019</span></dd></div><div class="flex gap-3.5 py-2.5 first:pt-0"><dt class="w-[112px] shrink-0 pt-px text-[13px] font-semibold text-ink-muted">Рейтинг устойчивости</dt><dd class="flex items-start gap-1.5 text-[13.5px] font-semibold [overflow-wrap:anywhere] text-ink"><span>A</span></dd></div><div class="flex gap-3.5 py-2.5 first:pt-0"><dt class="w-[112px] shrink-0 pt-px text-[13px] font-semibold text-ink-muted">Вид деятельности</dt><dd class="flex items-start gap-1.5 text-[13.5px] font-semibold [overflow-wrap:anywhere] text-ink"><span>Хизмат кўрсатиш</span></dd></div></dl><p class="mt-2.5 text-[12px] leading-snug text-ink-muted">рейтинг устойчивости Налогового комитета, по данным<!-- --> <a href="https://xarid.icppa.uz" target="_blank" rel="noopener noreferrer nofollow" class="underline underline-offset-2 hover:text-ink">xarid.icppa.uz</a></p></section></div></section><section class="overflow-hidden rounded-lg border border-edge bg-bone-surface shadow-m-sm"><dl class="grid grid-cols-2 divide-x divide-y divide-edge-light"><div class="p-4 sm:p-5"><div class="mb-1 text-[11px] font-bold uppercase tracking-[0.05em] text-ink-muted">Seller 02</div><div class="text-[17px] font-bold tabular-nums text-ink">47</div></div><div class="p-4 sm:p-5"><div class="mb-1 text-[11px] font-bold uppercase tracking-[0.05em] text-ink-muted">Seller 03</div><div class="text-[17px] font-bold tabular-nums text-ink">6,1 млрд сум</div></div><div class="p-4 sm:p-5"><div class="mb-1 text-[11px] font-bold uppercase tracking-[0.05em] text-ink-muted">Средний контракт</div><div class="text-[17px] font-bold tabular-nums text-ink">129,9 млн сум</div></div><div class="p-4 sm:p-5"><div class="mb-1 text-[11px] font-bold uppercase tracking-[0.05em] text-ink-muted">Seller 04</div><div class="text-[17px] font-bold tabular-nums text-ink">7</div></div></dl><div class="border-t border-edge-light px-5 py-3 text-[13px] text-ink-muted sm:px-6"><span class="text-[11px] font-bold uppercase tracking-[0.05em] text-ink-soft">На рынке</span> <!-- -->4 июня 2022<!-- --> —<!-- --> <!-- -->24 сентября 2026</div></section><section class="overflow-hidden rounded-lg border border-edge bg-bone-surface shadow-m-sm"><div class="px-5 pt-5 sm:px-6"><div class="text-[11px] font-bold uppercase tracking-[0.05em] text-ink-soft">Госзакупки за 12 месяцев</div></div><dl class="grid grid-cols-2 divide-x divide-y divide-edge-light"><div class="p-4 sm:p-5"><div class="mb-1 text-[11px] font-bold uppercase tracking-[0.05em] text-ink-muted">Seller 02</div><div class="text-[17px] font-bold tabular-nums text-ink">34</div></div><div class="p-4 sm:p-5"><div class="mb-1 text-[11px] font-bold uppercase tracking-[0.05em] text-ink-muted">Seller 03</div><div class="text-[17px] font-bold tabular-nums text-ink">5,5 млрд сум</div></div><div class="p-4 sm:p-5"><div class="mb-1 text-[11px] font-bold uppercase tracking-[0.05em] text-ink-muted">Медианная скидка от стартовой цены</div><div title="по 34 контрактам со стартовой ценой" class="text-[17px] font-bold tabular-nums text-ink">5%</div></div><div class="p-4 sm:p-5"><div class="mb-1 text-[11px] font-bold uppercase tracking-[0.05em] text-ink-muted">Медиана участников в выигранных лотах</div><div class="text-[17px] font-bold tabular-nums text-ink">8</div></div></dl><div class="border-t border-edge-light px-5 py-3 text-[13px] text-ink-soft sm:px-6"><span class="text-[11px] font-bold uppercase tracking-[0.05em] text-ink-soft">Участие с детализацией</span> <!-- -->31 побед из 155 лотов, где источник публикует всех участников; полная доля участий неизвестна</div><div class="border-t border-edge-light px-5 py-2.5 text-[12px] text-ink-muted sm:px-6">По итогам госзакупок в базе UzTender.com, дата определения победителя за последние 12 месяцев.</div></section><section class="rounded-lg border border-edge bg-bone-surface p-5 shadow-m-sm sm:p-6"><div class="mb-3 text-[11px] font-bold uppercase tracking-[0.05em] text-ink-soft">Недавние контракты</div><ul class="divide-y divide-edge-light"><li class="py-2.5 first:pt-0"><div class="flex items-baseline justify-between gap-3"><a class="min-w-0 truncate text-[14px] font-semibold text-brand hover:underline" title="Укладка асфальтобетонного покрытия на улицах Джагалбойского махалли, улице Ислохат, имени Меморбулая и других улицах" href="/tender/jagalboyli-mfy-isloxat-memor-bolajon-va-boshqa-kochalariga-asfalt-cmu46pb04002bmu0mb1q1spxw" data-discover="true">Укладка асфальтобетонного покрытия на улицах Джагалбойского махалли, улице Ислохат, имени Меморбулая и других улицах</a><span class="shrink-0 text-[13px] font-semibold tabular-nums text-ink-soft">31,3 млн<!-- --> <!-- -->сум</span></div><div class="mt-0.5 text-[12px] text-ink-muted">24 сентября 2026</div></li><li class="py-2.5 first:pt-0"><div class="flex items-baseline justify-between gap-3"><a class="min-w-0 truncate text-[14px] font-semibold text-brand hover:underline" title="Укладка асфальтобетонного покрытия на улицы Бағобилан, Ифтихор и Марджан в махалле Джайратепа" href="/tender/jayratepa-mfy-ning-bogibaland-iftixor-va-marjon-kochalariga-asfalt-cmu456fii00e5mu0nzkeg1b16" data-discover="true">Укладка асфальтобетонного покрытия на улицы Бағобилан, Ифтихор и Марджан в махалле Джайратепа</a><span class="shrink-0 text-[13px] font-semibold tabular-nums text-ink-soft">31,3 млн<!-- --> <!-- -->сум</span></div><div class="mt-0.5 text-[12px] text-ink-muted">24 сентября 2026</div></li><li class="py-2.5 first:pt-0"><div class="flex items-baseline justify-between gap-3"><a class="min-w-0 truncate text-[14px] font-semibold text-brand hover:underline" title="Асфальтирование внутренних дорог улиц Истикляль и Золотой вершины" href="/tender/istiqlol-va-oltin-tepa-kochasini-ichki-yollarini-asfaltlash-cmu456lbj00ehmu0nu3ppm9oh" data-discover="true">Асфальтирование внутренних дорог улиц Истикляль и Золотой вершины</a><span class="shrink-0 text-[13px] font-semibold tabular-nums text-ink-soft">31,3 млн<!-- --> <!-- -->сум</span></div><div class="mt-0.5 text-[12px] text-ink-muted">24 сентября 2026</div></li><li class="py-2.5 first:pt-0"><div class="flex items-baseline justify-between gap-3"><a class="min-w-0 truncate text-[14px] font-semibold text-brand hover:underline" title="Асфальтирование улицы Чарбоғ МФЙ" href="/tender/charbog-mfy-chorbog-kochasini-asfaltlash-cmu41zmd001qjmt016m7i89vs" data-discover="true">Асфальтирование улицы Чарбоғ МФЙ</a><span class="shrink-0 text-[13px] font-semibold tabular-nums text-ink-soft">31,3 млн<!-- --> <!-- -->сум</span></div><div class="mt-0.5 text-[12px] text-ink-muted">24 сентября 2026</div></li><li class="py-2.5 first:pt-0"><div class="flex items-baseline justify-between gap-3"><a class="min-w-0 truncate text-[14px] font-semibold text-brand hover:underline" title="Укладка асфальта на внутренние дороги в жилищно-коммунальном фонде" href="/tender/oroqli-mfydagi-ichki-yollarga-asfalt-yotqizish-cmu41zkhx01qhmt015s2k5ms6" data-discover="true">Укладка асфальта на внутренние дороги в жилищно-коммунальном фонде</a><span class="shrink-0 text-[13px] font-semibold tabular-nums text-ink-soft">31,3 млн<!-- --> <!-- -->сум</span></div><div class="mt-0.5 text-[12px] text-ink-muted">24 сентября 2026</div></li><li class="py-2.5 first:pt-0"><div class="flex items-baseline justify-between gap-3"><a class="min-w-0 truncate text-[14px] font-semibold text-brand hover:underline" title="Улучшение технического состояния водохранилища &quot;Окчабсой&quot;" href="/tender/oqchabsoy-sel-suv-omborining-texnik-xolatini-yaxshilash-cmse9cj1702eurz3fw7lt7lbc" data-discover="true">Улучшение технического состояния водохранилища &quot;Окчабсой&quot;</a><span class="shrink-0 text-[13px] font-semibold tabular-nums text-ink-soft">28,3 млн<!-- --> <!-- -->сум</span></div><div class="mt-0.5 text-[12px] text-ink-muted">4 июня 2026</div></li><li class="py-2.5 first:pt-0"><div class="flex items-baseline justify-between gap-3"><a class="min-w-0 truncate text-[14px] font-semibold text-brand hover:underline" title="Улучшение технического состояния водохозяйственного объекта &quot;Омондара&quot;" href="/tender/omondara-sel-suv-omborining-texnik-xolatini-yaxshilash-cmse9cj0b02eqrz3f127g7la3" data-discover="true">Улучшение технического состояния водохозяйственного объекта &quot;Омондара&quot;</a><span class="shrink-0 text-[13px] font-semibold tabular-nums text-ink-soft">45,2 млн<!-- --> <!-- -->сум</span></div><div class="mt-0.5 text-[12px] text-ink-muted">4 июня 2026</div></li><li class="py-2.5 first:pt-0"><div class="flex items-baseline justify-between gap-3"><a class="min-w-0 truncate text-[14px] font-semibold text-brand hover:underline" title="Улучшение технического состояния водохранилища &quot;Карасув&quot;" href="/tender/qorasuv-sel-suv-omborining-texnik-xolatini-yaxshilash-cmse9cj2402eyrz3fk4n2g72y" data-discover="true">Улучшение технического состояния водохранилища &quot;Карасув&quot;</a><span class="shrink-0 text-[13px] font-semibold tabular-nums text-ink-soft">39,5 млн<!-- --> <!-- -->сум</span></div><div class="mt-0.5 text-[12px] text-ink-muted">4 июня 2026</div></li></ul></section><section class="rounded-lg border border-edge bg-bone-surface p-5 shadow-m-sm sm:p-6"><div class="mb-3 text-[11px] font-bold uppercase tracking-[0.05em] text-ink-soft">Категории</div><ul class="flex flex-col gap-2"><li class="flex items-baseline justify-between gap-2 text-[13.5px]"><span class="min-w-0 truncate text-ink-soft" title="Архитектурные, инженерные и проектные услуги">Архитектурные, инженерные и проектные услуги</span><span class="shrink-0 font-semibold tabular-nums text-ink-muted">5,5 млрд</span></li></ul></section><section class="rounded-lg border border-edge bg-bone-surface p-5 shadow-m-sm sm:p-6"><div class="mb-3 text-[11px] font-bold uppercase tracking-[0.05em] text-ink-soft">Регионы</div><ul class="flex flex-col gap-2"><li class="flex items-baseline justify-between gap-2 text-[13.5px]"><span class="min-w-0 truncate text-ink-soft">Самаркандская область</span><span class="shrink-0 tabular-nums text-ink-muted">27 контр.</span></li><li class="flex items-baseline justify-between gap-2 text-[13.5px]"><span class="min-w-0 truncate text-ink-soft">Навоийская область</span><span class="shrink-0 tabular-nums text-ink-muted">17 контр.</span></li><li class="flex items-baseline justify-between gap-2 text-[13.5px]"><span class="min-w-0 truncate text-ink-soft">Кашкадарьинская область</span><span class="shrink-0 tabular-nums text-ink-muted">1 контр.</span></li></ul></section></div><section class="mt-5 rounded-lg border border-edge bg-bone-surface p-6 text-center shadow-m-sm"><p class="mb-4 text-[14px] text-ink-muted">Профили поставщиков доступны на тарифе Pro.</p><a class="inline-flex h-11 w-full items-center justify-center rounded-md bg-brand px-6 text-[14px] font-bold text-white hover:bg-brand-mid sm:w-auto" href="/register" data-discover="true">Создать аккаунт</a></section><div class="mt-10 pb-2" data-testid="company-data-link"><button type="button" class="text-left text-[12px] underline underline-offset-2 transition-colors text-ink-muted decoration-ink-muted/40 hover:text-ink">Это ваша компания? Скрыть телефон или исправить данные</button></div></div></div><footer class="mt-10 border-t border-edge-light pt-6 text-[12.5px] text-ink-muted"><nav class="mb-3 flex flex-wrap items-center gap-x-5 gap-y-2"><a class="font-medium transition-colors hover:text-brand" href="/directory" data-discover="true">Категории и регионы</a><a class="font-medium transition-colors hover:text-brand" href="/about" data-discover="true">О сервисе</a><a class="font-medium transition-colors hover:text-brand" href="/guide" data-discover="true">Seller 05</a><a class="font-medium transition-colors hover:text-brand" href="/plans" data-discover="true">Тарифы</a><a class="font-medium transition-colors hover:text-brand" href="/offer" data-discover="true">Публичная оферта</a><a class="font-medium transition-colors hover:text-brand" href="/privacy" data-discover="true">Конфиденциальность</a><a class="font-medium transition-colors hover:text-brand" href="/requisites" data-discover="true">Реквизиты</a><button type="button" class="font-medium transition-colors hover:text-brand">Поддержка</button></nav><p class="leading-[1.6]">© <!-- -->2026<!-- --> <!-- -->ООО &quot;FASTAGO&quot;<!-- -->. <!-- -->Все права защищены.<br/>ИНН<!-- -->: <!-- -->306377222</p></footer></main></div></div></div><script>window.__RQ_STATE__={"mutations":[],"queries":[{"dehydratedAt":1793236371013,"state":{"data":{"profile":{"indexable":true,"awards24m":34,"tin":"306825083","name":"\"MUQAYYAS GROUP\" XUSUSIY KORXONA","sector":"ДЕЯТЕЛЬНОСТЬ В ОБЛАСТИ АРХИТЕКТУРЫ","region":"Samarqand viloyati","status":"Действующее и имеющее налоговые обязательства","totalContracts":47,"totalValueUzs":6104154789,"avgValueUzs":129875633.80851063,"firstAwardAt":"2022-06-04T12:49:05.000Z","lastAwardAt":"2026-09-24T05:55:27.000Z","distinctBuyers":7,"recentContracts":[{"tenderId":"cmu46pb04002bmu0mb1q1spxw","slug":"jagalboyli-mfy-isloxat-memor-bolajon-va-boshqa-kochalariga-asfalt","title":"Укладка асфальтобетонного покрытия на улицах Джагалбойского махалли, улице Ислохат, имени Меморбулая и других улицах","valueUzs":31291290,"awardedAt":"2026-09-24T05:55:27.000Z"},{"tenderId":"cmu456fii00e5mu0nzkeg1b16","slug":"jayratepa-mfy-ning-bogibaland-iftixor-va-marjon-kochalariga-asfalt","title":"Укладка асфальтобетонного покрытия на улицы Бағобилан, Ифтихор и Марджан в махалле Джайратепа","valueUzs":31309245,"awardedAt":"2026-09-24T05:40:24.000Z"},{"tenderId":"cmu456lbj00ehmu0nu3ppm9oh","slug":"istiqlol-va-oltin-tepa-kochasini-ichki-yollarini-asfaltlash","title":"Асфальтирование внутренних дорог улиц Истикляль и Золотой вершины","valueUzs":31309245,"awardedAt":"2026-09-24T05:40:21.000Z"},{"tenderId":"cmu41zmd001qjmt016m7i89vs","slug":"charbog-mfy-chorbog-kochasini-asfaltlash","title":"Асфальтирование улицы Чарбоғ МФЙ","valueUzs":31303260,"awardedAt":"2026-09-24T05:20:24.000Z"},{"tenderId":"cmu41zkhx01qhmt015s2k5ms6","slug":"oroqli-mfydagi-ichki-yollarga-asfalt-yotqizish","title":"Укладка асфальта на внутренние дороги в жилищно-коммунальном фонде","valueUzs":31303260,"awardedAt":"2026-09-24T05:20:13.000Z"},{"tenderId":"cmse9cj1702eurz3fw7lt7lbc","slug":"oqchabsoy-sel-suv-omborining-texnik-xolatini-yaxshilash","title":"Улучшение технического состояния водохранилища \"Окчабсой\"","valueUzs":28262500,"awardedAt":"2026-06-04T05:26:29.000Z"},{"tenderId":"cmse9cj0b02eqrz3f127g7la3","slug":"omondara-sel-suv-omborining-texnik-xolatini-yaxshilash","title":"Улучшение технического состояния водохозяйственного объекта \"Омондара\"","valueUzs":45223572,"awardedAt":"2026-06-04T05:26:28.000Z"},{"tenderId":"cmse9cj2402eyrz3fk4n2g72y","slug":"qorasuv-sel-suv-omborining-texnik-xolatini-yaxshilash","title":"Улучшение технического состояния водохранилища \"Карасув\"","valueUzs":39497827,"awardedAt":"2026-06-04T05:25:49.000Z"}],"procurement12m":{"wins":34,"valueUzs":5500474789,"pricedAwards":34,"medianDiscountPct":5,"participations":155,"winsWithDetail":31,"medianParticipants":8},"categoryMix":[{"section":"71","name":"Архитектурные, инженерные и проектные услуги","contracts":38,"valueUzs":5530054789}],"regionReach":[{"region":"Samarqand viloyati","contracts":27,"code":null},{"region":"Navoiy viloyati","contracts":17,"code":null},{"region":"Qashqadaryo viloyati","contracts":1,"code":null}],"debarred":null,"goodStanding":{"tier":"active_supplier","label":"Действующий поставщик","signals":[{"key":"tax_standing","value":"Действующее и имеющее налоговые обязательства"},{"key":"vat_payer","value":true},{"key":"charter_fund","value":"169083810"},{"key":"operating_since","value":"2019-10-31"},{"key":"track_record","value":47},{"key":"dxmap_rating","value":"A"}]},"dxmapRateType":"A","dxmapSector":"Хизмат кўрсатиш","kgdFlags":[],"vatPayer":true,"charterFundUzs":"169083810","statusGroup":"ACTIVE","regDate":"2019-10-31","liquidationDate":null}},"dataUpdateCount":1,"dataUpdatedAt":1793236370994,"error":null,"errorUpdateCount":0,"errorUpdatedAt":0,"fetchFailureCount":0,"fetchFailureReason":null,"fetchMeta":null,"isInvalidated":false,"status":"success","fetchStatus":"idle"},"queryKey":["supplier-public","306825083"],"queryHash":"[\"supplier-public\",\"306825083\"]"}]}</script>
+  </body>
+</html>

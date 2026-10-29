@@ -1,0 +1,24 @@
+{
+  "fetched_at": "2026-10-29T19:50:35.574497+05:00",
+  "final_url": "https://uzbuild.uz/era_cms/plugins/custom.js?v=50.3.1",
+  "headers": {
+    "accept-ranges": "bytes",
+    "cache-control": "max-age=604800",
+    "connection": "Keep-Alive",
+    "content-length": "11398",
+    "content-security-policy": "default-src https: 'unsafe-inline' 'unsafe-eval'; connect-src 'self' mc.yandex.ru wss://mc.yandex.ru analytics.google.com www.google-analytics.com https://www.recaptcha.net maps.googleapis.com stats.g.doubleclick.net; font-src 'self' maxcdn.bootstrapcdn.com data: fonts.gstatic.com *.fontawesome.com; img-src 'self' blob: iteca.com.uz cabinet.iteca.com.uz b2b.iteca.com.uz iteca.com.uz *.iteca.com.uz *.energyforum.uz energyforum.uz data: www.google-analytics.com www.google.com chart.googleapis.com www.googletagmanager.com img.youtube.com mc.yandex.ru cdn.getwhelp.com; frame-ancestors 'self' *.iteca.com.uz https://www.google.az",
+    "content-type": "application/javascript",
+    "date": "Thu, 29 Oct 2026 14:50:35 GMT",
+    "keep-alive": "timeout=5, max=100",
+    "last-modified": "Fri, 11 Apr 2025 15:05:05 GMT",
+    "permissions-policy": "geolocation=(),midi=(),sync-xhr=(),microphone=(),camera=(),magnetometer=(),gyroscope=(),fullscreen=(self),payment=()",
+    "referrer-policy": "same-origin",
+    "server": "Apache",
+    "strict-transport-security": "max-age=63072000; includeSubDomains",
+    "x-content-type-options": "nosniff",
+    "x-frame-options": "ALLOW-FROM https://*.iteca.com.uz/",
+    "x-xss-protection": "1; mode=block"
+  },
+  "status": 200,
+  "url": "https://uzbuild.uz/era_cms/plugins/custom.js?v=50.3.1"
+}

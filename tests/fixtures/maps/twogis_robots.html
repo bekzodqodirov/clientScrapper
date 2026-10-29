@@ -1,0 +1,61 @@
+User-agent: *
+Host: https://2gis.uz
+Sitemap: https://2gis.uz/sitemap.xml
+
+Disallow: /_/*
+Disallow: /maps_action
+
+Disallow: /*printmode=
+Disallow: /*login_token=
+Disallow: /*reference=
+Disallow: /*stat=
+
+Disallow: */my$
+Disallow: */my?*
+Disallow: */my/*
+
+Disallow: */user*
+Disallow: */geolocation*
+Disallow: *?refHash*
+
+Disallow: /geo/70030076128110973
+
+# Yandex-only
+Clean-param: m
+Clean-param: ruler
+Clean-param: my
+Clean-param: mapview
+Clean-param: addOrg
+Clean-param: feedback
+Clean-param: floor
+Clean-param: stat
+Clean-param: writeReview
+
+Clean-param: utm_medium&utm_campaign&utm_source&utm_content&utm_term&utm_from
+Clean-param: queryState
+Clean-param: reference
+Clean-param: gclid
+Clean-param: refHash
+Clean-param: utm_referrer
+Clean-param: fa821dba_ipp_key
+Clean-param: fa821dba_ipp_uid
+Clean-param: fa821dba_ipp_uid2
+Clean-param: fa821dba_ipp_uid1
+Clean-param: fa821dba_ipp_uid_tst
+Clean-param: fa821dba_static_key
+Clean-param: sa&ved
+Clean-param: af_xp
+Clean-param: rating
+Clean-param: pmv
+Clean-param: clckid
+Clean-param: immersive
+Clean-param: rel_scan
+
+User-agent: Yandex
+Disallow: /search/%D0%A0/rubricId
+
+User-agent: Mail.Ru
+Crawl-delay: 0.2
+
+User-agent: GoogleOther
+Disallow: /

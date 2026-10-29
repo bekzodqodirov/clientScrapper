@@ -1,0 +1,31 @@
+{
+  "fetched_at": "2026-10-29T19:56:11.561768+05:00",
+  "final_url": "https://mebelexpo.uz/ERAForms/companies_list.php?l=en&exhibition=463&draw=2&start=40&length=40",
+  "headers": {
+    "access-control-allow-credentials": "true",
+    "access-control-allow-headers": "Origin, X-Requested-With, Content-Type, Accept, Authorization",
+    "access-control-allow-methods": "GET, POST, PUT, DELETE, OPTIONS",
+    "access-control-allow-origin": "*",
+    "access-control-max-age": "3600",
+    "cache-control": "no-store, no-cache, must-revalidate",
+    "connection": "Keep-Alive",
+    "content-encoding": "gzip",
+    "content-security-policy": "default-src https: 'unsafe-inline' 'unsafe-eval'; connect-src 'self' mc.yandex.ru wss://mc.yandex.ru analytics.google.com www.google-analytics.com https://www.recaptcha.net maps.googleapis.com stats.g.doubleclick.net; font-src 'self' maxcdn.bootstrapcdn.com data: fonts.gstatic.com *.fontawesome.com; img-src 'self' blob: iteca.com.uz cabinet.iteca.com.uz b2b.iteca.com.uz iteca.com.uz *.iteca.com.uz *.energyforum.uz energyforum.uz data: www.google-analytics.com www.google.com chart.googleapis.com www.googletagmanager.com img.youtube.com mc.yandex.ru cdn.getwhelp.com; frame-ancestors 'self' *.iteca.com.uz https://www.google.az",
+    "content-type": "text/html; charset=UTF-8",
+    "date": "Thu, 29 Oct 2026 14:56:11 GMT",
+    "expires": "Thu, 19 Nov 1981 08:52:00 GMT",
+    "keep-alive": "timeout=5, max=100",
+    "permissions-policy": "geolocation=(),midi=(),sync-xhr=(),microphone=(),camera=(),magnetometer=(),gyroscope=(),fullscreen=(self),payment=()",
+    "pragma": "no-cache",
+    "referrer-policy": "same-origin",
+    "server": "Apache",
+    "strict-transport-security": "max-age=63072000; includeSubDomains",
+    "transfer-encoding": "chunked",
+    "vary": "Accept-Encoding",
+    "x-content-type-options": "nosniff",
+    "x-frame-options": "ALLOW-FROM https://*.iteca.com.uz/",
+    "x-xss-protection": "1; mode=block"
+  },
+  "status": 200,
+  "url": "https://mebelexpo.uz/ERAForms/companies_list.php?l=en&exhibition=463&draw=2&start=40&length=40"
+}

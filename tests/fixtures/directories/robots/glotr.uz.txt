@@ -1,0 +1,99 @@
+# clientScrapper robots fetched_at=2026-10-29T19:45:23.462009+05:00 status=200
+# ============================================
+# glotr.uz — robots.txt
+# ============================================
+
+# --- Search sahifalarini HAMMA botlardan yopish ---
+# (Sphinx ni himoya qilish uchun eng muhim qism)
+User-agent: *
+Disallow: /search
+Disallow: /uz/search
+Disallow: /ru/search
+Disallow: /en/search
+Disallow: /*?catid=
+Disallow: /*?term=
+Disallow: /*?page=
+Disallow: /*?region=
+Disallow: /*?sort=
+Disallow: /*?price_type=
+Disallow: /*&term=
+Disallow: /*&page=
+Disallow: /*&catid=
+Crawl-delay: 10
+
+# --- Baidu (asosiy muammo manbai) ---
+User-agent: Baiduspider
+Disallow: /
+
+# --- Yandex — sekinlashtirish ---
+User-agent: YandexBot
+Disallow: /search
+Disallow: /uz/search
+Disallow: /ru/search
+Crawl-delay: 15
+
+# --- Keraksiz / agressiv SEO va skraper botlar ---
+User-agent: AhrefsBot
+Disallow: /
+
+User-agent: SemrushBot
+Disallow: /
+
+User-agent: MJ12bot
+Disallow: /
+
+User-agent: DotBot
+Disallow: /
+
+User-agent: BLEXBot
+Disallow: /
+
+User-agent: DataForSeoBot
+Disallow: /
+
+User-agent: PetalBot
+Disallow: /
+
+User-agent: Bytespider
+Disallow: /
+
+User-agent: SeznamBot
+Disallow: /
+
+User-agent: MojeekBot
+Disallow: /
+
+User-agent: SerpstatBot
+Disallow: /
+
+User-agent: ZoominfoBot
+Disallow: /
+
+# --- AI skraperlar (ixtiyoriy — xohlasangiz qoldiring) ---
+User-agent: GPTBot
+Disallow: /
+
+User-agent: CCBot
+Disallow: /
+
+User-agent: ClaudeBot
+Disallow: /
+
+# --- Google va Bing — saytni indekslasin, LEKIN search'ga kirmasin ---
+User-agent: Googlebot
+Disallow: /search
+Disallow: /uz/search
+Disallow: /ru/search
+Disallow: /en/search
+Disallow: /*?term=
+Disallow: /*?page=
+
+User-agent: Bingbot
+Disallow: /search
+Disallow: /uz/search
+Disallow: /ru/search
+Disallow: /*?term=
+Disallow: /*?page=
+
+# --- Sitemap ---
+Sitemap: https://glotr.uz/sitemap.xml

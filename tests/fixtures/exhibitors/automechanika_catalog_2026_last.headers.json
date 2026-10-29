@@ -1,0 +1,22 @@
+{
+  "fetched_at": "2026-10-29T19:47:01.031213+05:00",
+  "final_url": "https://catalog.automechanika.uz/en/expositions/exposition/7012-automechanika-tashkent-comtrux-tashkent-bautrux-tashkent-2026.html?start=456",
+  "headers": {
+    "cache-control": "no-store, no-cache, must-revalidate, post-check=0, pre-check=0",
+    "connection": "keep-alive",
+    "content-type": "text/html; charset=utf-8",
+    "date": "Thu, 29 Oct 2026 14:47:00 GMT",
+    "expires": "Wed, 17 Aug 2005 00:00:00 GMT",
+    "last-modified": "Thu, 29 Oct 2026 14:47:00 GMT",
+    "p3p": "CP=\"NOI ADM DEV PSAi COM NAV OUR OTRo STP IND DEM\"",
+    "pragma": "no-cache",
+    "server": "nginx/1.20.1",
+    "strict-transport-security": "max-age=31536000; includeSubDomains; preload",
+    "transfer-encoding": "chunked",
+    "x-content-powered-by": "K2 v2.7.1 (by JoomlaWorks)",
+    "x-logged-in": "False",
+    "x-powered-by": "PHP/7.4.33"
+  },
+  "status": 200,
+  "url": "https://catalog.automechanika.uz/en/expositions/exposition/7012-automechanika-tashkent-comtrux-tashkent-bautrux-tashkent-2026.html?start=456"
+}

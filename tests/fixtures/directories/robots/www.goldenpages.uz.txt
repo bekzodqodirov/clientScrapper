@@ -1,0 +1,110 @@
+# clientScrapper robots fetched_at=2026-10-29T19:45:09.767650+05:00 status=200
+User-agent: *
+
+Disallow: *&s=*
+Disallow: *.pdf
+Disallow: *.rar
+Disallow: */add/
+Disallow: *.html
+Disallow: */sm/*
+Disallow: */maps/*
+Disallow: *&Print
+Disallow: *?Print
+Disallow: *?Map=*
+Disallow: *&tab=*
+Disallow: */?sort=*
+Disallow: */person/*
+Disallow: */anketa/*
+Disallow: *&region=*
+Disallow: *?ysclid=*
+Disallow: */search/*
+Disallow: */download/*
+Disallow: */rubplaces/*
+Disallow: */prosto_ya/*
+Disallow: */searchhelp/*
+Disallow: */mapcompany/*
+Disallow: */rsearch?ch=*
+Disallow: */rsearch/?ch=*
+Disallow: */free-listing/*
+Disallow: */company_maps.php?company_id=*
+Allow: *.css
+Allow: *.js
+
+User-agent: Yandex
+
+Disallow: *&rc
+Disallow: *&s=*
+Disallow: *&sa=*
+Disallow: */?q=*
+Disallow: */sm/*
+Disallow: *.pdf
+Disallow: *.rar
+Disallow: */add/
+Disallow: *.html
+Disallow: *&tab=*
+Disallow: *&Print
+Disallow: *?Print
+Disallow: *&lang=*
+Disallow: *&type=*
+Disallow: *?date=*
+Disallow: */maps/*
+Disallow: */search/*
+Disallow: */?sort=*
+Disallow: */person/*
+Disallow: */anketa/*
+Disallow: */rsearch?*
+Disallow: */download/*
+Disallow: */prosto_ya/*
+Disallow: */searchhelp/*
+Disallow: */mapcompany/*
+Disallow:  *?cache_delete_
+Disallow: */free-listing/*
+Disallow: *PhoneChangesSearch*
+Disallow: */company_maps.php?company_id=*
+Allow: *.css
+Allow: *.js
+
+Clean-param: Map&CatId */company/*
+Clean-param: mobile_version&full_version&sort&rc
+Clean-param: city&region&Page */rubrics/*
+Clean-param: comment&prefix&region&operator&PhoneChangesSearch */phone/*
+
+
+User-agent: CCBot
+Disallow: /
+
+User-agent: DotBot
+Disallow: /
+
+User-agent: MJ12bot
+Disallow: /
+
+User-agent: PetalBot
+Disallow: /
+
+User-agent: AhrefsBot
+Disallow: /
+
+User-agent: SeznamBot
+Disallow: /
+
+User-agent: ZoominfoBot
+Disallow: /
+
+User-agent: Serpstatbot
+Disallow: /
+
+User-agent: ZoominfoBot
+Disallow: /
+
+
+User-agent: SemrushBot
+Disallow: /
+
+User-agent: Vkrobot
+Disallow: /
+
+User-agent: SemrushBot
+Disallow: /
+
+Sitemap: https://www.goldenpages.uz/sitemap.xml
