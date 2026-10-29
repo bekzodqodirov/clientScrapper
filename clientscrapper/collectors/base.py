@@ -177,7 +177,11 @@ class Collector(ABC):
     as it skips a disabled row. ``supplied`` holds the bytes ``supply`` was
     given, by ``(url, sha256)``; ``evidence_root`` is where the run keeps
     evidence files (the runner sets it), for a collector that reads stored
-    ones back."""
+    ones back. ``incomplete`` names, in words, what the run set out to read
+    and could not read whole when no budget stopped it — a list under half
+    its organiser's count, a list the site removed, a walk the site cut
+    short (03 §2.8): the runner ends such an ``ok`` run ``partial`` and
+    writes them into ``meta.incomplete``."""
 
     key: ClassVar[str]
     family: ClassVar[str]
@@ -214,6 +218,7 @@ class Collector(ABC):
         self.started_at: datetime | None = None
         self.supplied: dict[tuple[str, str], Supplied] = {}
         self.evidence_root: Path | None = None
+        self.incomplete: list[str] = []
 
     @classmethod
     def unavailable(cls) -> str | None:
