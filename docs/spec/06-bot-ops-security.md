@@ -221,6 +221,8 @@ inside `REVIEW_HOURS` and sends what is `pending`. The burst and daily caps abov
 — the 2-minute cadence changes latency, never volume. Every other source keeps its cron and
 reaches a card on the next job run.
 
+As built (seam review wave 4): a card is sent before its row is written (`asked`, the chat and message ids). When the database fails between the two, the next run sends the card again; the copy already in the chat is edited to «⚠️ Bu karta yozib olinmadi — qayta yuboriladi.» with no buttons (`reviews._recorded`, the owner's, the managers' and the re-sent cards alike), so a chat never holds two live copies of one card.
+
 ### 1.7 Manager handoff — Telegram-only prospects
 
 The agent sends nothing to a prospect. A hot candidate without a phone goes to a human who

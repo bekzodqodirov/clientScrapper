@@ -1536,3 +1536,75 @@ async def test_only_an_auto_approved_candidate_is_listed_with_its_push_note(
     company = await company_of(session, auto)
     assert holat.auto_waiting_total == 1
     assert [w.display_name for w in holat.auto_waiting] == [company.display_name]
+
+
+async def test_a_card_sent_but_not_recorded_loses_its_buttons(session, monkeypatch):
+    """The database went away between the send and the row's write: the next
+    run sends the card again, and the copy sent now is marked and stripped,
+    so the owner's chat never holds two live cards (seam review wave 4)."""
+    configure(monkeypatch, managers=())
+    cand = await lead(session, 61)
+    review = await card(session, cand)
+    await session.commit()
+    sender = FakeSender()
+    real = cards.mark_asked
+    calls = {"n": 0}
+
+    async def flaky(*a, **k):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise sa.exc.OperationalError("UPDATE", {}, Exception("server closed"))
+        return await real(*a, **k)
+
+    monkeypatch.setattr(cards, "mark_asked", flaky)
+    with pytest.raises(sa.exc.OperationalError):
+        async with reviews.SessionLocal() as s:
+            await reviews.send_owner_cards(s, sender, now=NOW, limit=5)
+    [(chat, first, text, layout, rid)] = sender.edits
+    assert (chat, text, layout, rid) == (
+        OWNER,
+        reviews.UNRECORDED_CARD_UZ,
+        None,
+        review.id,
+    )
+    async with reviews.SessionLocal() as s:
+        await reviews.send_owner_cards(s, sender, now=NOW, limit=5)
+    assert [r for _, _, _, r in sender.sent] == [review.id, review.id]
+    row = await fresh(session, review)
+    assert row.state == "asked" and row.card_message_id not in (None, first)
+
+
+async def test_a_manager_card_sent_but_not_recorded_loses_its_buttons(
+    session, monkeypatch
+):
+    configure(monkeypatch, managers=(MANAGER,))
+    cand = await lead(
+        session, 62, person=True, username="namuna_tg", phone_number=None, state="hold"
+    )
+    review = await card(session, cand, kind="manager", by_telegram_id=MANAGER)
+    await session.commit()
+    sender = FakeSender()
+    real = cards.mark_asked
+    calls = {"n": 0}
+
+    async def flaky(*a, **k):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise sa.exc.OperationalError("UPDATE", {}, Exception("server closed"))
+        return await real(*a, **k)
+
+    monkeypatch.setattr(cards, "mark_asked", flaky)
+    with pytest.raises(sa.exc.OperationalError):
+        async with reviews.SessionLocal() as s:
+            await reviews.send_manager_card(s, review.id, sender, now=NOW)
+    [(chat, first, text, layout, rid)] = sender.edits
+    assert (chat, text, layout, rid) == (
+        MANAGER,
+        reviews.UNRECORDED_CARD_UZ,
+        None,
+        review.id,
+    )
+    async with reviews.SessionLocal() as s:
+        assert await reviews.send_manager_card(s, review.id, sender, now=NOW)
+    row = await fresh(session, review)
+    assert row.state == "asked" and row.card_message_id not in (None, first)

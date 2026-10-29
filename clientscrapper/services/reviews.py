@@ -99,9 +99,10 @@ Nothing here imports aiogram.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -176,6 +177,9 @@ LIVE_SCAN_MAX: Final = 1000
 # A closed card's buttons are taken off its message while it is this young
 # (a message Telegram no longer lets the bot edit is not retried for ever).
 STRIP_WINDOW: Final = timedelta(days=14)
+# A card sent whose row could not be written: this copy is not the one the
+# next run's card will be.
+UNRECORDED_CARD_UZ: Final = "⚠️ Bu karta yozib olinmadi — qayta yuboriladi."
 # A ✅ card whose push finished this recently gets the push's footer (the job
 # runs every 2 minutes: a few chances, and an edit only when the text moved).
 PUSH_FOOTER_WINDOW: Final = timedelta(minutes=15)
@@ -1192,6 +1196,31 @@ class Burst:
     failed: bool = False
 
 
+async def _recorded[T](
+    session: AsyncSession,
+    sender: CardSender,
+    out: SentCard,
+    review_id: int,
+    write: Awaitable[T],
+) -> T:
+    """``write`` (the sent card's row) and the commit. The card is in the
+    chat already: when the database fails here the next run sends it again,
+    so this copy loses its buttons and says so — the chat never holds two
+    live cards (seam review wave 4). Re-raises."""
+    try:
+        result = await write
+        await session.commit()
+    except BaseException:
+        with contextlib.suppress(Exception):
+            await session.rollback()
+        with contextlib.suppress(Exception):
+            await sender.edit(
+                out.chat_id, out.message_id, UNRECORDED_CARD_UZ, None, review_id
+            )
+        raise
+    return result
+
+
 async def send_owner_cards(
     session: AsyncSession, sender: CardSender, *, now: datetime, limit: int
 ) -> Burst:
@@ -1235,15 +1264,20 @@ async def send_owner_cards(
             await session.rollback()
             burst.failed = True
             break
-        marked = await cards.mark_asked(
+        marked = await _recorded(
             session,
+            sender,
+            out,
             review_id,
-            chat_id=out.chat_id,
-            message_id=out.message_id,
-            card_hash=card.hash,
-            now=now,
+            cards.mark_asked(
+                session,
+                review_id,
+                chat_id=out.chat_id,
+                message_id=out.message_id,
+                card_hash=card.hash,
+                now=now,
+            ),
         )
-        await session.commit()
         if not marked:
             # The claim makes this impossible; said, never hidden.
             log.error("claimed card not pending", extra={"review_id": review_id})
@@ -1342,13 +1376,19 @@ async def send_manager_card(
         if refused is not None:
             refused.add(manager)
         return None
-    await cards.mark_asked(
+    await _recorded(
         session,
+        sender,
+        out,
         review_id,
-        chat_id=out.chat_id,
-        message_id=out.message_id,
-        card_hash=card.hash,
-        now=now,
+        cards.mark_asked(
+            session,
+            review_id,
+            chat_id=out.chat_id,
+            message_id=out.message_id,
+            card_hash=card.hash,
+            now=now,
+        ),
     )
     return out
 
@@ -1486,22 +1526,29 @@ async def resend_later(
                 refused.add(to)
                 continue
             fresh_deadline = now + timedelta(hours=settings.review_expiry_hours)
-            await session.execute(
-                sa.update(LeadReview)
-                .where(LeadReview.id == review_id)
-                .values(
-                    card_chat_id=out.chat_id,
-                    card_message_id=out.message_id,
-                    card_hash=cards.card_hash(drawn.text, drawn.layout),
-                    remind_at=None,
-                    expires_at=sa.func.greatest(LeadReview.expires_at, fresh_deadline),
-                )
-            )
             if review.kind == "owner":
                 session.add(
                     ReminderLog(kind=RESENT_REMINDER, ref=str(review_id), sent_at=now)
                 )
-            await session.commit()
+            await _recorded(
+                session,
+                sender,
+                out,
+                review_id,
+                session.execute(
+                    sa.update(LeadReview)
+                    .where(LeadReview.id == review_id)
+                    .values(
+                        card_chat_id=out.chat_id,
+                        card_message_id=out.message_id,
+                        card_hash=cards.card_hash(drawn.text, drawn.layout),
+                        remind_at=None,
+                        expires_at=sa.func.greatest(
+                            LeadReview.expires_at, fresh_deadline
+                        ),
+                    )
+                ),
+            )
             if review.kind == "owner":
                 sent_owner += 1
             else:
@@ -1895,6 +1942,7 @@ __all__ = [
     "ROW_STATE",
     "STALE_NOTE",
     "TEL_BASIS",
+    "UNRECORDED_CARD_UZ",
     "Burst",
     "CardSender",
     "CardsReport",
