@@ -12,7 +12,7 @@ COMPOSE := docker compose
 switch = $(if $(filter-out 0 1,$(strip $($(1)))),$(error $(1)=$($(1)): use $(1)=1 (on) or $(1)=0 (off)),$(filter 1,$(strip $($(1)))))
 .PHONY: help env doctor up update down reload logs ps psql migrate revision downgrade \
         bot worker userbot userbot-login backup backup-key backup-key-show restore \
-        import-clients erp-sync push-test purge install test lint fmt typecheck check db-test hooks smoke
+        import-clients erp-sync push-test mvp-report purge install test lint fmt typecheck check db-test hooks smoke
 
 help: ## Show this help
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -134,6 +134,12 @@ erp-sync: ## One ERP feed walk: make erp-sync WALK=full|delta|outcomes|quarter|y
 
 push-test: ## Push one visibly synthetic lead to the ERP (05 §B.1)
 	$(COMPOSE) run --rm worker python -m clientscrapper.tools.push_test
+
+# 07 §3.2: the four MVP numbers (read-only); START = the pilot's first day,
+# default the day of the first push.
+mvp-report: ## The pilot's MVP numbers: make mvp-report [START=YYYY-MM-DD]
+	$(COMPOSE) run --rm worker python -m clientscrapper.tools.mvp_report \
+		$(if $(strip $(START)),--start "$(strip $(START))",)
 
 purge: ## Forget a subject: make purge COMPANY=<uuid> | PHONE=<tail9> | TG_USER=<id> [APPLY=1]
 	@test -n "$(COMPANY)$(PHONE)$(TG_USER)" || (echo "usage: make purge COMPANY=<uuid> | PHONE=<tail9> | TG_USER=<id> [APPLY=1]" && exit 1)

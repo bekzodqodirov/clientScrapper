@@ -98,6 +98,7 @@ EXPECTED_ENV_KEYS: tuple[str, ...] = (
     "PUSH_WINDOW",
     "PUSH_DAYS",
     "TEST_PHONE",
+    "QUOTE_STAGE_NAMES",
     "REVIEW_HOURS",
     "REVIEW_BURST_MAX",
     "REVIEW_DAILY_CAP",

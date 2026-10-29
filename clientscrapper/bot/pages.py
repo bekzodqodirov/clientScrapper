@@ -35,7 +35,7 @@ def at(moment: datetime) -> str:
 
 
 def precision(value: Decimal | None) -> str:
-    return f"{int(value * 100)}%" if value is not None else "—"
+    return cards.precision_text(value)
 
 
 # --- /manbalar ------------------------------------------------------------------------

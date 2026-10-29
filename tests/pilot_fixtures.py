@@ -12,7 +12,7 @@ from __future__ import annotations
 import itertools
 import uuid
 from collections.abc import AsyncIterator
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -193,3 +193,97 @@ async def spend(
         )
     )
     await session.flush()
+
+
+async def repush(session: AsyncSession, log: PushLog, *, sent_at: datetime) -> PushLog:
+    """``/push tekshir``'s re-push: the delivered row superseded, the same
+    ``external_id`` sent again as ``attempt + 1``."""
+    log.superseded_at = sent_at
+    await session.flush()
+    again = PushLog(
+        external_id=log.external_id,
+        attempt=log.attempt + 1,
+        candidate_id=log.candidate_id,
+        company_id=log.company_id,
+        phone_tail=log.phone_tail,
+        endpoint=log.endpoint,
+        source_key_sent=log.source_key_sent,
+        payload=None,
+        payload_sha256=log.payload_sha256,
+        status="sent",
+        http_status=200,
+        sent_at=sent_at,
+    )
+    session.add(again)
+    await session.flush()
+    return again
+
+
+# --- one pilot (tests/test_mvp_report.py, /holat) -----------------------------------
+
+PILOT_START = datetime(2026, 11, 2, tzinfo=TZ)  # a Monday
+PILOT_NOW = datetime(2026, 11, 16, 12, 0, tzinfo=TZ)  # day 15, a Monday
+UNCLASSED = "Mijoz bilan kelishmadi"
+
+
+def _at(day: int, hour: int, minute: int = 0) -> datetime:
+    return datetime(2026, 11, day, hour, minute, tzinfo=TZ)
+
+
+async def pilot(session: AsyncSession, source: str = "telegram_monitor") -> None:
+    """Two weeks of pushes, read on day 15 (``PILOT_NOW``):
+
+    week 1 — eight pushes: won (contacted in time); lost «Import qilmaydi»,
+    re-pushed two days later and contacted only then (late against the
+    first delivery); lost «Raqam notoʻgʻri», never contacted; open at «Narx
+    aytildi», contacted in time; a Saturday push nobody touched (its
+    deadline was Monday 24:00); lost with a label no class matches; a capped
+    drop; a Saturday push contacted Monday 10:00 (in time) at «Muzokara».
+    week 2 — 21 pushes at score 72, two at 50, one on Sunday 23:30 (still
+    week 2); then one on day 15 at 00:30 (after week 2, inside the pilot).
+    Spend: Claude $5.20 at most (10.11), all providers $7.20 at most."""
+    read = PILOT_NOW - timedelta(hours=9)
+    tue = _at(3, 11)
+    a1 = await push(session, source, sent_at=tue)
+    await judged(session, a1, read_at=read, stage_kind="won", stage_name="Yutildi",
+                 contacted_at=_at(3, 16))  # fmt: skip
+    a2 = await push(session, source, sent_at=tue, status="unknown")
+    a2 = await repush(session, a2, sent_at=_at(5, 10))
+    await judged(session, a2, read_at=read, stage_kind="lost", stage_name="Yoʻqotildi",
+                 lost_reason="Import qilmaydi", contacted_at=_at(5, 11))  # fmt: skip
+    a3 = await push(session, source, sent_at=tue)
+    await judged(session, a3, read_at=read, stage_kind="lost", stage_name="Yoʻqotildi",
+                 lost_reason="Raqam notoʻgʻri")  # fmt: skip
+    a4 = await push(session, source, sent_at=tue)
+    await judged(session, a4, read_at=read, stage_name="Narx aytildi",
+                 contacted_at=_at(3, 15))  # fmt: skip
+    a5 = await push(session, source, sent_at=_at(7, 11))
+    await judged(session, a5, read_at=read)
+    a6 = await push(session, source, sent_at=tue)
+    await judged(session, a6, read_at=read, stage_kind="lost", stage_name="Yoʻqotildi",
+                 lost_reason=UNCLASSED, contacted_at=_at(4, 10))  # fmt: skip
+    a7 = await push(session, source, sent_at=tue)
+    await judged(session, a7, read_at=read, landing="dropped", reason="capped")
+    a8 = await push(session, source, sent_at=_at(7, 12))
+    await judged(session, a8, read_at=read, stage_name="Muzokara",
+                 contacted_at=_at(9, 10))  # fmt: skip
+    for _ in range(21):
+        await push(session, source, sent_at=_at(10, 11))
+    for _ in range(2):
+        await push(session, source, sent_at=_at(10, 11), score=50)
+    await push(session, source, sent_at=_at(15, 23, 30))
+    await push(session, source, sent_at=_at(16, 0, 30))
+    await spend(session, _at(3, 12), "3.50")
+    await spend(session, _at(3, 13), "1.00", provider="brave", operation="serp_brave")
+    await spend(session, _at(4, 12), "2.40")
+    await spend(session, _at(4, 23, 30), "2.40")
+    await spend(session, _at(5, 0, 30), "0.10")
+    await spend(session, _at(10, 12), "5.20")
+    await spend(
+        session,
+        _at(10, 13),
+        "2.00",
+        provider="google_places",
+        operation="places_text_ids",
+    )
+    await session.commit()

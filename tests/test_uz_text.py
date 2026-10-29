@@ -95,6 +95,8 @@ OWNER_TEXT_MODULES = (
     # notes (lead_reviews.note, shown in /lidlar).
     "services/gates.py",
     "services/push_gate.py",
+    # T-36: the MVP report's lines (its words are services/cards').
+    "tools/mvp_report.py",
 )
 # Modules whose raise messages reach the owner (see the docstring).
 OWNER_RAISE_MODULES = frozenset({"config.py"})

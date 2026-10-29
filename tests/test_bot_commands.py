@@ -1351,7 +1351,11 @@ async def test_the_merge_menu_offers_at_most_five_targets(w):
 
 async def test_holat_lists_the_enabled_sources_only(w):
     async with w.db() as s:
-        await s.execute(sa.update(Source).values(enabled=False))
+        await s.execute(
+            sa.update(Source).values(
+                enabled=False, precision_30d=None, pushes_30d=0, auto_push=False
+            )
+        )
         await s.execute(
             sa.update(Source)
             .where(Source.key == "telegram_monitor")
@@ -1368,11 +1372,11 @@ async def test_holat_lists_the_enabled_sources_only(w):
     await w.say("/holat")
     lines = w.last().splitlines()
     start = lines.index("Manbalar:")
-    end = next(i for i, line in enumerate(lines) if line.startswith("Muammolar:"))
+    end = next(i for i, line in enumerate(lines) if line.startswith("Natija ("))
     assert sorted(lines[start + 1 : end]) == sorted(
         [
-            f"  {titles['telegram_monitor']} ✅ —",
-            f"  {titles['hh_vacancies']} ⏸ —",
+            f"  {titles['telegram_monitor']} ✅ — · bugun 0 yangi · aniqlik — (0)",
+            f"  {titles['hh_vacancies']} ⏸ — · bugun 0 yangi · aniqlik — (0)",
         ]
     )
 
