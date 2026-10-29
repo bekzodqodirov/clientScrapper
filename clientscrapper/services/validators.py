@@ -218,11 +218,11 @@ def role_consistent(role: SpeakerRole, *, text: str, confidence: float) -> Speak
 # --- goods ---------------------------------------------------------------------
 
 
-def _uz_apostrophes(word: str) -> str:
-    """oʻ/gʻ with U+02BB, any other apostrophe between letters U+02BC
-    (07 §1.11: goods reach the owner's cards)."""
-    folded = fold_apostrophes(word)
-    folded = re.sub(r"(?<=[og])'", "ʻ", folded)
+def uz_apostrophes(text: str) -> str:
+    """oʻ/gʻ with U+02BB (either case), any other apostrophe U+02BC (07 §1.11:
+    goods and reasons reach the owner's cards)."""
+    folded = fold_apostrophes(text)
+    folded = re.sub(r"(?<=[oOgG])'", "ʻ", folded)
     return folded.replace("'", "ʼ")
 
 
@@ -241,7 +241,7 @@ def clean_goods(goods: Iterable[str]) -> list[str]:
     them); at most ``GOODS_MAX``. An item that breaks a rule is dropped."""
     kept: list[str] = []
     for raw in goods:
-        item = _uz_apostrophes(" ".join(raw.casefold().split()))
+        item = uz_apostrophes(" ".join(raw.casefold().split()))
         if (
             not item
             or len(item) > GOODS_CHARS_MAX
@@ -310,5 +310,6 @@ __all__ = [
     "role_consistent",
     "sane_volume",
     "unit_count",
+    "uz_apostrophes",
     "verify_quote",
 ]
