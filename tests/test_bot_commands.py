@@ -1542,3 +1542,21 @@ async def test_mark_asked_takes_only_a_pending_card(db):
         assert not await cards.mark_asked(s, review.id, now=NOW, **args)
         row = await s.get(LeadReview, review.id, populate_existing=True)
         assert row is not None and (row.card_message_id, row.card_hash) == (77, "0" * 64)
+
+
+async def test_the_erp_client_of_a_tap_is_closed_and_a_refused_url_is_none(
+    monkeypatch,
+):
+    from clientscrapper.bot.handlers import common
+
+    monkeypatch.setattr(settings, "crm_agent_key", "namuna-kalit")
+    monkeypatch.setattr(settings, "crm_base_url", "http://erp.test")
+    async with common._erp() as refused:
+        assert refused is None  # the key is never sent in clear
+    monkeypatch.setattr(settings, "crm_base_url", "https://erp.test")
+    async with common._erp() as client:
+        assert client is not None and not client.client.is_closed
+    assert client.client.is_closed
+    monkeypatch.setattr(settings, "crm_agent_key", "")
+    async with common._erp() as keyless:
+        assert keyless is None
