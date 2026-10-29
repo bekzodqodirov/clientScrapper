@@ -34,6 +34,7 @@ from clientscrapper.collectors.exhibitors import (
     match_entry,
     pick_targets,
     plan_visits,
+    rows_url,
 )
 from clientscrapper.collectors.runner import run_collector
 from clientscrapper.db.models import CollectorRun, Evidence, Source
@@ -102,6 +103,13 @@ def test_an_entry_the_collector_cannot_read_is_skipped_and_named():
                 **good,
                 "url_patterns": ["https://a.uz/x", "https://a.uz/spisok.php?PAGEN_2=1"],
             },
+            {
+                **good,
+                "url_patterns": [
+                    "https://uzbuild.uz/en/exhibitors-list",
+                    "https://uzbuild.uz/ERAForms/companies_list.php?l=en&exhibition=461",
+                ],
+            },
             {**good, "expected": "450"},
             {**good, "show": "Uz Build"},
             "uzbuild",
@@ -112,6 +120,7 @@ def test_an_entry_the_collector_cannot_read_is_skipped_and_named():
     assert problems == [
         "uzbuild: end_date",
         "uzbuild: url_patterns",
+        "uzbuild: url_patterns[1] is no list address this collector reads",
         "uzbuild: url_patterns[1] is no list address this collector reads",
         "uzbuild: expected",
         "show",
@@ -227,6 +236,15 @@ def test_an_in_window_entry_the_index_does_not_list_is_missing():
     targets, missing = pick_targets(visit, linked, MONDAY.date())
     assert [(t.edition.id, t.why) for t in targets] == [("7012", "window")]
     assert missing == []
+
+
+def test_an_owner_s_pattern_takes_the_edition_and_nothing_else():
+    pattern = (
+        "https://uzbuild.uz/ERAForms/companies_list.php?l=en&exhibition={edition}&x={y}"
+    )
+    assert rows_url(pattern, "461") == (
+        "https://uzbuild.uz/ERAForms/companies_list.php?l=en&exhibition=461&x={y}"
+    )
 
 
 def test_judging_a_list_against_its_organiser():

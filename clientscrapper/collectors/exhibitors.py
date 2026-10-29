@@ -133,6 +133,8 @@ ERA_PAGE: Final = 500
 MAX_PAGES_PER_LIST: Final = 40
 EXCERPT_MAX: Final = 600
 SHORT_PROBLEM: Final = "exhibitor_list_short"
+# Where a calendar's rows address takes the site's edition id.
+EDITION_SLOT: Final = "{edition}"
 # Country names an exhibitor list prints for Uzbekistan, compared after
 # normalise_for_search (any case and script, apostrophes dropped):
 # «Uzbekistan», «Узбекистан», «O'zbekiston», «Oʻzbekiston», «Ўзбекистон».
@@ -377,7 +379,7 @@ def _entry(raw: Any) -> ShowEntry | str:
     ):
         return f"{show}: url_patterns"
     index, rows = str(patterns[0]), str(patterns[1])
-    if platform_of(rows) is None:
+    if platform_of(rows) is None or EDITION_SLOT not in rows:
         return f"{show}: url_patterns[1] is no list address this collector reads"
     try:
         end = date.fromisoformat(str(raw.get("end_date")))
@@ -1217,7 +1219,7 @@ class Exhibitors(Collector):
         result: ListResult,
         exclude: Sequence[str],
     ) -> None:
-        url = visit.rows_pattern.format(edition=target.edition.id)
+        url = rows_url(visit.rows_pattern, target.edition.id)
         start = 0
         seen: set[str] = set()
         for draw in range(1, MAX_PAGES_PER_LIST + 1):
@@ -1260,7 +1262,7 @@ class Exhibitors(Collector):
         result: ListResult,
         exclude: Sequence[str],
     ) -> None:
-        url = target.edition.url or visit.rows_pattern.format(edition=target.edition.id)
+        url = target.edition.url or rows_url(visit.rows_pattern, target.edition.id)
         params: dict[str, int] | None = None
         start = 0
         end_start: int | None = None
@@ -1310,6 +1312,12 @@ class Exhibitors(Collector):
         earlier runs (in the run's transaction)."""
         now = self.started_at or datetime.now(settings.tz)
         await note_short_lists(session, self.lists, now=now)
+
+
+def rows_url(pattern: str, edition: str) -> str:
+    """The rows address of one edition (``{edition}`` replaced; any other
+    brace in an owner's pattern is left as written)."""
+    return pattern.replace(EDITION_SLOT, edition)
 
 
 def served(result: FetchResult) -> bool:
