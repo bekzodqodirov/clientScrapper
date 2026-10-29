@@ -17,7 +17,9 @@ or of the savepoint the row was stored in — drops the write. So no file ever
 exists that no row points to, which retention (R1 selects rows) could never
 find. The opposite failure, a crash between the commit and the write, leaves a
 row whose file is missing: harmless (``open_raw`` answers None, the excerpt
-still quotes), and healed by the next store of the same bytes.
+still quotes), and healed by the next store of the same bytes. Deleting goes
+the other way round — rows first, their files after the commit — so a stop in
+between leaves files no row names; R1's ``sweep_orphans`` finds those on disk.
 
 Only the runner writes here (03 §1.1: "the runner, not the collector").
 """
@@ -65,6 +67,10 @@ _PENDING: Final = "evidence_pending_raw"
 # ``.tmp`` this old is a crash mid-write, and retention sweeps it (02 §3, T-31).
 TMP_SUFFIX: Final = ".tmp"
 TMP_GRACE: Final = timedelta(hours=1)
+# A stored file as ``raw_path`` names it (``raw_path_for``); the orphan sweep
+# touches nothing of any other shape. Its rows are read this many at a time.
+_RAW_PATH: Final = re.compile(r"\d{2}/[0-9a-f]{64}\.gz")
+ORPHAN_PAGE: Final = 500
 
 log = logging.getLogger(__name__)
 
@@ -420,6 +426,59 @@ def sweep_tmp(
             continue
         except OSError:
             log.warning("evidence tmp not removed", extra={"raw": path.name})
+    return removed
+
+
+def _stored_files(base: Path, cutoff: float) -> list[str]:
+    """Every ``<yy>/<sha256>.gz`` under ``base`` (``raw_path``'s own shape —
+    nothing else the directory may hold) that is a regular file older than
+    ``cutoff``, as ``raw_path`` would name it."""
+    found: list[str] = []
+    for path in base.glob("*/*.gz"):
+        rel = f"{path.parent.name}/{path.name}"
+        if not _RAW_PATH.fullmatch(rel):
+            continue
+        try:
+            st = path.lstat()
+        except OSError:
+            continue
+        if stat.S_ISREG(st.st_mode) and st.st_mtime < cutoff:
+            found.append(rel)
+    return sorted(found)
+
+
+async def sweep_orphans(
+    session: AsyncSession,
+    *,
+    now: datetime,
+    root: Path | None = None,
+    grace: timedelta = TMP_GRACE,
+) -> int:
+    """Unlink every stored file no evidence row names any more (retention R1,
+    02 §3: «no file exists that no row points to»). A purge or R2a deletes
+    its rows, commits, and only then unlinks their files; a process stopped
+    in between, or an unlink the disk refused, leaves the file behind with no
+    row to find it by — this is how it still goes (a legal request's page
+    included). A file is written only after its row commits, so a file older
+    than ``grace`` that no committed row names is an orphan; the rows are read
+    in pages by ``sha256`` (indexed) right before each page is unlinked.
+    Returns the count."""
+    base = root or evidence_root()
+    if not base.is_dir():
+        return 0
+    files = _stored_files(base, now.timestamp() - grace.total_seconds())
+    removed = 0
+    for start in range(0, len(files), ORPHAN_PAGE):
+        page = files[start : start + ORPHAN_PAGE]
+        shas = sorted({rel.split("/")[1].removesuffix(".gz") for rel in page})
+        named = set(
+            await session.scalars(
+                sa.select(Evidence.raw_path).where(
+                    Evidence.sha256.in_(shas), Evidence.raw_path.is_not(None)
+                )
+            )
+        )
+        removed += unlink_raw([rel for rel in page if rel not in named], root=base)
     return removed
 
 

@@ -398,7 +398,7 @@ async def test_a_purge_executes_what_its_plan_counted_and_the_log_holds_a_hash(
     assert files["ev_shared"].exists() and files["ev_twin_a"].exists()
 
 
-async def test_the_companies_are_tombstoned_and_a_merged_source_lets_go_of_its_keys(
+async def test_the_companies_are_tombstoned_and_a_merged_source_keeps_its_own_keys(
     session, root
 ):
     w = await subject(session, root)
@@ -413,16 +413,15 @@ async def test_the_companies_are_tombstoned_and_a_merged_source_lets_go_of_its_k
             purge.PURGED_NAME_KEY,
         )
         assert company.merged_into is None and company.verdict is None
-    # The root keeps what the resolver answers «purged» by; the source gives
-    # its STIR and domain up (they would collide with the root's once it is
-    # no longer 'merged').
+    # The root keeps what the resolver answers «purged» by; so does the source,
+    # for a STIR and a domain nobody else holds.
     assert (firm.stir, firm.website_domain, firm.telegram_channel, firm.instagram) == (
         "300000041",
         "namuna41.example.uz",
         "namuna_kanal41",
         "namuna_insta41",
     )
-    assert (source.stir, source.website_domain) == (None, None)
+    assert (source.stir, source.website_domain) == ("300000042", "namuna42.example.uz")
     twin = await fresh(session, m.Company, w.twin.id)
     assert (twin.dup_of, twin.dup_score) == (None, None)
     control = await fresh(session, m.Company, w.control.id)
@@ -589,7 +588,7 @@ async def test_a_failed_group_is_logged_and_a_new_plan_finishes_the_job(
         await purge.execute(
             session, plan, requested_by="owner:1001", now=now(), root=root
         )
-    assert refused.value.code == "closed"
+    assert refused.value.code == "failed"
     monkeypatch.undo()
     again = await purge.plan_company(session, firm_id)
     await purge.execute(session, again, requested_by="owner:1001", now=now(), root=root)

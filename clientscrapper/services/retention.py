@@ -12,10 +12,13 @@ with the error's class; the job goes on with the next step and raises
 
 * **R1** raw evidence 180 d (30 d for Places): the file goes, the row stays —
   ``evidence.purge_raw``, which unlinks only when no other row holds the same
-  file. Then the orphan ``.tmp`` a crash mid-write left (02 §3), and the
-  cap of 06 §3.5: while the directory is over ``EVIDENCE_MAX_GB``, the oldest
-  files go early (rows stay) and ``evidence_over_cap`` is raised; it clears
-  on the first run that did not have to.
+  file. Then the orphan ``.tmp`` a crash mid-write left (02 §3), the stored
+  files no row names any more (``evidence.sweep_orphans``: a purge or R2a
+  stopped between its commit and its unlink), and the cap of 06 §3.5: while
+  the directory is over ``EVIDENCE_MAX_GB``, the oldest files go early (rows
+  stay) and ``evidence_over_cap`` is raised; it clears on the first run that
+  did not have to (a directory over the cap with no file left to take stays
+  reported).
 * **R2a** unconverted Telegram posts 30 d: deleted — and the post's own
   evidence row with them, whose excerpt is the post's text: an unconverted or
   rejected post is gone at 30 days, not only its ``interactions`` row
@@ -235,15 +238,25 @@ async def _db_now(session: AsyncSession) -> datetime:
 # --- R1 ----------------------------------------------------------------------------
 
 
+def _cap() -> int:
+    """EVIDENCE_MAX_GB in bytes; 0 is no cap."""
+    return int(settings.evidence_max_gb * GB)
+
+
+def _over(size: int) -> bool:
+    cap = _cap()
+    return cap > 0 and size > cap
+
+
 async def _over_cap(session: AsyncSession, ctx: Ctx) -> tuple[int, int, int]:
     """06 §3.5: while the directory exceeds EVIDENCE_MAX_GB the oldest files go
     (rows stay). Returns (size before, rows taken, files removed); a cap of 0
     is no cap."""
-    cap = int(settings.evidence_max_gb * GB)
+    cap = _cap()
     size = evidence.stored_bytes(root=ctx.root)
     before = size
     rows = files = 0
-    if cap <= 0 or size <= cap:
+    if not _over(size):
         return before, rows, files
     while size > cap:
         page = list(
@@ -281,6 +294,7 @@ async def step_r1(session: AsyncSession, ctx: Ctx) -> Done:
         if await evidence.purge_raw(session, row, now=ctx.now, root=ctx.root):
             removed += 1
     tmp = evidence.sweep_tmp(now=ctx.now, root=ctx.root)
+    orphans = await evidence.sweep_orphans(session, now=ctx.now, root=ctx.root)
     size, early_rows, early_files = await _over_cap(session, ctx)
     if early_rows:
         await health.raise_problem(
@@ -290,16 +304,19 @@ async def step_r1(session: AsyncSession, ctx: Ctx) -> Done:
             by=WRITER,
             detail={"gb": round(size / GB, 1)},
         )
-    else:
+    elif not _over(size):
+        # Cleared only by a run that did not have to: a directory still over
+        # the cap with no row left to take a file from stays reported.
         await health.clear_problem(session, CAP_PROBLEM)
     done = {
         "rows": len(due),
         "files": removed,
         "tmp": tmp,
+        "orphans": orphans,
         "over_cap_rows": early_rows,
         "over_cap_files": early_files,
     }
-    return Done(plan={"rows": len(due), "tmp": tmp}, executed=done)
+    return Done(plan={"rows": len(due), "tmp": tmp, "orphans": orphans}, executed=done)
 
 
 # --- R2a, R2b, R3 ---------------------------------------------------------------------

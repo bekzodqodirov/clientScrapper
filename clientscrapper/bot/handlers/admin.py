@@ -12,7 +12,9 @@ does not (a safety action is at once). ``/unut`` is the purge's
 up, one live company is planned (its ``purge_log`` row written, the plan kept
 in memory under that id), the card shows counts and the uuid — never a name
 — and only ``pg:<purge_log_id>:y`` executes; a cancel or a confirm that
-outlived the plan closes the row.
+outlived the plan closes the row, a second tap on a plan the first one took
+closes nothing, and a purge that stopped part-way tells the owner to send
+``/unut <uuid>`` again (the company is planned again while it holds anything).
 """
 
 from __future__ import annotations
@@ -222,6 +224,25 @@ async def unut(message: Message, deps: Deps) -> None:
     await reply(message, pages.purge_plan_text(plan), keyboard=keyboard)
 
 
+# What a tap on a plan that will not run (again) says, by its log row
+# (``purge.row_state``): executed, being executed or stopped, failed part-way,
+# or closed.
+ROW_TEXT: Final = {
+    purge.ROW_DONE: "unut.done",
+    purge.ROW_RUNNING: "unut.running",
+    purge.ROW_FAILED: "unut.unfinished",
+    purge.ROW_CLOSED: "unut.closed",
+    purge.ROW_UNKNOWN: "unut.closed",
+    # A plan another tap took and has not claimed yet: it is being executed.
+    purge.ROW_OPEN: "unut.running",
+}
+
+
+async def _row_text(tap: Tap, purge_log_id: int) -> str:
+    async with tap.deps.session_factory() as session:
+        return t(ROW_TEXT[await purge.row_state(session, purge_log_id)])
+
+
 async def on_purge(tap: Tap) -> None:
     purge_log_id = tap.data.ref
     assert purge_log_id is not None
@@ -229,8 +250,14 @@ async def on_purge(tap: Tap) -> None:
     # answer; the outcome is the edited message.
     await toast(tap.query)
     now = tap.deps.clock()
-    planned = tap.deps.plans.take(PLAN_PURGE, purge_log_id, now=now)
+    plans = tap.deps.plans
+    planned = plans.take(PLAN_PURGE, purge_log_id, now=now)
     yes = tap.data.action == "y"
+    if planned is None and plans.taken(PLAN_PURGE, purge_log_id, now=now):
+        # A second tap (a double tap, ✅ then ❌): the first one holds the
+        # plan — this one closes nothing and says where the row stands.
+        await edit(tap.query, await _row_text(tap, purge_log_id))
+        return
     if not isinstance(planned, purge.PurgePlan) or not yes:
         # A plan this process no longer holds (a restart, ten minutes gone)
         # closes as expired; a row executed or closed already says so.
@@ -238,9 +265,9 @@ async def on_purge(tap: Tap) -> None:
         async with tap.deps.session_factory() as session:
             closed = await purge.abandon(session, purge_log_id, why=why)
         if not closed:
-            said = "unut.closed"
-        else:
-            said = "unut.cancelled" if why == PURGE_CANCELLED else "unut.expired"
+            await edit(tap.query, await _row_text(tap, purge_log_id))
+            return
+        said = "unut.cancelled" if why == PURGE_CANCELLED else "unut.expired"
         await edit(tap.query, t(said))
         return
     try:
@@ -251,8 +278,16 @@ async def on_purge(tap: Tap) -> None:
                 requested_by=owner.owner_ref(tap.user_id),
                 now=now,
             )
-    except purge.PurgeRefused:
-        await edit(tap.query, t("unut.closed"))
+    except purge.PurgeRefused as refused:
+        await edit(tap.query, t(ROW_TEXT.get(refused.code, "unut.closed")))
+        return
+    except Exception as exc:
+        # A group failed after the ones before it committed (06 §5.4): the
+        # owner is told how to finish — /unut plans the company again while
+        # it still holds anything (purge.unfinished).
+        log.warning("purge stopped", extra={"error": type(exc).__name__})
+        # /unut plans a company (plan_company): its root is the one id.
+        await edit(tap.query, t("unut.failed", id=str(planned.company_ids[0])))
         return
     await edit(tap.query, pages.purge_result_text(result, reason=planned.reason))
 

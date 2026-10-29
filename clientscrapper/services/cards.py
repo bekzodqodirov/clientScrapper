@@ -65,6 +65,7 @@ from clientscrapper.services import (
     health,
     keys,
     normalise,
+    purge,
     push_gate,
     redlines,
     schemas,
@@ -818,16 +819,21 @@ def render_company(card: CompanyCard, *, state_words: Mapping[str, str]) -> str:
 
 
 async def live_roots(session: AsyncSession, query: str) -> list[uuid.UUID]:
-    """``find_company_ids``' hits as the roots that hold them now, each once,
-    a purged company left out (``/unut``: what a key names today)."""
+    """``find_company_ids``' hits as the roots a purge names now
+    (``purge.subject_root``), each once — ``/unut``'s lookup. A purged company
+    is left out unless a purge of it stopped part-way (``purge.unfinished``:
+    its rows are still there), so ``/unut`` can finish that job."""
     roots: list[uuid.UUID] = []
     for company_id in await find_company_ids(session, query):
         found = await session.get(Company, company_id)
         if found is None:
             continue
-        root = await companies.root_company(session, found)
-        if root.state != "purged" and root.id not in roots:
-            roots.append(root.id)
+        root = await purge.subject_root(session, found)
+        if root.id in roots:
+            continue
+        if root.state == "purged" and not await purge.unfinished(session, root.id):
+            continue
+        roots.append(root.id)
     return roots
 
 

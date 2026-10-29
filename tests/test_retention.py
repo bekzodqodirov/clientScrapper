@@ -16,6 +16,7 @@ import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import pytest
 import sqlalchemy as sa
@@ -184,6 +185,7 @@ async def test_r1_unlinks_a_file_only_when_no_other_row_shares_the_sha(session, 
         "rows": 2,
         "files": 1,
         "tmp": 0,
+        "orphans": 0,
         "over_cap_rows": 0,
         "over_cap_files": 0,
     }
@@ -212,6 +214,106 @@ async def test_r1_sweeps_a_crash_s_orphan_tmp_and_leaves_a_write_in_flight(sessi
     report = await run(dirs)
     assert report["R1"]["tmp"] == 1
     assert not orphan.exists() and flight.exists()
+
+
+def backdate(path: Path, hours: float = 2) -> None:
+    stamp = (now() - timedelta(hours=hours)).timestamp()
+    os.utime(path, (stamp, stamp), follow_symlinks=False)
+
+
+async def test_r1_sweeps_a_stored_file_no_row_names_and_keeps_the_rest(session, dirs):
+    """A purge or R2a deletes its rows, commits, then unlinks; a stop in
+    between leaves files no row names (02 §3). R1 finds them on disk."""
+    root, _ = dirs
+    named = await stored(session, root, b"Namuna nomli sahifa", "https://n.example.uz/1")
+    gone = await stored(session, root, b"Namuna yetim sahifa", "https://n.example.uz/2")
+    purged = await stored(session, root, b"Namuna eski sahifa", "https://n.example.uz/3")
+    files = {
+        "named": root / str(named.raw_path),
+        "gone": root / str(gone.raw_path),
+        "purged": root / str(purged.raw_path),
+    }
+    # The row of «gone» was deleted after its file was written; «purged»'s row
+    # stays without a raw_path (R1 took it; its file was left behind).
+    await session.execute(sa.delete(m.Evidence).where(m.Evidence.id == gone.id))
+    await session.execute(
+        sa.update(m.Evidence).where(m.Evidence.id == purged.id).values(raw_path=None)
+    )
+    await session.commit()
+    # The same bytes under another year's folder: a row names 26/<sha>, not
+    # 25/<sha> — the file a row names is its raw_path, not its sha.
+    other_year = root / "25" / Path(str(named.raw_path)).name
+    if str(named.raw_path).startswith("25/"):
+        other_year = root / "24" / Path(str(named.raw_path)).name
+    other_year.parent.mkdir(exist_ok=True)
+    other_year.write_bytes(files["named"].read_bytes())
+    young = root / "26" / f"{'c' * 64}.gz"  # an unnamed file younger than the grace
+    young.parent.mkdir(exist_ok=True)
+    young.write_bytes(b"young")
+    foreign = root / "26" / "README.gz"  # not raw_path's shape: never touched
+    foreign.write_bytes(b"x")
+    outside = root.parent / f"{'d' * 64}.gz"
+    outside.write_bytes(b"x")
+    for path in (*files.values(), other_year, foreign, outside):
+        backdate(path)
+    report = await run(dirs)
+    assert report["R1"]["orphans"] == 3
+    assert files["named"].is_file()
+    assert not files["gone"].exists() and not files["purged"].exists()
+    assert not other_year.exists()
+    assert young.is_file() and foreign.is_file() and outside.is_file()
+    # The rows are as they were.
+    assert (await fresh(session, m.Evidence, named.id)).raw_path == named.raw_path
+    assert (await run(dirs))["R1"]["orphans"] == 0
+
+
+async def test_r1_keeps_reporting_a_directory_over_the_cap_it_cannot_free(
+    session, dirs, monkeypatch
+):
+    """«It clears on the first run that did not have to»: a run over the cap
+    with no row left to take a file from had to, and could not."""
+    root, _ = dirs
+    (root / "26").mkdir()
+    big = root / "26" / f"{'e' * 64}.gz"  # an unnamed file still in its grace
+    big.write_bytes(os.urandom(5000))
+    await health.raise_problem(
+        session, retention.CAP_PROBLEM, now=now(), by="test", detail={"gb": 0.0}
+    )
+    await session.commit()
+    monkeypatch.setattr(settings, "evidence_max_gb", 1000 / retention.GB)
+    report = await run(dirs)
+    assert (report["R1"]["over_cap_rows"], report["R1"]["orphans"]) == (0, 0)
+    assert await fresh(session, m.RuntimeFlag, "problem:evidence_over_cap") is not None
+    big.unlink()
+    await run(dirs)
+    assert await fresh(session, m.RuntimeFlag, "problem:evidence_over_cap") is None
+
+
+def test_unlink_never_leaves_the_evidence_root(tmp_path: Path):
+    root = tmp_path / "evidence"
+    (root / "26").mkdir(parents=True)
+    outside = tmp_path / f"{'f' * 64}.gz"
+    outside.write_bytes(b"x")
+    inside = root / "26" / f"{'f' * 64}.gz"
+    inside.write_bytes(b"x")
+    rel = f"../{outside.name}"
+    assert evidence.unlink_raw([rel, f"26/../../{outside.name}"], root=root) == 0
+    assert outside.is_file()
+    assert evidence.raw_size(m.Evidence(raw_path=rel), root=root) == 0
+    assert evidence.unlink_raw([f"26/{inside.name}"], root=root) == 1
+    assert not inside.exists()
+
+
+async def test_r1_tmp_sweep_leaves_a_symlink_alone(session, dirs, tmp_path):
+    root, _ = dirs
+    (root / "26").mkdir()
+    target = tmp_path / "kept.txt"
+    target.write_bytes(b"x")
+    link = root / "26" / f"{'a' * 64}.gz.1.ab.tmp"
+    link.symlink_to(target)
+    backdate(link)
+    assert (await run(dirs))["R1"]["tmp"] == 0
+    assert link.is_symlink() and target.is_file()
 
 
 async def test_r1_keeps_the_directory_under_evidence_max_gb(session, dirs, monkeypatch):
@@ -361,6 +463,30 @@ async def test_r2a_deletes_an_unconverted_post_and_its_evidence_at_31_days(sessi
     assert files[cited_ev.id].is_file()
     for kept in (converted_ev, young_ev):
         assert await fresh(session, m.Evidence, kept.id) is not None
+
+
+async def test_r2a_keeps_evidence_a_younger_message_still_cites(session, dirs):
+    """The same post read twice (a forward, a re-scan): the old row goes at 31
+    days, the page stays while the young one still cites it."""
+    root, _ = dirs
+    old, ev, _ = await post(session, root, days=31)
+    again = m.Interaction(
+        tg_chat_id=-100501,
+        tg_message_id=next(_MSG),
+        sender_id=5100000041,
+        text=old.text,
+        occurred_at=now(),
+        prefilter_hit=["volume_kub"],
+        evidence_id=ev.id,
+    )
+    session.add(again)
+    await session.commit()
+    report = await run(dirs)
+    assert report["R2a"] == {"interactions": 1, "evidence": 0, "files": 0}
+    assert await fresh(session, m.Interaction, old.id) is None
+    assert await fresh(session, m.Interaction, again.id) is not None
+    assert await fresh(session, m.Evidence, ev.id) is not None
+    assert (root / str(ev.raw_path)).is_file()
 
 
 async def test_r2b_drops_a_converted_post_s_text_at_91_days(session, dirs):
@@ -592,6 +718,41 @@ async def test_r4_anonymises_the_person_at_91_days_after_an_untouched_push(sessi
         assert (kept.full_name, kept.anonymised_at) == ("Rustam Namunaev", None)
 
 
+async def test_r4_the_company_s_latest_push_decides(session, dirs):
+    """An untouched push 100 days old is not the company's last word when a
+    later one was answered, or is still young."""
+    answered = await pushed_lead(session, days=100, label="open_untouched", nn=66)
+    young = await pushed_lead(session, days=100, label=None, nn=67)
+    for (company, _, _), days, label in (
+        (answered, 95, "contacted_open"),
+        (young, 10, "open_untouched"),
+    ):
+        later = await gate_fixtures.candidate(
+            session, company, state="pushed", external_id=f"cs:{company.id}:202601"
+        )
+        session.add(
+            m.Outcome(
+                external_id=str(later.external_id),
+                intake_id=uuid.uuid4(),
+                candidate_id=later.id,
+                company_id=company.id,
+                landing="created",
+                erp_at=now(),
+                label=label,
+                precision_class="pending",
+                raw={},
+            )
+        )
+        await session.commit()
+        await age(session, "lead_candidates", "pushed_at", later.id, days)
+        await session.commit()
+    report = await run(dirs)
+    assert report["R4"] == {"companies": 0, "contacts": 0}
+    for _, _, someone in (answered, young):
+        kept = await fresh(session, m.Contact, someone.id)
+        assert (kept.full_name, kept.anonymised_at) == ("Rustam Namunaev", None)
+
+
 async def ended_lead(session, *, state: str, days: int, nn: int, **fields: Any):
     company = await gate_fixtures.firm(session)
     _, someone = await person(session, company, nn)
@@ -753,6 +914,26 @@ async def test_r6b_sweeps_client_exports_older_than_a_day(session, dirs):
     report = await run(dirs)
     assert report["R6b"] == {"files": 1}
     assert not old.exists() and today.exists() and (imports / "nested").is_dir()
+
+
+async def test_r6b_leaves_a_symlink_alone(session, dirs, tmp_path):
+    _, imports = dirs
+    target = tmp_path / "elsewhere.xlsx"
+    target.write_bytes(b"PK")
+    link = imports / "clients-link.xlsx"
+    link.symlink_to(target)
+    for path in (target, link):
+        backdate(path, hours=72)
+    assert (await run(dirs))["R6b"] == {"files": 0}
+    assert link.is_symlink() and target.is_file()
+
+
+def test_the_subject_hash_is_the_tashkent_day():
+    """04:15 Tashkent is 23:15 UTC the day before: the hash names the
+    Tashkent date whatever zone the clock is given in."""
+    at = datetime(2026, 10, 28, 23, 15, tzinfo=ZoneInfo("UTC"))
+    expected = hashlib.sha256(b"retention:R1:2026-10-29").hexdigest()
+    assert retention.subject_hash("R1", at) == expected
 
 
 def test_r6b_reads_tools_import_clients_folder():

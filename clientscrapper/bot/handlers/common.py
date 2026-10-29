@@ -79,6 +79,9 @@ class Plans:
     ttl: timedelta = PLAN_TTL
     rng: random.Random = field(default_factory=random.SystemRandom)
     _items: dict[int, tuple[str, datetime, Any]] = field(default_factory=dict)
+    # Plans a tap took, for as long as they would have lived: a second tap on
+    # the same button finds the first one's, not a forgotten plan.
+    _taken: dict[int, tuple[str, datetime]] = field(default_factory=dict)
 
     def put(
         self, kind: str, value: Any, *, now: datetime, plan_id: int | None = None
@@ -91,6 +94,7 @@ class Plans:
             if drawn not in self._items:
                 plan_id = drawn
         self._items[plan_id] = (kind, now, value)
+        self._taken.pop(plan_id, None)
         return plan_id
 
     def take(self, kind: str, plan_id: int, *, now: datetime) -> Any | None:
@@ -99,11 +103,21 @@ class Plans:
         if found is None or found[0] != kind:
             return None
         del self._items[plan_id]
+        self._taken[plan_id] = (kind, found[1])
         return found[2]
+
+    def taken(self, kind: str, plan_id: int, *, now: datetime) -> bool:
+        """A tap took this plan already (while it would still be fresh) — as
+        opposed to a plan this process never held or forgot."""
+        self._sweep(now)
+        found = self._taken.get(plan_id)
+        return found is not None and found[0] == kind
 
     def _sweep(self, now: datetime) -> None:
         for key in [k for k, (_, at, _) in self._items.items() if now - at > self.ttl]:
             del self._items[key]
+        for key in [k for k, (_, at) in self._taken.items() if now - at > self.ttl]:
+            del self._taken[key]
 
 
 @dataclass(slots=True)

@@ -802,7 +802,7 @@ async def test_unut_plans_by_counts_then_purges_after_its_confirm(w):
         )
         assert row is not None and row.executed_at is not None and row.error is None
     await w.press(yes)
-    assert w.last() == t("unut.closed")
+    assert w.last() == t("unut.done")
     # A purged company is no longer found — by the STIR it keeps either.
     for query in ("+998 90 000 00 61", "300000061", str(company_id)):
         await w.say(f"/unut {query}")

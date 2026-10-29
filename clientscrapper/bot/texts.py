@@ -166,7 +166,20 @@ UZ: Final[Mapping[str, str]] = MappingProxyType(
         "unut.ask": "Oʻchiraymi? Buni qaytarib boʻlmaydi.",
         "unut.expired": "Reja eskirgan — /unut ni qaytadan yuboring.",
         "unut.cancelled": "Bekor qilindi — hech narsa oʻchirilmadi.",
-        "unut.closed": "Bu reja allaqachon bajarilgan yoki yopilgan.",
+        "unut.done": "Bu reja allaqachon bajarilgan.",
+        "unut.closed": "Bu reja yopilgan — kerak boʻlsa /unut ni qaytadan yuboring.",
+        "unut.running": (
+            "Bu reja bajarilmoqda. Toʻxtab qolgan boʻlsa, /unut ni qaytadan "
+            "yuboring — qolgan maʼlumot boʻlsa, yangi reja chiqadi."
+        ),
+        "unut.unfinished": (
+            "Bu reja oxirigacha yetmagan — /unut ni qaytadan yuboring, "
+            "qolgani oʻchiriladi."
+        ),
+        "unut.failed": (
+            "⚠️ Oʻchirish oxirigacha yetmadi. /unut <code>{id}</code> ni qaytadan "
+            "yuboring: qolgan maʼlumot boʻlsa, yangi reja chiqadi."
+        ),
         # --- /qidir ------------------------------------------------------------
         "qidir.how": (
             "Nimani qidiray? /qidir &lt;telefon | @username | STIR | sayt | nom&gt;"

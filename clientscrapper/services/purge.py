@@ -26,16 +26,19 @@ rows**, which ``push_log.candidate_id`` RESTRICT keeps on purpose: an open
 one ends ``suppressed`` (pointing at the ``legal``/``dnc`` row this purge
 wrote) or, for any other reason, ``excluded(owner)``; a terminal one stays as
 it is. ``sheet_rows`` are tombstoned and a monitored chat of the company's
-channel is no longer read.
+channel is no longer read. A message of the subject's person that resolved to
+another firm is the person's and goes with its observation and signals; that
+firm is not purged, its candidate is scored again (``signals.mark_stale``).
 
 **What is anonymised**: ``push_log.payload := NULL``; every lineage company
 becomes ``state='purged'`` with ``display_name='[oʻchirilgan]'`` and a name
 key no name match reaches, ``merged_into`` cleared in the same UPDATE (02
 §2.4). The root keeps its STIR, domain, channel and Instagram: the resolver
 answers an observation carrying them «purged» and never makes the firm
-again (``companies.resolve_company``); a merged source gives up its STIR and
-domain, or it would collide with the root's under the unique indexes once it
-is no longer ``merged``.
+again (``companies.resolve_company``); a merged source gives up a STIR or a
+domain another company holds (its root's, mostly — the two would collide
+under the unique indexes once the source is no longer ``merged``) and keeps
+one only it had, so that key answers «purged» too.
 
 **What stays**: ``outcomes``, ``usage_log``, ``merge_log``, ``purge_log``
 (the hash, the counts) and the suppression rows. With ``legal_request`` or
@@ -45,12 +48,16 @@ ids, Instagram, domain, STIR, every lineage id), so no card or push reaches
 it again.
 
 **Transactions** (06 §5.4: «one transaction per table group; files unlinked
-last»): the claim on the ``purge_log`` row, the suppression rows, the
-candidates and the companies first — once that commits, nothing is carded,
-pushed or resolved to the subject even if a later group fails — then the
-people data, then identity and evidence, then the files, then the log row's
-``executed``. A failure leaves ``error='failed:<class>'`` on the row; a new
-plan finishes the job (a purged company can be planned again).
+last»): the claim on the ``purge_log`` row alone (a second tap then finds it
+``running``); the suppression rows, the candidates and the companies — once
+that commits, nothing is carded, pushed or resolved to the subject even if a
+later group fails — then the people data, then identity and evidence, then
+the files, then the log row's ``executed``. A failure leaves
+``error='failed:<class>'`` on the row; a new plan finishes the job: a purged
+company that still holds rows a purge removes is ``unfinished`` and ``/unut``
+plans it again. A file the unlink missed (a stop after the evidence commit, a
+refusing disk) is no row's any more: retention R1's ``evidence.sweep_orphans``
+takes it.
 """
 
 from __future__ import annotations
@@ -66,6 +73,7 @@ from typing import Any, Final
 
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from clientscrapper.db import enums as e
 from clientscrapper.db.models import (
@@ -77,6 +85,7 @@ from clientscrapper.db.models import (
     Interaction,
     LeadCandidate,
     LeadReview,
+    MergeLog,
     ModelJob,
     Observation,
     PurgeLog,
@@ -86,6 +95,7 @@ from clientscrapper.db.models import (
 )
 from clientscrapper.db.models import Evidence as EvidenceRow
 from clientscrapper.services import candidates, companies, evidence, push_gate
+from clientscrapper.services import signals as signal_service
 from clientscrapper.services import suppression as suppression_service
 from clientscrapper.services.suppression import Entry, Key
 
@@ -130,6 +140,32 @@ COUNT_KEYS: Final = (
     "chats",
     "suppression",
 )
+# What groups 2 and 3 remove (group 1's candidates, cards, sheet rows and chats
+# are gone once the company reads 'purged'): a purged lineage that still holds
+# any of these is a purge that stopped part-way (``unfinished``).
+LEFTOVER_KEYS: Final = (
+    "contacts",
+    "observations",
+    "interactions",
+    "signals",
+    "evidence",
+    "files",
+    "model_jobs",
+    "aliases",
+    "company_ids",
+    "push_payloads",
+)
+# How far ``subject_root`` follows a purged source to its old root.
+ROOT_HOPS: Final = 8
+# ``row_state``'s answers: a plan that may still run, one an execute holds or
+# held when it stopped, one that failed, one executed, one cancelled or
+# expired, no such row.
+ROW_OPEN: Final = "open"
+ROW_RUNNING: Final = "running"
+ROW_FAILED: Final = "failed"
+ROW_DONE: Final = "done"
+ROW_CLOSED: Final = "closed"
+ROW_UNKNOWN: Final = "unknown"
 
 
 class PurgeRefused(Exception):
@@ -198,6 +234,9 @@ class Scope:
     sheet_rows: int = 0
     chats: tuple[int, ...] = ()
     keys: tuple[Key, ...] = ()
+    # Other companies whose observations or signals go with the subject's
+    # messages (a post its person wrote that resolved elsewhere): scored again.
+    bystanders: tuple[uuid.UUID, ...] = ()
 
     def counts(self) -> dict[str, int]:
         return {
@@ -309,7 +348,7 @@ async def collect(
     interactions = [m.id for m in messages]
     signal_rows = (
         await session.execute(
-            sa.select(Signal.id, Signal.evidence_id)
+            sa.select(Signal.id, Signal.evidence_id, Signal.company_id)
             .where(
                 sa.or_(
                     Signal.company_id.in_(members),
@@ -321,6 +360,15 @@ async def collect(
         )
     ).all()
     signal_ids = [s.id for s in signal_rows]
+    touched = {s.company_id for s in signal_rows}
+    touched |= set(
+        await _ids(
+            session,
+            sa.select(Observation.company_id).where(
+                Observation.id.in_(observations), Observation.company_id.is_not(None)
+            ),
+        )
+    )
     cited = {s.evidence_id for s in signal_rows}
     cited |= {m.evidence_id for m in messages if m.evidence_id is not None}
     cited |= set(
@@ -471,6 +519,7 @@ async def collect(
             )
         ),
         keys=tuple(sorted(k for k in keys if _key_fits(k))),
+        bystanders=tuple(sorted(touched - set(members))),
     )
 
 
@@ -509,6 +558,38 @@ def _reason(reason: str) -> str:
     return reason
 
 
+async def subject_root(session: AsyncSession, company: Company) -> Company:
+    """The root a purge of ``company`` names: ``companies.root_company``, and
+    for a purged merged source — whose ``merged_into`` the purge cleared —
+    the target of its merge (``merge_log``, undone merges excluded), so a
+    second purge through a source's id still takes the whole firm."""
+    found = await companies.root_company(session, company)
+    for _ in range(ROOT_HOPS):
+        if found.state != "purged":
+            return found
+        target = await session.scalar(
+            sa.select(MergeLog.target_company_id)
+            .where(MergeLog.source_company_id == found.id, MergeLog.undone_at.is_(None))
+            .order_by(MergeLog.created_at.desc(), MergeLog.id.desc())
+            .limit(1)
+        )
+        nxt = await session.get(Company, target) if target is not None else None
+        if nxt is None:
+            return found
+        found = await companies.root_company(session, nxt)
+    return found
+
+
+async def unfinished(session: AsyncSession, company_id: uuid.UUID) -> bool:
+    """A purged lineage that still holds rows a purge removes: a purge of it
+    stopped after its first group committed (06 §5.4's groups commit one by
+    one). ``/unut`` plans such a company again and the new plan finishes the
+    job; a lineage with nothing left is forgotten (the resolver refuses its
+    observations, so nothing comes back)."""
+    counts = (await collect(session, (company_id,), reason=EXCLUDE_REASON)).counts()
+    return any(counts[key] for key in LEFTOVER_KEYS)
+
+
 async def plan_company(
     session: AsyncSession, company_id: uuid.UUID, *, reason: str = DEFAULT_REASON
 ) -> PurgePlan:
@@ -518,7 +599,7 @@ async def plan_company(
     found = await session.get(Company, company_id)
     if found is None:
         raise PurgeRefused("unknown")
-    root = await companies.root_company(session, found)
+    root = await subject_root(session, found)
     plan = PurgePlan(
         subject_kind="company",
         subject_hash=hash_key(str(root.id)),
@@ -619,7 +700,36 @@ async def abandon(session: AsyncSession, purge_log_id: int, *, why: str) -> bool
 # --- the execution ----------------------------------------------------------------------
 
 
+async def row_state(session: AsyncSession, purge_log_id: int) -> str:
+    """Where a plan's log row stands: ``open`` (it may still run), ``running``
+    (an execute holds it — or held it when its process stopped), ``failed``
+    (a group failed; the company may hold the rest, ``unfinished``), ``done``,
+    ``closed`` (cancelled or expired) or ``unknown`` (no such row)."""
+    found = (
+        await session.execute(
+            sa.select(PurgeLog.executed_at, PurgeLog.error).where(
+                PurgeLog.id == purge_log_id
+            )
+        )
+    ).first()
+    if found is None:
+        return ROW_UNKNOWN
+    executed_at, error = found
+    if executed_at is not None:
+        return ROW_DONE
+    if error is None:
+        return ROW_OPEN
+    if error == RUNNING:
+        return ROW_RUNNING
+    if error.startswith(FAILED_PREFIX):
+        return ROW_FAILED
+    return ROW_CLOSED
+
+
 async def _claim(session: AsyncSession, purge_log_id: int) -> None:
+    """The row is this execute's — committed before anything is read, so a
+    second tap, a cancel or an expiry that comes later finds it ``running``
+    and never closes a plan another tap is executing."""
     claimed = await session.scalar(
         sa.update(PurgeLog)
         .where(
@@ -631,12 +741,8 @@ async def _claim(session: AsyncSession, purge_log_id: int) -> None:
         .returning(PurgeLog.id)
     )
     if claimed is None:
-        state = await session.scalar(
-            sa.select(PurgeLog.executed_at.is_not(None)).where(
-                PurgeLog.id == purge_log_id
-            )
-        )
-        raise PurgeRefused("unknown" if state is None else "done" if state else "closed")
+        raise PurgeRefused(await row_state(session, purge_log_id))
+    await session.commit()
 
 
 async def _gone(session: AsyncSession, stmt: Any) -> int:
@@ -665,6 +771,22 @@ async def _end_candidate(
         session, locked, "excluded", now=now, exclude_reason=EXCLUDE_REASON
     )
     return True
+
+
+def _released(name: str) -> sa.ColumnElement[Any]:
+    """A purged source's STIR or domain: NULL when another company holds the
+    same value under ``ux_companies_stir``/``ux_companies_domain`` (whose
+    predicate is ``state <> 'merged'``: the source leaving ``merged`` would
+    collide — with its root's, mostly), else kept, so the resolver answers
+    «purged» for a key only the source had (the root's are kept anyway)."""
+    other = aliased(Company)
+    mine, theirs = getattr(Company, name), getattr(other, name)
+    held = (
+        sa.select(sa.literal(1))
+        .where(theirs == mine, other.id != Company.id, other.state != "merged")
+        .exists()
+    )
+    return sa.case((held, sa.null()), else_=mine)
 
 
 async def _stop(
@@ -717,12 +839,18 @@ async def _stop(
     purged = await _gone(
         session, sa.update(Company).where(Company.id.in_(roots)).values(**anonymous)
     )
-    purged += await _gone(
-        session,
-        sa.update(Company)
-        .where(Company.id.in_(sources))
-        .values(**anonymous, stir=None, website_domain=None),
-    )
+    # One source at a time: each sees the sources before it already purged.
+    for source in sources:
+        purged += await _gone(
+            session,
+            sa.update(Company)
+            .where(Company.id == source)
+            .values(
+                **anonymous,
+                stir=_released("stir"),
+                website_domain=_released("website_domain"),
+            ),
+        )
     await _gone(
         session,
         sa.update(Company)
@@ -829,6 +957,15 @@ async def _people(
         .where(PushLog.company_id.in_(members), PushLog.payload.is_not(None))
         .values(payload=None),
     )
+    # A company that lost signals with the subject's messages is scored again
+    # (its company first: candidates' lock order, signals.mark_stale).
+    for company_id in scope.bystanders:
+        await session.execute(
+            sa.select(Company.id)
+            .where(Company.id == company_id)
+            .with_for_update(key_share=True)
+        )
+        await signal_service.mark_stale(session, company_id)
     return {
         "interactions": interactions,
         "observations": observations,
@@ -976,6 +1113,7 @@ def result_lines(result: PurgeResult, *, reason: str) -> list[str]:
 __all__ = [
     "COUNT_KEYS",
     "DEFAULT_REASON",
+    "LEFTOVER_KEYS",
     "OWNER_REASONS",
     "PURGED_NAME",
     "PurgePlan",
@@ -992,4 +1130,7 @@ __all__ = [
     "plan_lines",
     "record",
     "result_lines",
+    "row_state",
+    "subject_root",
+    "unfinished",
 ]
