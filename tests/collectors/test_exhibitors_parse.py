@@ -459,7 +459,7 @@ def test_a_name_with_no_latin_slug_is_keyed_by_its_company_id():
 
 def test_a_row_is_dated_by_its_show_not_by_the_crawl():
     """An archive read a year on is last year's evidence: ``published_at`` is
-    the show's last day — the calendar's, else the printed one, else the
+    the show's last day — the printed one, else the calendar's, else the
     year's last — never after the read."""
     archive = Edition("401", 2024, date(2024, 3, 1))
     assert observe(uzbek_row("NAMUNA"), edition=archive).published_at == datetime(
@@ -467,6 +467,11 @@ def test_a_row_is_dated_by_its_show_not_by_the_crawl():
     )
     assert observe(uzbek_row("NAMUNA"), held=date(2026, 10, 23)).published_at == (
         datetime(2026, 10, 23, tzinfo=TASHKENT)
+    )
+    # The date the site prints beats the calendar's guess.
+    printed = Edition("504", 2027, date(2027, 4, 29))
+    assert held_on(printed, datetime(2027, 6, 1, tzinfo=TASHKENT), date(2027, 5, 20)) == (
+        datetime(2027, 4, 29, tzinfo=TASHKENT)
     )
     undated = Edition("6400", 2025)
     assert held_on(undated, AT) == datetime(2025, 12, 31, tzinfo=TASHKENT)

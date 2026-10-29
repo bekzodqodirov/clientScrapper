@@ -777,13 +777,13 @@ class ListPage:
 
 
 def held_on(edition: Edition, fetched_at: datetime, held: date | None = None) -> datetime:
-    """When the show was (``Observation.published_at``): its last day —
-    ``held`` (the calendar entry's), else the date the site prints, else the
-    year's last day — never after the page was read. A list read a year on
-    is last year's evidence, and its signal ages from the show, not from
-    the crawl."""
+    """When the show was (``Observation.published_at``): its last day — the
+    date the site prints, else ``held`` (the calendar entry's, which may be
+    a little off: ``MATCH_SLACK``), else the year's last day — never after
+    the page was read. A list read a year on is last year's evidence, and
+    its signal ages from the show, not from the crawl."""
     read_on = fetched_at.astimezone(settings.tz).date()
-    day = held or edition.end or date(edition.year, 12, 31)
+    day = edition.end or held or date(edition.year, 12, 31)
     return datetime.combine(min(day, read_on), time(), tzinfo=settings.tz)
 
 
