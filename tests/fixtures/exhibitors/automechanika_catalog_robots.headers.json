@@ -1,0 +1,17 @@
+{
+  "fetched_at": "2026-10-29T19:46:25.220182+05:00",
+  "final_url": "https://catalog.automechanika.uz/robots.txt",
+  "headers": {
+    "accept-ranges": "bytes",
+    "connection": "keep-alive",
+    "content-length": "686",
+    "content-type": "text/plain; charset=UTF-8",
+    "date": "Thu, 29 Oct 2026 14:46:25 GMT",
+    "etag": "\"2ae-64de7b962c672\"",
+    "last-modified": "Thu, 26 Mar 2026 06:45:03 GMT",
+    "server": "nginx/1.20.1",
+    "strict-transport-security": "max-age=31536000; includeSubDomains; preload"
+  },
+  "status": 200,
+  "url": "https://catalog.automechanika.uz/robots.txt"
+}

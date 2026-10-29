@@ -1,0 +1,17 @@
+{
+  "fetched_at": "2026-10-29T19:45:18.837600+05:00",
+  "final_url": "https://www.yellowpages.uz/rubrika/optovaya-torgovlya-kanctovarami-kancelyarskimi-tovarami/tashkent",
+  "headers": {
+    "connection": "keep-alive",
+    "content-encoding": "gzip",
+    "content-type": "text/html;charset=utf-8",
+    "date": "Thu, 29 Oct 2026 14:45:18 GMT",
+    "server": "nginx/1.22.1",
+    "transfer-encoding": "chunked",
+    "vary": "Accept-Encoding, Accept-Encoding",
+    "x-powered-by": "Nuxt",
+    "x-served-by": "www.yellowpages.uz"
+  },
+  "status": 200,
+  "url": "https://www.yellowpages.uz/rubrika/optovaya-torgovlya-kanctovarami-kancelyarskimi-tovarami/tashkent"
+}

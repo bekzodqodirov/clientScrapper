@@ -1,0 +1,17 @@
+{
+  "fetched_at": "2026-10-29T20:08:03.522536+05:00",
+  "final_url": "https://orginfo.uz/ru/search/organizations/?q=310514454",
+  "headers": {
+    "connection": "keep-alive",
+    "content-language": "ru",
+    "content-type": "text/html; charset=utf-8",
+    "date": "Thu, 29 Oct 2026 15:07:50 GMT",
+    "referrer-policy": "same-origin",
+    "server": "nginx/1.29.5",
+    "vary": "Cookie",
+    "x-content-type-options": "nosniff",
+    "x-frame-options": "DENY"
+  },
+  "status": 200,
+  "url": "https://orginfo.uz/ru/search/organizations/?q=310514454"
+}

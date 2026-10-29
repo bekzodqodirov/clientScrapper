@@ -1,0 +1,146 @@
+# clientScrapper robots fetched_at=2026-10-29T19:45:19.131451+05:00 status=200
+User-agent: Yandex          # Ð”ÑƒÐ±Ð»Ð¸ÐºÐ°Ñ‚ Ð¿Ð¾ Ð¸Ð½ÑÑ‚Ñ€ÑƒÐºÑ†Ð¸Ð¸ Ð¾Ñ‚ Yandex
+Disallow:
+Clean-param: sphrase_id /
+Clean-param: has_phone /
+Disallow: /cgi-bin          # Ð¿Ð°Ð¿ÐºÐ° Ð½Ð° Ñ…Ð¾ÑÑ‚Ð¸Ð½Ð³Ðµ
+Disallow: /bitrix/          # Ð¿Ð°Ð¿ÐºÐ° Ñ ÑÐ¸ÑÑ‚ÐµÐ¼Ð½Ñ‹Ð¼Ð¸ Ñ„Ð°Ð¹Ð»Ð°Ð¼Ð¸ Ð±Ð¸Ñ‚Ñ€Ð¸ÐºÑÐ°
+Disallow: *bitrix_*=        # GET-Ð·Ð°Ð¿Ñ€Ð¾ÑÑ‹ Ð±Ð¸Ñ‚Ñ€Ð¸ÐºÑÐ°
+Disallow: /local/           # Ð¿Ð°Ð¿ÐºÐ° Ñ ÑÐ¸ÑÑ‚ÐµÐ¼Ð½Ñ‹Ð¼Ð¸ Ñ„Ð°Ð¹Ð»Ð°Ð¼Ð¸ Ð±Ð¸Ñ‚Ñ€Ð¸ÐºÑÐ°
+Disallow: /*index.php$      # Ð´ÑƒÐ±Ð»Ð¸ ÑÑ‚Ñ€Ð°Ð½Ð¸Ñ† index.php
+Disallow: /auth/            # Ð°Ð²Ñ‚Ð¾Ñ€Ð¸Ð·Ð°Ñ†Ð¸Ñ
+Disallow: *auth=            # Ð°Ð²Ñ‚Ð¾Ñ€Ð¸Ð·Ð°Ñ†Ð¸Ñ
+Disallow: /personal/        # Ð»Ð¸Ñ‡Ð½Ñ‹Ð¹ ÐºÐ°Ð±Ð¸Ð½ÐµÑ‚
+Disallow: *register=        # Ñ€ÐµÐ³Ð¸ÑÑ‚Ñ€Ð°Ñ†Ð¸Ñ
+Disallow: *forgot_password= # Ð·Ð°Ð±Ñ‹Ð»Ð¸ Ð¿Ð°Ñ€Ð¾Ð»ÑŒ
+Disallow: *change_password= # Ð¸Ð·Ð¼ÐµÐ½Ð¸Ñ‚ÑŒ Ð¿Ð°Ñ€Ð¾Ð»ÑŒ
+Disallow: *login=           # Ð»Ð¾Ð³Ð¸Ð½
+Disallow: *logout=          # Ð²Ñ‹Ñ…Ð¾Ð´
+Disallow: */search/         # Ð¿Ð¾Ð¸ÑÐº
+Disallow: *action=          # Ð´ÐµÐ¹ÑÑ‚Ð²Ð¸Ñ
+Disallow: *print=           # Ð¿ÐµÑ‡Ð°Ñ‚ÑŒ
+Disallow: *?new=Y           # Ð½Ð¾Ð²Ð°Ñ ÑÑ‚Ñ€Ð°Ð½Ð¸Ñ†Ð°
+Disallow: *?z-ajax=Y           # Ð½Ð¾Ð²Ð°Ñ ÑÑ‚Ñ€Ð°Ð½Ð¸Ñ†Ð°
+Disallow: *?edit=           # Ñ€ÐµÐ´Ð°ÐºÑ‚Ð¸Ñ€Ð¾Ð²Ð°Ð½Ð¸Ðµ
+Disallow: *?preview=        # Ð¿Ñ€ÐµÐ´Ð¿Ñ€Ð¾ÑÐ¼Ð¾Ñ‚Ñ€
+Disallow: *backurl=         # Ñ‚Ñ€ÐµÐºÐ±ÐµÐºÐ¸
+Disallow: *back_url=        # Ñ‚Ñ€ÐµÐºÐ±ÐµÐºÐ¸
+Disallow: *back_url_admin=  # Ñ‚Ñ€ÐµÐºÐ±ÐµÐºÐ¸
+Disallow: *captcha          # ÐºÐ°Ð¿Ñ‚Ñ‡Ð°
+Disallow: */feed            # Ð²ÑÐµ Ñ„Ð¸Ð´Ñ‹
+Disallow: */rss             # rss Ñ„Ð¸Ð´
+Disallow: *?FILTER*=        # Ð·Ð´ÐµÑÑŒ Ð¸ Ð½Ð¸Ð¶Ðµ Ñ€Ð°Ð·Ð»Ð¸Ñ‡Ð½Ñ‹Ðµ Ð¿Ð¾Ð¿ÑƒÐ»ÑÑ€Ð½Ñ‹Ðµ Ð¿Ð°Ñ€Ð°Ð¼ÐµÑ‚Ñ€Ñ‹ Ñ„Ð¸Ð»ÑŒÑ‚Ñ€Ð¾Ð²
+Disallow: *?ei=
+Disallow: *?p=
+Disallow: *?q=
+Disallow: *?tags=
+Disallow: *B_ORDER=
+Disallow: *BRAND=
+Disallow: *CLEAR_CACHE=
+Disallow: *ELEMENT_ID=
+Disallow: *price_from=
+Disallow: *price_to=
+Disallow: *PROPERTY_TYPE=
+Disallow: *PROPERTY_WIDTH=
+Disallow: *PROPERTY_HEIGHT=
+Disallow: *PROPERTY_DIA=
+Disallow: *PROPERTY_OPENING_COUNT=
+Disallow: *PROPERTY_SELL_TYPE=
+Disallow: *PROPERTY_MAIN_TYPE=
+Disallow: *PROPERTY_PRICE[*]=
+Disallow: *S_LAST=
+Disallow: *SECTION_ID=
+Disallow: *SECTION[*]=
+Disallow: *SHOWALL=
+Disallow: *SHOW_ALL=
+Disallow: *SHOWBY=
+Disallow: *SORT=
+Disallow: *SPHRASE_ID=
+Disallow: *TYPE=
+Disallow: *utm*=            # ÑÑÑ‹Ð»ÐºÐ¸ Ñ utm-Ð¼ÐµÑ‚ÐºÐ°Ð¼Ð¸
+Disallow: *openstat=        # ÑÑÑ‹Ð»ÐºÐ¸ Ñ Ð¼ÐµÑ‚ÐºÐ°Ð¼Ð¸ openstat
+Disallow: *from=            # ÑÑÑ‹Ð»ÐºÐ¸ Ñ Ð¼ÐµÑ‚ÐºÐ°Ð¼Ð¸ from
+Allow: */upload/            # Ð¾Ñ‚ÐºÑ€Ñ‹Ð²Ð°ÐµÐ¼ Ð¿Ð°Ð¿ÐºÑƒ Ñ Ñ„Ð°Ð¹Ð»Ð°Ð¼Ð¸ uploads
+Allow: /bitrix/*.js         # Ð·Ð´ÐµÑÑŒ Ð¸ Ð´Ð°Ð»ÐµÐµ Ð¾Ñ‚ÐºÑ€Ñ‹Ð²Ð°ÐµÐ¼ Ð´Ð»Ñ Ð¸Ð½Ð´ÐµÐºÑÐ°Ñ†Ð¸Ð¸ ÑÐºÑ€Ð¸Ð¿Ñ‚Ñ‹
+Allow: /bitrix/*.css
+Allow: /local/*.js
+Allow: /local/*.css
+Allow: /local/*.jpg
+Allow: /local/*.jpeg
+Allow: /local/*.png
+Allow: /local/*.gif
+Allow: /local/*.gif
+Allow: /local/*.svg
+Allow: */fonts/*
+User-Agent: *               # Ð¿Ñ€Ð°Ð²Ð¸Ð»Ð° Ð´Ð»Ñ Ð²ÑÐµÑ… Ñ€Ð¾Ð±Ð¾Ñ‚Ð¾Ð²
+Disallow: /cgi-bin          # Ð¿Ð°Ð¿ÐºÐ° Ð½Ð° Ñ…Ð¾ÑÑ‚Ð¸Ð½Ð³Ðµ
+Disallow: /bitrix/          # Ð¿Ð°Ð¿ÐºÐ° Ñ ÑÐ¸ÑÑ‚ÐµÐ¼Ð½Ñ‹Ð¼Ð¸ Ñ„Ð°Ð¹Ð»Ð°Ð¼Ð¸ Ð±Ð¸Ñ‚Ñ€Ð¸ÐºÑÐ°
+Disallow: *bitrix_*=        # GET-Ð·Ð°Ð¿Ñ€Ð¾ÑÑ‹ Ð±Ð¸Ñ‚Ñ€Ð¸ÐºÑÐ°
+Disallow: /local/           # Ð¿Ð°Ð¿ÐºÐ° Ñ ÑÐ¸ÑÑ‚ÐµÐ¼Ð½Ñ‹Ð¼Ð¸ Ñ„Ð°Ð¹Ð»Ð°Ð¼Ð¸ Ð±Ð¸Ñ‚Ñ€Ð¸ÐºÑÐ°
+Disallow: /*index.php$      # Ð´ÑƒÐ±Ð»Ð¸ ÑÑ‚Ñ€Ð°Ð½Ð¸Ñ† index.php
+Disallow: /auth/            # Ð°Ð²Ñ‚Ð¾Ñ€Ð¸Ð·Ð°Ñ†Ð¸Ñ
+Disallow: *auth=            # Ð°Ð²Ñ‚Ð¾Ñ€Ð¸Ð·Ð°Ñ†Ð¸Ñ
+Disallow: /personal/        # Ð»Ð¸Ñ‡Ð½Ñ‹Ð¹ ÐºÐ°Ð±Ð¸Ð½ÐµÑ‚
+Disallow: *register=        # Ñ€ÐµÐ³Ð¸ÑÑ‚Ñ€Ð°Ñ†Ð¸Ñ
+Disallow: *forgot_password= # Ð·Ð°Ð±Ñ‹Ð»Ð¸ Ð¿Ð°Ñ€Ð¾Ð»ÑŒ
+Disallow: *change_password= # Ð¸Ð·Ð¼ÐµÐ½Ð¸Ñ‚ÑŒ Ð¿Ð°Ñ€Ð¾Ð»ÑŒ
+Disallow: *login=           # Ð»Ð¾Ð³Ð¸Ð½
+Disallow: *logout=          # Ð²Ñ‹Ñ…Ð¾Ð´
+Disallow: */search/         # Ð¿Ð¾Ð¸ÑÐº
+Disallow: *action=          # Ð´ÐµÐ¹ÑÑ‚Ð²Ð¸Ñ
+Disallow: *print=           # Ð¿ÐµÑ‡Ð°Ñ‚ÑŒ
+Disallow: *?new=Y           # Ð½Ð¾Ð²Ð°Ñ ÑÑ‚Ñ€Ð°Ð½Ð¸Ñ†Ð°
+Disallow: *?z-ajax=Y           # Ð½Ð¾Ð²Ð°Ñ ÑÑ‚Ñ€Ð°Ð½Ð¸Ñ†Ð°
+Disallow: *?edit=           # Ñ€ÐµÐ´Ð°ÐºÑ‚Ð¸Ñ€Ð¾Ð²Ð°Ð½Ð¸Ðµ
+Disallow: *?preview=        # Ð¿Ñ€ÐµÐ´Ð¿Ñ€Ð¾ÑÐ¼Ð¾Ñ‚Ñ€
+Disallow: *backurl=         # Ñ‚Ñ€ÐµÐºÐ±ÐµÐºÐ¸
+Disallow: *back_url=        # Ñ‚Ñ€ÐµÐºÐ±ÐµÐºÐ¸
+Disallow: *back_url_admin=  # Ñ‚Ñ€ÐµÐºÐ±ÐµÐºÐ¸
+Disallow: *captcha          # ÐºÐ°Ð¿Ñ‚Ñ‡Ð°
+Disallow: */feed            # Ð²ÑÐµ Ñ„Ð¸Ð´Ñ‹
+Disallow: */rss             # rss Ñ„Ð¸Ð´
+Disallow: *?FILTER*=        # Ð·Ð´ÐµÑÑŒ Ð¸ Ð½Ð¸Ð¶Ðµ Ñ€Ð°Ð·Ð»Ð¸Ñ‡Ð½Ñ‹Ðµ Ð¿Ð¾Ð¿ÑƒÐ»ÑÑ€Ð½Ñ‹Ðµ Ð¿Ð°Ñ€Ð°Ð¼ÐµÑ‚Ñ€Ñ‹ Ñ„Ð¸Ð»ÑŒÑ‚Ñ€Ð¾Ð²
+Disallow: *?ei=
+Disallow: *?p=
+Disallow: *?q=
+Disallow: *?tags=
+Disallow: *B_ORDER=
+Disallow: *BRAND=
+Disallow: *CLEAR_CACHE=
+Disallow: *ELEMENT_ID=
+Disallow: *price_from=
+Disallow: *price_to=
+Disallow: *PROPERTY_TYPE=
+Disallow: *PROPERTY_WIDTH=
+Disallow: *PROPERTY_HEIGHT=
+Disallow: *PROPERTY_DIA=
+Disallow: *PROPERTY_OPENING_COUNT=
+Disallow: *PROPERTY_SELL_TYPE=
+Disallow: *PROPERTY_MAIN_TYPE=
+Disallow: *PROPERTY_PRICE[*]=
+Disallow: *S_LAST=
+Disallow: *SECTION_ID=
+Disallow: *SECTION[*]=
+Disallow: *SHOWALL=
+Disallow: *SHOW_ALL=
+Disallow: *SHOWBY=
+Disallow: *SORT=
+Disallow: *SPHRASE_ID=
+Disallow: *TYPE=
+Disallow: *utm*=            # ÑÑÑ‹Ð»ÐºÐ¸ Ñ utm-Ð¼ÐµÑ‚ÐºÐ°Ð¼Ð¸
+Disallow: *openstat=        # ÑÑÑ‹Ð»ÐºÐ¸ Ñ Ð¼ÐµÑ‚ÐºÐ°Ð¼Ð¸ openstat
+Disallow: *from=            # ÑÑÑ‹Ð»ÐºÐ¸ Ñ Ð¼ÐµÑ‚ÐºÐ°Ð¼Ð¸ from
+Allow: */upload/            # Ð¾Ñ‚ÐºÑ€Ñ‹Ð²Ð°ÐµÐ¼ Ð¿Ð°Ð¿ÐºÑƒ Ñ Ñ„Ð°Ð¹Ð»Ð°Ð¼Ð¸ uploads
+Allow: /bitrix/*.js         # Ð·Ð´ÐµÑÑŒ Ð¸ Ð´Ð°Ð»ÐµÐµ Ð¾Ñ‚ÐºÑ€Ñ‹Ð²Ð°ÐµÐ¼ Ð´Ð»Ñ Ð¸Ð½Ð´ÐµÐºÑÐ°Ñ†Ð¸Ð¸ ÑÐºÑ€Ð¸Ð¿Ñ‚Ñ‹
+Allow: /bitrix/*.css
+Allow: /local/*.js
+Allow: /local/*.css
+Allow: /local/*.jpg
+Allow: /local/*.jpeg
+Allow: /local/*.png
+Allow: /local/*.gif
+Allow: /local/*.gif
+Allow: /local/*.svg
+Allow: */fonts/*
+Sitemap: https://top.uz/sitemap.xml
+Host: top.uz

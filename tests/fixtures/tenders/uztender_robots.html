@@ -1,0 +1,15 @@
+User-agent: *
+Allow: /
+Disallow: /app
+Disallow: /login
+Disallow: /register
+Disallow: /uz/app
+Disallow: /uz/login
+Disallow: /uz/register
+Disallow: /s/
+# The API is proxied on this host too (/api/documents/download?… showed up in
+# GSC as 32 blocked + 8 «unauthorized» crawls, 2026-09-07). Nothing under /api/
+# is a page.
+Disallow: /api/
+
+Sitemap: https://uztender.com/sitemap.xml
