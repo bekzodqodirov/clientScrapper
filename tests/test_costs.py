@@ -1134,12 +1134,15 @@ async def test_an_undelivered_cost_cap_is_not_marked(session):
         await classify(session)
     with pytest.raises(CostCapReached):
         await classify(session, now=NOW.replace(hour=15))
-    # No alert row (the next refusal tries again); each failed delivery is
-    # noted, so the health sweep says what its teller could not (06 §4.2).
-    assert len(owner.told) == 2
-    assert [(kind, ref) for kind, ref, _ in await alert_rows(session)] == [
-        ("undelivered:cost_cap", "cost_cap"),
-        ("undelivered:cost_cap", "cost_cap"),
+    with pytest.raises(CostCapReached):
+        await classify(session, now=NOW.replace(hour=16))
+    # No alert row (the next refusal tries again); the failed delivery is
+    # noted, so the health sweep says what its teller could not (06 §4.2) —
+    # one row per key, at the newest failure: an outage with a refusal a
+    # second must not grow the ledger by a row a second.
+    assert len(owner.told) == 3
+    assert await alert_rows(session) == [
+        ("undelivered:cost_cap", "cost_cap", NOW.replace(hour=16)),
     ]
 
 

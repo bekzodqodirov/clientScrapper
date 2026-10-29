@@ -135,6 +135,70 @@ async def test_the_recorder_writes_one_row_per_live_test_and_nothing_else(
         assert await session.scalar(sa.text(f"SELECT count(*) FROM {table}")) == 0
 
 
+PHASES = """
+import pytest
+
+
+@pytest.fixture
+def needs_token():
+    pytest.skip("no token")
+
+
+@pytest.fixture
+def breaks_after():
+    yield
+    raise RuntimeError("teardown broke")
+
+
+@pytest.fixture
+def breaks_before():
+    raise RuntimeError("setup broke")
+
+
+@pytest.mark.live(source="hh_vacancies")
+def test_a_fixture_skips_in_setup(needs_token):
+    assert True
+
+
+@pytest.mark.live(source="olx_business")
+def test_a_pass_whose_teardown_fails(breaks_after):
+    assert True
+
+
+@pytest.mark.live(source="instagram_discovery")
+def test_a_failure_whose_teardown_fails_too(breaks_after):
+    assert False
+
+
+@pytest.mark.live(source="directories")
+def test_a_fixture_fails_in_setup(breaks_before):
+    assert True
+"""
+
+
+async def test_the_recorder_reads_setup_and_teardown_too(session, tmp_path):
+    """A test skipped or broken in its setup never reaches its call, and a
+    failed teardown turns a pass into a failure: each is recorded so."""
+    (tmp_path / "conftest.py").write_text(CONFTEST, encoding="utf-8")
+    (tmp_path / "test_phases_live.py").write_text(PHASES, encoding="utf-8")
+    done = child_pytest(tmp_path)
+    assert done.returncode == 1, done.stdout + done.stderr
+    assert "smoke: 4 outcome(s) recorded for the digest" in done.stdout
+    rows = (
+        await session.execute(
+            sa.select(
+                CollectorRun.source_key, CollectorRun.meta["smoke"].astext
+            ).order_by(CollectorRun.id)
+        )
+    ).all()
+    assert [tuple(r) for r in rows] == [
+        ("hh_vacancies", "skipped"),
+        ("olx_business", "failed"),
+        ("instagram_discovery", "failed"),
+        ("directories", "failed"),
+    ]
+
+
 def test_a_session_with_no_live_test_yet_is_not_an_error(tmp_path):
     (tmp_path / "conftest.py").write_text(CONFTEST, encoding="utf-8")
     (tmp_path / "test_nothing_yet_live.py").write_text("", encoding="utf-8")
@@ -214,6 +278,33 @@ async def test_a_smoke_row_does_not_hide_a_silent_collector(session, hh_row):
     )
     await session.commit()
     assert "hh_vacancies" not in await silent_keys(session)
+
+
+async def test_a_smoke_row_is_not_a_run_on_the_source_card(session):
+    """/manbalar's «last runs» are the scheduler's: a smoke row (status
+    skipped) there would read as a run the scheduler skipped."""
+    from clientscrapper.services import owner
+
+    session.add_all(
+        [
+            CollectorRun(
+                source_key="hh_vacancies",
+                started_at=NOW - timedelta(hours=2),
+                status="ok",
+                new_companies=3,
+            ),
+            CollectorRun(
+                source_key="hh_vacancies",
+                started_at=NOW - timedelta(hours=1),
+                status="skipped",
+                meta={"note": "smoke", "variant": "smoke", "smoke": "passed"},
+            ),
+        ]
+    )
+    await session.commit()
+    info = await owner.source_info(session, "hh_vacancies", now=NOW)
+    assert info is not None
+    assert [(r.status, r.new_companies) for r in info.runs] == [("ok", 3)]
 
 
 async def test_a_blocked_smoke_row_is_its_own_cadence(session, hh_row):
@@ -359,14 +450,62 @@ def test_make_smoke_runs_the_live_tests_in_the_smoke_service():
 
 
 @needs_make
-def test_make_smoke_cron_prints_the_weekly_and_the_quarterly_line():
+def smoke_cron_lines() -> list[str]:
     done = subprocess.run(
         ["make", "-s", "smoke-cron"], cwd=ROOT, capture_output=True, text=True, check=True
     )
-    assert done.stdout.splitlines() == [
-        f"0 5 * * 0 cd {ROOT} && make smoke >> {ROOT}/data/smoke.log 2>&1",
-        f"30 5 1 1,4,7,10 * cd {ROOT} && make smoke FULL=1 >> {ROOT}/data/smoke.log 2>&1",
+    return done.stdout.splitlines()
+
+
+def test_make_smoke_cron_prints_the_weekly_and_the_quarterly_line():
+    log = f">> {ROOT}/data/smoke.log 2>&1"
+    assert smoke_cron_lines() == [
+        '0 * * * * [ "$(TZ=Asia/Tashkent date +\\%u\\%H)" = 705 ] && '
+        f"cd {ROOT} && make smoke {log}",
+        '30 * * * * case "$(TZ=Asia/Tashkent date +\\%m\\%d\\%H)" in '
+        f"010105|040105|070105|100105) cd {ROOT} && make smoke FULL=1 {log};; esac",
     ]
+
+
+@pytest.mark.parametrize(
+    ("line", "now", "ran"),
+    [
+        (0, "705", "weekly"),  # Sunday 05 in Tashkent
+        (0, "704", None),  # Sunday 04 (an Ubuntu host's 23:00 UTC Saturday)
+        (0, "105", None),  # Monday 05
+        (1, "010105", "full"),  # 1 January 05
+        (1, "100105", "full"),  # 1 October 05
+        (1, "050105", None),  # 1 May
+        (1, "010106", None),  # the hour after
+    ],
+)
+def test_the_smoke_cron_lines_run_at_tashkent_s_hour_on_any_host(
+    tmp_path, line, now, ran
+):
+    """Cron runs a line in the host's zone (UTC on a stock Ubuntu VPS): each
+    line fires hourly and runs make smoke only when ``date`` in Tashkent's
+    zone says it is the hour. The command is the one cron hands to sh — its
+    ``\\%`` unescaped — with make replaced and ``date`` a stand-in that
+    answers only when asked in Asia/Tashkent."""
+    fields = smoke_cron_lines()[line].split(" ", 5)
+    command = fields[5].replace("\\%", "%")
+    command = command.replace("make smoke FULL=1", "echo full").replace(
+        "make smoke", "echo weekly"
+    )
+    command = command.replace(f"{ROOT}/data/smoke.log", str(tmp_path / "smoke.log"))
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    fake = bin_dir / "date"
+    fake.write_text(
+        '#!/bin/sh\n[ "$TZ" = Asia/Tashkent ] && echo "$FAKE_NOW" || echo 0\n',
+        encoding="utf-8",
+    )
+    fake.chmod(0o755)
+    env = {"PATH": f"{bin_dir}:/usr/bin:/bin", "FAKE_NOW": now}
+    subprocess.run(["sh", "-c", command], env=env, check=False)
+    log = tmp_path / "smoke.log"
+    said = log.read_text(encoding="utf-8").split() if log.exists() else []
+    assert said == ([] if ran is None else [ran])
 
 
 def test_the_smoke_service_runs_only_when_asked():

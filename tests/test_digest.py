@@ -165,6 +165,9 @@ def test_past_the_daily_card_cap_the_waiting_cards_are_said():
     )
     under = replace_view(capped, yesterday=digest.Yesterday(asked=19))
     assert "chegarasi" not in digest.render_digest(under)
+    # At the cap with nothing waiting there is nothing to say about it.
+    emptied = replace_view(capped, waiting_cards=0)
+    assert "chegarasi" not in digest.render_digest(emptied)
 
 
 def test_fit_drops_middle_lines_and_keeps_the_first_and_the_last():
@@ -526,6 +529,33 @@ async def test_the_managers_day_counts_contacts_names_refusals_and_silence(sessi
     )
 
 
+async def test_waiting_cards_are_live_owner_cards_on_candidates_in_review(session):
+    rows = [
+        ("owner", "pending", "review"),  # waiting
+        ("owner", "asked", "review"),  # waiting
+        ("owner", "asked", "hold"),  # its candidate left review: not waiting
+        ("owner", "declined", "review"),  # answered
+        ("manager", "asked", "review"),  # a manager's card
+    ]
+    for n, (kind, state, cand_state) in enumerate(rows):
+        company = await gf.firm(session, f"Namuna Kutish {n}")
+        cand = await gf.candidate(session, company, state=cand_state)
+        session.add(
+            LeadReview(
+                candidate_id=cand.id,
+                kind=kind,
+                state=state,
+                answered_at=NOW if state == "declined" else None,
+                asked_at=NOW - timedelta(hours=2),
+                card_chat_id=1001,
+                card_message_id=500 + n,
+                expires_at=NOW + timedelta(days=1),
+            )
+        )
+    await session.commit()
+    assert await digest._waiting_cards(session) == 2
+
+
 async def test_new_companies_per_source_skip_smoke_rows(session):
     inside = YESTERDAY.replace(hour=10)
     session.add_all(
@@ -593,6 +623,16 @@ async def test_an_auto_push_flip_is_one_line_once(session, sources_kept):
     await digest._remember(session, seen)
     await session.commit()
     assert (await digest._sources(session, NOW))[1] == ()
+    # A source the last digest never saw (added since) is no flip, whatever
+    # its switch says.
+    remembered = dict(seen)
+    remembered.pop("olx_business")
+    await digest._remember(session, remembered)
+    await session.execute(
+        sa.update(Source).where(Source.key == "olx_business").values(auto_push=True)
+    )
+    await session.commit()
+    assert (await digest._sources(session, NOW))[1] == ()
 
 
 async def test_only_enabled_sources_are_listed_with_their_state(session, sources_kept):
@@ -638,6 +678,13 @@ async def test_the_reader_line_counts_yesterday_s_hits_and_joins(session, monkey
                 chat_type="group",
                 status="joined",
                 joined_at=NOW - timedelta(days=5),
+            ),
+            # Joined this morning: today's, not yesterday's.
+            ChatMonitor(
+                tg_chat_id=-1003,
+                chat_type="group",
+                status="joined",
+                joined_at=NOW - timedelta(minutes=10),
             ),
         ]
     )

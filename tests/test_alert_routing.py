@@ -180,6 +180,29 @@ async def test_an_old_undelivered_note_is_another_episode_s(session, routed, mon
     assert owner_texts(routed) == []
 
 
+async def test_yesterday_s_undelivered_cost_cap_is_not_today_s(
+    session, routed, monkeypatch
+):
+    """cost_cap is said once per Tashkent day: a note from yesterday's failed
+    tell does not let the sweep say today's cap first (ask says it)."""
+    costs.mark_undelivered(session, "cost_cap", NOW - timedelta(hours=14))
+    await session.commit()
+    status, fragment = status_with("cost_cap")
+    gathering(monkeypatch, status)
+    await worker.health_job(now=NOW)
+    assert [t for t in owner_texts(routed) if fragment in t] == []
+
+
+async def test_a_cost_cap_refused_in_a_process_with_no_notifier_is_noted(session):
+    """make erp-sync and the tools have no owner notifier: the refusal at the
+    cap is noted for the sweep instead of being said by nobody."""
+    costs.set_cap_notifier(None)
+    await costs._tell_cost_cap(costs.CAP_DAILY, NOW)
+    assert (await session.scalars(sa.select(ReminderLog.kind))).all() == [
+        "undelivered:cost_cap"
+    ]
+
+
 async def test_a_quiet_hours_cost_cap_held_by_ask_is_no_undelivered_note(
     session, monkeypatch
 ):

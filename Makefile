@@ -195,7 +195,11 @@ smoke: ## Live smoke tests, one real request per collector, VPS only (FULL=1: th
 
 # The host's crontab lines for this checkout (07 §1.12: Sunday 05:00 weekly,
 # quarterly on the 1st; the full run half an hour later so a Sunday 1st does
-# not run twice at once). Printed, not installed: add them with `crontab -e`.
-smoke-cron: ## Print the VPS crontab lines for make smoke (weekly and quarterly)
-	@echo "0 5 * * 0 cd $(CURDIR) && make smoke >> $(CURDIR)/data/smoke.log 2>&1"
-	@echo "30 5 1 1,4,7,10 * cd $(CURDIR) && make smoke FULL=1 >> $(CURDIR)/data/smoke.log 2>&1"
+# not run twice at once), in Tashkent time whatever the host's zone is (an
+# Ubuntu VPS runs cron in UTC): each line fires hourly and runs only when
+# `date` in SMOKE_TZ says it is the hour. `%` is escaped as cron needs.
+# Printed, not installed: docs/SMOKE.md.
+SMOKE_TZ ?= Asia/Tashkent
+smoke-cron: ## Print the VPS crontab lines for make smoke (weekly and quarterly, Tashkent time)
+	@echo '0 * * * * [ "$$(TZ=$(SMOKE_TZ) date +\%u\%H)" = 705 ] && cd $(CURDIR) && make smoke >> $(CURDIR)/data/smoke.log 2>&1'
+	@echo '30 * * * * case "$$(TZ=$(SMOKE_TZ) date +\%m\%d\%H)" in 010105|040105|070105|100105) cd $(CURDIR) && make smoke FULL=1 >> $(CURDIR)/data/smoke.log 2>&1;; esac'

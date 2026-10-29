@@ -1789,6 +1789,7 @@ TELLERS = {
     "_note_undelivered": 0,
     "claim_alert": 1,
     "mark_undelivered": 1,
+    "note_undelivered": 1,
 }
 
 

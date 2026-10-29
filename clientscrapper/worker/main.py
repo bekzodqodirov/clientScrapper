@@ -721,8 +721,8 @@ async def prune_job_heartbeats(registered: list[str]) -> int:
 class _Deadman:
     last: float | None = None
     # The last ping's answer, carried in the next «worker» beat (``seen``) so
-    # /holat and the digest can say the outside watcher is not taking pings
-    # — a wrong URL is otherwise silent until the day it should have alarmed.
+    # the digest can say the outside watcher is not taking pings — a wrong
+    # URL is otherwise silent until the day it should have alarmed.
     seen: dict[str, Any] | None = None
 
 

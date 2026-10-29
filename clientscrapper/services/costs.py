@@ -1233,11 +1233,26 @@ def mark_undelivered(session: AsyncSession, key: str, now: datetime) -> None:
     session.add(ReminderLog(kind=UNDELIVERED_KIND + key, ref=key, sent_at=now))
 
 
+async def note_undelivered(session: AsyncSession, key: str, now: datetime) -> None:
+    """``mark_undelivered`` as one row per key, moved to ``now``: the sweep
+    reads only the newest moment (and its recovery), and during a Telegram
+    outage every refused call at the cap fails its tell — a row each would
+    grow the ledger by the refusal."""
+    moved = await session.execute(
+        sa.update(ReminderLog)
+        .where(ReminderLog.kind == UNDELIVERED_KIND + key)
+        .values(sent_at=now)
+        .returning(ReminderLog.id)
+    )
+    if moved.first() is None:
+        mark_undelivered(session, key, now)
+
+
 async def _note_undelivered(key: str, now: datetime) -> None:
-    """``mark_undelivered`` in a transaction of its own; never raises."""
+    """``note_undelivered`` in a transaction of its own; never raises."""
     try:
         async with _own_session() as own:
-            mark_undelivered(own, key, now)
+            await note_undelivered(own, key, now)
     except Exception as exc:
         log.warning(
             "undelivered alert not noted", extra={"key": key, "error": type(exc).__name__}
@@ -1296,7 +1311,7 @@ async def _say_once(
                     await own.execute(
                         sa.delete(ReminderLog).where(ReminderLog.id == claim)
                     )
-                    mark_undelivered(own, key, now)
+                    await note_undelivered(own, key, now)
             except Exception as exc:
                 # The claim stays: the alert is not said again today — the
                 # quiet direction, and /holat still shows the cap.
@@ -1599,6 +1614,7 @@ __all__ = [
     "month_start",
     "month_units",
     "next_hour",
+    "note_undelivered",
     "operation_lines",
     "read_ledger",
     "refused_until",

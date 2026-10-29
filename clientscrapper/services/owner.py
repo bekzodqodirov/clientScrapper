@@ -45,7 +45,7 @@ from clientscrapper.db.models import (
     Source,
     UsageLog,
 )
-from clientscrapper.services import companies, costs, erp_feeds, keys
+from clientscrapper.services import companies, costs, erp_feeds, keys, smoke
 
 PAUSE_FLAG: Final = costs.PAUSE_FLAG
 REASON_MAX: Final = 200
@@ -270,7 +270,9 @@ async def source_info(
     runs = (
         await session.scalars(
             sa.select(CollectorRun)
-            .where(CollectorRun.source_key == key)
+            # A make smoke row is the digest's «Tekshiruv», not a scheduler
+            # run of the source (services/smoke).
+            .where(CollectorRun.source_key == key, smoke.not_smoke())
             .order_by(CollectorRun.started_at.desc(), CollectorRun.id.desc())
             .limit(INFO_RUNS)
         )
