@@ -254,3 +254,30 @@ async def test_a_draft_made_across_the_purge_is_never_stored(
         ).all()
     assert openers.stored(after.score_breakdown) is None
     assert jobs and all(row == (None, None, None) for row in jobs)
+
+
+async def test_two_runs_at_once_pay_for_one_draft(world, monkeypatch, model_api):
+    """The card job beside /lidlar, two cards of one lead: the second run
+    finds the draft being bought and does not buy it again."""
+    cand = await world.lead()
+    real_make = openers.make
+    gate = asyncio.Event()
+    entered: list[int] = []
+
+    async def held_make(*a: Any, **k: Any) -> Any:
+        entered.append(1)
+        await gate.wait()
+        return await real_make(*a, **k)
+
+    monkeypatch.setattr(openers, "make", held_make)
+    model_api.queue(message({"lang": "uz", "text": GOOD_DRAFT, "hook": "Telegram"}))
+    first = asyncio.ensure_future(_ensure(cand.id))
+    for _ in range(100):
+        if entered:
+            break
+        await asyncio.sleep(0.02)
+    second = await asyncio.wait_for(_ensure(cand.id), 5)
+    gate.set()
+    made = await asyncio.wait_for(first, 10)
+    assert (len(entered), len(model_api.requests)) == (1, 1)
+    assert second is None and made is not None

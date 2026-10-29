@@ -255,6 +255,8 @@ async def make(
 # A company whose candidate gets no opener: purged (its data is gone) or
 # merged (the root's candidate is the one a manager reads).
 NO_OPENER_STATES: Final = frozenset({"purged", "merged"})
+# The advisory-lock namespace of a candidate's paid draft.
+DRAFT_LOCK: Final = "opener_draft"
 
 
 async def _gone(session: AsyncSession, candidate: LeadCandidate) -> bool:
@@ -267,6 +269,14 @@ async def _gone(session: AsyncSession, candidate: LeadCandidate) -> bool:
         .execution_options(populate_existing=True)
     )
     return state is None or state in NO_OPENER_STATES
+
+
+async def _drafting(session: AsyncSession, candidate_id: uuid.UUID) -> bool:
+    """This transaction's claim on the candidate's paid draft
+    (``pg_try_advisory_xact_lock``, released at its end); False when another
+    transaction holds it."""
+    key = sa.func.hashtextextended(f"{DRAFT_LOCK}:{candidate_id}", 0)
+    return bool(await session.scalar(sa.select(sa.func.pg_try_advisory_xact_lock(key))))
 
 
 async def forget_job(session: AsyncSession, job_id: int | None) -> None:
@@ -312,6 +322,11 @@ async def ensure_opener(
     if paid is None:
         paid = candidate.tier == "hot"
     if not due(candidate.score_breakdown, segment=segment, hot=paid):
+        return have
+    if paid and not await _drafting(session, candidate_id):
+        # Another run is paying for this candidate's draft right now (the
+        # card job beside /lidlar, two cards of one lead): its draft will
+        # stand; this one is not bought twice (seam review wave 4).
         return have
     made = await make(session, view, segment=segment, paid=paid, now=now)
     # The write: the company, then the candidate (services/candidates' order).
