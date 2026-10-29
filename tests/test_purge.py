@@ -821,9 +821,18 @@ async def test_a_half_done_purge_is_found_again_and_finished(session, root, monk
     firm = await fresh(session, m.Company, firm_id)
     assert firm.state == "purged" and await purge.unfinished(session, firm_id)
     # Every key /unut takes still names the firm: by its kept STIR, its uuid,
-    # the source's uuid, the person's phone and username.
-    for query in ("300000041", str(firm_id), str(source_id), phone(42), "@namuna_boss"):
-        assert await cards.live_roots(session, query) == [firm_id], query
+    # the source's uuid, the person's phone and username — read as /unut
+    # reads, in a session of its own (this one still holds the source as it
+    # was loaded, «merged» into the root).
+    async with SessionLocal() as other:
+        for query in (
+            "300000041",
+            str(firm_id),
+            str(source_id),
+            phone(42),
+            "@namuna_boss",
+        ):
+            assert await cards.live_roots(other, query) == [firm_id], query
     again = await purge.plan_company(session, source_id)
     assert again.company_ids == (firm_id,)
     assert (again.counts["contacts"], again.counts["evidence"]) == (2, 4)
@@ -848,6 +857,8 @@ async def test_the_claim_commits_before_the_purge_reads(session, root, monkeypat
     async def watched(*args: Any, **kw: Any) -> dict[str, int]:
         async with SessionLocal() as other:
             assert plan.purge_log_id is not None
+            # An uncommitted claim would hold the row: wait 2 s, not for ever.
+            await other.execute(sa.text("SET LOCAL lock_timeout = '2s'"))
             seen.append(await purge.row_state(other, plan.purge_log_id))
             seen.append(str(await purge.abandon(other, plan.purge_log_id, why="expired")))
             await other.commit()
