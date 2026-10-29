@@ -129,6 +129,7 @@ REDLINE_BAD: tuple[tuple[str, str, set[str]], ...] = (
     (_uz("Boshqalardan qimmat emasmiz."), "uz", {"money"}),
     (_ru("На двадцать процентов дешевле."), "ru", {"money"}),
     (_ru("Недорого и надёжно."), "ru", {"money"}),
+    (_ru("Возим дешевле других."), "ru", {"money"}),
     (_ru("Условия выгоднее, чем у других."), "ru", {"money"}),
     # days, durations, speed
     (_uz("Toshkentgacha 15 kunda yetkazamiz."), "uz", {"digit", "time"}),
