@@ -162,6 +162,19 @@ def test_the_review_keyboard_rows():
     ]
 
 
+def test_the_handoff_cards_fold_has_no_phone_to_correct():
+    more = keyboards.review_keyboard(5, "handoff", expanded=True).inline_keyboard
+    assert [[b.text for b in row] for row in more] == [
+        ["👤 Menejerga", "✖️ Yoʻq"],
+        ["🔀 Birlashtir", "🔒 DNC", "⏭ Keyinroq"],
+        ["🙍 B2C", "🚚 Kargo/raqobatchi"],
+        ["◀️ Orqaga"],
+    ]
+    assert keyboards.layout_actions("handoff") == frozenset("hdmxlbcok")
+    assert keyboards.layout_actions("review") == frozenset("pdmxlbceok")
+    assert keyboards.layout_actions("manager") == frozenset()
+
+
 def test_a_review_row_with_no_phone_and_no_handoff_flag_is_refused():
     with pytest.raises(CardRefused) as refused:
         cards.render_review(review(candidate=view(phone=None)))

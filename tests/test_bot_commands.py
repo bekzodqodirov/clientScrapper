@@ -40,7 +40,7 @@ from clientscrapper.bot import callbacks as cb
 from clientscrapper.bot import deliver, handlers
 from clientscrapper.bot import main as bot_main
 from clientscrapper.bot.handlers.common import Deps, Plans
-from clientscrapper.bot.texts import t
+from clientscrapper.bot.texts import COMMAND_MENU, MANAGER_MENU, t
 from clientscrapper.config import settings
 from clientscrapper.db.models import (
     ChatMonitor,
@@ -56,7 +56,7 @@ from clientscrapper.db.models import (
     Suppression,
 )
 from clientscrapper.db.session import engine, session_scope
-from clientscrapper.services import cards, chats, crm_push, health, owner
+from clientscrapper.services import cards, chats, crm_push, health, owner, scoring
 from tests import gate_fixtures
 from tests.fake_bot import FakeSession, added_to_group, document, fake_bot, message, tap
 from tests.fixtures.candidate_views import EXCERPT
@@ -326,7 +326,31 @@ async def test_lidlar_does_not_show_a_card_its_gate_now_refuses(w):
     assert w.fake.texts() == [t("lidlar.skipped", n=1)]
     async with w.db() as s:
         found = await s.get(LeadCandidate, cand.id, populate_existing=True)
-        assert found is not None and found.state == "hold"
+        assert found is not None
+        # The gate's own hold (gate 6: 90 days from the push), not the
+        # refused card's 7 days.
+        assert (found.state, found.hold_until) == ("hold", NOW + timedelta(days=80))
+
+
+async def test_a_card_whose_company_turned_dnc_is_suppressed_not_held(w):
+    async with w.db() as s:
+        cand = await lead(s)
+        await pending_card(s, cand)
+        s.add(
+            Suppression(
+                kind="dnc",
+                key_type="phone_tail",
+                key="900000061",
+                source="owner_bot",
+                reason="manager_report",
+            )
+        )
+        await s.flush()
+    await w.say("/lidlar")
+    assert w.fake.texts() == [t("lidlar.skipped", n=1)]
+    async with w.db() as s:
+        found = await s.get(LeadCandidate, cand.id, populate_existing=True)
+        assert found is not None and found.state == "suppressed"
 
 
 async def _quoteless(s: AsyncSession, nn: int, *, score: int) -> LeadCandidate:
@@ -482,6 +506,23 @@ async def test_two_lidlar_at_once_send_a_card_once(session, configured):
     assert row is not None and row.state == "asked"
     [card] = [m for m in w.fake.named("SendMessage") if m["text"].startswith("🆕 ")]
     assert row.card_hash == cards.card_hash(card["text"], "review")
+
+
+async def test_lidlar_answers_the_owner_at_any_hour(db, configured):
+    """The owner asked: /lidlar ignores REVIEW_HOURS and QUIET_HOURS (and
+    the daily cap — those bound the unsolicited cards of review_cards_job)."""
+    w = world(db)
+    night = NOW.replace(hour=23, minute=30)
+    w.deps.clock = lambda: night
+    async with w.db() as s:
+        await pending_card(s, await lead(s))
+    await w.say("/lidlar")
+    assert len(_owner_cards(w)) == 1
+
+
+async def test_a_button_past_its_column_is_stale_not_a_database_error(w):
+    await w.press("ch:t:9999999999")
+    assert w.fake.answers() == [t("stale_button")]
 
 
 async def test_lidlar_holat_counts_the_states(w):
@@ -800,6 +841,40 @@ async def test_vazn_copies_the_active_version_with_the_one_change(w):
     assert {r.approved_at for r in v2.values()} == {NOW}
 
 
+async def test_vazn_beside_a_waiting_proposal_takes_the_next_free_version(w):
+    """T-40's fit_weights proposes version 2 (unapproved); the owner's edit
+    is version 3 and supersedes it."""
+    async with w.db() as s:
+        rows = (
+            await s.scalars(sa.select(ScoringWeight).where(ScoringWeight.version == 1))
+        ).all()
+        s.add_all(
+            ScoringWeight(
+                version=2,
+                key=r.key,
+                group_key=r.group_key,
+                points=r.points,
+                group_cap=r.group_cap,
+                decay_days=r.decay_days,
+                decayed_factor=r.decayed_factor,
+                note=r.note,
+                proposed_by="fit_weights@2026-11-01",
+            )
+            for r in rows
+        )
+        await s.flush()
+    await w.say("/vazn ent_not_micro 5")
+    assert w.last() == "⚖️ ent_not_micro: 3 → 5 · 3-versiya"
+    async with w.db() as s:
+        assert await scoring.active_version(s) == 3
+        proposal = await s.scalar(
+            sa.select(sa.func.count())
+            .select_from(ScoringWeight)
+            .where(ScoringWeight.version == 2, ScoringWeight.approved_at.is_(None))
+        )
+    assert proposal == len(rows)
+
+
 async def test_vazn_refuses_points_outside_the_group_and_unknown_keys(w):
     await w.say("/vazn ent_not_micro 16")
     assert w.last() == t("vazn.refused", key="ent_not_micro", range="1–15")
@@ -947,6 +1022,12 @@ async def test_the_bot_reaches_telegram_sets_the_menus_and_beats(session, config
         for f in fake.named("SetMyCommands")
     }
     assert scopes == {("chat", OWNER), ("chat", MANAGER), ("chat", OTHER_MANAGER)}
+    menus = {
+        f["scope"]["chat_id"]: [c["command"] for c in f["commands"]]
+        for f in fake.named("SetMyCommands")
+    }
+    assert menus[OWNER] == [c for c, _ in COMMAND_MENU]
+    assert menus[MANAGER] == menus[OTHER_MANAGER] == [c for c, _ in MANAGER_MENU]
     assert [f["scope"]["type"] for f in fake.named("DeleteMyCommands")] == ["default"]
     beat = (await health.beats(session))["bot"]
     assert beat.detail == {"telegram": True, "username": "cs_agent_bot"}
@@ -1035,3 +1116,429 @@ async def test_qidir_finds_a_company_by_its_name(w):
         await lead(s, name="Namuna Qidiruv Savdo")
     await w.say("/qidir Namuna Qidiruv Savdo")
     assert w.last().splitlines()[0].startswith("🏢 Namuna Qidiruv Savdo (MChJ)")
+
+
+# --- the review's pins (each rule a string edit could break, 07 §4.1 T-20) ------------
+
+
+async def test_buttons_and_commands_outside_a_private_chat_are_not_served(w):
+    """06 §1.1: the bot never posts into a group — not for the owner's tap,
+    not for a manager's tap or command."""
+    await w.press(cb.resume("y"), chat_type="supergroup")
+    assert w.fake.calls == []
+    await w.press(cb.manager(1, "c"), user=MANAGER, chat_type="supergroup")
+    assert w.fake.calls == []
+    await w.say("/qidir Namuna", user=MANAGER, chat_type="group", chat_id=-100600)
+    assert w.fake.calls == []
+    await w.say("/yordam", user=MANAGER, chat_type="group", chat_id=-100600)
+    assert w.fake.calls == []
+
+
+async def test_a_bot_removed_from_a_group_does_not_try_to_leave_it(w):
+    for status in ("left", "kicked"):
+        w.fake.clear()
+        await w.dp.feed_update(w.bot, added_to_group(w.bot, by=OWNER, status=status))
+        assert w.fake.calls == []
+
+
+async def test_a_forwarded_command_runs_nothing(w):
+    """Someone else's «/toxtat» or «/vazn …», forwarded by the owner, is
+    never the owner's command."""
+    await w.say("/toxtat hujum", forwarded_from=STRANGER)
+    assert w.fake.texts() == [t("forwarded")]
+    await w.say("/vazn ent_not_micro 5", forwarded_from=STRANGER)
+    assert w.fake.texts() == [t("forwarded")]
+    await w.say("/qidir Namuna", user=MANAGER, forwarded_from=STRANGER)
+    assert w.fake.texts() == [t("forwarded")]
+    async with w.db() as s:
+        assert not await owner.paused(s)
+        top = await s.scalar(sa.select(sa.func.max(ScoringWeight.version)))
+    assert top == 1
+
+
+async def test_each_card_answers_only_its_own_kind_of_button(w):
+    async with w.db() as s:
+        owner_card = await pending_card(
+            s, await lead(s, 61), state="asked", by_telegram_id=MANAGER
+        )
+        manager_card = await pending_card(
+            s,
+            await lead(s, 62, state="hold"),
+            kind="manager",
+            state="asked",
+            by_telegram_id=MANAGER,
+            card_message_id=78,
+        )
+    # A manager's mh: on an owner card, the owner's rv:/mg: on a manager card.
+    await w.press(cb.manager(owner_card.id, "c"), user=MANAGER)
+    assert w.fake.answers() == [t("stale_card")]
+    for data in (
+        cb.review(manager_card.id, "p"),
+        cb.review(manager_card.id, "o"),
+        cb.review(manager_card.id, "m"),
+        cb.merge(manager_card.id, uuid.UUID(int=7)),
+    ):
+        await w.press(data)
+        assert w.fake.answers() == [t("stale_card")], data
+
+
+async def test_a_letter_the_cards_layout_lacks_never_reaches_the_review_flow(
+    db, configured
+):
+    seen: list[tuple[str, str | None]] = []
+
+    async def answer(tap_: Any, _: Any) -> str:
+        seen.append((tap_.data.kind, tap_.data.action))
+        return "qabul"
+
+    w = world(db, review_answer=answer)
+    async with w.db() as s:
+        normal = await pending_card(s, await lead(s, 61), state="asked")
+        cand = await lead(s, 62)
+        await s.execute(
+            sa.update(Contact)
+            .where(Contact.id == cand.contact_id)
+            .values(shared_phone=True, telegram_username="namuna_tg")
+        )
+        cand.score_breakdown = {"gates": {"no_phone": True}}
+        handoff = await pending_card(s, cand, state="asked", card_message_id=78)
+    for data in (
+        cb.review(normal.id, "h"),
+        cb.review(handoff.id, "p"),
+        cb.review(handoff.id, "e"),
+    ):
+        await w.press(data)
+        assert w.fake.answers() == [t("stale_button")], data
+    for data in (
+        cb.review(normal.id, "p"),
+        cb.review(normal.id, "e"),
+        cb.review(handoff.id, "h"),
+        cb.merge(normal.id, uuid.UUID(int=7)),
+    ):
+        await w.press(data)
+        assert w.fake.answers() == ["qabul"], data
+    assert seen == [("rv", "p"), ("rv", "e"), ("rv", "h"), ("mg", None)]
+
+
+async def test_forbidding_auto_push_switches_it_off(w):
+    async with w.db() as s:
+        await s.execute(
+            sa.update(Source)
+            .where(Source.key == "telegram_monitor")
+            .values(auto_push=True)
+        )
+    await w.press(cb.source("telegram_monitor", "a"))
+    async with w.db() as s:
+        row = await s.get(Source, "telegram_monitor", populate_existing=True)
+        assert row is not None
+        assert (row.config.get("auto_push_forbidden"), row.auto_push) == (True, False)
+
+
+async def test_stir_the_company_holds_already_and_a_merged_holder(w):
+    async with w.db() as s:
+        own = await lead(s, 61, name="Namuna STIR Bir", stir="300000044")
+        root = await gate_fixtures.firm(s, "Namuna Ildiz Savdo")
+        await gate_fixtures.firm(
+            s, "Namuna Eski Savdo", stir="300000055", state="merged", merged_into=root.id
+        )
+        other = await lead(s, 62, name="Namuna STIR Ikki")
+        other_company = other.company_id
+    await w.say(f"/stir {own.id} 300000044")
+    assert w.last() == t("stir.same", name="Namuna STIR Bir", stir="300000044")
+    # A merged company's old STIR is not a live holder.
+    await w.say(f"/stir {other.id} 300000055")
+    assert w.last() == t("stir.written", stir="300000055", name="Namuna STIR Ikki")
+    async with w.db() as s:
+        company = await s.get(Company, other_company, populate_existing=True)
+        assert company is not None and company.stir == "300000055"
+
+
+async def test_the_cancel_buttons_write_nothing(w):
+    async with w.db() as s:
+        cand = await lead(s, name="Namuna Bekor Savdo")
+    await w.say("/dnc +998 90 000 00 61")
+    [_yes, no] = w.buttons()
+    await w.press(no)
+    assert w.last() == t("dnc.cancelled")
+    w.fake.files["f3"] = CSV
+    await w.say(None, caption="/import", document=document("f3", "clients.csv", len(CSV)))
+    [_yes, no] = w.buttons()
+    await w.press(no)
+    assert w.last() == t("import.cancelled")
+    async with w.db() as s:
+        written = await s.scalar(sa.select(sa.func.count()).select_from(Suppression))
+        found = await s.get(LeadCandidate, cand.id, populate_existing=True)
+    assert written == 0
+    assert found is not None and found.state == "review"
+
+
+async def test_push_tekshir_cancel_sends_nothing(erp):
+    cand = await erp.lead()
+    first = await erp.push(cand)
+    w = world(session_scope, erp=lambda: contextlib.nullcontext(erp.erp))
+    await w.say(f"/push tekshir {first.external_id}")
+    [_yes, no] = w.buttons()
+    await w.press(no)
+    assert w.last() == t("push.cancelled")
+    rows = await erp.rows()
+    assert [(r.attempt, r.superseded_at) for r in rows] == [(1, None)]
+
+
+async def test_push_tekshir_without_a_usable_erp_client(db, configured):
+    @asynccontextmanager
+    async def none() -> AsyncIterator[None]:
+        yield None
+
+    w = world(db, erp=none)
+    await w.press(cb.push_check(7, "y"))
+    assert w.fake.texts() == [t("push.no_erp")]
+    # The tap is answered before the work, not after it.
+    assert [name for name, _ in w.fake.calls] == [
+        "AnswerCallbackQuery",
+        "EditMessageText",
+    ]
+
+
+async def test_dnc_refuses_another_countrys_number(w):
+    await w.say("/dnc +7 999 123 45 67")
+    assert w.last() == t("dnc.foreign")
+    assert w.buttons() == []
+
+
+async def test_dnc_names_a_merged_holder_by_its_root(w):
+    async with w.db() as s:
+        root = await gate_fixtures.firm(s, "Namuna Ildiz Savdo")
+        old = await gate_fixtures.firm(
+            s, "Namuna Eski Nom", state="merged", merged_into=root.id
+        )
+        await gate_fixtures.contact(s, old, phone(61))
+    await w.say("/dnc +998 90 000 00 61")
+    assert w.last().splitlines()[:2] == [
+        "🔒 DNC: 900000061",
+        "Kompaniya: Namuna Ildiz Savdo",
+    ]
+
+
+async def test_qidir_names_the_suppression_that_holds_the_company(w):
+    async with w.db() as s:
+        await lead(s, name="Namuna Bostirilgan Savdo")
+    await w.say("/dnc +998 90 000 00 61")
+    await w.press(w.buttons()[0])
+    async with w.db() as s:
+        row = await s.scalar(sa.select(Suppression).where(Suppression.kind == "dnc"))
+        assert row is not None and row.created_at is not None
+        when = cards.day(row.created_at)
+    await w.say("/qidir +998 90 000 00 61")
+    assert w.last().splitlines()[-1] == (
+        f"🚫 Bostirilgan: yozilmasin (DNC) (owner_bot, {when})"
+    )
+
+
+async def test_the_merge_menu_offers_at_most_five_targets(w):
+    async with w.db() as s:
+        cand = await lead(s, name="Namuna Birlashma Savdo")
+        for n in range(6):
+            twin = await gate_fixtures.firm(s, f"Zarafshon Texnika {n} Xyz")
+            twin.dup_of = cand.company_id
+            twin.dup_score = 90 - n
+        review = await pending_card(s, cand, state="asked")
+        await s.flush()
+    await w.press(cb.review(review.id, "m"))
+    buttons = w.buttons()
+    assert len(buttons) == 6 and buttons[-1] == cb.review(review.id, "k")
+    assert all(b.startswith(f"mg:{review.id}:") for b in buttons[:5])
+
+
+async def test_holat_lists_the_enabled_sources_only(w):
+    async with w.db() as s:
+        await s.execute(sa.update(Source).values(enabled=False))
+        await s.execute(
+            sa.update(Source)
+            .where(Source.key == "telegram_monitor")
+            .values(enabled=True, last_run_at=None, paused_until=None, breaker_until=None)
+        )
+        await s.execute(
+            sa.update(Source)
+            .where(Source.key == "hh_vacancies")
+            .values(enabled=True, last_run_at=None, paused_until=NOW + timedelta(hours=2))
+        )
+        titles = dict(
+            (await s.execute(sa.select(Source.key, Source.title_uz))).tuples().all()
+        )
+    await w.say("/holat")
+    lines = w.last().splitlines()
+    start = lines.index("Manbalar:")
+    end = next(i for i, line in enumerate(lines) if line.startswith("Muammolar:"))
+    assert sorted(lines[start + 1 : end]) == sorted(
+        [
+            f"  {titles['telegram_monitor']} ✅ —",
+            f"  {titles['hh_vacancies']} ⏸ —",
+        ]
+    )
+
+
+async def test_xarajat_tells_the_day_from_the_month(w):
+    from clientscrapper.db.models import UsageLog
+
+    async with w.db() as s:
+        for at, usd in ((NOW - timedelta(days=1), "1.50"), (NOW, "0.25")):
+            s.add(
+                UsageLog(
+                    provider="anthropic",
+                    operation="classify",
+                    model="namuna",
+                    cost_usd=Decimal(usd),
+                    created_at=at,
+                )
+            )
+        await s.flush()
+    await w.say("/xarajat")
+    day_cap, month_cap = settings.daily_cost_cap_usd, settings.monthly_cost_cap_usd
+    assert w.last().splitlines()[0] == (
+        f"💸 Xarajat — bugun $0.25 ({int(Decimal('0.25') * 100 / day_cap)}% / "
+        f"{cards.money(day_cap)}) · oy $1.75 "
+        f"({int(Decimal('1.75') * 100 / month_cap)}% / {cards.money(month_cap)}) · "
+        "rad etilgan chaqiruvlar 0"
+    )
+
+
+async def test_to_person_refuses_a_group_even_when_it_is_configured(monkeypatch):
+    """A negative id is a group or a channel: never a person, whatever the
+    .env says."""
+    monkeypatch.setattr(settings, "owner_telegram_id", -100500)
+    monkeypatch.setattr(settings, "manager_telegram_ids", (-100600,))
+    bot, fake = fake_bot()
+    for chat in (-100500, -100600):
+        with pytest.raises(deliver.NotAllowed):
+            await deliver.to_person(bot, chat, "salom")
+    assert fake.calls == []
+
+
+def test_a_long_reply_is_clipped_as_valid_html():
+    # The cut keeps 4,063 characters: inside <code> → the tag is closed …
+    text = "<b>Sarlavha</b>\n" + "a" * 4000 + "<code>" + "b" * 100 + "</code> oxir"
+    clipped = deliver.clip(text)
+    assert len(clipped) <= deliver.TELEGRAM_MESSAGE_MAX
+    assert clipped == text[:4063] + "…</code>"
+    # … and never inside an entity or a tag.
+    assert deliver.clip("x" * 4060 + "&amp;" + "y" * 100) == "x" * 4060 + "…"
+    assert deliver.clip("x" * 4060 + "<code>" + "y" * 100) == "x" * 4060 + "…"
+    assert deliver.clip("x" * 4058 + "&amp;" + "y" * 100) == "x" * 4058 + "&amp;…"
+    assert deliver.clip("qisqa <b>matn</b>") == "qisqa <b>matn</b>"
+
+
+async def test_a_reply_lost_on_the_network_is_not_sent_twice(configured):
+    bot, fake = fake_bot()
+    fake.fail("SendMessage", TimeoutError("network"))
+    from clientscrapper.bot.handlers.common import reply
+
+    update = message(bot, "/holat", user_id=OWNER)
+    assert update.message is not None
+    assert await reply(update.message, "<b>salom</b>") is None
+    assert len(fake.named("SendMessage")) == 1
+
+
+# --- the process wiring (06 §1.1) -------------------------------------------------------
+
+
+def test_the_bot_wires_the_seams_it_judges_with(configured):
+    from clientscrapper.services import costs, erp_feeds
+
+    bot, _fake = fake_bot()
+    before = (costs._hooks.notify_cap, costs._hooks.hold_cap, costs._hooks.anthropic_down)
+    probe = health._probes.suppression
+    try:
+        notify = bot_main.wire(bot)
+        assert costs._hooks.notify_cap is notify
+        assert costs._hooks.hold_cap is health.in_quiet_hours
+        assert costs._hooks.anthropic_down is health.anthropic_down_until
+        assert health._probes.suppression is erp_feeds.suppression_probe
+    finally:
+        costs.set_cap_notifier(before[0], hold=before[1])
+        costs.set_anthropic_health(before[2])
+        health.set_suppression_probe(probe)
+
+
+async def test_polling_keeps_what_the_owner_sent_meanwhile():
+    seen: dict[str, Any] = {}
+
+    class Polling:
+        async def start_polling(self, bot: Any, **kw: Any) -> None:
+            seen.update(kw)
+
+    bot, _ = fake_bot()
+    await bot_main._poll(Polling(), bot)  # type: ignore[arg-type]
+    assert seen == {"drop_pending_updates": False, "handle_signals": False}
+
+
+def _failing(exc: Exception) -> Callable[[], AbstractAsyncContextManager[Any]]:
+    @asynccontextmanager
+    async def factory() -> AsyncIterator[Any]:
+        raise exc
+        yield  # pragma: no cover
+
+    return factory
+
+
+@pytest.mark.parametrize(
+    ("exc", "word"),
+    [
+        (sa.exc.OperationalError("SELECT 1", {}, Exception("down")), "db_down"),
+        (OSError("connection refused"), "db_down"),
+        (sa.exc.IntegrityError("INSERT", {}, Exception("dup")), "error"),
+        (RuntimeError("bug"), "error"),
+    ],
+)
+async def test_a_failing_handler_is_answered_never_silent(configured, exc, word):
+    bot, fake = fake_bot()
+    dp = bot_main.build_dispatcher(Deps(session_factory=_failing(exc), clock=lambda: NOW))
+    await dp.feed_update(bot, tap(bot, cb.resume("y"), user_id=OWNER))
+    [answered] = fake.named("AnswerCallbackQuery")
+    assert (answered["text"], answered["show_alert"]) == (t(word), True)
+    fake.clear()
+    await dp.feed_update(bot, message(bot, "/toxtat", user_id=OWNER))
+    assert fake.texts() == [t(word)]
+
+
+async def test_an_error_after_the_tap_was_answered_is_said_in_the_chat(configured):
+    bot, fake = fake_bot()
+    refused = TelegramBadRequest(
+        method=SendMessage(chat_id=OWNER, text="x"), message="query is too old"
+    )
+    fake.fail("AnswerCallbackQuery", refused, after=1)
+    dp = bot_main.build_dispatcher(
+        Deps(clock=lambda: NOW, erp=_failing(RuntimeError("erp")))
+    )
+    await dp.feed_update(bot, tap(bot, cb.push_check(7, "y"), user_id=OWNER))
+    assert fake.texts() == [t("error")]
+
+
+async def test_the_worker_hands_the_backup_to_the_owner_through_the_bot(
+    configured, monkeypatch, tmp_path
+):
+    from clientscrapper.worker import main as worker
+
+    bot, fake = fake_bot()
+    monkeypatch.setattr(deliver, "make_bot", lambda token=None: bot)
+    connected = worker.connect_owner_bot()
+    piece = tmp_path / "zaxira.age"
+    piece.write_bytes(b"x")
+    try:
+        send = worker._seams.send_document
+        assert send is not None
+        assert await send(piece, "zaxira") is True
+        [sent] = fake.named("SendDocument")
+        assert (sent["chat_id"], sent["caption"]) == (OWNER, "zaxira")
+    finally:
+        await worker.disconnect_owner_bot(connected)
+    assert worker._seams.send_document is None
+
+
+async def test_mark_asked_takes_only_a_pending_card(db):
+    """A card already out keeps the message it went out as."""
+    async with db() as s:
+        review = await pending_card(s, await lead(s), state="asked")
+        args = {"chat_id": OWNER, "message_id": 99, "card_hash": "1" * 64}
+        assert not await cards.mark_asked(s, review.id, now=NOW, **args)
+        row = await s.get(LeadReview, review.id, populate_existing=True)
+        assert row is not None and (row.card_message_id, row.card_hash) == (77, "0" * 64)

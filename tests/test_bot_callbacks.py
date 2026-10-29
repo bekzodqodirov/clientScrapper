@@ -61,6 +61,11 @@ NEAR_MISSES = (
     "ch:t:",
     "ps:yes",
     "im:1:maybe",
+    "rv:\uff11:p",  # a fullwidth digit: \\d would take it, [0-9] does not
+    "rv:\u0661\u0662:p",  # Arabic-Indic digits
+    "pt:\u0663:y",
+    "ch:t:\uff19",
+    "ch:t:2147483648",  # past chat_monitors.id's integer
     "",
     ":",
 )
@@ -189,22 +194,27 @@ class _Callback:
     page: int | None = None
 
 
+# 06 §1.5's patterns, read as the ASCII it says the payloads are (``\d``
+# alone also takes «１», a fullwidth digit).
 _GRAMMAR: dict[str, re.Pattern[str]] = {
-    "rv": re.compile(r"rv:(?P<ref>\d{1,19}):(?P<action>[pdlxmbcehok])"),
+    "rv": re.compile(r"rv:(?P<ref>\d{1,19}):(?P<action>[pdlxmbcehok])", re.ASCII),
     "mg": re.compile(
-        r"mg:(?P<ref>\d{1,19}):(?P<target>[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"
+        r"mg:(?P<ref>\d{1,19}):(?P<target>[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})",
+        re.ASCII,
     ),
-    "mh": re.compile(r"mh:(?P<ref>\d{1,19}):(?P<action>[cnxwl])"),
-    "src": re.compile(r"src:(?P<target>[a-z][a-z0-9_]{2,40}):(?P<action>[tia])"),
-    "srcp": re.compile(r"src:p:(?P<page>\d{1,3})"),
-    "ch": re.compile(r"ch:t:(?P<ref>\d{1,10})"),
-    "chp": re.compile(r"ch:p:(?P<page>\d{1,3})"),
-    "chnoop": re.compile(r"ch:noop"),
-    "ps": re.compile(r"ps:(?P<action>[ync])"),
-    "im": re.compile(r"im:(?P<ref>\d{1,10}):(?P<action>[yn])"),
-    "pg": re.compile(r"pg:(?P<ref>\d{1,19}):(?P<action>[yn])"),
-    "dn": re.compile(r"dn:(?P<ref>\d{1,10}):(?P<action>[yn])"),
-    "pt": re.compile(r"pt:(?P<ref>\d{1,19}):(?P<action>[yn])"),
+    "mh": re.compile(r"mh:(?P<ref>\d{1,19}):(?P<action>[cnxwl])", re.ASCII),
+    "src": re.compile(
+        r"src:(?P<target>[a-z][a-z0-9_]{2,40}):(?P<action>[tia])", re.ASCII
+    ),
+    "srcp": re.compile(r"src:p:(?P<page>\d{1,3})", re.ASCII),
+    "ch": re.compile(r"ch:t:(?P<ref>\d{1,10})", re.ASCII),
+    "chp": re.compile(r"ch:p:(?P<page>\d{1,3})", re.ASCII),
+    "chnoop": re.compile(r"ch:noop", re.ASCII),
+    "ps": re.compile(r"ps:(?P<action>[ync])", re.ASCII),
+    "im": re.compile(r"im:(?P<ref>\d{1,10}):(?P<action>[yn])", re.ASCII),
+    "pg": re.compile(r"pg:(?P<ref>\d{1,19}):(?P<action>[yn])", re.ASCII),
+    "dn": re.compile(r"dn:(?P<ref>\d{1,10}):(?P<action>[yn])", re.ASCII),
+    "pt": re.compile(r"pt:(?P<ref>\d{1,19}):(?P<action>[yn])", re.ASCII),
 }
 
 
@@ -213,7 +223,7 @@ def _stand_in_parse(data: str) -> _Callback | None:
         if m := pattern.fullmatch(data):
             g = m.groupdict()
             ref, page = g.get("ref"), g.get("page")
-            if ref is not None and int(ref) > 2**63 - 1:
+            if ref is not None and int(ref) > (2**31 - 1 if kind == "ch" else 2**63 - 1):
                 return None
             return _Callback(
                 kind,

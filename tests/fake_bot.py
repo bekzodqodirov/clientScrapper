@@ -157,6 +157,7 @@ def message(
     document: dict[str, Any] | None = None,
     caption: str | None = None,
     reply_to: dict[str, Any] | None = None,
+    forwarded_from: int | None = None,
 ) -> Update:
     data: dict[str, Any] = {
         "message_id": next(_IDS),
@@ -180,6 +181,12 @@ def message(
         data["document"] = document
     if reply_to is not None:
         data["reply_to_message"] = reply_to
+    if forwarded_from is not None:
+        data["forward_origin"] = {
+            "type": "user",
+            "date": datetime.now(UTC),
+            "sender_user": _user(forwarded_from),
+        }
     return Update.model_validate(
         {"update_id": next(_UPDATES), "message": data}, context={"bot": bot}
     )
@@ -215,8 +222,14 @@ def tap(
     )
 
 
-def added_to_group(bot: Bot, *, by: int, chat_id: int = -100500) -> Update:
-    member = {"user": BOT_USER, "status": "member"}
+def added_to_group(
+    bot: Bot, *, by: int, chat_id: int = -100500, status: str = "member"
+) -> Update:
+    """The bot's membership in a group changed to ``status`` (``member``:
+    added; ``left``/``kicked``: removed)."""
+    member = {"user": BOT_USER, "status": status}
+    if status == "kicked":
+        member["until_date"] = 0
     return Update.model_validate(
         {
             "update_id": next(_UPDATES),
@@ -224,7 +237,10 @@ def added_to_group(bot: Bot, *, by: int, chat_id: int = -100500) -> Update:
                 "chat": {"id": chat_id, "type": "supergroup", "title": "Guruh"},
                 "from": _user(by),
                 "date": datetime.now(UTC),
-                "old_chat_member": {"user": BOT_USER, "status": "left"},
+                "old_chat_member": {
+                    "user": BOT_USER,
+                    "status": "left" if status == "member" else "member",
+                },
                 "new_chat_member": member,
             },
         },
