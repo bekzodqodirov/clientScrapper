@@ -458,9 +458,11 @@ async def test_r4b_nulls_a_places_phone_at_31_days_unless_a_push_used_it(session
     plain = await gate_fixtures.firm(session)
     pushed = await gate_fixtures.firm(session)
     failed = await gate_fixtures.firm(session)
+    vague = await gate_fixtures.firm(session)
     young = await gate_fixtures.firm(session)
     source = await gate_fixtures.firm(session)
-    for company, status in ((pushed, "sent"), (failed, "failed")):
+    # 'unknown' counts as used: the ERP may hold the lead (02 §2.10).
+    for company, status in ((pushed, "sent"), (failed, "failed"), (vague, "unknown")):
         cand = await gate_fixtures.candidate(session, company, state="pushed")
         await gate_fixtures.push(
             session, cand, sent_at=now(), phone_tail=tail(51), status=status
@@ -483,6 +485,7 @@ async def test_r4b_nulls_a_places_phone_at_31_days_unless_a_push_used_it(session
         "plain": await places_contact(session, plain, 51, days=31),
         "pushed": await places_contact(session, pushed, 52, days=31),
         "failed": await places_contact(session, failed, 53, days=31),
+        "unknown": await places_contact(session, vague, 57, days=31),
         "young": await places_contact(session, young, 54, days=29),
         "lineage": await places_contact(session, source, 55, days=31),
     }
@@ -492,12 +495,13 @@ async def test_r4b_nulls_a_places_phone_at_31_days_unless_a_push_used_it(session
     await age(session, "contacts", "collected_at", other.id, 31)
     await session.commit()
     report = await run(dirs)
-    assert report["R4b"] == {"contacts": 2, "kept": 2}
+    assert report["R4b"] == {"contacts": 2, "kept": 3}
     after = {k: await fresh(session, m.Contact, r.id) for k, r in rows.items()}
     assert {k: (c.phone, c.phone_kind) for k, c in after.items()} == {
         "plain": (None, None),
         "pushed": (phone(52), "mobile"),
         "failed": (None, None),
+        "unknown": (phone(57), "mobile"),
         "young": (phone(54), "mobile"),
         "lineage": (phone(55), "mobile"),
     }
