@@ -907,16 +907,24 @@ async def tel(
         )
     )
     if not held:
-        # The person already holds another number: the new one is the firm's.
-        await companies.upsert_contact(
-            session,
-            company,
-            tier="company",
-            phone=phone.e164,
-            legal_basis=TEL_BASIS,
-            source_url=url,
-            now=now,
+        # The person already holds another number: the one they gave a
+        # manager is theirs, not the firm's (seam review wave 4 — a company-
+        # tier copy escaped R4 and the person-tier rules), so it takes the
+        # person row's place, with this request as its basis.
+        person = await session.scalar(
+            sa.select(Contact).where(
+                Contact.company_id == company.id,
+                Contact.tier == "person",
+                Contact.anonymised_at.is_(None),
+            )
         )
+        if person is not None:
+            person.phone, person.phone_kind = phone.e164, phone.kind
+            person.legal_basis = TEL_BASIS
+            person.source_url = url[:2048]
+            person.collected_at = now
+            await session.flush()
+            await companies.check_shared_phone(session, phone.tail)
     await session.flush()
     if review.state == "asked":
         await _claim(session, review, "contacted", by=by, now=now)

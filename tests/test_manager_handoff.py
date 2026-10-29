@@ -444,6 +444,32 @@ async def test_tel_writes_its_own_basis_on_the_person_row(session, setup):
     )
 
 
+async def test_tel_over_a_persons_older_number_keeps_it_person_tier(session, setup):
+    """The person already holds a number from a public post: the one they
+    gave a manager replaces it on their own row, with the request's basis —
+    never a company-tier copy, which R4 and the person-tier rules would not
+    see (seam review wave 4)."""
+    cand, manager = await held_lead(session)
+    [person] = await contacts_of(session, cand)
+    person.phone, person.phone_kind = "+998901110022", "mobile"
+    person.legal_basis = "public_source"
+    person.source_url = "https://t.me/namuna_tg"
+    person.collected_at = NOW - timedelta(days=3)
+    await session.commit()
+    w = world(session_scope)
+    await w.say(f"/tel {manager.id} +998 90 000 00 77", user=MANAGER)
+    rows = await contacts_of(session, cand)
+    assert [(r.id, r.tier, r.phone) for r in rows] == [
+        (person.id, "person", "+998900000077")
+    ]
+    [after] = rows
+    assert (after.legal_basis, after.source_url, after.collected_at) == (
+        "pre_contract_request",
+        "https://t.me/namuna_optom/61",
+        NOW,
+    )
+
+
 async def test_tel_on_an_asked_card_answers_it_contacted(session, setup):
     """/tel before 📞: the card is answered «contacted» by the phone itself."""
     cand, manager = await held_lead(session)
