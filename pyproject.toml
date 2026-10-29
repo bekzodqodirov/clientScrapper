@@ -105,6 +105,9 @@ files = [
     # T-20: the bot's pure halves (handlers and main stay out, like MIYA's)
     "clientscrapper/bot/callbacks.py",
     "clientscrapper/bot/texts.py",
+    "clientscrapper/bot/keyboards.py",
+    "clientscrapper/bot/pages.py",
+    "clientscrapper/bot/deliver.py",
     "clientscrapper/services/cards.py",
     "clientscrapper/services/owner.py",
 ]

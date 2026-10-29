@@ -235,6 +235,13 @@ async def run(
         await set_commands(bot)
         notify = wire(bot)
         dp = build_dispatcher(deps)
+        # The start-up beat, before polling: a database still starting is
+        # the watchdog's to report, never a reason not to poll (MIYA).
+        try:
+            async with session_scope() as session:
+                await health.beat(session, "bot", detail=dict(identity))
+        except Exception as exc:
+            log.warning("start-up beat not written", extra={"error": type(exc).__name__})
         tasks = [
             asyncio.create_task(
                 health.keep_beating(

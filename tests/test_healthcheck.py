@@ -147,17 +147,29 @@ async def test_a_reader_switched_off_beats_once_and_stays_healthy(session, monke
     )
 
 
-async def test_the_bot_skeleton_beats_every_minute_until_stopped(session, monkeypatch):
+async def test_the_bot_beats_every_minute_until_stopped(session, monkeypatch):
+    """T-20: the bot connected to (a fake) Telegram beats ``bot`` with
+    ``{"telegram": true, "username": …}`` and stops on its signal."""
+    from aiogram import Bot, Dispatcher
+
+    from tests.fake_bot import fake_bot
+
     def _stop_soon(stop: asyncio.Event) -> tuple[int, ...]:
         asyncio.get_running_loop().call_later(0.3, stop.set)
         return ()
 
+    async def _poll_forever(dp: Dispatcher, client: Bot) -> None:
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(settings, "assistant_bot_token", "42:TEST")
+    monkeypatch.setattr(settings, "owner_telegram_id", 1001)
     monkeypatch.setattr(bot, "install_stop_signals", _stop_soon)
     monkeypatch.setattr(bot, "setup_logging", lambda *a, **k: None)
     assert timedelta(minutes=1) == bot.BEAT_EVERY
-    await asyncio.wait_for(bot.run(), timeout=10)
+    client, _ = fake_bot()
+    await asyncio.wait_for(bot.run(bot=client, polling=_poll_forever), timeout=10)
     row = (await health.beats(session))["bot"]
-    assert row.detail == {"telegram": False}
+    assert row.detail == {"telegram": True, "username": "cs_agent_bot"}
     assert healthcheck.verdict("bot", row.last_seen_at, row.detail, now=row.last_seen_at)[
         0
     ]
