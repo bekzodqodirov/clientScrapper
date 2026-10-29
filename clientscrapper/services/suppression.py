@@ -400,8 +400,8 @@ async def add(
 def dnc_entries(company: Company, *contacts: Contact | None) -> list[Entry]:
     """06 §1.3 🔒: the lead contact's phone tail, username and Instagram —
     and the card's own contact's, when that is another (the poster whose
-    handle the card shows, 9.1) — and the company's channel, Instagram and
-    domain; each the stored key. An anonymised contact is known by nothing
+    handle the card shows, 9.1) — and the company's channel, Instagram,
+    domain and STIR; each the stored key. An anonymised contact is known by nothing
     (``build_keys``' rule): its kept switchboard number is not the person."""
     found: list[Entry] = []
     for contact in contacts:
@@ -419,6 +419,10 @@ def dnc_entries(company: Company, *contacts: Contact | None) -> list[Entry]:
         found.append(Entry("dnc", "instagram", company.instagram))
     if company.website_domain:
         found.append(Entry("dnc", "domain", company.website_domain))
+    # And the STIR (CLAUDE.md's DNC keys; seam review wave 4): after a
+    # contact purge or an anonymisation the firm may be known by it alone.
+    if company.stir and (stir := keys.stir_key(company.stir)) is not None:
+        found.append(Entry("dnc", "stir", stir))
     unique = list(dict.fromkeys(f for f in found if _fits(f.key)))
     return unique
 
