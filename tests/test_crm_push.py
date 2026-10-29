@@ -237,6 +237,7 @@ CLEAN = sig(
         ("5 kub mato kerak, telegram: namuna_shop", "namuna_shop"),
         ("5 kub mato kerak, agent +86 138 0000 0077", "0000 0077"),
         ("5 kub mato kerak, tel +7 916 000-00-77", "000-00-77"),
+        ("5 kub mato kerak, tel +372 000 077", "000 077"),
         ("5 kub mato kerak, tel 8 916 000 00 77", "000 00 77"),
         ("5 kub mato kerak, namuna@namuna.example.uz", "@namuna.example.uz"),
         ("5 kub mato kerak, <PHONE_1> ga yozing", "<PHONE_1>"),
@@ -612,16 +613,24 @@ def test_a_container_signal_is_the_hajm_when_nothing_else_says():
 
 
 def test_the_evidence_pair_drops_its_quote_past_300_units():
-    quote = " ".join(["mato"] * 40)
     url = "https://t.me/" + "n" * 187
     assert push_gate.text_len(url) == 200
+    # A view the landed note holds whole (no shrink step reaches the pair).
+    lean = view(
+        address=None, goods=(), website_domain=None, telegram=None, instagram=None
+    )
+    # 200 + « — "» + a 96-unit cut + «"» = 301: the URL alone.
+    quote = " ".join(["optomchilar"] * 20)
     long_url = sig(url=url, quote=quote, excerpt="Salom. " + quote)
-    p = crm_push.build_payload(view(signals=(long_url,)))
+    p = crm_push.build_payload(replace(lean, signals=(long_url,)))
+    assert crm_push.fits(crm_push._payload(replace(lean, signals=(long_url,)), 0))
     assert p.evidence == url
-    short = replace(long_url, url="https://t.me/namuna_optom/101")
-    p2 = crm_push.build_payload(view(signals=(short,)))
-    assert p2.evidence.startswith('https://t.me/namuna_optom/101 — "mato mato')
-    assert push_gate.text_len(p2.evidence) <= crm_push.PAIR_VALUE_MAX
+    # 300 exactly («mato» cuts to 95): the quote rides along.
+    exact = " ".join(["mato"] * 40)
+    at_300 = sig(url=url, quote=exact, excerpt="Salom. " + exact)
+    p2 = crm_push.build_payload(replace(lean, signals=(at_300,)))
+    assert p2.evidence.startswith(url + ' — "mato mato')
+    assert push_gate.text_len(p2.evidence) == crm_push.PAIR_VALUE_MAX
 
 
 def test_a_name_shorter_than_two_units_is_refused():
@@ -1912,6 +1921,40 @@ async def test_a_repush_whose_attempts_are_spent_is_only_flagged(world, monkeypa
         )
     assert result.codes == ["attempts_spent"]
     assert (await world.candidate(cand)).state == "pushed"
+
+
+async def test_push_tekshir_on_a_spent_id_changes_nothing(world):
+    """An approved candidate whose ``unknown`` push was re-pushed twice and
+    failed both times: the delivered row stands at attempt 1, the id's three
+    attempts are spent — the confirm refuses before the gate, so the owner's
+    question sends nobody back to review."""
+    cand = await world.lead()
+    eid = eid_of(cand)
+    for attempt, status in ((1, "unknown"), (2, "failed"), (3, "failed")):
+        row = await gate_fixtures.push(
+            world.session,
+            cand,
+            sent_at=NOW - timedelta(days=3) + timedelta(hours=attempt),
+            finished_at=NOW - timedelta(days=3) + timedelta(hours=attempt),
+            phone_tail=tail(61),
+            external_id=eid,
+            attempt=attempt,
+            status=status,
+        )
+        row.payload = {"external_id": eid}
+        if attempt == 1:
+            delivered = row
+    await world.session.commit()
+    async with SessionLocal() as s:
+        check = await crm_push.push_tekshir_view(s, eid)
+        assert (check.attempt, check.attempts, check.refusal) == (1, 3, "attempts_spent")
+        result = await crm_push.push_tekshir_confirm(
+            s, delivered.id, now=NOW, erp=world.erp
+        )
+    assert result.codes == ["attempts_spent"]
+    assert (await world.candidate(cand)).state == "approved"
+    assert await owner_note(world.session, cand) is None
+    assert world.fake.posted == []
 
 
 async def test_a_repush_takes_the_push_log_row_before_the_candidate(world, monkeypatch):
