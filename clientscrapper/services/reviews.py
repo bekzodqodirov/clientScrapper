@@ -15,7 +15,7 @@ answer          row         candidate
 push            approved    review → approved(``owner:<tg_id>``)
 decline         declined    review → rejected
 later           asked       stays; ``expires_at += 24 h``, asked again in
-                            24 h (``remind_at``, 0004) inside the hours
+                            24 h (``remind_at``, 0003) inside the hours
 dnc             declined    review → suppressed + ``suppression(dnc)`` rows
 not_b2b         declined    review → excluded(b2c) + ``suppression(b2c)``
 competitor      declined    review → excluded(competitor), the company flag

@@ -758,7 +758,7 @@ async def _note_row(session: AsyncSession, candidate: LeadCandidate) -> LeadRevi
     newest answered one. An auto-approved candidate never had a card, and no
     row is made for it — a row with no tap would read as the owner's
     decision (``/lidlar``, the reports); its refusals go to
-    ``lead_candidates.push_note`` (0004, T-21), which ``/lidlar holat``
+    ``lead_candidates.push_note`` (0003, T-21), which ``/lidlar holat``
     lists."""
     row: LeadReview | None = await session.scalar(
         sa.select(LeadReview)

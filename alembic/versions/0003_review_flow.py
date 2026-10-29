@@ -13,10 +13,11 @@
   on, and a row nobody tapped would read as the owner's decision. ``/lidlar
   holat`` lists them.
 
-Additive only: 0001 and 0002 are not edited. 0003 is the T-20 lane's slot
-(unused there): this revision follows 0002.
+Additive only: 0001 and 0002 are not edited. Built as 0004 in its lane (0003
+was held for the T-20 lane, which needed none) and renumbered 0003 at the
+wave-4 integration, before any database had applied it.
 
-Revision ID: 0004_review_flow
+Revision ID: 0003_review_flow
 Revises: 0002_erp_contract
 Create Date: T-21
 """
@@ -29,7 +30,7 @@ import sqlalchemy as sa
 
 from alembic import op
 
-revision: str = "0004_review_flow"
+revision: str = "0003_review_flow"
 down_revision: str | None = "0002_erp_contract"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None

@@ -606,7 +606,7 @@ async def test_an_approved_candidates_refusal_comes_back_as_a_new_card(session, 
 
 
 async def test_an_auto_approved_candidates_refusal_has_a_home(session, setup):
-    """No owner card to carry it: ``lead_candidates.push_note`` (0004), and
+    """No owner card to carry it: ``lead_candidates.push_note`` (0003), and
     ``/lidlar holat`` lists it."""
     cand = await lead(
         session, state="approved", fields={"approved_by": "auto:telegram_monitor"}

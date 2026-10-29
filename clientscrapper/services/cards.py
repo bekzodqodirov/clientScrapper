@@ -829,7 +829,7 @@ async def live_review(session: AsyncSession, review_id: int) -> LeadReview | Non
 @dataclass(frozen=True, slots=True)
 class AutoWaiting:
     """An auto-approved candidate a push refused (``lead_candidates.
-    push_note``, 0004): it has no owner card to carry the refusal."""
+    push_note``, 0003): it has no owner card to carry the refusal."""
 
     display_name: str
     note: str

@@ -67,7 +67,7 @@ class LeadCandidate(Base):
     pushed_at: Mapped[datetime | None] = mapped_column(sa.DateTime(timezone=True))
     last_scored_at: Mapped[datetime | None] = mapped_column(sa.DateTime(timezone=True))
     # An auto-approved candidate's push refusals (04 §7 item 14): it has no
-    # owner review row to carry them (0004, T-21; /lidlar holat lists them).
+    # owner review row to carry them (0003, T-21; /lidlar holat lists them).
     push_note: Mapped[str | None] = mapped_column(sa.Text)
     push_noted_at: Mapped[datetime | None] = mapped_column(sa.DateTime(timezone=True))
     created_at: Mapped[datetime] = created_at_column()
@@ -162,7 +162,7 @@ class LeadReview(Base):
     by_telegram_id: Mapped[int | None] = mapped_column(sa.BigInteger)
     note: Mapped[str | None] = mapped_column(sa.Text)
     expires_at: Mapped[datetime | None] = mapped_column(sa.DateTime(timezone=True))
-    # ⏭ Keyinroq: when the card is asked again as a fresh message (0004,
+    # ⏭ Keyinroq: when the card is asked again as a fresh message (0003,
     # T-21; 06 §1.3 «ertaga qayta soʻrayman»). NULL = not put off.
     remind_at: Mapped[datetime | None] = mapped_column(sa.DateTime(timezone=True))
     created_at: Mapped[datetime] = created_at_column()
