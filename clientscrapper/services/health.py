@@ -474,6 +474,14 @@ class SourceState:
     # The row's last write: the clock of a source that has neither run nor
     # been skipped since it was enabled (enabling it is a write).
     updated_at: datetime | None = None
+    # /holat's per-source numbers (06 §1.4, 05 §B.2): the precision job's
+    # 30-day precision and pushes, its auto_push, and the companies minted
+    # from the evidence of the source's runs started since Tashkent midnight
+    # (the resolver counts each on its run, companies.count_minted).
+    precision_30d: Decimal | None = None
+    pushes_30d: int = 0
+    auto_push: bool = False
+    new_companies_today: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -774,7 +782,7 @@ async def reported_problems(session: AsyncSession, now: datetime) -> dict[str, R
     return found
 
 
-async def _sources(session: AsyncSession) -> tuple[SourceState, ...]:
+async def _sources(session: AsyncSession, now: datetime) -> tuple[SourceState, ...]:
     # A smoke test's row is ``skipped`` too, but the scheduler never fired the
     # source: it must not restart a silent collector's clock (services/smoke).
     found = await session.execute(
@@ -783,6 +791,12 @@ async def _sources(session: AsyncSession) -> tuple[SourceState, ...]:
         .group_by(CollectorRun.source_key)
     )
     skipped: dict[str, datetime] = {str(key): at for key, at in found.all()}
+    today = await session.execute(
+        sa.select(CollectorRun.source_key, sa.func.sum(CollectorRun.new_companies))
+        .where(CollectorRun.started_at >= costs.day_start(now))
+        .group_by(CollectorRun.source_key)
+    )
+    new_today: dict[str, int] = {str(key): int(n or 0) for key, n in today.all()}
     rows = await session.scalars(
         sa.select(Source).order_by(Source.key).execution_options(populate_existing=True)
     )
@@ -798,6 +812,10 @@ async def _sources(session: AsyncSession) -> tuple[SourceState, ...]:
             last_run_at=row.last_run_at,
             last_skipped_at=skipped.get(row.key),
             updated_at=row.updated_at,
+            precision_30d=row.precision_30d,
+            pushes_30d=row.pushes_30d,
+            auto_push=row.auto_push,
+            new_companies_today=new_today.get(row.key, 0),
         )
         for row in rows
     )
@@ -1017,7 +1035,7 @@ async def gather(
             < now - REVIEW_BACKLOG_AGE,
         )
     )
-    sources = await _sources(session)
+    sources = await _sources(session, now)
     erp = next((s for s in sources if s.key == ERP_SOURCE), None)
     erp_config = await session.scalar(
         sa.select(Source.config["suppression"]).where(Source.key == ERP_SOURCE)
@@ -1811,7 +1829,7 @@ _RECOVERY: Final[Mapping[str, str]] = {
     "backup_unconfigured": "✅ Zaxira sozlandi — tiklandi",
     "backup_stale": "✅ Zaxira yana yangi — tiklandi",
     "ig_token_expired": "✅ Instagram tokeni yangilandi — tiklandi",
-    "source_low_precision": "✅ Manbalar aniqligi yana yaxshi — tiklandi",
+    "source_low_precision": "✅ Past aniqlik pauzasi tugadi — tiklandi",
     "evidence_over_cap": "✅ Dalil papkasi chegara ichida — tiklandi",
 }
 

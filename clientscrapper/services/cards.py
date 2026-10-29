@@ -66,6 +66,7 @@ from clientscrapper.services import (
     gates,
     health,
     keys,
+    metrics,
     normalise,
     purge,
     push_gate,
@@ -1240,6 +1241,84 @@ def _process(component: health.Component | None, now: datetime) -> str:
     return f"✅ ({_age(component.last_seen_at, now)})"
 
 
+def precision_text(value: Decimal | None) -> str:
+    """A 30-day precision as the owner reads it: «59%», «—» while nothing
+    was judged (/manbalar and /holat say it the same way)."""
+    return f"{int(value * 100)}%" if value is not None else "—"
+
+
+def _source_line(source: health.SourceState, now: datetime) -> str:
+    """06 §1.4: ``{title} {✅|⏸|⛔} {age} · {n} yangi · aniqlik {p}%`` — the
+    30-day pushes beside the precision and «avto» while auto-push approves
+    its leads (05 §B.2: the three numbers per source;
+    ``candidates.auto_approves``)."""
+    line = (
+        f"  {esc(source.title_uz)} {_source_icon(source, now)} "
+        f"{_age(source.last_run_at, now)} · bugun {source.new_companies_today} yangi · "
+        f"aniqlik {precision_text(source.precision_30d)} ({source.pushes_30d})"
+    )
+    return line + (" · avto" if candidates.auto_approves(source.auto_push) else "")
+
+
+# A number with nothing to count yet (/holat, the MVP report).
+NOTHING_YET_UZ: Final = "hali yoʻq"
+
+
+def ratio_text(ratio: metrics.Ratio, *, approx: bool = False) -> str:
+    """«45% (9/20)» — «~45% (9/20)» for an approximate one — or «hali yoʻq»
+    with nothing to count."""
+    if ratio.pct is None:
+        return NOTHING_YET_UZ
+    return f"{'~' if approx else ''}{ratio.pct}% ({ratio.n}/{ratio.of})"
+
+
+# 01 §7 decision 6a: the contact metric under-counts, said beside it.
+CONTACT_NOTE_UZ: Final = "faqat ERP koʻrgani"
+# Decisions 5a and 3a: approximate, and labelled so wherever they are shown.
+QUOTE_NOTE_UZ: Final = "taxminiy, bosqich nomidan"
+SHIPMENT_NOTE_UZ: Final = "taxminiy: «yutildi» birinchi yuk oʻrniga"
+
+
+def render_results(results: metrics.Results) -> list[str]:
+    """``/holat``'s numbers (07 §3.2, 01 §5): the pushes, contact, the real
+    importer rate beside the strict precision, the approximate quote rate
+    (5a), won as the first-shipment proxy (3a) and the dictionary labels no
+    class matched (1a)."""
+    days = (results.until - results.since).days
+    lines = [
+        f"Natija ({days} kun): push {results.pushed} · ≥{metrics.HOT_SCORE} ball "
+        f"{results.hot}",
+        f"  Bogʻlanildi 1 ish kunida: {ratio_text(results.contacted)} — "
+        f"{CONTACT_NOTE_UZ}",
+        f"  Haqiqiy importyor: {ratio_text(results.importer)} · aniqlik "
+        f"{ratio_text(results.precision)}",
+        f"  Narx aytildi / bogʻlanildi: {ratio_text(results.quoted, approx=True)} — "
+        f"{QUOTE_NOTE_UZ}",
+        f"  Yutildi: {ratio_text(results.first_shipment)} — {SHIPMENT_NOTE_UZ}",
+    ]
+    lines += unclassed_lines(results.unclassed)
+    return lines
+
+
+# Decision 1a's line names this many labels (most used first) and counts the rest.
+UNCLASSED_SHOWN: Final = 10
+
+
+def unclassed_lines(found: Sequence[metrics.Unclassed]) -> list[str]:
+    """Decision 1a: every lost-reason label no class matched, so it is
+    mapped — the first ``UNCLASSED_SHOWN`` by name, «va yana N ta» for the
+    rest, none, no line (T-35's digest says it the same way)."""
+    if not found:
+        return []
+    shown = " · ".join(f"«{esc(u.label)}» {u.n} ta" for u in found[:UNCLASSED_SHOWN])
+    rest = len(found) - UNCLASSED_SHOWN
+    more = f" · va yana {rest} ta sabab" if rest > 0 else ""
+    return [
+        f"⚠️ Sinflanmagan yoʻqotish sabablari: {shown}{more} — dasturchiga ayting, "
+        "aniqlik hisobiga qoʻshilsin"
+    ]
+
+
 def _source_icon(source: health.SourceState, now: datetime) -> str:
     if not source.enabled:
         return "⛔"
@@ -1247,10 +1326,15 @@ def _source_icon(source: health.SourceState, now: datetime) -> str:
     return "⏸" if any(t > now for t in held) else "✅"
 
 
-def render_holat(status: health.Status, found: Sequence[health.Problem]) -> str:
+def render_holat(
+    status: health.Status,
+    found: Sequence[health.Problem],
+    results: metrics.Results | None = None,
+) -> str:
     """06 §1.4's ``/holat``: processes, database, disk, backup, Anthropic,
     the ERP, the queues, today's pushes and cards against their caps,
-    spend, the enabled sources and the open problems (each its own text,
+    spend, the enabled sources with their numbers, the pilot's numbers
+    (``metrics.holat``, 07 §3.2) and the open problems (each its own text,
     remedy included — ``health.problems``)."""
     now = status.now
     lines = [f"🩺 Agent holati — {now.astimezone(settings.tz):%d.%m.%Y %H:%M}"]
@@ -1313,10 +1397,9 @@ def render_holat(status: health.Status, found: Sequence[health.Problem]) -> str:
         shown = [s for s in status.sources if s.enabled]
         if shown:
             lines.append("Manbalar:")
-            lines += [
-                f"  {esc(s.title_uz)} {_source_icon(s, now)} {_age(s.last_run_at, now)}"
-                for s in shown
-            ]
+            lines += [_source_line(s, now) for s in shown]
+        if results is not None:
+            lines += render_results(results)
     if found:
         lines.append(f"Muammolar: {len(found)} ta:")
         lines += [f"  {p.text}" for p in found]
@@ -1396,6 +1479,62 @@ def render_xarajat(report: costs.SpendReport) -> str:
     return "\n".join(lines)
 
 
+def _target(pct: int | None, target: int) -> str:
+    """« ✅»/« ❌» against an «at least» target; nothing while nothing is
+    counted (a number not there yet has met no target and missed none)."""
+    if pct is None:
+        return ""
+    return " ✅" if pct >= target else " ❌"
+
+
+def render_mvp(report: metrics.MvpReport) -> str:
+    """``tools/mvp_report.py``'s text: 07 §3.2's four numbers against their
+    targets, then 01 §5's two approximate rows (decisions 5a, 3a) and the
+    unclassed lost reasons (1a)."""
+    r = report.results
+    end = report.week2_end - timedelta(days=1)
+    lines = [
+        f"📊 MVP hisoboti — pilot {report.start:%d.%m.%Y} dan, "
+        f"{report.now.astimezone(settings.tz):%d.%m.%Y %H:%M} gacha",
+        f"1. ≥{metrics.HOT_SCORE} ball, telefonli push, 2-hafta "
+        f"({report.week2_start:%d.%m}–{end:%d.%m}): {report.week2_hot} ta "
+        f"(maqsad ≥ {metrics.TARGET_PUSHED_W2}) "
+        + ("✅" if report.week2_hot >= metrics.TARGET_PUSHED_W2 else "❌"),
+        f"2. Haqiqiy importyor: {ratio_text(r.importer)} (maqsad ≥ "
+        f"{metrics.TARGET_IMPORTER}%){_target(r.importer.pct, metrics.TARGET_IMPORTER)}"
+        f" · aniqlik {ratio_text(r.precision)}",
+        f"3. 1 ish kunida bogʻlanildi: {ratio_text(r.contacted)} (maqsad ≥ "
+        f"{metrics.TARGET_CONTACTED}%)"
+        f"{_target(r.contacted.pct, metrics.TARGET_CONTACTED)} — {CONTACT_NOTE_UZ}",
+    ]
+    top_ai, top_all = report.anthropic_max, report.total_max
+    if top_ai is None or top_all is None:
+        lines.append(
+            f"4. Claude xarajati: {NOTHING_YET_UZ} (maqsad kuniga ≤ "
+            f"{money(metrics.TARGET_CLAUDE_DAY)})"
+        )
+    else:
+        ok = top_ai.anthropic <= metrics.TARGET_CLAUDE_DAY
+        within = top_all.total <= settings.daily_cost_cap_usd
+        lines.append(
+            f"4. Claude xarajati: eng koʻp kun {money(top_ai.anthropic)} "
+            f"({top_ai.day:%d.%m}, maqsad ≤ {money(metrics.TARGET_CLAUDE_DAY)}) "
+            + ("✅" if ok else "❌")
+            + f" · hammasi eng koʻp kun {money(top_all.total)} ({top_all.day:%d.%m}, "
+            f"chegara {money(settings.daily_cost_cap_usd)}) " + ("✅" if within else "❌")
+        )
+    lines += [
+        "Qoʻshimcha (taxminiy):",
+        f"  Narx aytildi / bogʻlanildi: {ratio_text(r.quoted, approx=True)} (maqsad ≥ "
+        f"{metrics.TARGET_QUOTED}%) — {QUOTE_NOTE_UZ}",
+        f"  Yutildi / push: {ratio_text(r.first_shipment)} (maqsad ≥ "
+        f"{metrics.TARGET_FIRST_SHIPMENT}%, 60 kun kechikadi) — {SHIPMENT_NOTE_UZ}",
+        f"  Jami push: {r.pushed} · ≥{metrics.HOT_SCORE} ball {r.hot}",
+    ]
+    lines += unclassed_lines(r.unclassed)
+    return "\n".join(lines)
+
+
 __all__ = [
     "AUTO_WAITING_SHOWN",
     "BAND_UZ",
@@ -1439,18 +1578,23 @@ __all__ = [
     "parse_uuid",
     "pending_owner_count",
     "phone_shown",
+    "precision_text",
     "purge_roots",
     "push_opens_word",
+    "ratio_text",
     "refusal_note",
     "render_company",
     "render_holat",
     "render_manager",
+    "render_mvp",
+    "render_results",
     "render_review",
     "render_xarajat",
     "review_view",
     "search",
     "segment_label",
     "set_aside",
+    "unclassed_lines",
     "volume_label",
     "with_footer",
 ]

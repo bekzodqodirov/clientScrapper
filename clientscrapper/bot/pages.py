@@ -35,7 +35,7 @@ def at(moment: datetime) -> str:
 
 
 def precision(value: Decimal | None) -> str:
-    return f"{int(value * 100)}%" if value is not None else "—"
+    return cards.precision_text(value)
 
 
 # --- /manbalar ------------------------------------------------------------------------
@@ -54,7 +54,7 @@ def source_line(line: SourceLine, now: datetime) -> str:
         cost=cards.money(line.cost_today),
         precision=precision(line.precision),
         pushes=line.pushes_30d,
-        mode=t("manbalar.mode_auto" if line.auto_push else "manbalar.mode_manual"),
+        mode=t("manbalar.mode_auto" if line.auto_live else "manbalar.mode_manual"),
     )
 
 
@@ -91,6 +91,8 @@ def source_info_text(info: SourceInfo, now: datetime) -> str:
         "manbalar.auto_forbidden"
         if line.forbidden
         else "manbalar.auto_on"
+        if line.auto_live
+        else "manbalar.auto_earned"
         if line.auto_push
         else "manbalar.auto_off"
     )

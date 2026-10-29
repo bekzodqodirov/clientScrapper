@@ -118,6 +118,8 @@ BUILT = {
     "verdict",
     # T-31: retention (services/retention, 02 §4).
     "retention",
+    # T-36: the weekly precision job (05 §B.2).
+    "source_precision",
 }
 # The ERP slots and the ErpSync variant each runs (03 §3, 05 §B.2).
 ERP_VARIANTS = {

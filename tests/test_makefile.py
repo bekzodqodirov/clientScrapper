@@ -257,3 +257,10 @@ def test_skip_doctor_skips_only_at_1():
     assert "tools.doctor" in dry_run("up", "SKIP_DOCTOR=0")
     assert "tools.doctor" in dry_run("up")
     assert "tools.doctor" not in dry_run("up", "SKIP_DOCTOR=1")
+
+
+def test_mvp_report_passes_the_start_only_when_given():
+    out = dry_run("mvp-report", "START=2026-11-02")
+    assert 'clientscrapper.tools.mvp_report \\\n\t--start "2026-11-02"' in out
+    bare = dry_run("mvp-report")
+    assert "clientscrapper.tools.mvp_report" in bare and "--start" not in bare

@@ -73,6 +73,8 @@ files = [
     "clientscrapper/userbot/limits.py",
     # T-09
     "clientscrapper/services/erp_feeds.py",
+    "clientscrapper/services/metrics.py",
+    "clientscrapper/tools/mvp_report.py",
     "clientscrapper/collectors/erp_sync.py",
     "clientscrapper/tools/erp_sync.py",
     # T-11

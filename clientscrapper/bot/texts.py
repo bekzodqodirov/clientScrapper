@@ -154,6 +154,9 @@ UZ: Final[Mapping[str, str]] = MappingProxyType(
         "manbalar.info_auto": "Avtomatik push: {state}",
         "manbalar.auto_on": "yoqilgan",
         "manbalar.auto_off": "oʻchiq",
+        "manbalar.auto_earned": (
+            "aniqlik yetarli, lekin hali yoqilmagan — lidlar sizning kartangizdan oʻtadi"
+        ),
         "manbalar.auto_forbidden": "taqiqlangan",
         "manbalar.mode_auto": "avto",
         "manbalar.mode_manual": "qoʻlda",

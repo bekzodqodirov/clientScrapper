@@ -57,10 +57,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from clientscrapper.config import settings
 from clientscrapper.db import enums as e
 from clientscrapper.db.models import (
+    CollectorRun,
     Company,
     CompanyAlias,
     CompanyId,
     Contact,
+    Evidence,
     LeadCandidate,
     MergeLog,
     ModelJob,
@@ -2163,6 +2165,26 @@ def _failure_facts(exc: BaseException) -> dict[str, str | None]:
     }
 
 
+async def count_minted(session: AsyncSession, evidence_id: int) -> None:
+    """One new company on the run whose evidence minted it (02 §2.2
+    ``collector_runs.new_companies``, what ``/holat``'s «bugun N yangi» and
+    ``/manbalar`` ℹ️'s run lines read). The runner writes 0 when the run
+    ends — its observations are not visible before that commit, so none of
+    them is resolved yet — and every company the resolver creates from one
+    of them is added here, in the resolving transaction. Evidence with no
+    run (its run row retired) counts nowhere."""
+    run_id = (
+        sa.select(Evidence.collector_run_id)
+        .where(Evidence.id == evidence_id)
+        .scalar_subquery()
+    )
+    await session.execute(
+        sa.update(CollectorRun)
+        .where(CollectorRun.id == run_id)
+        .values(new_companies=CollectorRun.new_companies + 1)
+    )
+
+
 async def _resolve_one(
     session_factory: SessionFactory,
     *,
@@ -2185,7 +2207,7 @@ async def _resolve_one(
         if obs is None:
             return False
         report.claimed += 1
-        obs_id, source_key = obs.id, obs.source_key
+        obs_id, source_key, evidence_id = obs.id, obs.source_key, obs.evidence_id
         values: dict[str, Any]
         try:
             async with session.begin_nested():
@@ -2230,6 +2252,8 @@ async def _resolve_one(
             }
             report.resolved += 1
             report.created += int(resolution.created)
+            if resolution.created:
+                await count_minted(session, evidence_id)
             if source_key == TELEGRAM_SOURCE:
                 # Wake score_job (04 §0): the notify is delivered at commit.
                 await session.execute(

@@ -43,6 +43,8 @@ any hour, the cards inside ``REVIEW_HOURS``, through the owner bot's
 ``services/crm_push.crm_push_job``, every minute, sending only inside the
 push window) and ``reconcile`` (T-28, ``crm_push.reconcile_job``, every 10
 minutes: a crashed claim, the ``unknown`` outcomes walk, rule 5's re-push);
+``source_precision`` (T-36, ``erp_feeds.source_precision_job``, Sunday 04:00:
+the 30-day precision, ``auto_push`` both ways, the low-precision pause);
 ``retention`` (T-31, ``services/retention.retention_job``, 04:15: 02 §4's
 steps, each in its own transaction with its own ``purge_log`` row).
 
@@ -378,7 +380,7 @@ def job_table() -> tuple[JobSlot, ...]:
             note="sends inside PUSH_WINDOW",
         ),
         JobSlot("reconcile", ("every 10m",), "T-28", crm_push.reconcile_slot),
-        JobSlot("source_precision", ("0 4 * * 0",), "T-36"),
+        JobSlot("source_precision", ("0 4 * * 0",), "T-36", source_precision_job),
         # --- 06: digest, retention --------------------------------------------------
         JobSlot(
             "digest",
@@ -1007,6 +1009,16 @@ async def backup_job(*, now: datetime | None = None) -> backup.BackupResult:
     except Exception as exc:
         log.error("backup heartbeat not written", extra={"error": type(exc).__name__})
     return result
+
+
+async def source_precision_job(*, now: datetime | None = None) -> dict[str, Any]:
+    """Weekly, Sunday 04:00 (05 §B.2): every source's 30-day precision, its
+    ``auto_push`` flipped both ways (never on while the owner forbids it)
+    and a source below 20 % over 30 pushes paused for a week (06 §4.2)."""
+    run = await erp_feeds.source_precision_job(
+        session_scope, now or datetime.now(settings.tz)
+    )
+    return run.as_dict()
 
 
 async def restore_drill_job() -> restore_drill.DrillResult | None:

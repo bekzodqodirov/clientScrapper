@@ -887,11 +887,9 @@ REJECTED_PROBLEM: Final = "push_rejected"
 STOP_ERRORS: Final[Mapping[str, str]] = {**BREAKER_ERRORS, "http_4xx": "rejected"}
 
 
-def synthetic_marked(candidate: LeadCandidate) -> bool:
-    """``score_breakdown.gates.test`` — make push-test's company (05 §B.1)."""
-    breakdown = candidate.score_breakdown or {}
-    gates = breakdown.get("gates") if isinstance(breakdown, Mapping) else None
-    return isinstance(gates, Mapping) and gates.get("test") is True
+# ``score_breakdown.gates.test`` — make push-test's company (05 §B.1); one
+# home with its SQL twin in services/candidates.
+synthetic_marked = candidates.synthetic_marked
 
 
 async def _lock_push(session: AsyncSession, push_log_id: int) -> PushLog | None:
@@ -1244,13 +1242,12 @@ async def due_candidates(session: AsyncSession, *, limit: int) -> list[uuid.UUID
         )
         .exists()
     )
-    synthetic = LeadCandidate.score_breakdown["gates"]["test"].as_boolean()
     rows = await session.scalars(
         sa.select(LeadCandidate.id)
         .where(
             LeadCandidate.state == "approved",
             ~busy,
-            sa.func.coalesce(synthetic, sa.false()).is_(False),
+            ~candidates.synthetic_sql(),
         )
         .order_by(
             LeadCandidate.score.desc().nulls_last(),

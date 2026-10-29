@@ -231,6 +231,9 @@ async def push(
     return log
 
 
+PRECISION_FIELDS = ("precision_30d", "positives_30d", "pushes_30d", "auto_push")
+
+
 def fresh_config(now: datetime = NOW) -> dict[str, Any]:
     """``config.suppression`` of a full pull 2 h and a delta 30 min before ``now``."""
     return erp_feeds.SuppressionConfig(
@@ -267,6 +270,14 @@ async def erp_ready(
         source.breaker_until,
         source.breaker_reason,
     )
+    # An outcomes walk (reconcile's ``unknown`` walk too) refreshes every
+    # row's 30-day numbers: /holat prints them, so they are put back.
+    numbers = {
+        r.key: {f: getattr(r, f) for f in PRECISION_FIELDS}
+        for r in await session.scalars(
+            sa.select(Source).execution_options(populate_existing=True)
+        )
+    }
     source.config = {**source.config, "suppression": fresh_config()}
     source.breaker_until = None
     source.breaker_reason = None
@@ -285,4 +296,8 @@ async def erp_ready(
                 breaker_reason=before[3],
             )
         )
+        for key, values in numbers.items():
+            await session.execute(
+                sa.update(Source).where(Source.key == key).values(**values)
+            )
         await session.commit()

@@ -729,13 +729,42 @@ async def source_families(session: AsyncSession) -> dict[str, str]:
     return {str(k): str(f) for k, f in rows.all()}
 
 
+def auto_approves(auto_push: bool) -> bool:
+    """A source's ``auto_push`` approves its hot candidates (02 §2.9
+    ``scored → approved(auto:<source>)``) only while ``AUTO_APPROVE`` is on.
+    The weekly precision job earns ``auto_push`` (05 §B.2); whether earning
+    it lets a lead skip the owner's card is the owner's switch — off until
+    he turns it on (07 T-39, 06 open question 2: review everything until
+    the precision numbers exist). /manbalar and /holat say «avto» by this."""
+    return settings.auto_approve and auto_push
+
+
 async def _auto_push(session: AsyncSession, source_key: str | None) -> bool:
     if source_key is None:
         return False
     found = await session.scalar(
         sa.select(Source.auto_push).where(Source.key == source_key)
     )
-    return bool(found)
+    return auto_approves(bool(found))
+
+
+# make push-test's company (05 §B.1, tools/push_test.py): the only candidate
+# whose breakdown says ``gates.test``; never pushed by the job, never counted.
+SYNTHETIC_MARK: Final[Mapping[str, Any]] = {"gates": {"test": True}}
+
+
+def synthetic_marked(candidate: LeadCandidate) -> bool:
+    """``score_breakdown.gates.test`` is the JSON ``true``."""
+    breakdown = candidate.score_breakdown or {}
+    marks = breakdown.get("gates") if isinstance(breakdown, Mapping) else None
+    return isinstance(marks, Mapping) and marks.get("test") is True
+
+
+def synthetic_sql() -> sa.ColumnElement[bool]:
+    """``synthetic_marked`` as SQL: true for the JSON ``true`` only, false
+    (never NULL) for a candidate with no breakdown — so ``~synthetic_sql()``
+    keeps every other row (crm_push.due_candidates, services/metrics)."""
+    return LeadCandidate.score_breakdown.contains(SYNTHETIC_MARK).is_(sa.true())
 
 
 async def apply_score(

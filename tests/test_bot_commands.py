@@ -45,6 +45,7 @@ from clientscrapper.bot.texts import COMMAND_MENU, MANAGER_MENU, t
 from clientscrapper.config import settings
 from clientscrapper.db.models import (
     ChatMonitor,
+    CollectorRun,
     Company,
     Contact,
     Evidence,
@@ -688,6 +689,90 @@ async def test_holat_shows_the_layout_and_the_problems(w):
     await w.say("/holat")
     lines = w.last().splitlines()
     assert lines[0].startswith("🩺 Agent holati — ")
+    assert any(line.startswith("Muammolar: ") for line in lines)
+
+
+@pytest.mark.parametrize(("approve", "tail"), [(True, " · avto"), (False, "")])
+async def test_holat_prints_each_source_s_numbers(w, monkeypatch, approve, tail):
+    """06 §1.4 / 05 §B.2: today's new companies, the 30-day precision with
+    its pushes, and «avto» while auto-push approves the source's leads —
+    earned, and the owner's ``AUTO_APPROVE`` on (candidates.auto_approves)."""
+    monkeypatch.setattr(settings, "auto_approve", approve)
+    async with w.db() as s:
+        await s.execute(
+            sa.update(Source).values(
+                enabled=False, precision_30d=None, pushes_30d=0, auto_push=False
+            )
+        )
+        await s.execute(
+            sa.update(Source)
+            .where(Source.key == "telegram_monitor")
+            .values(
+                enabled=True,
+                last_run_at=None,
+                paused_until=None,
+                breaker_until=None,
+                precision_30d=Decimal("0.6000"),
+                pushes_30d=15,
+                auto_push=True,
+            )
+        )
+        for started, found in (
+            (NOW - timedelta(hours=1), 3),
+            (NOW - timedelta(days=1), 9),
+        ):
+            s.add(
+                CollectorRun(
+                    source_key="telegram_monitor",
+                    started_at=started,
+                    status="ok",
+                    new_companies=found,
+                )
+            )
+        title = await s.scalar(
+            sa.select(Source.title_uz).where(Source.key == "telegram_monitor")
+        )
+    await w.say("/holat")
+    lines = w.last().splitlines()
+    start = lines.index("Manbalar:")
+    assert lines[start + 1] == f"  {title} ✅ — · bugun 3 yangi · aniqlik 60% (15){tail}"
+
+
+async def test_holat_shows_the_pilot_s_numbers_and_the_unclassed_labels(w):
+    """07 §3.2's numbers over the last 30 days (tests/pilot_fixtures.pilot;
+    tools/mvp_report prints the same), each approximate one labelled, and
+    the lost-reason label no class matched (01 §7 decisions 1a, 3a, 5a, 6a)."""
+    from tests import pilot_fixtures as pf
+
+    w.deps.clock = lambda: pf.PILOT_NOW
+    async with w.db() as s:
+        await pf.pilot(s)
+    await w.say("/holat")
+    lines = w.last().splitlines()
+    start = next(i for i, line in enumerate(lines) if line.startswith("Natija ("))
+    assert lines[start : start + 6] == [
+        "Natija (30 kun): push 33 · ≥60 ball 31",
+        "  Bogʻlanildi 1 ish kunida: 71% (5/7) — faqat ERP koʻrgani",
+        "  Haqiqiy importyor: 50% (2/4) · aniqlik 33% (1/3)",
+        "  Narx aytildi / bogʻlanildi: ~40% (2/5) — taxminiy, bosqich nomidan",
+        "  Yutildi: 3% (1/33) — taxminiy: «yutildi» birinchi yuk oʻrniga",
+        "⚠️ Sinflanmagan yoʻqotish sabablari: «Mijoz bilan kelishmadi» 1 ta — "
+        "dasturchiga ayting, aniqlik hisobiga qoʻshilsin",
+    ]
+    assert lines[start + 6].startswith("Muammolar: ")
+
+
+async def test_holat_answers_without_the_numbers_when_they_cannot_be_read(w, monkeypatch):
+    from clientscrapper.services import metrics
+
+    async def broken(*_: object, **__: object) -> None:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(metrics, "holat", broken)
+    await w.say("/holat")
+    lines = w.last().splitlines()
+    assert lines[0].startswith("🩺 Agent holati — ")
+    assert not any(line.startswith("Natija (") for line in lines)
     assert any(line.startswith("Muammolar: ") for line in lines)
 
 
@@ -1447,6 +1532,31 @@ async def test_forbidding_auto_push_switches_it_off(w):
         assert (row.config.get("auto_push_forbidden"), row.auto_push) == (True, False)
 
 
+@pytest.mark.parametrize(
+    ("approve", "mode", "state"),
+    [
+        (False, "manbalar.mode_manual", "manbalar.auto_earned"),
+        (True, "manbalar.mode_auto", "manbalar.auto_on"),
+    ],
+)
+async def test_an_earned_auto_push_reads_as_the_owner_s_switch_makes_it(
+    w, monkeypatch, approve, mode, state
+):
+    """The precision job earned ``auto_push``; whether it approves leads is
+    ``AUTO_APPROVE`` (candidates.auto_approves) — /manbalar says which."""
+    monkeypatch.setattr(settings, "auto_approve", approve)
+    async with w.db() as s:
+        await s.execute(
+            sa.update(Source)
+            .where(Source.key == "telegram_monitor")
+            .values(auto_push=True)
+        )
+    await w.press(cb.source("telegram_monitor", "i"))
+    lines = w.last().splitlines()
+    assert lines[1].endswith(f" · {t(mode)}")
+    assert t("manbalar.info_auto", state=t(state)) in lines
+
+
 async def test_stir_the_company_holds_already_and_a_merged_holder(w):
     async with w.db() as s:
         own = await lead(s, 61, name="Namuna STIR Bir", stir="300000044")
@@ -1564,7 +1674,11 @@ async def test_the_merge_menu_offers_at_most_five_targets(w):
 
 async def test_holat_lists_the_enabled_sources_only(w):
     async with w.db() as s:
-        await s.execute(sa.update(Source).values(enabled=False))
+        await s.execute(
+            sa.update(Source).values(
+                enabled=False, precision_30d=None, pushes_30d=0, auto_push=False
+            )
+        )
         await s.execute(
             sa.update(Source)
             .where(Source.key == "telegram_monitor")
@@ -1581,11 +1695,11 @@ async def test_holat_lists_the_enabled_sources_only(w):
     await w.say("/holat")
     lines = w.last().splitlines()
     start = lines.index("Manbalar:")
-    end = next(i for i, line in enumerate(lines) if line.startswith("Muammolar:"))
+    end = next(i for i, line in enumerate(lines) if line.startswith("Natija ("))
     assert sorted(lines[start + 1 : end]) == sorted(
         [
-            f"  {titles['telegram_monitor']} ✅ —",
-            f"  {titles['hh_vacancies']} ⏸ —",
+            f"  {titles['telegram_monitor']} ✅ — · bugun 0 yangi · aniqlik — (0)",
+            f"  {titles['hh_vacancies']} ⏸ — · bugun 0 yangi · aniqlik — (0)",
         ]
     )
 

@@ -181,6 +181,15 @@ class Settings(BaseSettings):
     push_window: str = "09:30-17:30"
     push_days: str = "1-6"
     test_phone: str = ""
+    # 01 §7 decision 5a: the ERP stage names that mean «a price was given»,
+    # «;»-separated fragments matched in the lead's current stage name (case
+    # and spacing ignored); every won stage counts as well. Approximate.
+    quote_stage_names: str = "narx"
+    # 07 T-39 / 06 open question 2: true lets a hot candidate of a source whose
+    # auto_push the weekly precision job turned on skip the owner's card
+    # (approved_by='auto:<source>'); false = every hot candidate reaches the
+    # owner and auto_push is only a number in /manbalar (candidates.auto_approves).
+    auto_approve: bool = False
 
     # --- Owner bot cadence --------------------------------------------------
     review_hours: str = "09:00-18:00"
@@ -323,6 +332,13 @@ class Settings(BaseSettings):
     @property
     def push_days_parsed(self) -> frozenset[int]:
         return parse_days(self.push_days)
+
+    @property
+    def quote_stage_names_parsed(self) -> tuple[str, ...]:
+        """The fragments, each lower-cased with its spaces collapsed (the
+        ERP's own normalisation of a label, 05 §A.7); blanks dropped."""
+        parts = (" ".join(p.split()).lower() for p in self.quote_stage_names.split(";"))
+        return tuple(p for p in parts if p)
 
 
 def _config_error_text(exc: ValidationError) -> str:
