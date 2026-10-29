@@ -857,3 +857,23 @@ async def test_the_worker_stays_silent_without_a_bot(monkeypatch):
     monkeypatch.setattr(settings, "assistant_bot_token", "")
     assert worker.connect_owner_bot() is None
     assert await worker.notify("⛔ sinov") is False
+
+
+async def test_the_merge_menu_lists_the_resolvers_suspicion(w):
+    async with w.db() as s:
+        cand = await lead(s, name="Namuna Birlashma Savdo")
+        target = await gate_fixtures.firm(s, "Zarafshon Elektr Texnika")
+        company = await s.get(Company, cand.company_id)
+        assert company is not None
+        company.dup_of = target.id
+        review = await pending_card(s, cand, state="asked")
+    await w.press(cb.review(review.id, "m"))
+    assert w.buttons() == [cb.merge(review.id, target.id), cb.review(review.id, "k")]
+    assert w.fake.answers() == [t("review.merge_title")]
+
+
+async def test_qidir_finds_a_company_by_its_name(w):
+    async with w.db() as s:
+        await lead(s, name="Namuna Qidiruv Savdo")
+    await w.say("/qidir Namuna Qidiruv Savdo")
+    assert w.last().splitlines()[0].startswith("🏢 Namuna Qidiruv Savdo (MChJ)")
