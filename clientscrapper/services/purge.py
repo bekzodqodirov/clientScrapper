@@ -831,7 +831,8 @@ async def _stop(
         "exclude_reason": None,
         "dup_of": None,
         "dup_score": None,
-        "verdict": None,
+        # SQL NULL, not JSON 'null' (a JSONB column takes None as the latter).
+        "verdict": sa.null(),
         "verdict_at": None,
     }
     roots = list(scope.roots)
@@ -935,9 +936,9 @@ async def _people(
         sa.update(ModelJob)
         .where(ModelJob.id.in_(scope.model_jobs))
         .values(
-            request=None,
-            pseudonyms=None,
-            result=None,
+            request=sa.null(),
+            pseudonyms=sa.null(),
+            result=sa.null(),
             status=sa.case((live, "failed"), else_=ModelJob.status),
             error=sa.case((live, JOB_PURGED), else_=ModelJob.error),
             # An untaken fallback whose request is gone can never be taken:
@@ -955,7 +956,7 @@ async def _people(
         session,
         sa.update(PushLog)
         .where(PushLog.company_id.in_(members), PushLog.payload.is_not(None))
-        .values(payload=None),
+        .values(payload=sa.null()),
     )
     # A company that lost signals with the subject's messages is scored again
     # (its company first: candidates' lock order, signals.mark_stale).

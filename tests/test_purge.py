@@ -13,8 +13,10 @@ control firm whose rows nothing may touch. Synthetic data only (07 §1.0).
 from __future__ import annotations
 
 import argparse
+import asyncio
 import hashlib
 import json
+import os
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
@@ -26,7 +28,8 @@ import sqlalchemy as sa
 
 from clientscrapper.config import settings
 from clientscrapper.db import models as m
-from clientscrapper.services import evidence, purge
+from clientscrapper.db.session import SessionLocal
+from clientscrapper.services import cards, evidence, purge, retention
 from clientscrapper.tools import purge as purge_tool
 from tests import gate_fixtures
 from tests.gate_fixtures import phone, tail
@@ -392,6 +395,19 @@ async def test_a_purge_executes_what_its_plan_counted_and_the_log_holds_a_hash(
     control_push = await fresh(session, m.PushLog, w.rows["pushes"]["control"].id)
     assert sent.payload is None and failed.payload is None
     assert control_push.payload is not None
+    # SQL NULL, not JSON 'null': a later IS NOT NULL never finds them again.
+    for table, column in (
+        ("push_log", "payload"),
+        ("model_jobs", "request"),
+        ("model_jobs", "pseudonyms"),
+        ("model_jobs", "result"),
+        ("companies", "verdict"),
+    ):
+        nulls = await session.scalar(
+            sa.text(f"SELECT count(*) FROM {table} WHERE {column} = 'null'::jsonb")
+        )
+        assert nulls == 0, (table, column)
+    assert not await purge.unfinished(session, w.root.id)
     # Files: the subject's own two unlinked; the shared row's file and the
     # file the control's twin row holds stay.
     assert not files["ev_own"].exists() and not files["ev_msg"].exists()
@@ -737,3 +753,292 @@ def test_make_purge_parses_one_subject():
         purge_tool.parse_args(["--phone", tail(41), "--tg-user", "1"])
     with pytest.raises(SystemExit):
         purge_tool.parse_args(["--company", str(uuid.uuid4()), "--reason", "retention"])
+
+
+# --- a purge that stopped part-way (06 §5.4: one transaction per group) -------------
+
+
+def backdate(*paths: Path, hours: float = 2) -> None:
+    stamp = now().timestamp() - hours * 3600
+    for path in paths:
+        os.utime(path, (stamp, stamp))
+
+
+async def test_a_stop_after_the_evidence_commit_leaves_files_r1_sweeps(
+    session, root, tmp_path, monkeypatch
+):
+    """Rows go first and commit, files after: a process stopped in between
+    (a deploy, OOM) leaves the subject's raw pages with no row to name them.
+    R1's orphan sweep is how they still go."""
+    w = await subject(session, root)
+    own = [root / w.rows[n].raw_path for n in ("ev_own", "ev_msg")]
+    kept = [root / w.rows[n].raw_path for n in ("ev_shared", "ev_twin_a")]
+    plan = await purge.plan_company(session, w.root.id)
+    await purge.record(session, plan, requested_by="owner:1001")
+    await session.commit()
+
+    def killed(paths: Any, *, root: Path | None = None) -> int:
+        raise asyncio.CancelledError  # the process is stopped here
+
+    monkeypatch.setattr(purge.evidence, "unlink_raw", killed)
+    with pytest.raises(asyncio.CancelledError):
+        await purge.execute(
+            session, plan, requested_by="owner:1001", now=now(), root=root
+        )
+    monkeypatch.undo()
+    await session.rollback()
+    assert all(path.is_file() for path in own)
+    row = await fresh(session, m.PurgeLog, plan.purge_log_id)
+    assert (row.error, row.executed_at) == ("running", None)
+    names = [str(path.relative_to(root)) for path in own]
+    assert await count(session, m.Evidence, m.Evidence.raw_path.in_(names)) == 0
+    # Nothing is left in the database to plan again.
+    assert not await purge.unfinished(session, w.root.id)
+    backdate(*own, *kept)
+    imports = tmp_path / "imports"
+    imports.mkdir()
+    report = await retention.retention_job(root=root, imports_dir=imports)
+    assert report["R1"]["orphans"] == 2
+    assert not any(path.exists() for path in own)
+    assert all(path.is_file() for path in kept)
+
+
+async def test_a_half_done_purge_is_found_again_and_finished(session, root, monkeypatch):
+    w = await subject(session, root)
+    firm_id, source_id = w.root.id, w.source.id
+    own = root / w.rows["ev_own"].raw_path
+    plan = await purge.plan_company(session, firm_id)
+
+    async def broken(*args: Any, **kw: Any) -> dict[str, int]:
+        raise RuntimeError("db blip in group 2")
+
+    monkeypatch.setattr(purge, "_people", broken)
+    with pytest.raises(RuntimeError):
+        await purge.execute(
+            session, plan, requested_by="owner:1001", now=now(), root=root
+        )
+    monkeypatch.undo()
+    firm = await fresh(session, m.Company, firm_id)
+    assert firm.state == "purged" and await purge.unfinished(session, firm_id)
+    # Every key /unut takes still names the firm: by its kept STIR, its uuid,
+    # the source's uuid, the person's phone and username.
+    for query in ("300000041", str(firm_id), str(source_id), phone(42), "@namuna_boss"):
+        assert await cards.live_roots(session, query) == [firm_id], query
+    again = await purge.plan_company(session, source_id)
+    assert again.company_ids == (firm_id,)
+    assert (again.counts["contacts"], again.counts["evidence"]) == (2, 4)
+    await purge.execute(session, again, requested_by="owner:1001", now=now(), root=root)
+    assert await count(session, m.Contact, m.Contact.company_id == firm_id) == 0
+    assert not own.exists()
+    assert not await purge.unfinished(session, firm_id)
+    for query in ("300000041", str(firm_id), str(source_id)):
+        assert await cards.live_roots(session, query) == [], query
+
+
+async def test_the_claim_commits_before_the_purge_reads(session, root, monkeypatch):
+    """A second tap, a cancel or an expiry that comes while the purge runs
+    finds the row ``running`` — never open, which it would close."""
+    w = await subject(session, root)
+    plan = await purge.plan_company(session, w.root.id)
+    await purge.record(session, plan, requested_by="owner:1001")
+    await session.commit()
+    seen: list[str] = []
+    real = purge._stop
+
+    async def watched(*args: Any, **kw: Any) -> dict[str, int]:
+        async with SessionLocal() as other:
+            assert plan.purge_log_id is not None
+            seen.append(await purge.row_state(other, plan.purge_log_id))
+            seen.append(str(await purge.abandon(other, plan.purge_log_id, why="expired")))
+            await other.commit()
+        return await real(*args, **kw)
+
+    monkeypatch.setattr(purge, "_stop", watched)
+    result = await purge.execute(
+        session, plan, requested_by="owner:1001", now=now(), root=root
+    )
+    assert seen == ["running", "False"]
+    assert result.executed["companies"] == 2
+    assert await purge.row_state(session, result.purge_log_id) == "done"
+
+
+async def test_the_log_row_says_where_a_plan_stands(session):
+    plan = purge.PurgePlan("company", "0" * 64, "owner", (), counts={})
+    states = {}
+    for error, executed in (
+        (None, False),
+        ("running", False),
+        ("failed:RuntimeError", False),
+        ("cancelled", False),
+        ("expired", False),
+        (None, True),
+    ):
+        row_id = await purge.record(session, plan, requested_by="owner:1")
+        await session.execute(
+            sa.update(m.PurgeLog)
+            .where(m.PurgeLog.id == row_id)
+            .values(error=error, executed_at=now() if executed else None)
+        )
+        states[(error, executed)] = await purge.row_state(session, row_id)
+    assert states == {
+        (None, False): "open",
+        ("running", False): "running",
+        ("failed:RuntimeError", False): "failed",
+        ("cancelled", False): "closed",
+        ("expired", False): "closed",
+        (None, True): "done",
+    }
+    assert await purge.row_state(session, 10**12) == "unknown"
+
+
+# --- who the subject is ----------------------------------------------------------------
+
+
+async def test_a_merged_source_gives_up_only_a_key_another_company_holds(session, root):
+    firm = await gate_fixtures.firm(
+        session, stir="300000051", website_domain="n51.example.uz"
+    )
+    # The STIR the merge carried (the root's own); a domain only this source had.
+    carried = await gate_fixtures.firm(
+        session,
+        state="merged",
+        merged_into=firm.id,
+        stir="300000051",
+        website_domain="n52.example.uz",
+    )
+    # Two sources with one domain nobody else holds: the first keeps it.
+    twins = [
+        await gate_fixtures.firm(
+            session, state="merged", merged_into=firm.id, website_domain="n53.example.uz"
+        )
+        for _ in range(2)
+    ]
+    for source in (carried, *twins):
+        session.add(
+            m.MergeLog(
+                source_company_id=source.id,
+                target_company_id=firm.id,
+                decided_by="owner:1",
+                moved={},
+            )
+        )
+    await session.commit()
+    plan = await purge.plan_company(session, firm.id, reason="owner")
+    await purge.execute(session, plan, requested_by="owner:1001", now=now(), root=root)
+    carried = await fresh(session, m.Company, carried.id)
+    assert (carried.state, carried.stir, carried.website_domain) == (
+        "purged",
+        None,
+        "n52.example.uz",
+    )
+    domains = []
+    for twin in twins:
+        domains.append(str((await fresh(session, m.Company, twin.id)).website_domain))
+    assert sorted(domains) == ["None", "n53.example.uz"]
+    # A key only the source had now names the purged firm, not a new one.
+    assert await cards.find_company_ids(session, "n52.example.uz") == [carried.id]
+
+
+async def test_a_firm_that_loses_the_subject_s_signals_is_scored_again(session, root):
+    """A post the subject's person wrote that resolved to another firm is the
+    person's: it goes, with its signals; that firm is scored again, not purged."""
+    w = await subject(session, root)
+    other = await gate_fixtures.firm(session)
+    cand = await gate_fixtures.candidate(session, other, state="review", score=65)
+    ev = await stored(session, root, b"namuna boshqa firma", "https://t.me/n/71")
+    obs = observation(ev, other)
+    session.add(obs)
+    await session.flush()
+    session.add(message(ev, SUBJECT_TG, "namuna_boss", obs))
+    session.add(
+        m.Signal(
+            company_id=other.id,
+            evidence_id=ev.id,
+            observation_id=obs.id,
+            key="vol_stated_3plus",
+            observed_at=now(),
+            source_key="telegram_monitor",
+        )
+    )
+    await session.commit()
+    assert (await fresh(session, m.LeadCandidate, cand.id)).last_scored_at is not None
+    plan = await purge.plan_company(session, w.root.id)
+    await purge.execute(session, plan, requested_by="owner:1001", now=now(), root=root)
+    assert await count(session, m.Signal, m.Signal.company_id == other.id) == 0
+    assert await fresh(session, m.Observation, obs.id) is None
+    assert await fresh(session, m.Evidence, ev.id) is None
+    after = await fresh(session, m.LeadCandidate, cand.id)
+    assert (after.state, after.last_scored_at) == ("review", None)
+    assert (await fresh(session, m.Company, other.id)).state == "active"
+    # The control firm, which lost nothing, was not touched.
+    control = await fresh(session, m.LeadCandidate, w.rows["candidates"]["control"].id)
+    assert control.last_scored_at is not None
+
+
+async def test_an_observation_that_names_the_subject_s_person_goes(session, root):
+    """Reached through the contact, whatever company it resolved to."""
+    w = await subject(session, root)
+    person = await session.scalar(
+        sa.select(m.Contact).where(m.Contact.telegram_id == SUBJECT_TG)
+    )
+    ev = await stored(session, root, b"namuna shaxs", "https://t.me/n/72")
+    obs = observation(ev, w.control)
+    obs.contact_id = person.id
+    session.add(obs)
+    await session.commit()
+    plan = await purge.plan_company(session, w.root.id)
+    await purge.execute(session, plan, requested_by="owner:1001", now=now(), root=root)
+    assert await fresh(session, m.Observation, obs.id) is None
+    assert await fresh(session, m.Evidence, ev.id) is None
+
+
+async def test_a_tail_only_an_anonymised_contact_holds_names_no_company(session):
+    company = await gate_fixtures.firm(session)
+    await gate_fixtures.contact(
+        session, company, "+998712345644", tier="person", anonymised_at=now()
+    )
+    await session.commit()
+    plan = await purge.plan_contact(session, phone_tail="712345644")
+    assert plan.company_ids == ()
+    assert plan.counts["companies"] == 0 and plan.counts["suppression"] == 1
+
+
+async def test_a_telegram_id_names_the_company_whose_contact_carries_it(session, root):
+    w = await subject(session, root)
+    plan = await purge.plan_contact(session, tg_user_id=SUBJECT_TG)
+    assert (plan.subject_kind, plan.company_ids) == ("tg_user", (w.root.id,))
+    assert plan.counts["contacts"] == 2
+    await purge.execute(session, plan, requested_by="owner:1001", now=now(), root=root)
+    assert (await fresh(session, m.Company, w.root.id)).state == "purged"
+    assert await count(session, m.Contact, m.Contact.telegram_id == SUBJECT_TG) == 0
+    assert (await fresh(session, m.Company, w.control.id)).state == "active"
+
+
+async def test_a_channel_poster_is_a_username_key_never_a_user_id(session, root):
+    """A channel's post has a negative peer id: no user id key is written for
+    it (the channel's username is)."""
+    w = await subject(session, root)
+    ev = await stored(session, root, b"namuna kanal posti", "https://t.me/n/73")
+    obs = observation(ev, w.root)
+    session.add(obs)
+    await session.flush()
+    session.add(message(ev, -1001234567890, "namuna_kanal_post", obs))
+    await session.commit()
+    plan = await purge.plan_company(session, w.root.id)
+    await purge.execute(session, plan, requested_by="owner:1001", now=now(), root=root)
+    keys = set(
+        (
+            await session.execute(sa.select(m.Suppression.key_type, m.Suppression.key))
+        ).all()
+    )
+    assert ("tg_username", "namuna_kanal_post") in keys
+    assert not any(key.startswith("-") for kind, key in keys if kind == "tg_user_id")
+
+
+async def test_an_excluded_company_is_purged_without_its_old_reason(session, root):
+    company = await gate_fixtures.firm(session, state="excluded", exclude_reason="b2c")
+    await session.commit()
+    plan = await purge.plan_company(session, company.id, reason="b2c")
+    await purge.execute(session, plan, requested_by="owner:1001", now=now(), root=root)
+    found = await fresh(session, m.Company, company.id)
+    assert (found.state, found.exclude_reason) == ("purged", None)

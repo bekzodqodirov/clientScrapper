@@ -926,6 +926,18 @@ async def find_company_ids(session: AsyncSession, query: str) -> list[uuid.UUID]
             )
         if tail is not None:
             found += [c.id for c in await companies.find_by_phone_tail(session, tail)]
+            # A purged firm whose purge stopped before its contacts went
+            # (find_by_phone_tail names live firms only): /unut finishes it.
+            found += await session.scalars(
+                sa.select(Contact.company_id)
+                .join(Company, Company.id == Contact.company_id)
+                .where(
+                    Contact.phone_tail == tail,
+                    Contact.anonymised_at.is_(None),
+                    Company.state == "purged",
+                )
+                .order_by(Contact.company_id)
+            )
         if handle is not None:
             found += await session.scalars(
                 sa.union(
