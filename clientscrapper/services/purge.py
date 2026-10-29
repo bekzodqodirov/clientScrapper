@@ -99,7 +99,7 @@ from clientscrapper.db.models import (
     Signal,
 )
 from clientscrapper.db.models import Evidence as EvidenceRow
-from clientscrapper.services import candidates, companies, evidence, push_gate
+from clientscrapper.services import candidates, companies, evidence, normalise, push_gate
 from clientscrapper.services import signals as signal_service
 from clientscrapper.services import suppression as suppression_service
 from clientscrapper.services.suppression import Entry, Key
@@ -337,6 +337,19 @@ async def collect(
             ),
         )
     )
+    # An intent post that names the subject by its handles (until R3 strips
+    # them) is theirs wherever it resolved, or if it resolved nowhere.
+    handles = Observation.parsed["handles"]
+    named = sorted({key for kind, key in own_keys if kind == "tg_username"})
+    naming: list[sa.ColumnElement[bool]] = []
+    if tg:
+        naming.append(handles["tg_user_id"].astext.in_([str(t) for t in tg]))
+    if named:
+        naming.append(sa.func.lower(handles["telegram"].astext).in_(named))
+    if naming:
+        first |= set(
+            await _ids(session, sa.select(Observation.id).where(sa.or_(*naming)))
+        )
     sent = (
         await session.execute(
             sa.select(Interaction.observation_id).where(
@@ -670,6 +683,70 @@ async def plan_contact(
         company_ids=tuple(sorted(set(holders))),
         tg_user_ids=tg,
         own_keys=own,
+    )
+    plan.counts = (await _scope_of(session, plan)).counts()
+    return plan
+
+
+async def senders_of(session: AsyncSession, handle: str) -> list[int]:
+    """The Telegram user ids a ``@username`` was seen on (seam review wave
+    4): the messages its holder wrote (``interactions.sender_username``) and
+    the intent posts that name it (``observations.parsed.handles``, until R3
+    strips them). A channel's negative peer id is no user."""
+    key = normalise.telegram_key(handle)
+    if key is None:
+        return []
+    handles = Observation.parsed["handles"]
+    found = await session.scalars(
+        sa.union(
+            sa.select(Interaction.sender_id).where(
+                Interaction.sender_username == key, Interaction.sender_id.is_not(None)
+            ),
+            sa.select(sa.cast(handles["tg_user_id"].astext, sa.BigInteger)).where(
+                sa.func.lower(handles["telegram"].astext) == key,
+                handles["tg_user_id"].astext.op("~")(r"^[0-9]{1,19}$"),
+            ),
+        )
+    )
+    return sorted({int(i) for i in found if i is not None and int(i) > 0})
+
+
+async def plan_handle(
+    session: AsyncSession, handle: str, *, reason: str = DEFAULT_REASON
+) -> PurgePlan | None:
+    """``/unut @username`` for a person the agent keeps no contact under that
+    name (seam review wave 4: the lookup answered «nothing found» while their
+    messages were held): the ``tg_user`` plan over every id the username was
+    seen on, with the username as a key of its own. None when nothing carries
+    it — no message, no post naming it; nothing changes."""
+    key = normalise.telegram_key(handle)
+    if key is None:
+        return None
+    ids = await senders_of(session, handle)
+    named = await session.scalar(
+        sa.select(
+            sa.exists().where(
+                sa.func.lower(Observation.parsed["handles"]["telegram"].astext) == key
+            )
+        )
+    )
+    if not ids and not named:
+        return None
+    holders = await _ids(
+        session,
+        sa.select(Contact.company_id).where(Contact.telegram_id.in_(ids)),
+    )
+    own: tuple[Key, ...] = (
+        ("tg_username", key),
+        *(("tg_user_id", str(i)) for i in ids),
+    )
+    plan = PurgePlan(
+        subject_kind="tg_user",
+        subject_hash=hash_key(",".join(str(i) for i in ids) or key),
+        reason=_reason(reason),
+        company_ids=tuple(sorted(set(holders))),
+        tg_user_ids=tuple(ids),
+        own_keys=tuple(k for k in own if _key_fits(k)),
     )
     plan.counts = (await _scope_of(session, plan)).counts()
     return plan
@@ -1243,10 +1320,12 @@ __all__ = [
     "hash_key",
     "plan_company",
     "plan_contact",
+    "plan_handle",
     "plan_lines",
     "record",
     "result_lines",
     "row_state",
+    "senders_of",
     "subject_root",
     "unfinished",
 ]

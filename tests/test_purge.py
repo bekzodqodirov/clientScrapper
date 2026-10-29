@@ -735,6 +735,99 @@ async def test_a_telegram_id_alone_takes_its_messages_and_its_keys(session, root
     assert keys == {("tg_user_id", str(stranger)), ("tg_username", "namuna_begona")}
 
 
+async def test_a_username_names_the_ids_it_was_seen_on(session, root):
+    """/unut @username for a person kept under no contact (seam review wave
+    4): their messages by the username's sender ids, an intent post's id
+    too, both keys — and another sender's message stays."""
+    ev = await stored(session, root, b"namuna begona 2", "https://t.me/n/71")
+    other = await stored(session, root, b"namuna boshqa 2", "https://t.me/n/72")
+    obs = observation(other, None)
+    obs.parsed = {
+        "kind": "intent_post",
+        "handles": {"telegram": "Namuna_Begona", "tg_user_id": 5100000072},
+    }
+    session.add(obs)
+    session.add_all(
+        [
+            message(ev, 5100000071, "namuna_begona"),
+            message(other, CONTROL_TG, "boshqa_xx"),
+        ]
+    )
+    await session.commit()
+    assert await purge.senders_of(session, "@Namuna_Begona") == [5100000071, 5100000072]
+    assert await purge.senders_of(session, "t.me/namuna_begona") == [
+        5100000071,
+        5100000072,
+    ]
+    assert await purge.plan_handle(session, "@hech_kim_yoq") is None
+    plan = await purge.plan_handle(session, "@namuna_begona")
+    assert plan is not None
+    assert (plan.subject_kind, plan.company_ids) == ("tg_user", ())
+    assert plan.tg_user_ids == (5100000071, 5100000072)
+    assert plan.counts["interactions"] == 1
+    await purge.record(session, plan, requested_by="owner:1001")
+    await session.commit()
+    await purge.execute(session, plan, requested_by="owner:1001", now=now(), root=root)
+    assert set(await session.scalars(sa.select(m.Interaction.sender_id))) == {CONTROL_TG}
+    # The intent post that named them, resolved nowhere, goes too.
+    assert await fresh(session, m.Observation, obs.id) is None
+    keys = set(
+        (
+            await session.execute(sa.select(m.Suppression.key_type, m.Suppression.key))
+        ).all()
+    )
+    assert {
+        ("tg_username", "namuna_begona"),
+        ("tg_user_id", "5100000071"),
+        ("tg_user_id", "5100000072"),
+    } <= keys
+    assert ("tg_username", "boshqa_xx") not in keys
+
+
+@pytest.mark.parametrize("by", ["id", "username"])
+async def test_an_intent_post_naming_the_subject_goes_with_them(session, root, by):
+    """Resolved to no company and sent by nobody the agent kept: the post's
+    own handles name the subject (a channel poster has a username only)."""
+    ev = await stored(
+        session, root, f"namuna post {by}".encode(), f"https://t.me/n/9{by}"
+    )
+    obs = observation(ev, None)
+    held = {"tg_user_id": 5100000091} if by == "id" else {"telegram": "namuna_kanal"}
+    obs.parsed = {"kind": "intent_post", "handles": held}
+    session.add(obs)
+    await session.commit()
+    if by == "id":
+        plan = await purge.plan_contact(session, tg_user_id=5100000091)
+    else:
+        found = await purge.plan_handle(session, "@namuna_kanal")
+        assert found is not None
+        plan = found
+    assert plan.counts["observations"] == 1
+    await purge.record(session, plan, requested_by="owner:1001")
+    await session.commit()
+    await purge.execute(session, plan, requested_by="owner:1001", now=now(), root=root)
+    assert await fresh(session, m.Observation, obs.id) is None
+
+
+async def test_make_purge_takes_a_username(session, root, monkeypatch):
+    monkeypatch.setattr(settings, "evidence_dir", str(root))
+    ev = await stored(session, root, b"namuna begona 3", "https://t.me/n/73")
+    session.add(message(ev, 5100000073, "namuna_uchinchi"))
+    await session.commit()
+    code, lines = await purge_tool.run(args(tg_handle="@namuna_uchinchi"))
+    assert code == 0 and lines[-1] == purge_tool.DRY_RUN_TEXT
+    code, lines = await purge_tool.run(args(tg_handle="@namuna_uchinchi", apply=True))
+    assert code == 0
+    assert await count(session, m.Interaction, m.Interaction.sender_id == 5100000073) == 0
+    code, lines = await purge_tool.run(args(tg_handle="@hech_kim_yoq"))
+    assert (code, lines) == (
+        1,
+        [purge_tool.UNKNOWN_HANDLE_TEXT.format(subject="@hech_kim_yoq")],
+    )
+    parsed = purge_tool.parse_args(["--tg-handle", "@namuna_uchinchi"])
+    assert parsed.tg_handle == "@namuna_uchinchi"
+
+
 async def test_the_plan_refuses_what_it_cannot_name(session):
     with pytest.raises(purge.PurgeRefused) as refused:
         await purge.plan_company(session, uuid.uuid4())
@@ -777,6 +870,7 @@ def args(**kw: Any) -> argparse.Namespace:
         company=kw.get("company"),
         phone=kw.get("phone"),
         tg_user=kw.get("tg_user"),
+        tg_handle=kw.get("tg_handle"),
         reason=kw.get("reason", purge.DEFAULT_REASON),
         apply=kw.get("apply", False),
     )

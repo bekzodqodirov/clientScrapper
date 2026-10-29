@@ -28,7 +28,7 @@ Telegram accounts, 10:00–17:00 Tashkent (`docs/sotuv-playbook.md`).
 | `make erp-sync WALK=full\|delta\|outcomes\|quarter\|year [ACCEPT_SHRINK=1]` | one ERP feed walk by hand (exit 3 = skipped) |
 | `make push-test` | pushes one visibly synthetic lead to the ERP |
 | `make mvp-report [START=YYYY-MM-DD]` | the pilot's four MVP numbers (§4 below) |
-| `make purge COMPANY=… \| PHONE=… \| TG_USER=… [REASON=…] [APPLY=1]` | forget a subject (06 §5.4): the plan's counts first, nothing changes without `APPLY=1`; `REASON` is `legal_request` (the default, as `/unut`), `dnc`, `b2c` or `owner` |
+| `make purge COMPANY=… \| PHONE=… \| TG_USER=… \| TG_HANDLE=@… [REASON=…] [APPLY=1]` | forget a subject (06 §5.4): the plan's counts first, nothing changes without `APPLY=1`; `REASON` is `legal_request` (the default, as `/unut`), `dnc`, `b2c` or `owner`; `TG_HANDLE` is `/unut @username`'s rule for a person kept under no contact (the ids the username was seen on) |
 | `make smoke [FULL=1]` / `make smoke-cron` | the live smoke tests, VPS only (`docs/SMOKE.md`) / print the two crontab lines that run them |
 | `make update` | backup (must succeed) → pull → rebuild → prune |
 | `make test` | ruff + mypy + pytest (needs Postgres: `make db-test` prints the line) |

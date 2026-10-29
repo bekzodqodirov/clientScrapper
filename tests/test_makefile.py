@@ -260,6 +260,12 @@ def test_make_purge_passes_the_reason_through():
     assert '--reason "owner"' in " ".join(line.split())
 
 
+def test_make_purge_takes_a_telegram_username():
+    """/unut @username's rule from the terminal (seam review wave 4)."""
+    line = " ".join(dry_run("purge", "TG_HANDLE=@namuna_tg").replace("\\", " ").split())
+    assert '--tg-handle "@namuna_tg"' in line
+
+
 def test_skip_doctor_skips_only_at_1():
     assert "tools.doctor" in dry_run("up", "SKIP_DOCTOR=0")
     assert "tools.doctor" in dry_run("up")

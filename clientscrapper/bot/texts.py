@@ -233,6 +233,10 @@ UZ: Final[Mapping[str, str]] = MappingProxyType(
             "⚠️ Oʻchirish oxirigacha yetmadi. /unut <code>{id}</code> ni qaytadan "
             "yuboring: qolgan maʼlumot boʻlsa, yangi reja chiqadi."
         ),
+        "unut.failed_again": (
+            "⚠️ Oʻchirish oxirigacha yetmadi. /unut ni qaytadan yuboring: qolgan "
+            "maʼlumot boʻlsa, yangi reja chiqadi."
+        ),
         # --- /qidir ------------------------------------------------------------
         "qidir.how": (
             "Nimani qidiray? /qidir &lt;telefon | @username | STIR | sayt | nom&gt;"

@@ -383,7 +383,7 @@ clientscrapper`, `CMD ["python", "-m", "clientscrapper.worker.main"]`. Image ≈
 | `import-clients FILE= [APPLY=1]` | `tools/import_clients.py` → `suppression(manual_import)`; dry run by default; a written import deletes its file from `data/imports/` (the export is every client's phones) |
 | `erp-sync WALK=full\|delta\|outcomes\|quarter\|year [ACCEPT_SHRINK=1]` | `tools/erp_sync.py --<walk>`: one ERP feed walk by hand, the run the scheduler makes; exit 0 ran, 1 failed, 3 skipped (disabled, feeds not configured, already running); any other `WALK` stops make |
 | `push-test` | 05 §B.1 synthetic push |
-| `purge COMPANY=<uuid> \| PHONE=<tail9> \| TG_USER=<id> [REASON=legal_request\|dnc\|b2c\|owner] [APPLY=1]` | `tools/purge.py` (§5.4; make variables, not flags — `make purge --company` is a make error) |
+| `purge COMPANY=<uuid> \| PHONE=<tail9> \| TG_USER=<id> \| TG_HANDLE=@<username> [REASON=legal_request\|dnc\|b2c\|owner] [APPLY=1]` | `tools/purge.py` (§5.4; make variables, not flags — `make purge --company` is a make error) |
 | `reload` | `compose up -d --force-recreate worker userbot bot` after editing `.env` |
 | `logs` / `ps` / `psql` / `bot` / `worker` / `userbot` | tails and shells |
 | `test` / `lint` / `fmt` / `typecheck` / `check` | `pytest -q` · `ruff check .` · `ruff format .` · `mypy` (the strict `files` list in `pyproject.toml`, 07 §2.3) |
@@ -785,6 +785,8 @@ cannot be re-created by the next observation. The plan card shows counts, never 
 `pg:<id>:y` tap or `--apply`.
 
 As built (seam review wave 4): the cards a purged lead left in the owner's and the managers' chats are closed too — they named the company, its phone, its person and its quotes, and the purge deletes their `lead_reviews` rows. Group 1 writes where each card is (`purge_log.executed.cards`: `[chat id, message id]`, our own chats only) in the transaction of the delete; `purge.close_purged_cards` edits each to «🗑 Bu lid maʼlumotlari oʻchirildi.» with no buttons and forgets it — at once after the `/unut` confirm, and from `review_cards_job` every run (even under `/toxtat`: an edit is silent and takes data out of a chat), so a `make purge` without a bot, or a card Telegram refused, is closed by the worker; pointers older than 14 days after the plan are dropped unasked. A card's message is our own; its text is the only copy of the lead the agent leaves.
+
+As built (seam review wave 4): `/unut @username` (and `make purge TG_HANDLE=@…`) for a person the agent keeps under no contact by that name plans `purge.plan_handle` instead of answering «nothing found»: a `tg_user` plan over every id the username was seen on (`interactions.sender_username`, an intent post's `handles.tg_user_id`), with the username as a key of its own; a username named only by posts (a channel poster) plans those posts. Every purge also takes the intent posts whose `handles` name the subject's ids or username, wherever they resolved. A username that matches a company's contact still plans that company.
 
 ### 5.5 Suppression precedence and overrides
 

@@ -51,6 +51,7 @@ from clientscrapper.db.models import (
     Company,
     Contact,
     Evidence,
+    Interaction,
     LeadCandidate,
     LeadReview,
     PurgeLog,
@@ -991,6 +992,46 @@ async def test_unut_takes_the_lead_off_the_cards_it_left_in_the_chat(w):
             sa.select(PurgeLog).execution_options(populate_existing=True)
         )
         assert row is not None and purge.CARDS_KEY not in (row.executed or {})
+
+
+async def test_unut_a_username_kept_under_no_contact_takes_their_messages(w):
+    """The person wrote in a monitored chat and the agent kept no contact by
+    that name: /unut @username plans their messages, never «nothing found»
+    (seam review wave 4)."""
+    async with w.db() as s:
+        s.add(
+            Interaction(
+                tg_chat_id=-100800,
+                tg_message_id=81,
+                sender_id=5100000081,
+                sender_username="namuna_yozuvchi",
+                sender_name="Namuna",
+                text="5 kub mato kerak",
+                occurred_at=NOW,
+                prefilter_hit=["volume_kub"],
+            )
+        )
+    await w.say("/unut @Namuna_Yozuvchi")
+    plan_text = w.last()
+    assert plan_text.splitlines()[0] == "🗑 Oʻchirish rejasi · huquqiy soʻrov"
+    assert "Telegram xabar: 1" in plan_text and "namuna_yozuvchi" not in plan_text
+    [yes, _] = w.buttons()
+    await w.press(yes)
+    assert w.last().splitlines()[0] == "✅ Oʻchirildi · huquqiy soʻrov"
+    async with w.db() as s:
+        left = await s.scalar(
+            sa.select(sa.func.count()).where(Interaction.sender_id == 5100000081)
+        )
+        assert left == 0
+        held = await s.scalar(
+            sa.select(Suppression).where(
+                Suppression.key_type == "tg_username",
+                Suppression.key == "namuna_yozuvchi",
+            )
+        )
+        assert held is not None and held.kind == "legal"
+    await w.say("/unut @hech_kim_yoq_x")
+    assert w.last() == t("unut.none", query="@hech_kim_yoq_x")
 
 
 async def test_unut_cancel_and_a_forgotten_plan_delete_nothing(w):

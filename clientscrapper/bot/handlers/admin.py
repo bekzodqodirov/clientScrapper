@@ -203,16 +203,36 @@ async def on_import(tap: Tap) -> None:
 # --- /unut ---------------------------------------------------------------------------
 
 
+def _handle(arg: str) -> bool:
+    """A Telegram ``@username`` or ``t.me/`` link, as ``cards.lookup`` reads one."""
+    text = arg.strip()
+    return text.startswith("@") or "t.me/" in text.lower()
+
+
 async def unut(message: Message, deps: Deps) -> None:
     arg = args_of(message)
     if not arg:
         await reply(message, t("unut.how"))
         return
+    held: purge.PurgePlan | None = None
     async with deps.session_factory() as session:
         found, by_name = await cards.purge_roots(session, arg)
         if len(found) == 1:
             plan = await purge.plan_company(session, found[0], reason=PURGE_REASON)
             purge_log_id = await purge.record(session, plan, requested_by=_owner(message))
+        elif not found and _handle(arg):
+            # A person kept under no contact by that name: their messages,
+            # by the ids the username was seen on (purge.plan_handle).
+            held = await purge.plan_handle(session, arg, reason=PURGE_REASON)
+            if held is not None:
+                purge_log_id = await purge.record(
+                    session, held, requested_by=_owner(message)
+                )
+    if held is not None:
+        deps.plans.put(PLAN_PURGE, held, now=deps.clock(), plan_id=purge_log_id)
+        keyboard = None if held.empty else keyboards.purge_keyboard(purge_log_id)
+        await reply(message, pages.purge_plan_text(held), keyboard=keyboard)
+        return
     if not found:
         await reply(message, t("unut.none", query=esc(arg)))
         return
@@ -287,8 +307,12 @@ async def on_purge(tap: Tap) -> None:
         # owner is told how to finish — /unut plans the company again while
         # it still holds anything (purge.unfinished).
         log.warning("purge stopped", extra={"error": type(exc).__name__})
-        # /unut plans a company (plan_company): its root is the one id.
-        await edit(tap.query, t("unut.failed", id=str(planned.company_ids[0])))
+        # /unut plans a company (plan_company): its root is the one id; a
+        # username's plan may name none (plan_handle).
+        if planned.company_ids:
+            await edit(tap.query, t("unut.failed", id=str(planned.company_ids[0])))
+        else:
+            await edit(tap.query, t("unut.failed_again"))
         return
     await edit(tap.query, pages.purge_result_text(result, reason=planned.reason))
     if tap.query.bot is not None:

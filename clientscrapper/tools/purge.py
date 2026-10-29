@@ -34,6 +34,7 @@ log = logging.getLogger(__name__)
 
 DRY_RUN_TEXT: Final = "Sinov: hech narsa oʻchirilmadi. Oʻchirish uchun APPLY=1 qoʻshing."
 UNKNOWN_TEXT: Final = "Bunday kompaniya topilmadi: {subject}"
+UNKNOWN_HANDLE_TEXT: Final = "Bu Telegram foydalanuvchisining maʼlumoti yoʻq: {subject}"
 BAD_PHONE_TEXT: Final = (
     "Telefon tushunilmadi: PHONE=+998901234567 yoki oxirgi 9 raqamini yozing."
 )
@@ -85,6 +86,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     which.add_argument("--company", type=uuid.UUID, help="a company uuid")
     which.add_argument("--phone", help="the last nine digits of a phone")
     which.add_argument("--tg-user", type=int, help="a Telegram user id")
+    which.add_argument("--tg-handle", help="a Telegram @username or t.me link")
     parser.add_argument(
         "--reason", choices=purge.OWNER_REASONS, default=purge.DEFAULT_REASON
     )
@@ -109,6 +111,14 @@ async def run(
         try:
             if args.company is not None:
                 plan = await purge.plan_company(session, args.company, reason=args.reason)
+            elif args.tg_handle:
+                # The /unut @username rule: the ids the username was seen on.
+                held = await purge.plan_handle(
+                    session, args.tg_handle, reason=args.reason
+                )
+                if held is None:
+                    return 1, [UNKNOWN_HANDLE_TEXT.format(subject=args.tg_handle)]
+                plan = held
             else:
                 plan = await purge.plan_contact(
                     session,
