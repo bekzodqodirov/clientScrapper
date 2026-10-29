@@ -240,6 +240,9 @@ class Landed:
 Checker = Callable[[Any], Validated]
 MakeChecker = Callable[[AsyncSession, ModelJob], Awaitable[Checker]]
 Effects = Callable[[AsyncSession, Landed, datetime], Awaitable[None]]
+# The night's selection of a kind: enqueues the jobs the submit after it
+# sends (T-30: the companies a company_verdict is due for); returns how many.
+Selector = Callable[[Callable[[], AsyncSession], datetime], Awaitable[int]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -248,13 +251,16 @@ class BatchKind:
     reads what the validators need (the evidence excerpts) and returns the
     answer → ``Validated`` function both lanes use; None stores the answer as
     it validated against the schema. ``apply(session, landed, now)`` writes
-    the effects in the job's transaction."""
+    the effects in the job's transaction. ``select(session_factory, now)``,
+    when set, is the night's selection: ``model_batch_submit_job`` runs it
+    right before the submit, so what it enqueues goes out the same night."""
 
     schema: type[BaseModel]
     system: str
     prompt_version: int | None = None
     checker: MakeChecker | None = None
     apply: Effects | None = None
+    select: Selector | None = None
 
 
 KINDS: dict[Operation, BatchKind] = {}
@@ -460,6 +466,7 @@ class LaneReport:
     taken: int = 0
     given_up: int = 0
     waiting: int = 0
+    selected: int = 0
     errors: int = 0
     batch_ids: list[str] = field(default_factory=list)
     error: Exception | None = field(default=None, repr=False)
@@ -1308,6 +1315,29 @@ async def take_fallbacks(
     return report
 
 
+# --- 1b. the night's selection ----------------------------------------------------------
+
+
+async def select_nightly(
+    session_factory: SessionFactory = SessionLocal,
+    *,
+    now: datetime,
+    report: LaneReport | None = None,
+) -> LaneReport:
+    """Each registered kind's ``select`` (the jobs the night's submit sends).
+    A selection that raises is passed over (``report.noted``): the night's
+    submit still sends what waits."""
+    report = report or LaneReport()
+    for op, kind in list(KINDS.items()):
+        if kind.select is None:
+            continue
+        try:
+            report.selected += await kind.select(session_factory, now)
+        except Exception as exc:
+            report.noted(exc, "batch selection failed", op=op)
+    return report
+
+
 # --- the jobs ---------------------------------------------------------------------
 
 
@@ -1337,12 +1367,13 @@ def _finish(report: LaneReport) -> dict[str, int]:
 
 async def model_batch_submit_job(*, now: datetime | None = None) -> dict[str, int]:
     """The worker's ``model_batch_submit`` slot (23:30, 04 §0): the stuck
-    batches given up, the night's batch sent, then the fallbacks handed to
-    the instant lane until the day ends (``FALLBACK_UNTIL``). Counts only are
-    logged (06 §4.5)."""
+    batches given up, the night's selection enqueued (``select_nightly``),
+    the night's batch sent, then the fallbacks handed to the instant lane
+    until the day ends (``FALLBACK_UNTIL``). Counts only are logged (06 §4.5)."""
     start = now or _wall()
     report = LaneReport()
     await _step(give_up_stuck(now=start, report=report), report, "give_up_stuck")
+    await _step(select_nightly(now=start, report=report), report, "select_nightly")
     await _step(submit_batch(now=start, report=report), report, "submit_batch")
     await _step(
         take_fallbacks(
@@ -1384,6 +1415,7 @@ __all__ = [
     "BatchKind",
     "Landed",
     "LaneReport",
+    "Selector",
     "collect",
     "collect_batch",
     "enqueue",
@@ -1392,6 +1424,7 @@ __all__ = [
     "model_batch_collect_job",
     "model_batch_submit_job",
     "register",
+    "select_nightly",
     "submit_batch",
     "take_fallbacks",
 ]

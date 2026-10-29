@@ -19,7 +19,7 @@ Russian land on the same Latin). The flags (04 §4.5):
 
 | flag | the text has |
 |---|---|
-| ``digit`` | a digit of any script outside ``allowed_tokens`` («2018», the year GSR began) |
+| ``digit`` | a digit of any script outside ``allowed_tokens`` («2018») |
 | ``money`` | a price word, a currency, a percent sign |
 | ``time`` | a day count, a duration, a speed («kun», «hafta», «soat», «срок», «tez») |
 | ``promise`` | a guarantee («kafolat», «гарант», «albatta», «eng arzon», «bojsiz») |
@@ -27,7 +27,7 @@ Russian land on the same Latin). The flags (04 §4.5):
 | ``link`` | a URL, a t.me link, an @handle, «www.» |
 | ``competitor`` | a forwarder's word or name (``COMPETITOR_NAME_RE``, the seeds' names) |
 | ``optout_missing`` | not ending with the opt-out sentence of its language |
-| ``language`` | not Uzbek (Latin or Cyrillic) or Russian — English, another Cyrillic alphabet, or a script the ``lang`` does not name |
+| ``language`` | not Uzbek (Latin, Cyrillic) or Russian, or not ``lang`` |
 | ``hook_missing`` | none of the goods words nor the source's name |
 | ``pseudonym`` | a pseudonym token left in it (``<NAME_1>``, ``<PHONE_1>``, ``<ID>``) |
 
@@ -104,7 +104,7 @@ class GuardResult:
 # --- the two views ---------------------------------------------------------------
 
 _FORMAT_CHARS: Final = frozenset({"Cf"})
-_QUOTES: Final = str.maketrans({c: "" for c in "\"«»“”„‟‹›"})
+_QUOTES: Final = str.maketrans({c: "" for c in '"«»“”„‟‹›'})
 _DASHES: Final = str.maketrans({c: "-" for c in "‐‑‒–—―−"})
 _SPACES: Final = re.compile(r"\s+")
 

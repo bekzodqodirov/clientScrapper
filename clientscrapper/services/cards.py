@@ -66,8 +66,11 @@ from clientscrapper.services import (
     keys,
     normalise,
     push_gate,
+    redlines,
     suppression,
+    validators,
 )
+from clientscrapper.services import verdict as verdict_service
 from clientscrapper.services.candidates import CandidateView, SignalEvidence
 from clientscrapper.services.gates import GateResult
 from clientscrapper.services.suppression import Hit
@@ -131,15 +134,22 @@ SHARED_PHONE_UZ: Final = "⚠️ Raqam 3+ firmada uchraydi"
 
 # The manager card's fixed lines (06 §1.7, 01 §7 decision 2a).
 MANAGER_HOURS_UZ: Final = "oʻz akkauntingizdan, 10:00–17:00 (Du–Sha)"
+# The last sentence is the opt-out line of the playbook (§2.6) the redline
+# gate holds every opener to (services/redlines.OPTOUT_UZ — one home).
 NO_PRICE_UZ: Final = (
-    "⚠️ Birinchi xabarda narx yoʻq. Oxirgi jumla: "
-    '«Agar qiziq boʻlmasa, "yoʻq" deb yozing — boshqa yozmayman.»'
+    f"⚠️ Birinchi xabarda narx yoʻq. Oxirgi jumla: «{redlines.OPTOUT_UZ}»"
 )
 ERP_FIRST_UZ: Final = "🔍 Yozishdan oldin ERPda nomi boʻyicha qidiring"
 OPENER_MAX: Final = crm_push.OPENER_MAX
 # Without 04's draft: the playbook's segment script (docs/sotuv-playbook.md
 # §3.1; the templates themselves are T-30's).
 OPENER_FALLBACK_UZ: Final = "sotuv qoʻllanmasidagi «{segment}» shabloni (§3.1)"
+# 04 §4.4: the verdict's reasons on the owner card; 04 §8: the line when a
+# cap refused the verdict; the lt1 flag (validators.verdict_small), no points.
+VERDICT_LINE_UZ: Final = "🤖 AI xulosasi: "
+VERDICT_REFUSED_UZ: Final = "🤖 AI xulosasi: byudjet tugadi"
+VERDICT_SMALL_UZ: Final = "⚠️ AI: yuk 1 kubdan kam koʻrinadi (ball qoʻshilmadi)"
+VERDICT_REASON_SEP: Final = "; "
 
 
 class CardRefused(Exception):
@@ -281,6 +291,11 @@ class ReviewView:
     # not usable (short, foreign) is still the handoff card: ✅ would be
     # refused by the push gate's item 4.
     phone_usable: bool | None = None
+    # The company's RelevanceVerdict (04 §4.4): its Uzbek reasons, its lt1
+    # flag; ``verdict_refused`` when a cap refused it today and none stands.
+    verdict_reasons: tuple[str, ...] = ()
+    verdict_small: bool = False
+    verdict_refused: bool = False
 
     @property
     def handoff_card(self) -> bool:
@@ -309,6 +324,20 @@ def _contact_line(rv: ReviewView) -> str:
     if c.website_domain:
         parts.append(esc(c.website_domain))
     return " · ".join(parts)
+
+
+def verdict_lines(rv: ReviewView) -> list[str]:
+    """The card's AI lines (04 §4.4, §8): the reasons, else the budget's
+    word; the lt1 flag beside either."""
+    reasons = [r for r in (crm_push.clean(x) for x in rv.verdict_reasons) if r]
+    lines: list[str] = []
+    if reasons:
+        lines.append(VERDICT_LINE_UZ + esc(VERDICT_REASON_SEP.join(reasons)))
+    elif rv.verdict_refused:
+        lines.append(VERDICT_REFUSED_UZ)
+    if rv.verdict_small:
+        lines.append(VERDICT_SMALL_UZ)
+    return lines
 
 
 def render_review(rv: ReviewView) -> Card:
@@ -343,6 +372,7 @@ def render_review(rv: ReviewView) -> Card:
         SHARED_PHONE_UZ if rv.shared_phone and layout == "review" else "",
         _quote_line(quote, title, cited),
         f"🔗 {esc(crm_push.url_line(cited))}",
+        *verdict_lines(rv),
         ("🧮 " + " · ".join(esc(p) for p in ball)) if ball else "",
         gate_line,
     ]
@@ -443,6 +473,11 @@ async def review_view(
     tails = [lead.phone_tail.strip()] if lead is not None and lead.phone_tail else []
     gate = await gates.evaluate(session, candidate.company_id, now=now, tails=tails)
     handoff = candidates.is_handoff(candidate.score_breakdown)
+    verdict = company.verdict if company is not None else None
+    reasons = verdict.get("reasons") if isinstance(verdict, dict) else None
+    refused = verdict is None and await verdict_service.refused_today(
+        session, [candidate.company_id], now=now
+    )
     return ReviewView(
         review_id=review.id,
         candidate=view,
@@ -455,6 +490,9 @@ async def review_view(
             await _handoff_username(session, candidate) if handoff else None
         ),
         phone_usable=push_gate.usable_lead_phone(lead),
+        verdict_reasons=tuple(str(r) for r in reasons or () if isinstance(r, str)),
+        verdict_small=validators.verdict_small(verdict),
+        verdict_refused=refused,
     )
 
 

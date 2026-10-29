@@ -109,6 +109,8 @@ BUILT = {
     # T-28: the push and its reconcile.
     "crm_push",
     "reconcile",
+    # T-30: the instant verdicts and the openers (services/verdict).
+    "verdict",
 }
 # The ERP slots and the ErpSync variant each runs (03 §3, 05 §B.2).
 ERP_VARIANTS = {

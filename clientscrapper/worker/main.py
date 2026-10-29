@@ -31,7 +31,10 @@ outcomes/quarter/year walks), each ``run_collector(ErpSync, variant=…)``;
 ``classify`` (T-15, ``services/classify.classify_job``, woken by
 ``cs_interaction``); the batch lane (T-16, ``services/model_jobs``):
 ``model_batch_submit`` at 23:30 and ``model_batch_collect`` every 30 minutes
-00:30–08:00; ``score`` (T-18, ``services/candidates.score_job``, every 15
+00:30–08:00 — the ``company_verdict`` kind they carry, and the night's
+selection the submit runs first, are T-30's ``services/verdict``, which also
+fills ``verdict`` (every 10 minutes: the instant verdicts, then the openers;
+never the batch lane's fallbacks, which only the 23:30 run takes); ``score`` (T-18, ``services/candidates.score_job``, every 15
 minutes and at once on ``cs_interaction``); ``crm_push`` (T-28,
 ``services/crm_push.crm_push_job``, every minute, sending only inside the
 push window) and ``reconcile`` (T-28, ``crm_push.reconcile_job``, every 10
@@ -114,6 +117,7 @@ from clientscrapper.services import (
     health,
     model_jobs,
     restore_drill,
+    verdict,
 )
 from clientscrapper.services import http as http_layer
 from clientscrapper.services.lifecycle import (
@@ -339,7 +343,7 @@ def job_table() -> tuple[JobSlot, ...]:
         ),
         JobSlot("review_cards", ("every 2m",), "T-21", note="sends inside REVIEW_HOURS"),
         JobSlot("enrich", ("*/10 7-21 * * *",), "T-24", note="every 10 min 07:00–22:00"),
-        JobSlot("verdict", ("every 10m",), "T-30"),
+        JobSlot("verdict", ("every 10m",), "T-30", verdict.verdict_job),
         # --- 05: push, reconcile, precision ---------------------------------------
         JobSlot(
             "crm_push",

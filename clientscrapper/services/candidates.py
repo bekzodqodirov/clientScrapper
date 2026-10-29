@@ -613,11 +613,18 @@ classify.register_after_classify(after_classify)
 # --- scoring a candidate ------------------------------------------------------------
 
 
+# What other writers keep in score_breakdown beside the gates and the
+# enrichment trail: the opener (05 §B.1's NIMA DEYISH, 06 §1.7's «Taklif»).
+CARRIED_KEYS: Final = ("opener", "opener_meta")
+
+
 def _carried(
     previous: Mapping[str, Any] | None, breakdown: dict[str, Any]
 ) -> dict[str, Any]:
     """A re-score keeps what other writers put in the breakdown: the gates'
-    verdicts (T-19, incl. ``gates.no_phone``) and the enrichment trail (T-24).
+    verdicts (T-19, incl. ``gates.no_phone``), the enrichment trail (T-24)
+    and the opener with how it was made (``opener``/``opener_meta``, T-30's
+    ``services/openers``).
     ``gates.no_phone`` is the phone-less handoff's mark and holds only while
     there is no usable phone: a score that finds one drops it (the card is
     the ordinary one again, 06 §1.3; a manager's approval is recorded by
@@ -630,6 +637,9 @@ def _carried(
             merged["gates"] = {**dict(gates), **merged["gates"]}
         if isinstance(enrichment, list):
             merged["enrichment"] = list(enrichment)
+        for key in CARRIED_KEYS:
+            if key in previous and key not in merged:
+                merged[key] = previous[key]
     if merged.get("usable_phone") is True and "no_phone" in merged["gates"]:
         merged["gates"] = {k: v for k, v in merged["gates"].items() if k != "no_phone"}
     return merged
@@ -1082,8 +1092,8 @@ async def load_view(
     company, the lead contact the push gate chooses (``push_gate.lead_contact``),
     the decision maker with a legal basis, the lineage's live signals with
     their evidence, the stated volume, the score's breakdown and — when 04's
-    draft stored one — the opener (``score_breakdown.opener``; UNVERIFIED:
-    T-30 decides where the draft lives). Raises LookupError for a candidate
+    draft or the playbook template stored one — the opener
+    (``score_breakdown.opener``, ``services/openers``). Raises LookupError for a candidate
     or a company that is gone."""
     from clientscrapper.services import push_gate  # it imports this module
 
