@@ -28,7 +28,15 @@ from clientscrapper.bot.texts import t
 from clientscrapper.config import settings
 from clientscrapper.db.models import LeadReview, Suppression
 from clientscrapper.db.session import session_scope
-from clientscrapper.services import candidates, cards, crm_push, openers, owner, reviews
+from clientscrapper.services import (
+    candidates,
+    cards,
+    crm_push,
+    gates,
+    openers,
+    owner,
+    reviews,
+)
 from tests import gate_fixtures
 from tests.ast_tools import PACKAGE, dotted_name, imported_modules, is_under, tree_of
 from tests.fakes import message
@@ -237,13 +245,28 @@ async def test_yozmang_dedi_writes_a_dnc_and_suppresses(session, setup):
     assert (await fresh(session, manager)).answer == "said_no"
 
 
-async def test_wrong_or_b2c_excludes(session, setup):
+async def test_wrong_or_b2c_excludes_the_company_as_the_owners_b2c_does(session, setup):
+    """The binding decision: B2C buyers are excluded — the manager's ❌ writes
+    the company-wide row the owner's 🙍 writes (seam review: it excluded the
+    one candidate, so the poster's next ask went round to a manager again)."""
     cand, manager = await held_lead(session)
     await session.commit()
     w = world(session_scope)
     await w.press(cb.manager(manager.id, "w"), user=MANAGER)
     found = await fresh(session, cand)
     assert (found.state, found.exclude_reason) == ("excluded", "b2c")
+    [row] = list(await session.scalars(sa.select(Suppression)))
+    assert (row.kind, row.key_type, row.key, row.source, row.reason) == (
+        "b2c",
+        "company_id",
+        str(cand.company_id),
+        "owner_bot",
+        "manager_report",
+    )
+    # The firm's next ask meets the row: gate 5 suppresses it.
+    gate = await gates.evaluate(session, cand.company_id, now=NOW)
+    assert gate.decision == "suppressed"
+    assert gate.hit is not None and gate.hit.kind == "b2c"
 
 
 # --- who may answer -----------------------------------------------------------------

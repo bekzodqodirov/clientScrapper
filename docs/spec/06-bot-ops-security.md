@@ -247,7 +247,7 @@ of the least-loaded rule is month-2 backlog (07 §4.1).
 |---|---|
 | 📞 Bogʻlandim | `answer='contacted'`; candidate stays `hold`; digest counts it; the manager may then send `/tel <review_id> +998…` — stored as the company's person-tier phone with `legal_basis='pre_contract_request'`, `source_url=message_url`, `collected_at=now()`; the new phone re-scores the candidate at once: `hold → scored → approved(approved_by='manager:<tg_id>')` (02 §2.9 — the owner's earlier `handoff` answer was the owner's approval; `approved_by` takes exactly `'owner:<id>'`, `'auto:<source>'` or `'manager:<tg_id>'`) → normal push gate → ERP lead with phone |
 | 🙅 Yozmang dedi | `answer='said_no'` → `suppression(dnc, tg_username, source='owner_bot', reason='manager_report')`; candidate `suppressed`; the owner's digest lists it |
-| ❌ Notoʻgʻri / B2C | `answer='wrong_or_b2c'` → `excluded(b2c)`; outcome fed to source precision as negative |
+| ❌ Notoʻgʻri / B2C | `answer='wrong_or_b2c'` → `excluded(b2c)` + `suppression(b2c, company_id, source='owner_bot', reason='manager_report')` — the company-wide row the owner's 🙍 writes (seam review wave 4: excluding the one candidate let the poster's next ask go round to a manager again). As built it is **not** fed to source precision: precision is ERP-outcome-only (05 §B.2, `erp_feeds._precision_numbers` — a handoff lead the manager judged never reached the ERP, so it is in no push's denominator); the digest says «Menejerlar kecha: notoʻgʻri/B2C N» |
 | ⏭ Keyinroq | `expires_at += 24 h` |
 
 No card after 72 h → `expired`, owner digest line «Menejer javob bermadi: {n}». Managers never

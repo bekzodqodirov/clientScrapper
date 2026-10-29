@@ -27,7 +27,7 @@ handoff         approved    review → hold 30 d + a ``kind='manager'`` row
                             (with nobody yet when no manager is listed)
 contacted       approved    stays hold (``/tel`` re-scores it)
 said_no         declined    hold → suppressed + ``suppression(dnc)``
-wrong_or_b2c    declined    hold → excluded(b2c)
+wrong_or_b2c    declined    hold → excluded(b2c) + ``suppression(b2c)``
 =============  ==========  ===============================================
 
 An owner card waits on a candidate in ``review``, a manager card on one in
@@ -673,6 +673,16 @@ async def _wrong(
 ) -> tuple[str, int | None]:
     if not await _claim(session, review, "wrong_or_b2c", by=by, now=now):
         raise Refused("stale")
+    # The binding decision «B2C buyers are excluded»: the company-wide row
+    # the owner's 🙍 writes (``_not_b2b``), so the poster's next ask does not
+    # go round to a manager again; a manager's word, by the owner bot.
+    await suppression.suppress_company(
+        session,
+        candidate.company_id,
+        "b2c",
+        source=suppression.OWNER_SOURCE,
+        reason=MANAGER_REASON,
+    )
     await candidates.transition(
         session, candidate, "excluded", now=now, exclude_reason="b2c"
     )
