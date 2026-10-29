@@ -27,11 +27,17 @@ stricter on purpose and never taken back here: ``bounced`` (a wrong number is
 a fact about the number), ``companies.is_competitor`` (the owner clears it by
 hand), every row a person wrote and every ``erp_feed`` / ``manual_import`` row
 (their own syncs own them) — and a ``lost`` row while the ``lost_no_contact``
-label that wrote it stands (``KEPT_WHILE_STANDING``): its key can leave the
-company (a merge moves the contact, an anonymisation or a purge clears it)
-while the decision «never again» did not move. A row this module writes is
-``source='outcomes'`` with ``reason='outcome:<external_id>'`` or
-``'erp_belt:<external_id>'`` — that is how it finds its own rows again.
+label that wrote it stands, a ``client`` row while the ``won`` /
+``landed_client`` label that wrote it stands (``KEPT_WHILE_STANDING``): its
+key can leave the company (a merge moves the contact, an anonymisation or a
+purge clears it) while the decision («never again», «our client») did not
+move. A won or landed company is closed on every key it is known by — the
+pushed phone, its Telegram usernames, Instagram handles, domain and STIR
+(01 §7 decision 2a: the ERP checks a client by phone only) — and the
+retraction that takes its label back takes them all back with it. A row
+this module writes is ``source='outcomes'`` with
+``reason='outcome:<external_id>'`` or ``'erp_belt:<external_id>'`` — that is
+how it finds its own rows again.
 
 ``carry_lost_reason`` is the one place a stored value outranks the feed: a
 renamed dictionary label comes back as ``lost_reason: null`` on every old
@@ -532,8 +538,13 @@ NEVER_RETRACTED: Final[frozenset[str]] = frozenset({"bounced"})
 # keeps the lost rows (04 §7) — while the decision «never again» did not
 # move; only a changed label takes it back (02 §2.11). Every other row sits
 # on the pushed phone or the company id, which never leave.
+# The same holds for a client (01 §7 decision 2a): the handle, domain or STIR
+# of a company that became a client stays closed while the won/landed label
+# stands, whatever the company holds now.
 KEPT_WHILE_STANDING: Final[Mapping[str, frozenset[str]]] = {
     "lost_no_contact": frozenset({"lost"}),
+    "won": frozenset({"client"}),
+    "landed_client": frozenset({"client"}),
 }
 # Serialises the recompute across processes (the nightly walk, reconcile's
 # 10-minute walk): two of them over one company would each delete what the
@@ -600,6 +611,20 @@ def _key_ok(key: str | None) -> bool:
     return key is not None and 3 <= len(key) <= 200
 
 
+def company_keys(company: CompanyKeys) -> list[tuple[str, str]]:
+    """The keys beyond the pushed phone an outcome closes for the whole
+    company — its Telegram usernames, Instagram handles, domains and STIRs
+    over its lineage (02 §2.11 ``lost_no_contact``; 01 §7 decision 2a for
+    ``won``/``landed_client``): sorted, each one the table can hold."""
+    found: list[tuple[str, str]] = [
+        ("tg_username", n) for n in sorted(company.tg_usernames)
+    ]
+    found += [("instagram", h) for h in sorted(company.instagrams) if _key_ok(h)]
+    found += [("domain", d) for d in sorted(company.domains) if _key_ok(d)]
+    found += [("stir", s) for s in sorted(company.stirs)]
+    return found
+
+
 def desired(
     company: CompanyKeys,
     labelled: Sequence[Labelled],
@@ -624,21 +649,17 @@ def desired(
         tail = item.phone_tail
         because = Want(OUTCOME_REASON + item.external_id)
         if item.label in CLIENT_LABELS:
+            # 01 §7 decision 2a: the ERP knows its client by phone only, so
+            # the agent closes the company's other keys itself.
             add(("client", "phone_tail", tail), because)
+            for key_type, key in company_keys(company):
+                add(("client", key_type, key), because)
         elif item.label == "dropped_suppressed":
             add(("client", "phone_tail", tail), Want(BELT_REASON + item.external_id))
         elif item.label == "lost_no_contact":
             add(("lost", "phone_tail", tail), because)
-            for name in sorted(company.tg_usernames):
-                add(("lost", "tg_username", name), because)
-            for handle in sorted(company.instagrams):
-                if _key_ok(handle):
-                    add(("lost", "instagram", handle), because)
-            for domain in sorted(company.domains):
-                if _key_ok(domain):
-                    add(("lost", "domain", domain), because)
-            for stir in sorted(company.stirs):
-                add(("lost", "stir", stir), because)
+            for key_type, key in company_keys(company):
+                add(("lost", key_type, key), because)
         elif item.label in ("lost_price", "lost_not_importer"):
             span = PRICE_COOLDOWN if item.label == "lost_price" else NOT_IMPORTER_COOLDOWN
             until = item.label_changed_at + span
@@ -1195,6 +1216,7 @@ __all__ = [
     "Want",
     "apply_effects",
     "carry_lost_reason",
+    "company_keys",
     "deliveries",
     "derive_label",
     "desired",
