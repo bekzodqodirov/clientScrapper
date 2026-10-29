@@ -119,9 +119,11 @@ question 2's «review everything until the first precision numbers exist», T-39
   earned it, and the source's mode stays «qoʻlda».
 - `AUTO_APPROVE=true` (then `make reload`) — from the moment the Sunday job turns a source's
   `auto_push` on, its hot candidates are approved as `auto:<source>` and pushed **without an
-  owner card**; `/manbalar` and `/holat` say «avto». The owner is not told of a flip until the
-  digest exists (T-35, «a flip of auto_push is its own line»): read `/manbalar` on Monday, and
-  forbid a source there (ℹ️ → «🚫 Avto-pushni taqiqlash») to keep its cards.
+  owner card**; `/manbalar` and `/holat` say «avto». The owner is told of a flip in Telegram on
+  the first health sweep after `QUIET_HOURS` (the job runs at Sunday 04:00, inside them;
+  `erp_feeds.tell_flips`, once per week's flips), and Monday's digest has the flip as a line —
+  with «AUTO_APPROVE oʻchiq — bu manbalarning kartalari hali ham sizga keladi» while the switch
+  is off. Forbid a source on `/manbalar` (ℹ️ → «🚫 Avto-pushni taqiqlash») to keep its cards.
 
 ## 5. The pilot's numbers (07 §3.2) — `/holat` and `make mvp-report`
 

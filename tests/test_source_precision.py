@@ -377,6 +377,26 @@ async def test_the_worker_slot_runs_the_job(session):
     assert (await row(session, "telegram_monitor")).auto_push is True
 
 
+async def test_the_worker_job_outside_quiet_hours_tells_the_flips_itself(
+    session, monkeypatch
+):
+    """Run by hand on a weekday (docs/OPS.md) or late after a restart, the
+    job tells its flips at once rather than waiting for the next sweep — its
+    own ``_tell_flips`` (seam review wave 4: no test held it)."""
+    from clientscrapper.worker import main as worker
+
+    told: list[str] = []
+
+    async def notify(text: str) -> bool:
+        told.append(text)
+        return True
+
+    monkeypatch.setattr(worker._seams, "notify", notify)
+    await pushes(session, "telegram_monitor", good=15)
+    await worker.source_precision_job(now=MORNING)
+    assert len(told) == 1 and told[0].startswith(erp_feeds.FLIPS_HEAD_UZ)
+
+
 async def tap_source(session, key: str, *, now: datetime) -> bool | None:
     """One ``src:<key>:t`` tap, committed before anything is asserted — a
     failing assertion must not leave the row locked under the fixture's

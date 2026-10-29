@@ -383,7 +383,7 @@ clientscrapper`, `CMD ["python", "-m", "clientscrapper.worker.main"]`. Image ≈
 | `import-clients FILE= [APPLY=1]` | `tools/import_clients.py` → `suppression(manual_import)`; dry run by default; a written import deletes its file from `data/imports/` (the export is every client's phones) |
 | `erp-sync WALK=full\|delta\|outcomes\|quarter\|year [ACCEPT_SHRINK=1]` | `tools/erp_sync.py --<walk>`: one ERP feed walk by hand, the run the scheduler makes; exit 0 ran, 1 failed, 3 skipped (disabled, feeds not configured, already running); any other `WALK` stops make |
 | `push-test` | 05 §B.1 synthetic push |
-| `purge --company <uuid> \| --phone <tail9> \| --tg-user <id> [--apply]` | `tools/purge.py` (§5.4) |
+| `purge COMPANY=<uuid> \| PHONE=<tail9> \| TG_USER=<id> [REASON=legal_request\|dnc\|b2c\|owner] [APPLY=1]` | `tools/purge.py` (§5.4; make variables, not flags — `make purge --company` is a make error) |
 | `reload` | `compose up -d --force-recreate worker userbot bot` after editing `.env` |
 | `logs` / `ps` / `psql` / `bot` / `worker` / `userbot` | tails and shells |
 | `test` / `lint` / `fmt` / `typecheck` / `check` | `pytest -q` · `ruff check .` · `ruff format .` · `mypy` (the strict `files` list in `pyproject.toml`, 07 §2.3) |

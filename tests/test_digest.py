@@ -1032,6 +1032,34 @@ def test_a_missed_digest_is_due_until_review_hours_end(clock, due):
     assert worker.digest_due(NOW.replace(hour=clock[0], minute=clock[1])) is due
 
 
+def test_a_digest_is_never_due_before_review_hours_start(monkeypatch):
+    """The window's start holds even when DIGEST_TIME sits before it (the
+    Settings validator refuses that at start; a patched setting is what
+    reaches here — seam review wave 4: no test held the start)."""
+    from clientscrapper.worker import main as worker
+
+    monkeypatch.setattr(settings, "digest_time", "07:30")
+    monkeypatch.setattr(settings, "review_hours", "09:00-18:00")
+    assert worker.digest_due(NOW.replace(hour=8, minute=0)) is False
+    assert worker.digest_due(NOW.replace(hour=9, minute=0)) is True
+
+
+async def test_a_digest_already_sent_moves_no_retry(session, monkeypatch):
+    """Only an undelivered digest is tried again: «already» (sent today)
+    and «sent» leave the job's cron alone (seam review wave 4)."""
+    from clientscrapper.worker import main as worker
+
+    monkeypatch.setattr(worker, "_digest_retry", worker._DigestRetry())
+
+    async def already(notify, *, now):
+        return "already"
+
+    monkeypatch.setattr(digest, "send", already)
+    scheduler = worker.build_scheduler()
+    assert await worker.digest_job(scheduler, now=NOW, notify=Owner()) == "already"
+    assert getattr(scheduler.get_job("digest"), "next_run_time", None) is None
+
+
 async def test_the_start_up_catch_up_sends_a_missed_digest(session):
     from clientscrapper.worker import main as worker
 
