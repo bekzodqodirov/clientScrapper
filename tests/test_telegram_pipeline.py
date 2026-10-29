@@ -302,3 +302,47 @@ async def test_the_classify_queue_is_the_work_anthropic_silence_counts(
     model_api.queue(message(BUYER))
     assert (await classify.classify_batch(now=NOW)).applied == 1
     assert (await health.anthropic_facts(session)).pending_jobs == 0
+
+
+TOUT_BIO = "Xitoydan yuk tashish xizmati, kargo"
+
+
+async def _ask_then_tout_bio(session, offline, tmp_path, *, after: timedelta) -> None:
+    """A poster's ask, linked; then, ``after`` it, a message the collector
+    judges a tout's by the bio the reader has learnt meanwhile (T-14 P2b:
+    the bio arrives after a first-time poster's first message)."""
+    await chat(session)
+    await store(session, ASK, message_id=401, bio=None)
+    await link(offline, tmp_path, now=cf.T0 + timedelta(minutes=5))
+    await companies.resolve_batch(now=cf.T0 + timedelta(minutes=6))
+    at = cf.T0 + after
+    await store(
+        session, "Toshkentga 3 kub yuk kerak", message_id=402, at=at, bio=TOUT_BIO
+    )
+    await link(offline, tmp_path, now=at + timedelta(minutes=5))
+    report = await companies.resolve_batch(now=at + timedelta(minutes=6))
+    assert (report.resolved, report.rejected) == (0, 1)
+
+
+async def test_a_poster_the_collector_later_reads_as_a_tout_is_no_lead(
+    session, enabled, offline, tmp_path
+):
+    """The first message was judged before the bio was known and stood; the
+    second, a day later, is a tout's by the bio — gate 2 reads that verdict
+    for the first message's company."""
+    await _ask_then_tout_bio(session, offline, tmp_path, after=timedelta(days=1))
+    await candidates.score_batch(now=cf.T0 + timedelta(days=1, hours=1))
+    cand = await _candidate(session)
+    assert (cand.state, cand.exclude_reason) == ("excluded", "competitor")
+
+
+async def test_a_tout_verdict_beyond_the_window_does_not_reach_back(
+    session, enabled, offline, tmp_path
+):
+    """A verdict ten days after the post is outside every 7-day window that
+    holds it (03 §2.3): the lead stands."""
+    await _ask_then_tout_bio(session, offline, tmp_path, after=timedelta(days=10))
+    await candidates.score_batch(now=cf.T0 + timedelta(days=10, hours=1))
+    cand = await _candidate(session)
+    assert cand.state == "enriching"
+    assert cand.score_breakdown["gates"]["not_competitor"] == "pass"
