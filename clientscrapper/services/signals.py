@@ -538,6 +538,13 @@ def _collector_types(
             quote = reading.quote if reading else None
         elif key == "vol_container":
             quote = container_quote(trading)
+            if quote is None and CONTAINER_RE.search(trading) is not None:
+                # The collector's type is CONTAINER_RE read literally, and
+                # what it matched is no container (rule 2): «partiya» alone,
+                # a tonne (rule 1's), a half truck (rule 1's ≈ 40 m³) or a
+                # container sold as a cabin. A type with no such text behind
+                # it is the collector's own knowledge and stands.
+                continue
         elif key == VACANCY_KEY:
             quote = _first(VACANCY_IMPORT_RE, own) if vacancy else None
         elif key == "vol_marketplace_velocity":

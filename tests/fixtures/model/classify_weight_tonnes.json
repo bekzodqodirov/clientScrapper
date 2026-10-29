@@ -1,0 +1,13 @@
+{
+  "speaker_role": "buyer",
+  "b2b": true,
+  "b2c_markers": false,
+  "goods": ["mato"],
+  "goods_category": "textile",
+  "origin_cn": "explicit",
+  "volume_m3_est": null,
+  "volume_basis": "weight",
+  "volume_quote": "5 tonna mato",
+  "frequency": "unknown",
+  "confidence": 0.82
+}

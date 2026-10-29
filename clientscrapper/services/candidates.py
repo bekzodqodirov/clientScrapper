@@ -18,6 +18,17 @@ Producers built here:
   brought a volume or origin signal; else ``primary_source_key`` stays NULL
   until the first score names the source whose signal it scored on
   (``_attribute``: 02 §2.9 «the source whose signal created the candidate»);
+* the classifier's signals (04 §4.3, §5.3 rule 3): an applied ImportSignal
+  becomes model signals through ``signals.from_model`` on the same evidence
+  as the rules' (``emit``'s upsert: the model's verified «2 kub mato» takes
+  the rule's «2 kub»). Classify runs in seconds, the resolver every two
+  minutes, so the result meets its company on whichever side comes second:
+  ``after_classify`` (registered with ``classify.register_after_classify``)
+  when the observation is resolved already, ``after_resolve`` through
+  ``classify.classification_for`` when it is resolved later. Either side
+  also names the company on the ``classify`` job (``model_jobs.company_id``)
+  when the job was asked before the company existed: gate 1's «ImportSignal
+  b2b ∧ buyer» and the B2C read (``gates``) find the classifications by it;
 * ``score_job`` (04 §0: on ``NOTIFY cs_interaction``, sweep every 15 min):
   each open candidate marked stale (``last_scored_at`` NULL — set by every
   signal written, every resolution and every merge — or older than the
@@ -76,13 +87,14 @@ from clientscrapper.db.models import (
     Contact,
     Evidence,
     LeadCandidate,
+    ModelJob,
     Observation,
     Outcome,
     Signal,
     Source,
 )
 from clientscrapper.db.session import SessionLocal
-from clientscrapper.services import companies, gates, scoring, signals
+from clientscrapper.services import classify, companies, gates, scoring, signals
 from clientscrapper.services.scoring import ScoreResult, Tier
 
 log = logging.getLogger(__name__)
@@ -430,29 +442,69 @@ async def ensure_found(
     return await open_candidate(session, company.id)
 
 
-async def after_resolve(
-    session: AsyncSession,
-    obs: Observation,
-    resolution: companies.Resolution,
-    now: datetime,
-) -> None:
-    """The resolver's hook (04 §0 «→ signals, lead_candidates(found)»): the
-    observation's rule signals, the ``found`` candidate, and the open
-    candidate marked for re-scoring — a resolution may have added a phone or
-    a handle even when it brought no signal."""
-    company = resolution.company
-    if company.state in ("merged", "purged"):
-        return
-    contact_id = resolution.contact.id if resolution.contact is not None else None
-    evidence = signals.EvidenceRef(
+def _evidence_of(
+    obs: Observation, contact_id: uuid.UUID | None, now: datetime
+) -> signals.EvidenceRef:
+    return signals.EvidenceRef(
         id=obs.evidence_id,
         source_key=obs.source_key,
         fetched_at=obs.created_at or now,
         observation_id=obs.id,
         contact_id=contact_id,
     )
-    facts = await signals.company_facts(session, company)
-    drafts = signals.from_rules(evidence, obs.parsed, facts)
+
+
+def model_drafts(
+    evidence: signals.EvidenceRef,
+    obs: Observation,
+    classified: classify.Classified,
+    facts: signals.CompanyFacts,
+) -> list[signals.SignalDraft]:
+    """The classifier's signals of ``obs`` (04 §4.3, §5.3 rule 3): the
+    validated ImportSignal and its verified volume quote — ``stated`` with a
+    quote and 1 ≤ m³ < 3 → ``vol_stated_1_3``, ≥ 3 → ``vol_stated_3plus``;
+    ``container``/``truck`` with a quote → ``vol_container`` (with no number
+    when the model gave none: the unit is what the text says); ``weight`` →
+    rule 1 on the quoted tonnes; no quote → no volume signal. ``cn_origin``
+    is never the model's: ImportSignal carries no origin quote, and a model
+    signal that needs one is not written without it (04 §4.7) — the rule's
+    CHINA_RE already writes it with the excerpt's own fragment."""
+    return signals.from_model(
+        evidence,
+        obs.parsed,
+        classified.signal,
+        quote=classified.quote,
+        company=facts,
+        model=classified.model,
+        model_job_id=classified.model_job_id,
+    )
+
+
+async def _name_classification(
+    session: AsyncSession, model_job_id: int, company_id: uuid.UUID
+) -> None:
+    """The company a classification was asked about before it existed: the
+    job carries ``company_id`` from now on (gates read ImportSignals by the
+    company lineage, ``gates.CLASSIFY_KIND``). A job that names one already
+    keeps it."""
+    await session.execute(
+        sa.update(ModelJob)
+        .where(ModelJob.id == model_job_id, ModelJob.company_id.is_(None))
+        .values(company_id=company_id)
+    )
+
+
+async def _land(
+    session: AsyncSession,
+    company: Company,
+    obs: Observation,
+    drafts: list[signals.SignalDraft],
+    *,
+    contact_id: uuid.UUID | None,
+    now: datetime,
+) -> None:
+    """Write ``drafts``, then the ``found`` candidate (attributed to the
+    observation's source when a draft makes a lead) and the stale mark."""
     weights = await scoring.load_weights(session)
     await signals.emit(session, company.id, drafts, weights=weights)
     await session.refresh(company, ["last_signal_at"])
@@ -467,7 +519,61 @@ async def after_resolve(
     await signals.mark_stale(session, company.id)
 
 
+async def after_resolve(
+    session: AsyncSession,
+    obs: Observation,
+    resolution: companies.Resolution,
+    now: datetime,
+) -> None:
+    """The resolver's hook (04 §0 «→ signals, lead_candidates(found)»): the
+    observation's rule signals — and, for a Telegram message the classifier
+    answered before the company existed, its model signals — the ``found``
+    candidate, and the open candidate marked for re-scoring: a resolution
+    may have added a phone or a handle even when it brought no signal."""
+    company = resolution.company
+    if company.state in ("merged", "purged"):
+        return
+    contact_id = resolution.contact.id if resolution.contact is not None else None
+    evidence = _evidence_of(obs, contact_id, now)
+    facts = await signals.company_facts(session, company)
+    drafts = signals.from_rules(evidence, obs.parsed, facts)
+    if obs.source_key == companies.TELEGRAM_SOURCE:
+        # Classify holds the observation while it asks (classify._claim), so
+        # a result is either committed by now or comes later through
+        # ``after_classify`` — never lost between the two.
+        classified = await classify.classification_for(session, obs.evidence_id)
+        if classified is not None:
+            drafts += model_drafts(evidence, obs, classified, facts)
+            await _name_classification(session, classified.model_job_id, company.id)
+    await _land(session, company, obs, drafts, contact_id=contact_id, now=now)
+
+
+async def after_classify(
+    session: AsyncSession, classified: classify.Classified, now: datetime
+) -> None:
+    """The classifier's hook (04 §0: classify → signals): an applied
+    ImportSignal whose observation is resolved already becomes model signals
+    on the company that holds the observation's rows now (a merge moved
+    them, ``merged_into``), then the ``found`` candidate and the stale mark
+    as the resolver's hook does — score_job hears classify's own
+    ``classify:<id>`` at commit."""
+    if classified.observation_id is None or classified.company_id is None:
+        return
+    obs = await session.get(Observation, classified.observation_id)
+    company = await session.get(Company, classified.company_id)
+    if obs is None or company is None:
+        return
+    company = await companies.root_company(session, company)
+    if company.state in ("merged", "purged"):
+        return
+    evidence = _evidence_of(obs, obs.contact_id, now)
+    facts = await signals.company_facts(session, company)
+    drafts = model_drafts(evidence, obs, classified, facts)
+    await _land(session, company, obs, drafts, contact_id=obs.contact_id, now=now)
+
+
 companies.register_after_resolve(after_resolve)
+classify.register_after_classify(after_classify)
 
 
 # --- scoring a candidate ------------------------------------------------------------

@@ -671,6 +671,13 @@ async def _root(session: AsyncSession, company: Company) -> Company:
     return current
 
 
+async def root_company(session: AsyncSession, company: Company) -> Company:
+    """The company that holds ``company``'s rows now (``merged_into`` followed)
+    — for a writer that met the company through an older pointer (the
+    classifier's hook reads ``observations.company_id``)."""
+    return await _root(session, company)
+
+
 async def _companies(
     session: AsyncSession, stmt: sa.Select[tuple[Company]]
 ) -> list[Company]:

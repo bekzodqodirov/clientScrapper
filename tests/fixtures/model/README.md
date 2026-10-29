@@ -18,6 +18,9 @@ task on the VPS (07 §5.5); when one lands it gets its own line here marked
 | `classify_container.json` | yes | a 40 ft container, 60 m³, quote «40 futlik konteyner»; duplicate goods «Kafel»/«kafel» |
 | `classify_cyrillic_stated.json` | yes | Uzbek Cyrillic: «5 куб ўйинчоқ», goods in Latin with ʻ |
 | `classify_quote_with_token.json` | yes | a quote that carries a pseudonym token («<NAME_1>ga 3 kub mebel»), restored before it is checked |
+| `classify_words_stated.json` | yes | «Guangzhoudan ikki kub mato kerak …»: 2 m³ stated in words, quote «ikki kub mato» (no VOLUME_RE number; the integration test `tests/test_telegram_pipeline.py`) |
+| `classify_container_no_number.json` | yes | a quoted 40 ft container with `volume_m3_est` null — the unit is what the text says (04 §5.3 rule 3) |
+| `classify_weight_tonnes.json` | yes | basis `weight`, no number, quote «5 tonna mato» — rule 1 on the quoted tonnes |
 
 The batch lane's tests (T-16, `tests/test_model_jobs.py`) answer with the files
 below. They conform to the test's own SYNTHETIC stand-in schema `Verdict`

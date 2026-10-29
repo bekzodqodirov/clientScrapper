@@ -463,6 +463,28 @@ def test_rule_6_maps_03_s_types_onto_02_s_keys(kind, key):
     assert keys(found) == {key}
 
 
+@pytest.mark.parametrize(
+    ("text", "want"),
+    [
+        # A tonne and a half truck are rule 1's amounts, «partiya» alone and a
+        # cabin are nothing: the collector's CONTAINER_RE type is not vol_container.
+        ("Guangzhoudan 5 tonna mato kerak", {"vol_stated_3plus", "cn_origin"}),
+        ("Yarim fura kafel kerak", {"vol_stated_3plus"}),
+        ("Yangi partiya mato kerak", set()),
+        ("Konteyner uy (bitovka) kerak", set()),
+        # A container word stands, quoted; no text at all is the collector's word.
+        ("40 futlik konteyner kafel kerak", {"vol_container"}),
+        ("", {"vol_container"}),
+    ],
+)
+def test_rule_6_container_type_needs_a_container_word_in_the_text(text, want):
+    """Integration (T-14 → T-18): telegram_monitor types a message
+    ``container_truck`` whenever CONTAINER_RE matches, «tonna» and «partiya»
+    included; rule 2's container word decides (04 §5.3)."""
+    found = rules(text, "intent_post", signal_types=["container_truck"])
+    assert keys(found) == want
+
+
 def test_rule_6_ved_vacancy_on_a_vacancy():
     found = rules("Менеджер ВЭД", "vacancy", signal_types=["ved_vacancy"])
     assert keys(found) == {"vol_vacancy_import"}
