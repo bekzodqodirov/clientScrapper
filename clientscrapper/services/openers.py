@@ -24,6 +24,11 @@ for another segment than the company's now (the verdict that sets the
 segment may land after the opener was made), or made for a candidate that
 was not hot and now is. A stored draft stands: it was paid for.
 
+Who asks: ``verdict_job`` (``ensure_openers``, every 10 minutes), the manager
+card before its claim (``reviews.ensure_manager_opener``), and ``crm_push_job``
+before each push (``crm_push.opener_first``: the template only, never a paid
+draft, so a lead pushed before the next verdict run still carries one).
+
 The model call runs with no row lock held; the write takes the company and
 then the candidate (the lock order every writer of the two keeps,
 ``services/candidates``) and keeps an opener another run stored meanwhile.

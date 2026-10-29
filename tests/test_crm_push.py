@@ -43,6 +43,7 @@ from clientscrapper.services import (
     crm_push,
     erp_feeds,
     health,
+    owner,
     purge,
     push_gate,
     scoring,
@@ -1776,6 +1777,43 @@ async def test_crm_push_job_pushes_the_approved_best_first(world):
     # Nothing left: the next tick pushes nothing.
     again = await crm_push.crm_push_job(SessionLocal, world.erp, now=NOW)
     assert (again.candidates, again.sent) == (0, 0)
+
+
+async def test_crm_push_job_gives_an_opener_less_lead_the_template_before_the_claim(
+    world,
+):
+    # T-30 → T-28: a candidate approved and pushed before verdict_job's next
+    # run reached the ERP with no «NIMA DEYISH». The job now stores the free
+    # template first (no model request — the autouse fake would refuse one).
+    cand = await world.lead(61)
+    assert "opener" not in ((await world.candidate(cand)).score_breakdown or {})
+    report = await crm_push.crm_push_job(SessionLocal, world.erp, now=NOW)
+    assert report.sent == 1
+    stored = (await world.candidate(cand)).score_breakdown
+    assert stored["opener_meta"]["source"] == "template"
+    [(_, _, body)] = world.fake.posted
+    deyish = next(x for x in body["note"].split("\n") if x.startswith("NIMA DEYISH: "))
+    assert deyish.removeprefix("NIMA DEYISH: ")[:20] == stored["opener"][:20]
+
+
+async def test_crm_push_job_keeps_a_stored_draft_and_writes_nothing_while_paused(world):
+    drafted = await world.lead(61)
+    held = await world.lead(62)
+    row = await world.candidate(drafted)
+    draft = "Assalomu alaykum! Xitoydan mato olib kelasizmi? Kerak boʻlmasa, yozing."
+    row.score_breakdown = {
+        **(row.score_breakdown or {}),
+        "opener": draft,
+        "opener_meta": {"source": "draft", "segment": "A", "lang": "uz"},
+    }
+    await world.session.commit()
+    await crm_push.opener_first(SessionLocal, drafted.id, now=NOW)
+    assert (await world.candidate(drafted)).score_breakdown["opener"] == draft
+    async with SessionLocal() as s:
+        await owner.pause(s, by="owner:1", reason=None, now=NOW)
+        await s.commit()
+    await crm_push.opener_first(SessionLocal, held.id, now=NOW)
+    assert "opener" not in ((await world.candidate(held)).score_breakdown or {})
 
 
 async def test_crm_push_job_stops_on_the_cap_window_and_breaker(world, monkeypatch):

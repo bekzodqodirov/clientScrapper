@@ -1303,6 +1303,7 @@ async def crm_push_job(
     try:
         for candidate_id in ids:
             moment = now or datetime.now(settings.tz)
+            await opener_first(session_factory, candidate_id, now=moment)
             try:
                 async with session_factory() as session:
                     result = await push_one(session, candidate_id, now=moment, erp=client)
@@ -1331,6 +1332,32 @@ async def crm_push_job(
     if report.sent or report.unknown or report.failed or report.errors:
         log.info("crm_push_job", extra={"counts": report.as_dict()})
     return report
+
+
+async def opener_first(
+    session_factory: SessionFactory, candidate_id: uuid.UUID, *, now: datetime
+) -> None:
+    """The note's «NIMA DEYISH» before the claim (T-30 → T-28): a candidate
+    approved and pushed before ``verdict_job``'s next run (every 10 min) had
+    no opener and reached the ERP without one. Here a candidate with none
+    gets the playbook template — free, no model call (``paid=False``; the
+    draft stays ``verdict_job``'s, a stored one stands) — in a transaction of
+    its own, so no lock is held into the push. Not while ``/toxtat`` holds
+    (the push refuses anyway); a failure is a log line and the push goes on
+    without the section, as before."""
+    from clientscrapper.services import openers  # it imports this module
+
+    try:
+        async with session_factory() as session:
+            if await costs.global_pause(session):
+                return
+            await openers.ensure_opener(session, candidate_id, now=now, paid=False)
+            await session.commit()
+    except Exception as exc:
+        log.error(
+            "crm_push: opener not made",
+            extra={"candidate_id": str(candidate_id), "error": type(exc).__name__},
+        )
 
 
 async def crm_push_slot() -> dict[str, Any]:
@@ -1685,6 +1712,7 @@ __all__ = [
     "js_trim",
     "landed_note",
     "last_attempt",
+    "opener_first",
     "push_one",
     "push_tekshir_confirm",
     "push_tekshir_view",

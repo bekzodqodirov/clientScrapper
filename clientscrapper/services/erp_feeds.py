@@ -2100,7 +2100,7 @@ async def tell_flips(
         )
         await session.commit()
     flips = _flips_of(claimed)
-    if not flips:
+    if not flips or not isinstance(claimed, dict):
         return False
     delivered = False
     try:
