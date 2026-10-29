@@ -774,6 +774,25 @@ async def test_an_intent_message_reaches_the_owners_card_in_under_5_minutes(
     )
 
 
+async def test_the_matched_person_answers_the_number_and_is_not_the_author(
+    session, setup
+):
+    """The card's carried attribution rule: the person the phone matched is
+    «who answers this number» on the contact line; the quote names only the
+    cited message's own author (none here — no interaction row), never the
+    contact."""
+    await lead(session, person=True)
+    await session.commit()
+    sender = FakeSender()
+    assert (await reviews.run_cards(sender, now=NOW)).sent == 1
+    [(_, text, _, _)] = sender.sent
+    lines = text.splitlines()
+    contact = next(x for x in lines if x.startswith("📞"))
+    assert "👤 Rustam Karimov, direktori (raqam egasi)" in contact
+    quote = next(x for x in lines if x.startswith("🔎"))
+    assert "Rustam" not in quote
+
+
 # --- the push gate's view of a review: the owner's word ------------------------------
 
 
