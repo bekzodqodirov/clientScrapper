@@ -180,3 +180,17 @@ def test_the_soft_404_gives_nothing_whatever_its_status():
     assert (
         glotr.parse_list(p.body, url=p.final_url, fetched_at=p.fetched_at).entries == ()
     )
+
+
+def test_an_individual_entrepreneur_s_name_is_no_company_name():
+    p = page("glotr_showcase_jack")
+    person = "Намунов Намуна Намунович ИндП"
+    body = p.body.replace(
+        b'<h1 class=\'h1\'>"JACK" (\xd0\x9e\xd0\x9e\xd0\x9e "SEWING MACHINES TRADING")',
+        f"<h1 class='h1'>{person}".encode(),
+    )
+    assert person.encode() in body
+    [obs] = glotr.parse_showcase(body, url=p.final_url, fetched_at=p.fetched_at)
+    assert (obs.company_name_raw, obs.legal_form) == (None, "ИП")
+    assert "Намунов" not in obs.excerpt
+    assert obs.phones == ["+998 90 000 00 01"]

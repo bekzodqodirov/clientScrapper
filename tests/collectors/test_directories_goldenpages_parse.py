@@ -279,3 +279,44 @@ def test_a_page_that_is_no_card_gives_nothing():
     card = page("goldenpages_company_85641")
     rubric = "https://www.goldenpages.uz/rubrics/?Id=1424"
     assert gp.parse_company(card.body, url=rubric, fetched_at=card.fetched_at) == []
+
+
+PERSON = "Намунов Намуна Намунович ИндП"
+
+
+def test_an_individual_entrepreneur_s_name_is_no_company_name():
+    """The card and its list row, with the firm's name rewritten the way the
+    directories print an individual entrepreneur's (README «Scrubbing»)."""
+    p = page("goldenpages_company_85641")
+    card = p.body.replace('"CHINT DISTRIBUTION" ООО'.encode(), PERSON.encode()).replace(
+        '\\"CHINT DISTRIBUTION\\" ООО'.encode(), PERSON.encode()
+    )
+    assert PERSON.encode() in card
+    [obs] = gp.parse_company(card, url=p.final_url, fetched_at=p.fetched_at)
+    assert (obs.company_name_raw, obs.legal_form) == (None, "ИП")
+    assert "Намунов" not in obs.excerpt
+    assert obs.phones == ["(+99890) 0000001", "(+99890) 0000002"]
+    rubric = page("goldenpages_rubric_1424_p1")
+    body = rubric.body.replace('"CHINT DISTRIBUTION" ООО'.encode(), PERSON.encode())
+    listed = gp.parse_list(body, url=rubric.final_url, fetched_at=rubric.fetched_at)
+    [row] = [e.observation for e in listed.entries if e.ref == "goldenpages:85641"]
+    assert row is not None and row.company_name_raw is None
+    assert "Намунов" not in row.excerpt
+
+
+def test_a_firm_named_after_a_given_name_keeps_its_name_by_its_legal_form():
+    """«"AKMAL KONSULT" ООО» (recorded row 53976) keys as «akmal konsult», which
+    reads as a person (a given name first, two tokens); its ООО says it is a
+    company, so the name stays the company's (04 §1.6 as built)."""
+    [row] = [
+        e.observation
+        for e in listing("goldenpages_rubric_1424_p1").entries
+        if e.ref == "goldenpages:53976"
+    ]
+    assert row is not None and row.company_name_raw == '"AKMAL KONSULT" ООО'
+    parsed = to_observation_json(row)
+    assert (parsed["company"]["name_raw"], parsed["name_key"]) == (
+        '"AKMAL KONSULT" ООО',
+        "akmal konsult",
+    )
+    assert parsed["company"]["legal_form"] == "OOO"

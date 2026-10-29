@@ -19,10 +19,12 @@ is the same organisation with its ``description``; an unknown slug is a real
 * **Phones** — ``contacts.phone`` then ``contacts.faxes`` (03 §2.6: «phones
   (sometimes only fax/e-mail)»), the same number once. A row with only a fax
   or an e-mail has no recording (README): the fax branch is read, unproven.
-* **STIR** — ``inn`` (nine digits) where printed; never an individual
-  entrepreneur's (``ИндП``, ``ИП``…): that is a natural person's taxpayer
-  number, and the name before the form is the person's — such a row is named
-  by its ``brand_name``.
+* **STIR** — ``inn`` where printed and a legal entity's (``common.entity_stir``:
+  nine digits, the first 2–3); never an individual entrepreneur's (``ИндП``,
+  ``ИП``…, or a 4–6 number): that is a natural person's taxpayer number, and
+  the name before the form is the person's — such a row is named by its
+  ``brand_name`` (``common.company_name``), and a person's name is kept in no
+  field, ``attrs.brand_name`` included.
 * **China** — the tags 03 §2.6 names, ``tovary-iz-kitaya`` and
   ``mebel-iz-kitaya``, give ``china_origin``; the one recorded
   ``tovary-iz-kitaya`` firm is a logistics company, which the competitor rule
@@ -47,7 +49,6 @@ HOST: Final = "www.yellowpages.uz"
 BASE: Final = f"https://{HOST}"
 SOURCE_KEY: Final = "directories_yellowpages"
 SLUG: Final = re.compile(r"\A[a-z0-9][a-z0-9-]{0,199}\Z")
-STIR: Final = re.compile(r"\A\d{9}\Z")
 CARD_PATH: Final = re.compile(r"\A/kompaniya/([a-z0-9][a-z0-9-]{0,199})/?\Z")
 # 03 §2.6: «/teg/tovary-iz-kitaya and mebel-iz-kitaya give china_origin».
 CHINA_TAGS: Final = frozenset({"tovary-iz-kitaya", "mebel-iz-kitaya"})
@@ -116,13 +117,9 @@ def organisation(
         return None
     legal, brand = _text(org.get("name")), _text(org.get("brand_name"))
     person = common.individual(legal)
-    if person:
-        # The name before «ИндП» is a person's: the shop's own name instead.
-        name = brand if brand and not common.individual(brand) else None
-    else:
-        name = legal
-    inn = org.get("inn")
-    stir = inn.strip() if isinstance(inn, str) and STIR.match(inn.strip()) else None
+    # The name before «ИндП» is a person's: the shop's own name instead.
+    name = common.company_name(legal, brand)
+    stir = common.entity_stir(org.get("inn"), person=person)
     given = org.get("contacts")
     contacts: dict[str, Any] = given if isinstance(given, dict) else {}
     phones = common.phones_as_written(
@@ -141,8 +138,9 @@ def organisation(
     ]
     china = _text(china_tags[0]) if china_tags else None
     attrs: dict[str, Any] = {"site": SITE, "rubrics": rubrics, "tags": tag_slugs}
-    if brand and brand != name:
-        attrs["brand_name"] = brand
+    shop = common.company_name(brand)
+    if shop and shop != name:
+        attrs["brand_name"] = shop
     updated = org.get("updated_at")
     if isinstance(updated, str):
         attrs["updated_at"] = updated
@@ -158,7 +156,7 @@ def organisation(
         kind="company",
         company_name_raw=name,
         legal_form=common.legal_form_in(legal),
-        stir=None if person else stir,
+        stir=stir,
         phones=phones,
         telegram=_first(common.strings(contacts.get("telegram")), telegram_key),
         instagram=_first(common.strings(contacts.get("instagram")), instagram_key),

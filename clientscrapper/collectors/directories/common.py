@@ -60,6 +60,8 @@ HELD: Final = "category"
 # A phone's identity for de-duplication: its last nine digits.
 _TAIL: Final = 9
 SEPARATOR: Final = " · "
+# 04 §1.5: nine digits, the first 2–3 for a legal entity (4–6: an individual).
+_ENTITY_STIR: Final = re.compile(r"[23]\d{8}")
 # Two numbers in one field («(998) 90-000-00-33, 90-000-00-34»).
 _LIST_SPLIT: Final = re.compile(r"[;,]")
 # Line and block ends inside a payload's HTML field: a space, so two lines do
@@ -251,6 +253,29 @@ def individual(name: str | None) -> bool:
     """The name is an individual entrepreneur's: the words before the form
     are a person's name, and the taxpayer number beside it a person's."""
     return bool(name and INDIVIDUAL_FORM_RE.search(name))
+
+
+def company_name(*names: str | None) -> str | None:
+    """The first of ``names`` that names the company — never an individual
+    entrepreneur's (``individual``): the words before «ИндП» are a person's
+    (README «Scrubbing» item 2), and a person's name is kept in no field of a
+    directory observation — not the name, not the excerpt, not ``attrs``. The
+    form itself is no person data: ``legal_form_in`` still reads it."""
+    for name in names:
+        if name and not individual(name):
+            return name
+    return None
+
+
+def entity_stir(value: object, *, person: bool) -> str | None:
+    """A legal entity's STIR as printed: nine digits whose first is 2 or 3
+    (04 §1.5). 4–6 is an individual entrepreneur's — a natural person's
+    taxpayer number, person data like the name beside it — and so is any
+    number on a row whose name carries an individual form (``person``)."""
+    text = value.strip() if isinstance(value, str) else ""
+    if person or _ENTITY_STIR.fullmatch(text) is None:
+        return None
+    return text
 
 
 def excerpt(*parts: str | None) -> str:

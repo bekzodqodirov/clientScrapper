@@ -8,7 +8,9 @@ import re
 
 from clientscrapper.collectors.base import Observation
 from clientscrapper.collectors.directories import stop_reason
+from clientscrapper.collectors.directories import nuxt
 from clientscrapper.collectors.directories import topuz as tz
+from clientscrapper.collectors.directories.markup import parse
 from tests.collectors.directories_pages import page
 
 P1_IDS = [
@@ -221,3 +223,37 @@ def test_a_page_that_is_not_the_named_company_gives_nothing():
         tz.parse_company(listing.body, url=listing.url, fetched_at=listing.fetched_at)
         == []
     )
+
+
+# An individual entrepreneur's name, the way the directories print it (README
+# «Scrubbing» item 2): synthetic words, a real shape — surname, given name,
+# patronymic, «ИндП».
+PERSON = "Намунов Намуна Намунович ИндП"
+
+
+def _org(name: str, *, legal: str | None = None) -> Observation | None:
+    p = page("topuz_stroymaterialy_optom_p1")
+    org = dict(nuxt.list_block(nuxt.payload(parse(p.body)))["data"][0])
+    org.update(name_ru=name, name_uz=name, legal_name=legal)
+    return tz.organisation(org, url=p.final_url, fetched_at=p.fetched_at, sha=p.sha256)
+
+
+def test_an_individual_entrepreneur_s_name_is_no_company_name():
+    """The words before «ИндП» are a person's: not the company name, not the
+    excerpt, not ``attrs`` (the README scrubbed them as person data)."""
+    obs = _org(PERSON, legal=PERSON)
+    assert obs is not None
+    assert (obs.company_name_raw, obs.legal_form) == (None, "ИП")
+    assert "Намунов" not in obs.excerpt and "legal_name" not in obs.attrs
+    assert obs.phones  # the shop's own number is company-tier and kept
+
+
+def test_a_shop_name_beside_a_person_s_legal_name_names_the_company():
+    obs = _org("Namuna Qurilish", legal=PERSON)
+    assert obs is not None
+    assert (obs.company_name_raw, obs.legal_form) == ("Namuna Qurilish", "ИП")
+    assert "Намунов" not in obs.excerpt and "legal_name" not in obs.attrs
+    # A person's name in name_ru, the firm's own in legal_name: the firm's.
+    named = _org(PERSON, legal="Namuna Qurilish ООО")
+    assert named is not None and named.company_name_raw == "Namuna Qurilish ООО"
+    assert "Намунов" not in named.excerpt

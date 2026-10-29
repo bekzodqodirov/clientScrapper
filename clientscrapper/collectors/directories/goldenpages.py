@@ -154,7 +154,9 @@ def _row(
         return None
     ident = company_id(target)
     assert ident is not None
-    name = common.squash(link.text())
+    raw = common.squash(link.text())
+    # An individual entrepreneur's name is a person's: kept in no field.
+    name = common.company_name(raw)
     rubrics = _activities(section)
     if rubric and rubric not in rubrics:
         rubrics.append(rubric)
@@ -174,7 +176,7 @@ def _row(
         raw_sha256=sha,
         kind="company",
         company_name_raw=name,
-        legal_form=common.legal_form_in(name),
+        legal_form=common.legal_form_in(raw),
         address=common.squash(line.text()) if line else None,
         goods_text=common.joined([*rubrics, description]),
         excerpt=common.excerpt(name, *badges, *rubrics, description),
@@ -283,9 +285,11 @@ def parse_company(body: bytes, *, url: str, fetched_at: datetime) -> list[Observ
     if updated is not None and updated.year < OLDEST_YEAR:
         return []
     named = business.get("name")
-    name = common.squash(named) if isinstance(named, str) else None
-    if name is None:
-        name = common.squash(re.sub(r"\s*\([^()]*\)\s*\Z", "", heading.text()))
+    raw = common.squash(named) if isinstance(named, str) else None
+    if raw is None:
+        raw = common.squash(re.sub(r"\s*\([^()]*\)\s*\Z", "", heading.text()))
+    # An individual entrepreneur's name is a person's: kept in no field.
+    name = common.company_name(raw)
     holder = heading.parent or heading
     badges = _badges(holder)
     tab = root.find("div", attr=("id", "tab-3"))
@@ -310,7 +314,7 @@ def parse_company(body: bytes, *, url: str, fetched_at: datetime) -> list[Observ
         raw_sha256=common.sha256(body),
         kind="company",
         company_name_raw=name,
-        legal_form=common.legal_form_in(name),
+        legal_form=common.legal_form_in(raw),
         phones=_phones(faq),
         address=common.squash(line.text()) if line else None,
         city=common.squash(city.text()) if city else None,

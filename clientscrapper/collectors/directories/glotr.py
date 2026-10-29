@@ -149,7 +149,9 @@ def parse_showcase(body: bytes, *, url: str, fetched_at: datetime) -> list[Obser
     if business is None or heading is None:
         return []
     slug = match.group(1)
-    name = common.squash(heading.text())
+    raw = common.squash(heading.text())
+    # An individual entrepreneur's name is a person's: kept in no field.
+    name = common.company_name(raw)
     given = business.get("address")
     address: Mapping[str, Any] = given if isinstance(given, Mapping) else {}
     links = [s for s in business.get("sameAs") or [] if isinstance(s, str)]
@@ -178,7 +180,7 @@ def parse_showcase(body: bytes, *, url: str, fetched_at: datetime) -> list[Obser
         raw_sha256=common.sha256(body),
         kind="company",
         company_name_raw=name,
-        legal_form=common.legal_form_in(name),
+        legal_form=common.legal_form_in(raw),
         phones=common.phones_as_written([phone] if phone else []),
         telegram=handle,
         instagram=insta,

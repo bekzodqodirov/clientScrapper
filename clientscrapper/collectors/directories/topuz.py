@@ -93,7 +93,12 @@ def organisation(
     ident = org.get("id")
     if isinstance(ident, bool) or not isinstance(ident, int):
         return None
-    name = _text(org, "name_ru") or _text(org, "name_uz")
+    raw = _text(org, "name_ru") or _text(org, "name_uz")
+    given_legal = _text(org, "legal_name")
+    # An individual entrepreneur's name («… ИндП») is a person's: kept in no
+    # field (common.company_name); the firm's own name where one is printed.
+    legal_name = common.company_name(given_legal)
+    name = common.company_name(raw, _text(org, "name_uz"), legal_name)
     numbers = [p.get("phone") for p in org.get("phones") or [] if isinstance(p, dict)]
     fax = _text(org, "fax")
     phones = common.phones_as_written(
@@ -102,7 +107,6 @@ def organisation(
     sections = _sections(org, "name_ru")
     slugs = _sections(org, "slug")
     description = common.plain(org.get("description_ru"))
-    legal_name = _text(org, "legal_name")
     handle = _text(org, "tg_channel") or _text(org, "tg_contact")
     insta = _text(org, "instagram")
     attrs: dict[str, Any] = {"site": SITE, "sections": slugs}
@@ -122,7 +126,7 @@ def organisation(
         raw_sha256=sha,
         kind="company",
         company_name_raw=name,
-        legal_form=common.legal_form_in(name) or common.legal_form_in(legal_name),
+        legal_form=common.legal_form_in(raw) or common.legal_form_in(given_legal),
         phones=phones,
         telegram=telegram_key(handle) if handle else None,
         instagram=instagram_key(insta) if insta else None,
@@ -130,7 +134,9 @@ def organisation(
         address=common.plain(org.get("address_ru")),
         city=_city(org.get("address_ru")),
         goods_text=common.joined([*sections, description]),
-        excerpt=common.excerpt(name, legal_name, description, *sections),
+        excerpt=common.excerpt(
+            name, legal_name if legal_name != name else None, description, *sections
+        ),
         attrs=attrs,
         lang="ru",
     )

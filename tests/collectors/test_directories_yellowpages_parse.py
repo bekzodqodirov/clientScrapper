@@ -32,7 +32,10 @@ ALTA_RUBRICS = [
     "Пеналы школьные - продажа, производство",
     "Художественные краски - продажа, производство",
 ]
-# (ref, name, legal form, stir, phones, website, signal types, held)
+# (ref, name, legal form, stir, phones, website, signal types, held). The
+# scrubber rewrote every ``inn`` that starts like a mobile code as a phone
+# («9000000NN», README «Scrubbing» item 4): no legal entity's shape (a first
+# digit 2–3, common.entity_stir), so none is kept; 313064467 is one.
 ROWS = [
     (
         "26219",
@@ -58,7 +61,7 @@ ROWS = [
         "11808",
         "BETA ООО",
         "ООО",
-        "900000011",
+        None,
         ["90 0000012", "90 0000013", "90 0000003"],
         None,
         ["directory_wholesale"],
@@ -68,7 +71,7 @@ ROWS = [
         "22628",
         "PREMIER OFIS ЧП",
         "ЧП",
-        "900000014",
+        None,
         ["90 0000015", "90 0000004", "90 0000016"],
         "https://centrum-post.com/",
         [],
@@ -78,7 +81,7 @@ ROWS = [
         "20325",
         "CHILONZOR SAVDO UYI ООО",
         "ООО",
-        "900000017",
+        None,
         ["90 0000005", "90 0000018"],
         "torgstroy.uz",
         ["directory_wholesale"],
@@ -88,7 +91,7 @@ ROWS = [
         "4853",
         "DELI TORG ЧП",
         "ЧП",
-        "900000019",
+        None,
         ["90 0000006"],
         "deli.uz",
         ["directory_wholesale"],
@@ -151,7 +154,7 @@ ROWS = [
         "253053",
         "Alfa Monet Group",
         None,
-        "900000032",
+        None,
         ["90 0000033"],
         "alfamonetgroup.uz",
         [],
@@ -362,3 +365,39 @@ def test_an_unknown_slug_gives_nothing():
     card = page("yellowpages_kompaniya_alta_trade_ooo")
     other = "https://www.yellowpages.uz/kompaniya/beta-ooo"
     assert yp.parse_kompaniya(card.body, url=other, fetched_at=card.fetched_at) == []
+
+
+PERSON = "Намунов Намуна Намунович ИндП"
+
+
+def _row(**changes: object) -> Observation | None:
+    p = page(RUBRIKA)
+    org = next(
+        o
+        for o in nuxt.list_block(nuxt.payload(parse(p.body)))["data"]
+        if o["id"] == 11785
+    )
+    return yp.organisation(
+        {**org, **changes}, url=p.final_url, fetched_at=p.fetched_at, sha=p.sha256
+    )
+
+
+def test_a_person_s_name_in_the_brand_too_is_kept_nowhere():
+    """Both ``name`` and ``brand_name`` an individual entrepreneur's: no
+    company name, no ``attrs.brand_name`` — the person's name is in no field."""
+    obs = _row(name=PERSON, brand_name=PERSON, official_name=PERSON)
+    assert obs is not None
+    assert (obs.company_name_raw, obs.legal_form, obs.stir) == (None, "ИП", None)
+    assert "brand_name" not in obs.attrs
+    assert "Намунов" not in repr(obs)
+
+
+def test_only_a_legal_entity_s_stir_is_kept():
+    """04 §1.5: a STIR's first digit 2–3 is a legal entity's, 4–6 an
+    individual entrepreneur's — a natural person's taxpayer number, kept
+    nowhere even when the name carries no individual form."""
+    kept = _row(name="Namuna Savdo ООО", brand_name="Namuna Savdo ООО", inn="313064467")
+    assert kept is not None and kept.stir == "313064467"
+    for inn in ("413064467", "513064467", "613064467", "913064467"):
+        obs = _row(name="Namuna Savdo ООО", brand_name="Namuna Savdo ООО", inn=inn)
+        assert obs is not None and obs.stir is None, inn
