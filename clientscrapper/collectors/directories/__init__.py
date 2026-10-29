@@ -79,7 +79,12 @@ from clientscrapper.config import settings
 from clientscrapper.db.models import Observation as ObservationRow
 from clientscrapper.db.models import Source
 from clientscrapper.db.session import SessionLocal
-from clientscrapper.services.http import BudgetExhausted, HostPaused, RobotsDisallowed
+from clientscrapper.services.http import (
+    BudgetExhausted,
+    FetchResult,
+    HostPaused,
+    RobotsDisallowed,
+)
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -202,6 +207,16 @@ def stop_reason(
     return None
 
 
+def usable(result: FetchResult) -> bool:
+    """A page to parse: a 200, or a 304 answered with the stored copy — never
+    a challenge page (the breaker counts it as a 403)."""
+    return (result.status == 200 or result.not_modified) and not result.captcha
+
+
+def answer_of(result: FetchResult) -> str:
+    return "captcha" if result.captcha else str(result.status)
+
+
 def needs_card(entry: Entry) -> bool:
     """A card is asked for unless the list row is complete and settles the
     company already (held by the category filter, or a competitor's)."""
@@ -320,8 +335,8 @@ class Directories(Collector):
             except RobotsDisallowed:
                 stats["robots"] += 1
                 return
-            if result.status != 200:
-                stats["list_status"][str(result.status)] += 1
+            if not usable(result):
+                stats["list_status"][answer_of(result)] += 1
                 return
             page = spec.parse_list(
                 result.body, url=result.final_url, fetched_at=result.fetched_at
@@ -395,7 +410,7 @@ class Directories(Collector):
                 continue
             found = (
                 spec.parse_card(card.body, url=card.final_url, fetched_at=card.fetched_at)
-                if card.status == 200
+                if usable(card)
                 else []
             )
             if found:
