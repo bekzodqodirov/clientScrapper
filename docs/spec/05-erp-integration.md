@@ -55,6 +55,7 @@ runs `pnpm db:migrate && pnpm db:seed`.
 
 ### A.0 Status (2026-10-24, the merge 2026-10-29)
 
+- **Merged into fullprompt `main` (2026-10-29)** as PR #136, merge commit `901c2802`, after CI went green on `efc0ec27`; the production deploy (backup, `git pull`, build `migrate`, `--profile https --profile telegram up -d --build`, ledger still 139, `/api/version`) is the owner's.
 - **After the merge (2026-10-29).** `agent-feed` took `origin/main` `a4e1b1c8` in `2ac5bf7c` (main's
   AI sotuvchi and the rounds before it, migrations 0136-0138 — the journal is now 139 files, still none
   of this branch's own), and the ERP renumbered this branch's DECISIONS +90 because main had taken
@@ -66,7 +67,7 @@ runs `pnpm db:migrate && pnpm db:seed`.
   (2) the AI sotuvchi's ✅'d reply to a lead whose source is `agent` waits for THIS agent's playbook
   window — Monday-Saturday 10:00-17:00 Tashkent, never Sunday, Friday 12:00-14:00 avoided, no night
   exception — and a ✅ that could only go after the question is a day old is refused `window_closed`
-  (fullprompt docs/AGENT-FEED.md §2a; built as the owner's ⭐ (a), owed to him as a confirmation);
+  (fullprompt docs/AGENT-FEED.md §2a; built as the owner's ⭐ (a) and confirmed by him on 2026-10-29: «A»);
   (3) a person can no longer tag a lead «Agent (qidiruv)» by a hand-posted form (`source_not_pickable`);
   (4) the doors screen's hint on the agent door names the agent server's `.env`. Nothing the AI drafts
   reaches a prospect without the owner's ✅, and it never writes first. **The wire is unchanged:**
