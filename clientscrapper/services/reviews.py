@@ -1,3 +1,4 @@
+# VENDORED_FROM dailyJournal@6b1f67f miya/services/approvals.py
 """The review flow: 02 §2.9's review state machine, the card job, the expiry
 sweep and the manager handoff (06 §1.3, §1.6, §1.7; 07 §4.1 T-21).
 

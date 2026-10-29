@@ -106,6 +106,8 @@ BUILT = {
     "model_batch_collect",
     # T-18: the scorer.
     "score",
+    # T-21: the review cards (and their expiry sweep).
+    "review_cards",
     # T-28: the push and its reconcile.
     "crm_push",
     "reconcile",

@@ -32,7 +32,10 @@ outcomes/quarter/year walks), each ``run_collector(ErpSync, variant=…)``;
 ``cs_interaction``); the batch lane (T-16, ``services/model_jobs``):
 ``model_batch_submit`` at 23:30 and ``model_batch_collect`` every 30 minutes
 00:30–08:00; ``score`` (T-18, ``services/candidates.score_job``, every 15
-minutes and at once on ``cs_interaction``); ``crm_push`` (T-28,
+minutes and at once on ``cs_interaction``); ``review_cards`` (T-21,
+``services/reviews.review_cards_job``, every 2 minutes: the expiry sweep at
+any hour, the cards inside ``REVIEW_HOURS``, through the owner bot's
+``BotCards`` that ``connect_owner_bot`` wires); ``crm_push`` (T-28,
 ``services/crm_push.crm_push_job``, every minute, sending only inside the
 push window) and ``reconcile`` (T-28, ``crm_push.reconcile_job``, every 10
 minutes: a crashed claim, the ``unknown`` outcomes walk, rule 5's re-push).
@@ -114,6 +117,7 @@ from clientscrapper.services import (
     health,
     model_jobs,
     restore_drill,
+    reviews,
 )
 from clientscrapper.services import http as http_layer
 from clientscrapper.services.lifecycle import (
@@ -170,18 +174,22 @@ def connect_owner_bot() -> Any | None:
     aiogram is imported here, not at the top: the scheduler's tests import
     this module and need no Telegram client."""
     from clientscrapper.bot import deliver
+    from clientscrapper.bot.cards_out import BotCards
 
     if not deliver.configured():
         return None
     bot = deliver.make_bot()
     set_owner_notifier(deliver.owner_notifier(bot))
     set_backup_sender(deliver.document_sender(bot))
+    # review_cards_job's cards (T-21): the owner's and the managers' only.
+    reviews.set_card_sender(BotCards(bot))
     return bot
 
 
 async def disconnect_owner_bot(bot: Any | None) -> None:
     set_owner_notifier(None)
     set_backup_sender(None)
+    reviews.set_card_sender(None)
     if bot is not None:
         with contextlib.suppress(Exception):
             await bot.session.close()
@@ -337,7 +345,13 @@ def job_table() -> tuple[JobSlot, ...]:
             candidates.score_job,
             wakes_on=chats.INTERACTION_CHANNEL,
         ),
-        JobSlot("review_cards", ("every 2m",), "T-21", note="sends inside REVIEW_HOURS"),
+        JobSlot(
+            "review_cards",
+            ("every 2m",),
+            "T-21",
+            reviews.review_cards_job,
+            note="sends inside REVIEW_HOURS",
+        ),
         JobSlot("enrich", ("*/10 7-21 * * *",), "T-24", note="every 10 min 07:00–22:00"),
         JobSlot("verdict", ("every 10m",), "T-30"),
         # --- 05: push, reconcile, precision ---------------------------------------

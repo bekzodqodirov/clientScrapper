@@ -110,6 +110,9 @@ files = [
     "clientscrapper/bot/deliver.py",
     "clientscrapper/services/cards.py",
     "clientscrapper/services/owner.py",
+    # T-21
+    "clientscrapper/services/reviews.py",
+    "clientscrapper/bot/cards_out.py",
 ]
 
 # APScheduler 3 ships no type information.

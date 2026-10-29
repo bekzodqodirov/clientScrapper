@@ -1,19 +1,22 @@
 # VENDORED_FROM dailyJournal@6b1f67f miya/bot/handlers.py
 """What a manager reaches (06 §1.1, §1.7) and the commands the owner shares
-with them: ``/start``, ``/yordam``, ``/qidir``, and the buttons ``mh:*`` of
-the manager's OWN cards (``lead_reviews.by_telegram_id`` must be the
-presser's — another manager's card answers «not yours»).
+with them: ``/start``, ``/yordam``, ``/qidir``, ``/tel``, and the buttons
+``mh:*`` of the manager's OWN cards (``lead_reviews.by_telegram_id`` must be
+the presser's — another manager's card answers «not yours»).
 
-The manager card's answers (📞 🙅 ❌ ⏭) are the review flow's (T-21,
-``Deps.review_answer``); unwired, a tap is answered «not ready». ``/tel`` is
-T-21's too. A manager never sees ``/lidlar``, ``/manbalar``, ``/unut`` or a
-health alert: those are on the owner's router alone.
+The manager card's answers (📞 🙅 ❌ ⏭) are the review flow's
+(``reviews.answer``, the owner card's own path); ``/tel <karta> +998…`` is
+``reviews.tel``: the phone the prospect gave, stored with its legal basis,
+the candidate re-scored at once. A manager never sees ``/lidlar``,
+``/manbalar``, ``/unut`` or a health alert: those are on the owner's router
+alone.
 """
 
 from __future__ import annotations
 
 from aiogram.types import Message
 
+from clientscrapper.bot import callbacks as cb
 from clientscrapper.bot.handlers.common import (
     Deps,
     Tap,
@@ -22,9 +25,10 @@ from clientscrapper.bot.handlers.common import (
     reply,
     toast,
 )
-from clientscrapper.bot.texts import t
+from clientscrapper.bot.handlers.review import apply_answer
+from clientscrapper.bot.texts import UZ, t
 from clientscrapper.db.enums import CANDIDATE_STATES
-from clientscrapper.services import cards
+from clientscrapper.services import cards, reviews
 
 
 async def start(message: Message) -> None:
@@ -70,12 +74,34 @@ async def on_answer(tap: Tap) -> None:
     if review.by_telegram_id != tap.user_id:
         await toast(tap.query, t("not_yours"), alert=True)
         return
-    answer = tap.deps.review_answer
-    if answer is None:
-        await toast(tap.query, t("review.not_ready"), alert=True)
+    action = tap.data.action
+    if action is None or action not in cb.MANAGER_ANSWERS:
+        await toast(tap.query, t("stale_button"))
         return
-    said = await answer(tap, None)
-    await toast(tap.query, said)
+    await apply_answer(tap, cb.MANAGER_ANSWERS[action])
 
 
-__all__ = ["on_answer", "qidir", "start", "yordam"]
+async def tel(message: Message, deps: Deps) -> None:
+    """``/tel <karta> +998…`` (06 §1.7): the manager's own card only."""
+    head, _, raw = args_of(message).partition(" ")
+    if not (head.isascii() and head.isdigit()) or len(head) > 19 or not raw.strip():
+        await reply(message, t("tel.how"))
+        return
+    review_id = int(head)
+    if review_id > cb.BIGINT_MAX:
+        await reply(message, t("tel.how"))
+        return
+    user = message.from_user.id if message.from_user else 0
+    async with deps.session_factory() as session:
+        try:
+            done = await reviews.tel(session, review_id, raw, by=user, now=deps.clock())
+        except reviews.Refused as refused:
+            await session.rollback()
+            key = f"tel.{refused.code}"
+            await reply(message, UZ[key] if key in UZ else t("tel.stale"))
+            return
+        await session.commit()
+    await reply(message, t("tel.done" if done.approved else "tel.held", score=done.score))
+
+
+__all__ = ["on_answer", "qidir", "start", "tel", "yordam"]

@@ -489,9 +489,7 @@ def with_footer(text: str, line: str) -> str:
 # --- loading a review card ----------------------------------------------------------
 
 
-async def handoff_username(
-    session: AsyncSession, candidate: LeadCandidate
-) -> str | None:
+async def handoff_username(session: AsyncSession, candidate: LeadCandidate) -> str | None:
     """The username a manager writes to: the candidate's own contact's, else
     the lineage's oldest live contact with one (02 §2.9's «contacts.
     telegram_username IS NOT NULL»)."""

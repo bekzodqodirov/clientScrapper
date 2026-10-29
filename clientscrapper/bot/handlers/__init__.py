@@ -88,6 +88,7 @@ OWNER_COMMANDS: Final[Mapping[str, Handler]] = MappingProxyType(
         "vazn": admin.vazn,
         "push": admin.push,
         "stir": admin.stir,
+        "tel": manager.tel,
     }
 )
 MANAGER_COMMANDS: Final[Mapping[str, Handler]] = MappingProxyType(
@@ -96,6 +97,7 @@ MANAGER_COMMANDS: Final[Mapping[str, Handler]] = MappingProxyType(
         "yordam": manager.yordam,
         "help": manager.yordam,
         "qidir": manager.qidir,
+        "tel": manager.tel,
     }
 )
 
@@ -130,8 +132,14 @@ async def forwarded(message: Message) -> None:
     await reply(message, t("forwarded"))
 
 
-async def owner_text(message: Message) -> None:
-    """Anything that is not a command: the list of commands."""
+async def owner_text(message: Message, deps: Deps) -> None:
+    """Anything that is not a command: the phone a ✏️ tap waits for (5
+    minutes, 06 §1.3), else the list of commands."""
+    user = message.from_user.id if message.from_user else None
+    review_id = deps.phones.take(user, now=deps.clock()) if user is not None else None
+    if review_id is not None and message.text:
+        await review.phone_answer(message, deps, review_id)
+        return
     await reply(message, t("help_owner"))
 
 
