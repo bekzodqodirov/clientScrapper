@@ -26,7 +26,34 @@ Built here (T-08):
 Built by later tasks and registered here: the five ERP feed cadences, read
 from ``collectors/erp_sync.JOBS`` (T-09's suppression delta/full, T-10's
 outcomes/quarter/year walks), each ``run_collector(ErpSync, variant=…)``;
-and ``resolve`` (T-17, ``services/companies.resolve_job``, every 2 minutes).
+``resolve`` (T-17, ``services/companies.resolve_job``, every 2 minutes);
+``telegram_monitor`` (T-14, ``run_collector(TelegramMonitor)``);
+``classify`` (T-15, ``services/classify.classify_job``, woken by
+``cs_interaction``); the batch lane (T-16, ``services/model_jobs``):
+``model_batch_submit`` at 23:30 and ``model_batch_collect`` every 30 minutes
+00:30–08:00; ``score`` (T-18, ``services/candidates.score_job``, every 15
+minutes and at once on ``cs_interaction``); ``crm_push`` (T-28,
+``services/crm_push.crm_push_job``, every minute, sending only inside the
+push window) and ``reconcile`` (T-28, ``crm_push.reconcile_job``, every 10
+minutes: a crashed claim, the ``unknown`` outcomes walk, rule 5's re-push).
+
+**The event-driven path** (04 §0, 01 N-06). A slot with ``wakes_on`` also
+runs when its ``NOTIFY`` channel speaks: :func:`listen_for_wakes` holds a
+``LISTEN`` connection of its own and moves each such job's next run to now
+(``wake``); the cron is the fallback sweep for a notification lost while
+nobody listened — and on every (re)connect the listener wakes them all once,
+for what was said while it was away. A wake that lands while the job runs is
+not dropped by ``max_instances=1``: the job is not moved (APScheduler would
+only skip a second instance) but runs once more when it ends
+(``wakeable``). A payload ``<slot id>:<…>`` is that job's own announcement
+(``telegram_monitor`` linking a message for the classifier, ``classify`` a
+result for the scorer) and wakes the jobs **after** it on the channel — the
+table lists a channel's slots upstream first (telegram_monitor, classify,
+score), and each stage wakes the next (04 §0) — never the one that said it
+nor a stage before it: an applied classification has nothing for the
+collector to read. ``resolve`` announces on the channel without waking on it
+(``resolve:<id>``, a resolved Telegram row for the scorer): it stands after
+``classify`` (``ANNOUNCES_AFTER``), so it wakes the scorer alone.
 
 Every job's outcome is also recorded as a ``job:<id>`` heartbeat by an
 APScheduler listener (04 §0: «every job … beats job:<id>»). Crons are
@@ -68,17 +95,23 @@ from apscheduler.triggers.interval import IntervalTrigger
 from clientscrapper.collectors import erp_sync, runner
 from clientscrapper.collectors.base import Collector
 from clientscrapper.collectors.runner import run_collector
+from clientscrapper.collectors.telegram_monitor import TelegramMonitor
 from clientscrapper.config import settings
 from clientscrapper.db.models import CollectorRun, Heartbeat, Source
 from clientscrapper.db.session import engine, session_scope
 from clientscrapper.logs import setup_logging
 from clientscrapper.services import (
     backup,
+    candidates,
+    chats,
+    classify,
     companies,
     costs,
+    crm_push,
     crontab,
     erp_feeds,
     health,
+    model_jobs,
     restore_drill,
 )
 from clientscrapper.services import http as http_layer
@@ -216,9 +249,10 @@ def job_table() -> tuple[JobSlot, ...]:
             "telegram_monitor",
             ("*/15 * * * *",),
             "T-14",
-            source_key="telegram_monitor",
+            collector_job(TelegramMonitor),
+            source_key=TelegramMonitor.key,
             primary=True,
-            wakes_on="cs_interaction",
+            wakes_on=chats.INTERACTION_CHANNEL,
             note="join (10–20 h) and backfill (01:00) run in the userbot process",
         ),
         _collector("serp_layer", "0 10,14 * * *", "T-25", "serp_layer", primary=True),
@@ -249,22 +283,46 @@ def job_table() -> tuple[JobSlot, ...]:
         _collector("uzum_shops", "0 4 15 * *", "T-37", "uzum_sellers", "shops"),
         _collector("tenders", "0 4 * * 6", "T-38", None, note="phase 2; no sources row"),
         # --- 04 §0: the pipeline -----------------------------------------------
-        JobSlot("classify", ("every 15m",), "T-15", wakes_on="cs_interaction"),
-        JobSlot("model_batch_submit", ("30 23 * * *",), "T-16"),
+        JobSlot(
+            "classify",
+            ("every 15m",),
+            "T-15",
+            classify.classify_job,
+            wakes_on=chats.INTERACTION_CHANNEL,
+        ),
+        JobSlot(
+            "model_batch_submit",
+            ("30 23 * * *",),
+            "T-16",
+            model_jobs.model_batch_submit_job,
+        ),
         JobSlot(
             "model_batch_collect",
             ("30 0 * * *", "0,30 1-7 * * *", "0 8 * * *"),
             "T-16",
+            model_jobs.model_batch_collect_job,
             note="every 30 min 00:30–08:00",
         ),
         JobSlot("resolve", ("every 2m",), "T-17", companies.resolve_job),
-        JobSlot("score", ("every 15m",), "T-18", wakes_on="cs_interaction"),
+        JobSlot(
+            "score",
+            ("every 15m",),
+            "T-18",
+            candidates.score_job,
+            wakes_on=chats.INTERACTION_CHANNEL,
+        ),
         JobSlot("review_cards", ("every 2m",), "T-21", note="sends inside REVIEW_HOURS"),
         JobSlot("enrich", ("*/10 7-21 * * *",), "T-24", note="every 10 min 07:00–22:00"),
         JobSlot("verdict", ("every 10m",), "T-30"),
         # --- 05: push, reconcile, precision ---------------------------------------
-        JobSlot("crm_push", ("every 1m",), "T-28", note="sends inside PUSH_WINDOW"),
-        JobSlot("reconcile", ("every 10m",), "T-28"),
+        JobSlot(
+            "crm_push",
+            ("every 1m",),
+            "T-28",
+            crm_push.crm_push_slot,
+            note="sends inside PUSH_WINDOW",
+        ),
+        JobSlot("reconcile", ("every 10m",), "T-28", crm_push.reconcile_slot),
         JobSlot("source_precision", ("0 4 * * 0",), "T-36"),
         # --- 06: digest, retention --------------------------------------------------
         JobSlot("digest", (_at(settings.digest_time_parsed),), "T-35"),
@@ -336,7 +394,7 @@ def build_scheduler(
             continue
         args = [scheduler] if slot.pass_scheduler else []
         scheduler.add_job(
-            slot.job,
+            wakeable(slot.id, slot.job) if slot.wakes_on else slot.job,
             trigger,
             args=args,
             id=slot.id,
@@ -378,6 +436,154 @@ def collector_job(cls: type[Collector], variant: str | None = None) -> Job:
 
     job.__name__ = f"collector_{cls.key}{'_' + variant if variant else ''}"
     return job
+
+
+# --- the event-driven path (04 §0) -------------------------------------------------
+
+
+def plain_dsn(url: str) -> str:
+    """SQLAlchemy's ``postgresql+psycopg://…`` as psycopg's own connection
+    string: the lock and the listener hold a connection of their own."""
+    return re.sub(r"^postgresql\+\w+://", "postgresql://", url)
+
+
+# How long the listener waits before it reconnects after losing its connection.
+WAKE_RETRY: Final = timedelta(seconds=10)
+# How long one wait for notifications lasts before ``stop`` is looked at again.
+WAKE_POLL_SECONDS: Final = 1.0
+# A stage that announces on a channel it does not wake on → the woken slot it
+# follows there (04 §0: classify → resolve_job → score). Its payload wakes
+# the slots after that one; any other unknown origin wakes them all.
+ANNOUNCES_AFTER: Final[Mapping[str, str]] = {"resolve": "classify"}
+
+
+@dataclass(slots=True)
+class _Wakes:
+    # Slot ids woken since their job last started: the job runs again.
+    pending: set[str] = field(default_factory=set)
+    # Slot ids whose job is running now: a wake is kept, not moved.
+    running: set[str] = field(default_factory=set)
+
+
+_wakes = _Wakes()
+
+
+def wakeable(slot_id: str, job: Job) -> Job:
+    """``job`` as a woken slot runs it: a wake that came while it ran (the
+    scheduler's own run is refused by ``max_instances=1``) makes it run once
+    more as soon as it ends, so a burst of notifications is never lost and
+    never runs the job twice at once."""
+
+    async def run(*args: Any) -> Any:
+        _wakes.running.add(slot_id)
+        try:
+            while True:
+                _wakes.pending.discard(slot_id)
+                result = await job(*args)
+                if slot_id not in _wakes.pending:
+                    return result
+        finally:
+            _wakes.running.discard(slot_id)
+
+    run.__name__ = f"woken_{slot_id}"
+    return run
+
+
+def waking(slots: tuple[JobSlot, ...] | None = None) -> dict[str, tuple[str, ...]]:
+    """``NOTIFY`` channel → the built slots that wake on it."""
+    found: dict[str, list[str]] = {}
+    for slot in slots if slots is not None else job_table():
+        if slot.job is not None and slot.wakes_on:
+            found.setdefault(slot.wakes_on, []).append(slot.id)
+    return {channel: tuple(ids) for channel, ids in found.items()}
+
+
+def origin_of(payload: str) -> str | None:
+    """The slot a payload ``<slot id>:<…>`` comes from; None for the reader's
+    bare ``'<interaction id>'``."""
+    head, sep, _ = payload.partition(":")
+    return head if sep and head else None
+
+
+def wake(
+    scheduler: AsyncIOScheduler,
+    slot_ids: tuple[str, ...],
+    *,
+    payload: str = "",
+    now: datetime | None = None,
+) -> list[str]:
+    """Run each of ``slot_ids`` now — when ``payload`` names the slot it
+    comes from, only the slots listed after it (downstream); the ids woken."""
+    now = now or datetime.now(settings.tz)
+    origin = origin_of(payload)
+    if origin is not None:
+        origin = ANNOUNCES_AFTER.get(origin, origin)
+    if origin in slot_ids:
+        slot_ids = slot_ids[slot_ids.index(origin) + 1 :]
+    woken: list[str] = []
+    for slot_id in slot_ids:
+        if slot_id == origin:
+            continue
+        _wakes.pending.add(slot_id)
+        # A running job goes round once more (``wakeable``); moving it would
+        # only have APScheduler skip a second instance with a warning.
+        if slot_id in _wakes.running or _run_now(scheduler, slot_id, now):
+            woken.append(slot_id)
+    return woken
+
+
+async def listen_for_wakes(
+    scheduler: AsyncIOScheduler,
+    stop: asyncio.Event,
+    *,
+    slots: tuple[JobSlot, ...] | None = None,
+    database_url: str | None = None,
+    connected: Callable[[], None] | None = None,
+) -> None:
+    """``LISTEN`` on every channel a built slot wakes on, until ``stop``: a
+    notification wakes its slots (``wake``). On each (re)connect every such
+    slot is woken once — what was said while nobody listened is not heard
+    again. A lost connection is a log line and a reconnect after
+    ``WAKE_RETRY``; the cron sweep covers the gap. ``connected`` is called
+    once the LISTENs hold (for tests)."""
+    channels = waking(slots)
+    if not channels:
+        return
+    import psycopg
+    from psycopg import sql
+
+    dsn = plain_dsn(database_url or settings.database_url)
+    while not stop.is_set():
+        try:
+            conn = await psycopg.AsyncConnection.connect(
+                dsn, autocommit=True, connect_timeout=10
+            )
+            try:
+                for channel in channels:
+                    await conn.execute(
+                        sql.SQL("LISTEN {}").format(sql.Identifier(channel))
+                    )
+                for ids in channels.values():
+                    wake(scheduler, ids)
+                if connected is not None:
+                    connected()
+                while not stop.is_set():
+                    async for note in conn.notifies(timeout=WAKE_POLL_SECONDS):
+                        ids = channels.get(note.channel, ())
+                        woken = wake(scheduler, ids, payload=note.payload)
+                        log.debug(
+                            "woken by a notification",
+                            extra={"channel": note.channel, "jobs": woken},
+                        )
+            finally:
+                await conn.close()
+        except Exception as exc:
+            log.warning(
+                "wake listener lost its connection; the cron sweeps cover the gap",
+                extra={"error": type(exc).__name__},
+            )
+            if await _wait(stop, WAKE_RETRY):
+                return
 
 
 # --- self-monitoring -----------------------------------------------------------------
@@ -804,8 +1010,7 @@ class Leadership:
     worker frees it at once)."""
 
     def __init__(self, database_url: str | None = None) -> None:
-        url = database_url or settings.database_url
-        self._dsn = re.sub(r"^postgresql\+\w+://", "postgresql://", url)
+        self._dsn = plain_dsn(database_url or settings.database_url)
         self._conn: Any = None
 
     async def acquire(self) -> bool:
@@ -978,6 +1183,7 @@ async def run() -> None:
         EVENT_JOB_EXECUTED | EVENT_JOB_ERROR,
     )
     scheduler.start()
+    listener = asyncio.ensure_future(listen_for_wakes(scheduler, stop))
     registered = [job.id for job in scheduler.get_jobs()]
     log.info(
         "worker started",
@@ -1002,6 +1208,9 @@ async def run() -> None:
     try:
         await keep_leadership(leader, scheduler, stop)
     finally:
+        listener.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await listener
         scheduler.shutdown(wait=False)
         if _shared.fetcher is not None:
             await _shared.fetcher.aclose()

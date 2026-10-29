@@ -697,12 +697,42 @@ async def anthropic_facts(session: AsyncSession) -> AnthropicFacts:
     last_failed = await session.scalar(
         base.where(UsageLog.model.startswith(costs.FAILED_PREFIX, autoescape=True))
     )
+    # The work that waits for an answer now: the Telegram messages classify
+    # has still to ask about (its queue — an instant-lane job is never left
+    # pending once its transaction commits, so the queue is where the
+    # waiting work is) and any instant job left pending. The batch lane's
+    # pending jobs wait for 23:30 by design; batch_stuck is their alarm.
+    from clientscrapper.services import classify  # it imports this module
+
     pending = await session.scalar(
         sa.select(sa.func.count())
         .select_from(ModelJob)
-        .where(ModelJob.status == "pending")
+        .where(ModelJob.status == "pending", ModelJob.lane == "instant")
     )
-    return AnthropicFacts(last_ok, last_failed, int(pending or 0))
+    waiting = await classify.waiting(session)
+    return AnthropicFacts(last_ok, last_failed, int(pending or 0) + waiting)
+
+
+async def stuck_batches(
+    session: AsyncSession, now: datetime
+) -> tuple[tuple[str, datetime], ...]:
+    """06 §4.2 batch_stuck: each Message Batch whose jobs still wait
+    ``submitted`` more than ``BATCH_STUCK_AFTER`` after it was sent — (batch
+    id, submitted_at of its oldest job), oldest first. The one statement of
+    «stuck»: the sweep says it, the night's submit gives up on it
+    (``model_jobs``)."""
+    rows = await session.execute(
+        sa.select(ModelJob.batch_id, sa.func.min(ModelJob.submitted_at))
+        .where(
+            ModelJob.lane == "batch",
+            ModelJob.status == "submitted",
+            ModelJob.batch_id.is_not(None),
+        )
+        .group_by(ModelJob.batch_id)
+        .having(sa.func.min(ModelJob.submitted_at) < now - BATCH_STUCK_AFTER)
+        .order_by(sa.func.min(ModelJob.submitted_at))
+    )
+    return tuple((str(batch_id), at) for batch_id, at in rows.all())
 
 
 async def reported_problems(session: AsyncSession, now: datetime) -> dict[str, Reported]:
@@ -944,19 +974,7 @@ async def gather(
             )
         )
     ).one()
-    stuck = (
-        await session.execute(
-            sa.select(ModelJob.batch_id, sa.func.min(ModelJob.submitted_at))
-            .where(
-                ModelJob.lane == "batch",
-                ModelJob.status == "submitted",
-                ModelJob.batch_id.is_not(None),
-            )
-            .group_by(ModelJob.batch_id)
-            .having(sa.func.min(ModelJob.submitted_at) < now - BATCH_STUCK_AFTER)
-            .order_by(sa.func.min(ModelJob.submitted_at))
-        )
-    ).all()
+    stuck = await stuck_batches(session, now)
     # How long a card has waited: since the owner was first shown it (an
     # unanswered owner card's asked_at), else since the row last changed —
     # updated_at alone moves on every rescore and enrichment, and would
@@ -1044,7 +1062,7 @@ async def gather(
         last_interaction_at=last_signal,
         spend=await costs.snapshot(session, now),
         anthropic=await anthropic_facts(session),
-        stuck_batches=tuple((str(b), at) for b, at in stuck),
+        stuck_batches=stuck,
         review_backlog=int(backlog or 0),
         push_failing_streak=await _push_failing_streak(session),
         queues=await _queues(session, now),
@@ -1576,8 +1594,9 @@ def problems(status: Status) -> list[Problem]:
         add(
             "batch_stuck",
             f"⚠️ Tungi batch {age_label(status.now - submitted_at)} tugamadi "
-            f"({escape(batch_id)}{extra}) — <code>make worker</code> loglari; ertaga "
-            "Sonnet oʻzi oladi",
+            f"({escape(batch_id)}{extra}) — <code>make worker</code> loglari; "
+            "ishlar keyingi tunda qayta yuboriladi, 3-urinishdan keyin tezkor yoʻl "
+            "oʻzi oladi",
         )
     if "pii_leak" in rep:
         add(

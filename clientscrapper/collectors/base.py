@@ -11,14 +11,21 @@ that fetches through the ``Fetcher`` it was given and calls them. The runner
 ``enabled``, ``paused_until``, ``daily_page_budget`` and ``daily_cost_cap_usd``
 the runner reads. ``Observation.source`` may name an attribution-only
 sub-source (``search_brave``, ``directories_goldenpages``, ``maps_google``).
+
+A collector whose bytes are not a fetch — ``telegram_monitor`` reads the rows
+the Telegram reader stored (03 §2.3) — hands them to the runner with
+``supply`` instead (``Supplied``), and is told where each observation landed
+through ``after_write`` (``Placed``), inside the run's transaction.
 """
 
 from __future__ import annotations
 
+import hashlib
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Final, Literal
 
 from clientscrapper.services.health import collector_component
@@ -123,6 +130,37 @@ class Budget:
         self.spent_usd += usd
 
 
+@dataclass(frozen=True, slots=True)
+class Supplied:
+    """Bytes a collector read without the Fetcher, for the runner to keep as
+    the evidence of the observations that carry ``url`` and ``raw_sha256 ==
+    sha256`` — both, because two messages can say the same words at two
+    links, and each is cited where it was said: a
+    message the Telegram reader stored (``body`` its text), or an evidence
+    row another process already wrote (``body`` None or its bytes) — the
+    reader's weekly channel about (03 §2.3). Such a row, stored outside any
+    run (``collector_run_id`` NULL) and holding no observation yet, is
+    adopted: the run writes its observations against it."""
+
+    url: str
+    sha256: str
+    body: bytes | None
+    content_type: str
+    fetched_at: datetime
+    meta: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class Placed:
+    """Where the runner put one observation of the run: its evidence row, and
+    its observation row — None when it was not written now (a duplicate of
+    the last 24 h, bytes an earlier run stored)."""
+
+    observation: Observation
+    evidence_id: int
+    observation_id: int | None
+
+
 class Collector(ABC):
     """Subclasses set the class variables. ``heartbeat`` is derived, never
     set: ``health.collector_component(key)`` — the name the runner beats
@@ -136,7 +174,10 @@ class Collector(ABC):
     (``erp_sync``'s feed report, 05 §B.2). ``unavailable()`` names a reason
     the collector cannot run now whatever its ``sources`` row says (an ERP
     feed that is not configured, 05 §B.3): the runner skips the run with it,
-    as it skips a disabled row."""
+    as it skips a disabled row. ``supplied`` holds the bytes ``supply`` was
+    given, by ``(url, sha256)``; ``evidence_root`` is where the run keeps
+    evidence files (the runner sets it), for a collector that reads stored
+    ones back."""
 
     key: ClassVar[str]
     family: ClassVar[str]
@@ -171,6 +212,8 @@ class Collector(ABC):
         # The run's ``now`` (the runner sets it before ``collect``): the clock
         # of a collector whose work is not a fetch (the ERP feeds' ``now``).
         self.started_at: datetime | None = None
+        self.supplied: dict[tuple[str, str], Supplied] = {}
+        self.evidence_root: Path | None = None
 
     @classmethod
     def unavailable(cls) -> str | None:
@@ -180,3 +223,37 @@ class Collector(ABC):
     @abstractmethod
     async def collect(self, session: AsyncSession, budget: Budget) -> list[Observation]:
         """Fetch, parse, return every observation of this run."""
+
+    def supply(
+        self,
+        url: str,
+        body: bytes | None,
+        *,
+        content_type: str,
+        fetched_at: datetime,
+        sha256: str | None = None,
+        meta: dict[str, Any] | None = None,
+    ) -> str:
+        """Hand the runner bytes this run did not fetch; the sha256 its
+        observations carry as ``raw_sha256`` (with ``url`` as their ``url``).
+        Without ``body`` the bytes are an evidence row already, named by
+        ``sha256``."""
+        if body is not None:
+            sha = hashlib.sha256(body).hexdigest()
+            if sha256 is not None and sha256 != sha:
+                raise ValueError("supplied bytes do not hash to the sha256 given")
+        elif sha256 is None:
+            raise ValueError("supply needs the body or the stored row's sha256")
+        else:
+            sha = sha256
+        self.supplied[(url, sha)] = Supplied(
+            url, sha, body, content_type, fetched_at, dict(meta or {})
+        )
+        return sha
+
+    async def after_write(self, session: AsyncSession, placed: list[Placed]) -> None:
+        """Called by the runner once it wrote the run's evidence and
+        observations, before its commit, inside a savepoint of its own: what
+        a collector records about where its findings landed commits with them
+        or not at all. A collector that needs nothing leaves this alone."""
+        return None

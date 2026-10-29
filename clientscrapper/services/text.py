@@ -9,9 +9,10 @@ Copied from MIYA as-is (docs/kod-audit-miya.md §1) with four changes: type
 annotations for the strict mypy scope; ``normalise_for_search`` no longer
 joins MIYA's GS client codes (``services/codes.py`` is not ported, 02 §7);
 ``APOSTROPHE_CLASS``, the apostrophe table as a regex class for the
-keyword patterns that run on unfolded text; and ``storable``, the one rule
+keyword patterns that run on unfolded text; ``storable``, the one rule
 for what a ``text``/``jsonb`` column accepts (the evidence store and the
-normaliser ask it).
+normaliser ask it); and ``well_formed``, what the ERP push body may carry
+(T-28, 05 §B.1).
 """
 
 from __future__ import annotations
@@ -63,6 +64,17 @@ def storable(text: str) -> str:
     if "\x00" in text:
         text = text.replace("\x00", "")
     return _LONE_SURROGATE.sub("\ufffd", text)
+
+
+def well_formed(text: str) -> str:
+    """``text`` with every NUL and every lone surrogate DROPPED (05 §B.1):
+    what the ERP push body may carry. Unlike ``storable`` nothing becomes
+    U+FFFD — production ``7bea3051`` (the «Boshqa» fallback door) refuses a
+    NUL in a text column and a lone surrogate in ``ref``'s jsonb after the
+    lead stands, and agent-feed would store either as U+FFFD on the lenta."""
+    if "\x00" in text:
+        text = text.replace("\x00", "")
+    return _LONE_SURROGATE.sub("", text)
 
 
 # --- Latin → Cyrillic, for matching an alias in either script ----------------

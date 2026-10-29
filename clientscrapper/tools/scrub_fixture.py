@@ -58,6 +58,7 @@ from typing import Any, Final, Literal
 from clientscrapper.collectors.keywords import (
     EMAIL_RE,
     IG_RE,
+    INTL_PHONE_RE,
     LEGAL_FORM_RE,
     PHONE_RE,
     STIR_RE,
@@ -157,8 +158,8 @@ _NAME_ATTR = re.compile(
     re.I,
 )
 
-# A '+<country>' number, 10–15 digits with single separators (not +998).
-_INTL_PHONE = re.compile(r"(?<![\w+])\+(?!998)\d(?:[\s\-.()]{0,2}\d){8,14}(?!\d)")
+# A '+<country>' number, 9–15 digits (not +998): keywords' one home.
+_INTL_PHONE = INTL_PHONE_RE
 # A STIR label a few tags or spaces before nine digits (a table row).
 _STIR_NEAR = re.compile(
     r"(?<!\w)(?:STIR|СТИР|ИНН|INN|TIN)(?:\s|[:№#]|<[^<>]{0,80}>){0,6}(\d{9})(?!\d)",

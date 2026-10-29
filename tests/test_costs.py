@@ -803,6 +803,51 @@ async def test_batch_provisional_rows_are_updated_in_place(session):
     assert len(await rows(session)) == 4
 
 
+async def test_fits_counts_the_estimates_one_ask_would_let_through(session):
+    """The batch lane sizes its night batch with ``fits`` (04 §4.8): the
+    rungs are decide's — the op's allocation plus the reserve's room, the
+    daily and monthly caps — over the ledger as it stands; an unpriced
+    estimate stops the count."""
+    at = NOW.replace(hour=23, minute=30)
+    each = [D("0.40")] * 8
+    # company_verdict 1.50 + model_reserve 0.75: 5 × 0.40 = 2.00 < 2.25 ≤ 2.40.
+    assert (
+        await costs.fits(session, operation="company_verdict", estimates=each, now=at)
+        == 5
+    )
+    await seed(session, "1.00", at=at, operation="company_verdict")
+    assert (
+        await costs.fits(session, operation="company_verdict", estimates=each, now=at)
+        == 3
+    )
+    # Another Anthropic op already borrowed the reserve: the allocation alone.
+    await seed(session, "1.95", at=at, operation="verdict")  # 0.45 over its 1.50
+    assert (
+        await costs.fits(session, operation="company_verdict", estimates=each, now=at)
+        == 1
+    )
+    assert (
+        await costs.fits(
+            session,
+            operation="company_verdict",
+            estimates=[D("0.10"), None, D("0.10")],
+            now=at,
+        )
+        == 1
+    )
+    assert (
+        await costs.fits(session, operation="company_verdict", estimates=[], now=at) == 0
+    )
+    # The daily cap is a rung too: 9.80 spent leaves room for nothing at 0.40.
+    await seed(session, "6.85", at=at)
+    assert (
+        await costs.fits(session, operation="company_verdict", estimates=each, now=at)
+        == 0
+    )
+    # A read, never a claim: nothing was written.
+    assert len(await rows(session)) == 3
+
+
 async def test_two_concurrent_calls_near_the_cap_cannot_both_pass(session, monkeypatch):
     await seed(session, "9.98")
     # Hold each ask right after its ledger read until the other has read too

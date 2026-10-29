@@ -40,7 +40,7 @@ from clientscrapper.userbot import prefilter, tg
 
 log = logging.getLogger(__name__)
 
-NOTIFY_CHANNEL: Final = "cs_interaction"
+NOTIFY_CHANNEL: Final = chats.INTERACTION_CHANNEL
 TEXT_MAX: Final = 4000
 # 03 §2.3: an edit re-runs the prefilter, ten times per message at most.
 MAX_EDITS: Final = 10
@@ -229,10 +229,19 @@ async def handle_edit(
     """A message was edited: the prefilter runs again (≤ MAX_EDITS times).
 
     * not stored, now a hit → stored and notified, as a new message would be;
-    * stored, not yet processed, still a hit → its text and hits follow the
-      edit (the classifier has not read it yet);
-    * anything else stays as it was: a processed row is evidence of what was
-      said, and an edit that is no hit is not kept (no full chat logs).
+    * stored, not yet processed nor observed, still a hit → its text and hits
+      follow the edit (neither the collector nor the classifier has read it);
+    * stored and only counted by the collector (``chats.counted_only``: a
+      price list with no buyer trigger, no evidence of it was kept), still a
+      hit → its text follows the edit and it is read again, announced as a
+      new message is — the edit may have made it an ask;
+    * anything else stays as it was: a processed row — or one the
+      telegram_monitor collector already turned into evidence and an
+      observation (``evidence_id``), which quote the text as it was — is
+      evidence of what was said, and an edit that is no hit is not kept (no
+      full chat logs). The collector holds the rows it reads (``FOR UPDATE``)
+      until its run commits, so an edit waits for it and then finds
+      ``evidence_id`` set.
     An edit is not a new message: ``seen_count`` does not move."""
     item = incoming_of(message)
     if item is None:
@@ -259,11 +268,24 @@ async def handle_edit(
             return "unchanged"
         await chats.note_hit(session, item.tg_chat_id)
         return "stored"
-    if not hits or stored.processed_at is not None or stored.text_purged_at is not None:
+    counted = chats.counted_only(stored)
+    if (
+        not hits
+        or (stored.processed_at is not None and not counted)
+        or stored.evidence_id is not None
+        or stored.text_purged_at is not None
+    ):
         return "unchanged"
     if stored.text == item.text and list(stored.prefilter_hit) == list(hits):
         return "unchanged"
     stored.text = item.text
     stored.prefilter_hit = list(hits)
+    if counted:
+        stored.processed_at = None
     await session.flush()
+    if counted:
+        # Delivered when this transaction commits (04 §0): the collector reads
+        # the row again at once instead of at the next sweep.
+        notify = sa.func.pg_notify(NOTIFY_CHANNEL, str(stored.id))
+        await session.execute(sa.select(notify))
     return "updated"

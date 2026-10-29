@@ -1,0 +1,13 @@
+{
+  "speaker_role": "seller",
+  "b2b": true,
+  "b2c_markers": false,
+  "goods": ["kir yuvish mashinasi", "konditsioner"],
+  "goods_category": "electronics",
+  "origin_cn": "unknown",
+  "volume_m3_est": null,
+  "volume_basis": "inferred",
+  "volume_quote": null,
+  "frequency": "unknown",
+  "confidence": 0.7
+}

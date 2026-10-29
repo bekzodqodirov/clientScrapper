@@ -1548,7 +1548,8 @@ async def test_the_02_section_8_example_resolves_as_written(session):
         "needs_review": 0,
         "deferred": 0,
     }
-    assert heard == [str(interaction.id)]  # score_job wakes (04 §0)
+    # score_job wakes (04 §0), and only it: the announcement is the resolver's.
+    assert heard == [f"resolve:{interaction.id}"]
 
     row = await session.scalar(
         sa.select(Observation)

@@ -6,22 +6,51 @@ sleeping advances time instantly and is recorded. ``Site`` is an
 answers from a queue of responses or a callable, every request is kept with
 the fake time it arrived at, and an unknown URL is a 404 — so no test can
 reach the network. ``fetcher_for`` builds a ``Fetcher`` over both.
+
+``FakeAnthropic`` is the Messages API as an ``httpx.MockTransport`` (06 §5.2,
+T-15): it answers from a queue of scripted responses — hand-written and
+SYNTHETIC (``tests/fixtures/model/README.md``; real recordings are a day-1
+task on the VPS, 07 §5.5) — keeps every request body, and notes any request
+whose strings still carry personal data (``pseudonyms.unmasked``: a phone,
+Uzbek or foreign, a long digit run, a Telegram, messenger or Instagram
+handle, an e-mail or a 14-digit run), and any request nobody scripted an
+answer for.
+``tests/conftest.py`` installs one on ``services/extraction`` for every test
+and fails the test that leaked or called unscripted.
+
+Its Message Batches half (T-16) keeps batches by id: ``create`` mints one only
+when the test allowed it (``accept_batches``, or a scripted refusal with
+``refuse_batch``, or a create taken whose answer is lost with
+``lose_batch_answer``) — an unplanned submit is an unscripted request like
+any other — ``retrieve`` reads a batch as the test left it (``in_progress`` until
+``end``), ``results`` streams the JSONL the test wrote (``succeeded`` /
+``errored`` / ``expired`` / ``canceled`` lines, in whatever order it gave) —
+or breaks off part way when the test said so (``drop_results``: the
+connection dropped, or the line cut short) — and ``cancel`` is noted. Every
+request inside a batch passes the same PII fence (``batch_pii_in``: what the
+model reads, not the lane's own ``custom_id``).
 """
 
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
+import json
+import re
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal
+from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
+import anthropic
 import httpx
 
 from clientscrapper.collectors.base import Budget
+from clientscrapper.config import settings
 from clientscrapper.services.http import Fetcher, HostState
+from clientscrapper.services.pseudonyms import unmasked
 
 TASHKENT = ZoneInfo("Asia/Tashkent")
 T0 = datetime(2026, 10, 24, 10, 0, tzinfo=TASHKENT)
@@ -132,3 +161,349 @@ def budget(
 
 
 ALLOW_ALL = httpx.Response(200, text="User-agent: *\nDisallow:\n")
+
+
+# --- the Messages API (T-15) -----------------------------------------------------
+
+MODEL_FIXTURES = Path(__file__).parent / "fixtures" / "model"
+GRAMMAR_MESSAGE = "Grammar compilation timed out for the provided schema"
+
+
+def strings_of(value: Any) -> Iterator[str]:
+    """Every string inside a decoded JSON body, keys included."""
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for key, item in value.items():
+            yield str(key)
+            yield from strings_of(item)
+    elif isinstance(value, list):
+        for item in value:
+            yield from strings_of(item)
+
+
+def pii_in(body: Any) -> list[str]:
+    """The patterns a request body still matches — the pattern's name, never
+    the value (a failing test must not print what it protects). The one home
+    of what may not reach a model is ``pseudonyms.unmasked`` (its
+    ``GUARDED`` list, the shapes keywords keeps): the fence and
+    ``assert_masked`` cannot disagree — a labelled STIR is company-tier for
+    both."""
+    return sorted({name for text in strings_of(body) for name in unmasked(text)})
+
+
+def batch_pii_in(body: Any) -> list[str]:
+    """``pii_in`` over a batch create: everything the model is asked — each
+    request's ``params`` and the rest of the body — but not the ``custom_id``,
+    the lane's own key (``'cs-' || uuid4``, 02 §2.6) that only matches a
+    result to its job and is never shown to the model. A uuid's hyphens make
+    a phone-shaped digit run (``65555-2015``) about one time in forty."""
+    requests = body.get("requests") if isinstance(body, dict) else None
+    if not isinstance(requests, list):
+        return pii_in(body)
+    rest = {k: v for k, v in body.items() if k != "requests"}
+    shown = [r.get("params") if isinstance(r, dict) else r for r in requests]
+    return pii_in([rest, shown])
+
+
+def model_fixture(name: str) -> Any:
+    """A SYNTHETIC structured answer from tests/fixtures/model/."""
+    return json.loads((MODEL_FIXTURES / name).read_text(encoding="utf-8"))
+
+
+def message_body(
+    answer: Any = None,
+    *,
+    stop_reason: str = "end_turn",
+    input_tokens: int = 300,
+    output_tokens: int = 150,
+    cache_read: int = 900,
+    cache_write: int = 0,
+    model: str | None = None,
+) -> dict[str, Any]:
+    """A Messages API message: ``answer`` as the text block (a dict or list is
+    written as JSON, a str as it is, None = no content at all)."""
+    if answer is None:
+        content: list[dict[str, Any]] = []
+    else:
+        text = answer if isinstance(answer, str) else json.dumps(answer)
+        content = [{"type": "text", "text": text}]
+    body = {
+        "id": "msg_synthetic",
+        "type": "message",
+        "role": "assistant",
+        "model": model or settings.extract_model,
+        "content": content,
+        "stop_reason": stop_reason,
+        "stop_sequence": None,
+        "usage": {
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "cache_read_input_tokens": cache_read,
+            "cache_creation_input_tokens": cache_write,
+        },
+    }
+    return body
+
+
+def message(answer: Any = None, **fields: Any) -> httpx.Response:
+    """A Messages API 200 carrying ``message_body(answer, **fields)``."""
+    return httpx.Response(200, json=message_body(answer, **fields))
+
+
+def api_error(status: int, kind: str, text: str) -> httpx.Response:
+    return httpx.Response(
+        status, json={"type": "error", "error": {"type": kind, "message": text}}
+    )
+
+
+def grammar_failure() -> httpx.Response:
+    """The 400 a schema too big for the grammar compiler gets (MIYA)."""
+    return api_error(400, "invalid_request_error", GRAMMAR_MESSAGE)
+
+
+def overloaded() -> httpx.Response:
+    return api_error(529, "overloaded_error", "Overloaded")
+
+
+ModelAnswer = httpx.Response | Callable[[httpx.Request], httpx.Response]
+
+
+# --- the Message Batches API (T-16) ---------------------------------------------
+
+BATCHES_PATH = "/v1/messages/batches"
+_BATCH_PATH = re.compile(
+    r"\A/v1/messages/batches/(?P<id>[A-Za-z0-9_]+)(?P<tail>/results|/cancel)?\Z"
+)
+
+
+def succeeded(answer: Any = None, **fields: Any) -> dict[str, Any]:
+    """A batch result line's ``result``: the request succeeded with this
+    message (``message_body``'s fields; the default model is the batch one)."""
+    fields.setdefault("model", settings.batch_model)
+    return {"type": "succeeded", "message": message_body(answer, **fields)}
+
+
+def errored(
+    kind: str = "api_error", text: str = "Internal server error"
+) -> dict[str, Any]:
+    return {
+        "type": "errored",
+        "error": {"type": "error", "error": {"type": kind, "message": text}},
+    }
+
+
+def expired() -> dict[str, Any]:
+    return {"type": "expired"}
+
+
+def canceled() -> dict[str, Any]:
+    return {"type": "canceled"}
+
+
+class _BrokenStream(httpx.AsyncByteStream):
+    """A results body that stops after ``head`` bytes: with ``error`` raised
+    there, as a dropped connection does mid-download, or (None) simply ended,
+    the last line cut short."""
+
+    def __init__(self, head: bytes, error: Exception | None) -> None:
+        self.head, self.error = head, error
+
+    async def __aiter__(self) -> Any:
+        yield self.head
+        if self.error is not None:
+            raise self.error
+
+
+@dataclass(slots=True)
+class FakeBatch:
+    """One Message Batch as the fake API holds it."""
+
+    id: str
+    requests: list[dict[str, Any]]
+    created_at: datetime
+    status: str = "in_progress"
+    # (custom_id, result) lines, in the order the test wrote them.
+    results: list[tuple[str, dict[str, Any]]] | None = None
+    cancelled: bool = False
+
+    @property
+    def custom_ids(self) -> list[str]:
+        return [str(r["custom_id"]) for r in self.requests]
+
+    def json(self) -> dict[str, Any]:
+        ended = self.status == "ended"
+        counts = {"processing": 0 if ended else len(self.requests), "succeeded": 0}
+        counts |= {"errored": 0, "canceled": 0, "expired": 0}
+        for _, result in self.results or ():
+            counts[str(result["type"])] += 1
+        return {
+            "id": self.id,
+            "type": "message_batch",
+            "processing_status": self.status,
+            "request_counts": counts,
+            "created_at": self.created_at.isoformat(),
+            "expires_at": (self.created_at + timedelta(hours=24)).isoformat(),
+            "ended_at": self.created_at.isoformat() if ended else None,
+            "results_url": (
+                f"https://api.anthropic.com{BATCHES_PATH}/{self.id}/results"
+                if ended and self.results is not None
+                else None
+            ),
+        }
+
+
+class FakeAnthropic:
+    """The Messages API: scripted answers in order, every request kept; and
+    the Message Batches API (the module docstring)."""
+
+    def __init__(self) -> None:
+        self.answers: list[ModelAnswer] = []
+        self.requests: list[dict[str, Any]] = []
+        self.leaks: list[list[str]] = []
+        self.unexpected = 0
+        self.batches: dict[str, FakeBatch] = {}
+        # Every batch create's body (its requests), refused ones included.
+        self.batch_bodies: list[dict[str, Any]] = []
+        # Scripted answers to batch creates: None accepts and mints a batch;
+        # an exception mints it and is raised instead of the answer (taken,
+        # the answer lost — ``lose_batch_answer``).
+        self.batch_answers: list[httpx.Response | Exception | None] = []
+        # Scripted failures of retrieve / results, per batch id, used first.
+        self.retrieve_failures: dict[str, list[httpx.Response]] = {}
+        self.results_failures: dict[str, list[httpx.Response]] = {}
+        # Scripted breaks of a results stream, per batch id, used first:
+        # (bytes sent before the break, the error raised there or None).
+        self.results_drops: dict[str, list[tuple[int, Exception | None]]] = {}
+        self.retrieved: list[str] = []
+        self.cancelled: list[str] = []
+
+    def queue(self, *answers: ModelAnswer) -> FakeAnthropic:
+        self.answers.extend(answers)
+        return self
+
+    def accept_batches(self, n: int = 1) -> FakeAnthropic:
+        self.batch_answers.extend([None] * n)
+        return self
+
+    def refuse_batch(self, response: httpx.Response) -> FakeAnthropic:
+        self.batch_answers.append(response)
+        return self
+
+    def lose_batch_answer(self, error: Exception) -> FakeAnthropic:
+        """The next batch create is taken — the batch exists — and its
+        answer never arrives: ``error`` is raised on the transport (a read
+        timeout, a dropped connection), so the caller cannot tell."""
+        self.batch_answers.append(error)
+        return self
+
+    def drop_results(
+        self, batch_id: str, *, after: int, error: Exception | None
+    ) -> FakeAnthropic:
+        """The next results download of ``batch_id`` breaks off after
+        ``after`` bytes (``error`` raised there, or None: the body just
+        ends)."""
+        self.results_drops.setdefault(batch_id, []).append((after, error))
+        return self
+
+    def batch(self, index: int = -1) -> FakeBatch:
+        """A batch by creation order (default: the newest)."""
+        return list(self.batches.values())[index]
+
+    def end(
+        self,
+        batch_id: str,
+        results: Mapping[str, dict[str, Any]] | Sequence[tuple[str, dict[str, Any]]],
+    ) -> None:
+        """The batch ended with these result lines (``custom_id`` → result,
+        streamed in the order given; a custom_id left out has no line)."""
+        lines = list(results.items()) if isinstance(results, Mapping) else list(results)
+        found = self.batches[batch_id]
+        found.status, found.results = "ended", lines
+
+    def _batches(self, request: httpx.Request) -> httpx.Response | None:
+        path = request.url.path
+        if path == BATCHES_PATH and request.method == "POST":
+            body = json.loads(request.content or b"{}")
+            self.batch_bodies.append(body)
+            found = batch_pii_in(body)
+            if found:
+                self.leaks.append(found)
+            if not self.batch_answers:
+                self.unexpected += 1
+                return api_error(500, "api_error", "no scripted batch")
+            answer = self.batch_answers.pop(0)
+            if isinstance(answer, httpx.Response):
+                return httpx.Response(
+                    answer.status_code, headers=answer.headers, content=answer.content
+                )
+            batch_id = f"msgbatch_namuna{len(self.batches) + 1:02d}"
+            self.batches[batch_id] = FakeBatch(
+                batch_id, list(body.get("requests") or []), T0
+            )
+            if answer is not None:
+                raise answer
+            return httpx.Response(200, json=self.batches[batch_id].json())
+        matched = _BATCH_PATH.match(path)
+        if matched is None:
+            return None
+        batch_id, tail = matched.group("id"), matched.group("tail")
+        found_batch = self.batches.get(batch_id)
+        if found_batch is None:
+            return api_error(404, "not_found_error", "batch not found")
+        failures = (
+            self.results_failures if tail == "/results" else self.retrieve_failures
+        ).get(batch_id)
+        if failures and tail != "/cancel":
+            failure = failures.pop(0)
+            return httpx.Response(
+                failure.status_code, headers=failure.headers, content=failure.content
+            )
+        if tail == "/cancel":
+            self.cancelled.append(batch_id)
+            found_batch.cancelled = True
+            if found_batch.status != "ended":
+                found_batch.status = "canceling"
+            return httpx.Response(200, json=found_batch.json())
+        if tail == "/results":
+            lines = [
+                json.dumps({"custom_id": custom_id, "result": result})
+                for custom_id, result in found_batch.results or ()
+            ]
+            body = ("\n".join(lines) + "\n").encode() if lines else b""
+            drops = self.results_drops.get(batch_id)
+            if drops:
+                after, error = drops.pop(0)
+                return httpx.Response(200, stream=_BrokenStream(body[:after], error))
+            return httpx.Response(200, content=body)
+        self.retrieved.append(batch_id)
+        return httpx.Response(200, json=found_batch.json())
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        batches = self._batches(request)
+        if batches is not None:
+            return batches
+        body = json.loads(request.content or b"{}")
+        self.requests.append(body)
+        found = pii_in(body)
+        if found:
+            self.leaks.append(found)
+        if not self.answers:
+            self.unexpected += 1
+            return api_error(500, "api_error", "no scripted answer")
+        answer = self.answers.pop(0)
+        if callable(answer) and not isinstance(answer, httpx.Response):
+            return answer(request)
+        return httpx.Response(
+            answer.status_code, headers=answer.headers, content=answer.content
+        )
+
+    def client(self, *, max_retries: int = 0) -> anthropic.AsyncAnthropic:
+        """An SDK client over this transport. No retries of the SDK's own by
+        default: a scripted 5xx is one request, so a test counts what it
+        planted (a test of what the SDK's retries would do asks for some)."""
+        return anthropic.AsyncAnthropic(
+            api_key="test-key-not-a-credential",
+            max_retries=max_retries,
+            http_client=httpx.AsyncClient(transport=httpx.MockTransport(self)),
+        )

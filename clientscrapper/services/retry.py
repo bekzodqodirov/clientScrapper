@@ -13,7 +13,10 @@ message: an HTTP error can quote the body that was sent.
 Users here: ``services/http.Fetcher`` (03 §1.1: attempts 3, base 2.0, cap
 60.0, ``retry_on=is_transient_http``) and the ERP push (05 §B.1). Model calls
 are not wrapped: the shared client retries by itself, and wrapping it again
-would retry twice.
+would retry twice. The one exception is the batch create
+(``model_jobs._create_batch``): it is not idempotent, so it runs with the
+client's retries off and is wrapped here to repeat only a create the API
+turned away before taking it.
 """
 
 from __future__ import annotations

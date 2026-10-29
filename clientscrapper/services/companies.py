@@ -87,6 +87,7 @@ from clientscrapper.services.normalise import (
     legal_form_code,
     website_key,
 )
+from clientscrapper.services.signals import mark_stale
 from clientscrapper.services.text import fold_apostrophes, to_latin
 
 log = logging.getLogger(__name__)
@@ -122,6 +123,10 @@ LABEL_PREFIX: Final = "#"
 _ROOT_HOPS: Final = 16
 RESOLVE_LIMIT: Final = 200
 TELEGRAM_SOURCE: Final = "telegram_monitor"
+# How a resolved Telegram row is announced on ``cs_interaction``: the worker
+# reads the prefix as this stage's (``worker.ANNOUNCES_AFTER``) and wakes the
+# scorer only — the collector and the classifier have nothing new to read.
+NOTIFY_PREFIX: Final = "resolve:"
 # A candidate the merge must leave alone: a push may be claiming it.
 _OPEN_STATES: Final = ("found", "enriching", "scored", "review", "approved", "hold")
 
@@ -153,9 +158,10 @@ _ID_VALUE_MAX: Final = 200
 
 
 class ObservationRejected(Exception):
-    """The observation names nothing the agent may keep: GSR itself
-    (``competitor``), nobody at all (``no_company``), or a company that was
-    purged on request (``purged`` — its data is not collected again)."""
+    """The observation names nothing the agent may keep: GSR itself or a
+    Telegram tout's message (``competitor``), nobody at all (``no_company``),
+    or a company that was purged on request (``purged`` — its data is not
+    collected again)."""
 
     def __init__(self, reason: str) -> None:
         super().__init__(reason)
@@ -365,6 +371,19 @@ def self_refusal(keys: IdentityKeys) -> str | None:
     if keys.site_key in SELF_DOMAINS or keys.tg_username in SELF_CHANNELS:
         return "competitor"
     return None
+
+
+def tout_refusal(parsed: Mapping[str, Any]) -> str | None:
+    """'competitor' for a Telegram message the collector found a tout's (03
+    §2.3: an ``intent_post`` whose ``hints.competitor_words`` is set): a
+    cargo competitor is never a lead (00 binding decisions), and its poster's
+    person-tier data is not kept (06 §5.1) — the message stays only as the
+    evidence the weekly competitor-offer diff reads. A competitor's own
+    channel (``profile``) still resolves: it is company-tier, and the gate
+    excludes it (04 §6 gate 2)."""
+    hints = _mapping(parsed.get("hints"))
+    tout = hints.get("competitor_words") is True
+    return "competitor" if tout and _text(parsed.get("kind")) == "intent_post" else None
 
 
 # --- Names (pure) -----------------------------------------------------------------
@@ -656,6 +675,13 @@ async def _root(session: AsyncSession, company: Company) -> Company:
     return current
 
 
+async def root_company(session: AsyncSession, company: Company) -> Company:
+    """The company that holds ``company``'s rows now (``merged_into`` followed)
+    — for a writer that met the company through an older pointer (the
+    classifier's hook reads ``observations.company_id``)."""
+    return await _root(session, company)
+
+
 async def _companies(
     session: AsyncSession, stmt: sa.Select[tuple[Company]]
 ) -> list[Company]:
@@ -746,12 +772,26 @@ def _label_key(display: str) -> str:
     return (LABEL_PREFIX + name_key(display))[:160]
 
 
+NAMELESS_LABELS: Final = ("Telegram mijoz", "Nomaʼlum firma")
+_NAMELESS_RE: Final = re.compile(
+    rf"(?:{'|'.join(re.escape(label) for label in NAMELESS_LABELS)}) #\d+"
+)
+
+
 def _nameless_label(keys: IdentityKeys, observation_id: int) -> str:
     """The display name of a firm nobody named: never the poster's handle or
     number (person-tier), only where it was seen."""
     if keys.kind == "intent_post":
-        return f"Telegram mijoz #{observation_id}"
-    return f"Nomaʼlum firma #{observation_id}"
+        return f"{NAMELESS_LABELS[0]} #{observation_id}"
+    return f"{NAMELESS_LABELS[1]} #{observation_id}"
+
+
+def is_nameless_label(display_name: str | None) -> bool:
+    """``display_name`` is the resolver's own label for a firm nobody named
+    («Telegram mijoz #1»), not a name anybody wrote: the ERP gets no
+    ``firma`` of it (its company column would hold junk a manager then
+    searches by)."""
+    return bool(display_name) and _NAMELESS_RE.fullmatch(display_name or "") is not None
 
 
 async def _name_candidates(
@@ -835,7 +875,7 @@ async def resolve_company(
     raises ``ObservationRejected`` for GSR itself, a nameless keyless
     observation, or a purged company."""
     keys = identity_keys(obs.parsed)
-    if (reason := self_refusal(keys)) is not None:
+    if (reason := self_refusal(keys) or tout_refusal(obs.parsed)) is not None:
         raise ObservationRejected(reason)
     if not keys.any_exact() and keys.name_key is None and keys.display_name is None:
         raise ObservationRejected("no_company")
@@ -1782,10 +1822,20 @@ async def merge_into(
     values: dict[str, Any] = {name: getattr(src, name) for name in carried}
     if tgt.dup_of == src.id:
         values["dup_of"] = None
+    if signals and src.last_signal_at is not None:
+        # The target now holds the source's signals: its newest is the newer
+        # of the two, so the stale sweep (04 §0) sees them too.
+        values["last_signal_at"] = sa.func.greatest(
+            sa.func.coalesce(Company.last_signal_at, src.last_signal_at),
+            src.last_signal_at,
+        )
     if values:
         await session.execute(
             sa.update(Company).where(Company.id == tgt.id).values(**values)
         )
+    # The target's open candidate (its own, or the one that moved) is scored
+    # again on what it holds now: moved signals and contacts change its score.
+    await mark_stale(session, tgt.id)
     session.add(
         MergeLog(
             source_company_id=src.id,
@@ -1935,6 +1985,10 @@ async def unmerge(
         )
     entry.undone_at = moment
     entry.undone_by = by
+    # Both companies hold a different set of signals and contacts than their
+    # open candidates were scored on.
+    await mark_stale(session, src.id)
+    await mark_stale(session, tgt.id)
     await session.flush()
     log.warning("unmerged company %s from %s (by %s)", src.id, tgt.id, by)
     await _reload(session, tgt.id)
@@ -2086,10 +2140,10 @@ async def _resolve_one(
                 # Wake score_job (04 §0): the notify is delivered at commit.
                 await session.execute(
                     sa.text(
-                        "SELECT pg_notify('cs_interaction', id::text) "
+                        "SELECT pg_notify('cs_interaction', :prefix || id::text) "
                         "FROM interactions WHERE observation_id = :o"
                     ),
-                    {"o": obs_id},
+                    {"prefix": NOTIFY_PREFIX, "o": obs_id},
                 )
         await session.execute(
             sa.update(Observation).where(Observation.id == obs_id).values(**values)

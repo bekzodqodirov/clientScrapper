@@ -51,7 +51,7 @@ log = logging.getLogger(__name__)
 SessionFactory = Callable[[], AbstractAsyncContextManager[AsyncSession]]
 
 ABOUT_EVERY: Final = timedelta(days=7)
-BIO_CACHE: Final = timedelta(days=30)
+BIO_CACHE: Final = chats.BIO_CACHE
 # Bios are read for senders of recent hits only: an older row is past the
 # tout filter's 7-day window.
 BIO_WINDOW: Final = timedelta(days=7)
@@ -153,7 +153,7 @@ async def store_about(
         source_ref=f"tg:{monitor.tg_chat_id}",
         excerpt=about.text or about.pinned or monitor.title or monitor.username,
         title=monitor.title,
-        meta={"kind": "telegram_about"},
+        meta={"kind": chats.ABOUT_EVIDENCE_KIND},
     )
     mentioned = companion_handles("\n".join(t for t in (about.text, about.pinned) if t))
     companions = [name for name in mentioned if name != monitor.username]
@@ -162,7 +162,7 @@ async def store_about(
             session,
             name,
             priority=chats.PRIORITY_COMPANION,
-            role="buyers",
+            role=chats.BUYERS_ROLE,
             now=now,
             by=f"about:{monitor.username}",
         )
@@ -187,17 +187,7 @@ async def channels_due(
             .where(
                 ChatMonitor.username.is_not(None),
                 ChatMonitor.chat_type.in_(("group", "channel")),
-                ChatMonitor.role != "calibration",
-                sa.or_(
-                    sa.and_(
-                        ChatMonitor.status == "queued",
-                        ChatMonitor.priority == chats.PRIORITY_RESOLVED,
-                    ),
-                    sa.and_(
-                        ChatMonitor.status == "joined",
-                        ChatMonitor.monitor_enabled.is_(True),
-                    ),
-                ),
+                chats.about_readable(),
                 ~recent,
             )
             .order_by(queued_first, ChatMonitor.priority, ChatMonitor.id)
@@ -236,17 +226,7 @@ async def cached_bio(
     session: AsyncSession, sender_id: int, *, now: datetime
 ) -> str | None:
     """A bio of this sender read within BIO_CACHE, else None."""
-    bio: str | None = await session.scalar(
-        sa.select(Interaction.sender_bio)
-        .where(
-            Interaction.sender_id == sender_id,
-            Interaction.sender_bio.is_not(None),
-            Interaction.occurred_at > now - BIO_CACHE,
-        )
-        .order_by(Interaction.occurred_at.desc())
-        .limit(1)
-    )
-    return bio
+    return (await chats.known_bios(session, [sender_id], now=now)).get(sender_id)
 
 
 async def fill_bio(

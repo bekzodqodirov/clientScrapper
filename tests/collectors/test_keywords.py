@@ -35,6 +35,10 @@ def _digits(m: re.Match[str]) -> str:
     return "".join(m.groups())
 
 
+def _id(m: re.Match[str]) -> str:
+    return m.group("id")
+
+
 Cases = dict[str, tuple[list[tuple[str, str]], list[str]]]
 
 CASES: dict[str, tuple[re.Pattern[str], Extract, Cases]] = {
@@ -110,12 +114,16 @@ CASES: dict[str, tuple[re.Pattern[str], Extract, Cases]] = {
                     ("furaga yuk kerak", "furaga"),
                     ("2 ta konteynerlarimiz bor", "konteynerlarimiz"),
                     ("tonnadan sotamiz", "tonnadan"),
+                    # 04 §5.1's truck words beyond 03 §1.4 (T-18 review)
+                    ("full truck kerak", "full truck"),
+                    ("FTL yuk Xitoydan", "FTL"),
                 ],
                 [
                     "kontakt raqam",
                     "furgon xizmati",
                     "tonnel qurilishi",
                     "partiyaviy ish",
+                    "full stack dasturchi",
                 ],
             ),
             "uz-Cyrl": (
@@ -127,6 +135,9 @@ CASES: dict[str, tuple[re.Pattern[str], Extract, Cases]] = {
                     ("контейнерда келади", "контейнерда"),
                     ("фурага юк", "фурага"),
                     ("партияси тайёр", "партияси"),
+                    # the half truck whole, never its «фура» alone (T-18 review)
+                    ("Хитойдан ярим фура мебел", "ярим фура"),
+                    ("ярим фурага юк", "ярим фурага"),
                 ],
                 ["фургон хизмати", "тоннел", "контакт рақам"],
             ),
@@ -142,8 +153,10 @@ CASES: dict[str, tuple[re.Pattern[str], Extract, Cases]] = {
                     ("5 фур в месяц", "фур"),
                     ("10 тонн груза", "тонн"),
                     ("новые партии", "партии"),
+                    ("Нужно пол фуры мебели", "пол фуры"),
+                    ("пол-фуры обоев", "пол-фуры"),
                 ],
-                ["фургон", "тоннель", "партийный билет", "фурнитура"],
+                ["фургон", "тоннель", "партийный билет", "фурнитура", "пол фурнитуры"],
             ),
         },
     ),
@@ -184,6 +197,41 @@ CASES: dict[str, tuple[re.Pattern[str], Extract, Cases]] = {
                     ("Работаем с поставщиками из Китая", "поставщиками"),
                 ],
                 ["ищущий", "ненужное убрать", "закупочная цена"],
+            ),
+        },
+    ),
+    # The tout filter's ask (03 §2.3 / 04 §6): «kim kargo qiladi?» is a buyer.
+    "QUESTION_RE": (
+        kw.QUESTION_RE,
+        _whole,
+        {
+            "uz-Latn": (
+                [
+                    ("2 kub mato bor, kim kargo qiladi", "kim"),
+                    ("qaysi kargo yaxshi", "qaysi"),
+                    ("narxi qancha bo'ladi", "qancha"),
+                    ("necha kunda keladi", "necha"),
+                    ("kargo kerakmi?", "?"),
+                ],
+                ["Kargo Xitoy-Toshkent: 1 kub 250$", "kimyo mahsulotlari", "Qaysar odam"],
+            ),
+            "uz-Cyrl": (
+                [
+                    ("ким карго қилади", "ким"),
+                    ("қайси карго яхши", "қайси"),
+                    ("нархи қанча", "қанча"),
+                    ("неча кунда келади", "неча"),
+                ],
+                ["кимё маҳсулотлари", "Карго Хитой-Тошкент: 1 куб 250$", "Қайсар одам"],
+            ),
+            "ru": (
+                [
+                    ("посоветуйте карго", "посоветуйте"),
+                    ("кто возит из Китая", "кто"),
+                    ("какая доставка лучше", "какая"),
+                    ("сколько стоит 1 куб", "сколько"),
+                ],
+                ["Карго из Китая: 1 куб 250$", "Какао оптом", "Доставка по Ташкенту"],
             ),
         },
     ),
@@ -268,6 +316,98 @@ CASES: dict[str, tuple[re.Pattern[str], Extract, Cases]] = {
                     ("услуги выкупа", "выкупа"),
                 ],
                 ["Ткани оптом", "Мебельная фабрика", "Цены договорные"],
+            ),
+        },
+    ),
+    # Gate 2 on a self-description (T-19 review): the cargo core; the delivery
+    # words an importer writes about its own trade are no match.
+    "COMPETITOR_SELF_RE": (
+        kw.COMPETITOR_SELF_RE,
+        _whole,
+        {
+            "uz-Latn": (
+                [
+                    ("1688 kargo Toshkentga", "1688 kargo"),
+                    ("Xitoydan yuk tashish xizmati", "yuk tashish"),
+                    ("Rastamojka qilamiz", "Rastamojka"),
+                    ("Bojxona xizmati", "Bojxona xizmati"),
+                    ("Namuna kargoxonasi", "kargoxonasi"),
+                    ("yukingizni yetkazib beramiz", "yukingizni yetkazib beramiz"),
+                    ("dostavka Xitoydan 3 kunda", "dostavka Xitoydan"),
+                    ("logistika xizmatlari", "logistika xizmatlari"),
+                ],
+                [
+                    "Oshxona mebeli optom. Toshkent bo'ylab yetkazib beramiz!",
+                    "Bepul dostavka, optom narxlar",
+                    "Barcha tovarlar rastamojka qilingan",
+                    "Tovarlar rastamojkadan o'tgan",
+                    "Mato optom, buyurtmalar yetkazib beriladi",
+                    "Mebel Express",
+                ],
+            ),
+            "uz-Cyrl": (
+                [
+                    ("Хитойдан карго хизмати", "карго"),
+                    ("Хитойдан юк ташиш хизмати", "юк ташиш"),
+                    ("Божхона брокер хизмати", "Божхона брокер"),
+                    ("Растаможка хизмати", "Растаможка"),
+                    ("юкингизни етказиб берамиз", "юкингизни етказиб берамиз"),
+                ],
+                [
+                    "Тошкент бўйлаб етказиб берамиз",
+                    "Бепул доставка",
+                    "Мебель оптом, ўз логистикамиз",
+                ],
+            ),
+            "ru": (
+                [
+                    ("Карго из Китая", "Карго"),
+                    ("таможенное оформление грузов", "таможенное оформление"),
+                    ("грузоперевозки по Узбекистану", "грузоперевозки"),
+                    ("доставка из Китая", "доставка из Китая"),
+                    ("Доставка грузов из Гуанчжоу", "Доставка грузов"),
+                    ("экспедиторская компания", "экспедиторская"),
+                    ("услуги выкупа", "выкупа"),
+                    ("логистические услуги", "логистические услуги"),
+                ],
+                [
+                    "Стиральные машины оптом со склада. Доставка по Ташкенту бесплатно.",
+                    "Сантехника из Китая оптом, своя логистика и склад",
+                    "растаможенный товар в наличии",
+                    "Доставка по городу",
+                ],
+            ),
+        },
+    ),
+    # Gate 2 on a name: the core and the logistics words, never «Express».
+    "COMPETITOR_NAME_RE": (
+        kw.COMPETITOR_NAME_RE,
+        _whole,
+        {
+            "uz-Latn": (
+                [
+                    ("Namuna Logistika MChJ", "Logistika"),
+                    ("Namuna Logistics", "Logistics"),
+                    ("Namuna Kargo", "Kargo"),
+                    ("Namuna Ekspeditor", "Ekspeditor"),
+                ],
+                ["Mebel Express", "Namuna Dostavka Optom", "Namuna Savdo MChJ"],
+            ),
+            "uz-Cyrl": (
+                [
+                    ("Намуна Логистика", "Логистика"),
+                    ("Намуна Карго", "Карго"),
+                    ("Намуна каргохонаси", "каргохонаси"),
+                ],
+                ["Намуна Экспресс Мебель", "Намуна Савдо", "Намуна Текстил"],
+            ),
+            "ru": (
+                [
+                    ("ООО «Намуна Логистик»", "Логистик"),
+                    ("Намуна Грузоперевозки", "Грузоперевозки"),
+                    ("Намуна Экспедиторская компания", "Экспедиторская"),
+                ],
+                ["Мебель Экспресс", "Намуна Доставка", "ООО «Намуна Трейд»"],
             ),
         },
     ),
@@ -376,6 +516,117 @@ CASES: dict[str, tuple[re.Pattern[str], Extract, Cases]] = {
             ),
         },
     ),
+    # The E2E review's shapes (2026-10-29): the pseudonymiser's and the push
+    # note's one home (keywords.intl_phones / long_numbers cut them back).
+    "INTL_PHONE_RE": (
+        kw.INTL_PHONE_RE,
+        _whole,
+        {
+            "uz-Latn": (
+                [
+                    ("Qozogʻiston nomer +7 701 000 00 00", "+7 701 000 00 00"),
+                    ("agent +86 138 0000 0000, Guangzhou", "+86 138 0000 0000"),
+                    ("Bishkek: +996 555 000 000", "+996 555 000 000"),
+                ],
+                ["Tel +998 90 000 00 01", "+7 701", "narx +15 000"],
+            ),
+            "uz-Cyrl": (
+                [
+                    ("Қозоғистон рақам +7 (701) 000-00-01", "+7 (701) 000-00-01"),
+                    ("Хитой: +8613800000002", "+8613800000002"),
+                    ("Туркия +90 532 000 00 03", "+90 532 000 00 03"),
+                ],
+                ["Тел +998 90 000 00 02", "+1 234", "чегирма +10%"],
+            ),
+            "ru": (
+                [
+                    ("Звоните +7 916 000-00-04", "+7 916 000-00-04"),
+                    ("Китай +86 138 0000 0005", "+86 138 0000 0005"),
+                    ("Дубай +971 50 000 0006", "+971 50 000 0006"),
+                ],
+                ["Тел: +998 71 200 00 04", "+5 кубов", "скидка +20 000"],
+            ),
+        },
+    ),
+    "LONG_NUMBER_RE": (
+        kw.LONG_NUMBER_RE,
+        _whole,
+        {
+            "uz-Latn": (
+                [
+                    ("tel 8 916 000 00 77", "8 916 000 00 77"),
+                    ("0086 138 0000 0002 ga yozing", "0086 138 0000 0002"),
+                    ("raqam 79161234567", "79161234567"),
+                ],
+                ["25.11.2026 10 kub", "narx 1 250 000 so'm", "Buyurtma №12345"],
+            ),
+            "uz-Cyrl": (
+                [
+                    ("тел 8 701 000 00 01", "8 701 000 00 01"),
+                    ("рақам 77010000002", "77010000002"),
+                    ("Хитой 138-0000-0003", "138-0000-0003"),
+                ],
+                ["25.11.2026 10 куб", "нархи 1 250 000 сўм", "СТИР 301234567"],
+            ),
+            "ru": (
+                [
+                    ("звоните 8 (916) 000-00-04", "8 (916) 000-00-04"),
+                    ("номер 89160000005", "89160000005"),
+                    ("WhatsApp 7 701 000 00 06", "7 701 000 00 06"),
+                ],
+                ["на 25.11.2026 10 кубов", "цена 1 250 000 сум", "ИНН 301234567"],
+            ),
+        },
+    ),
+    "MESSENGER_LABEL_RE": (
+        kw.MESSENGER_LABEL_RE,
+        _whole,
+        {
+            "uz-Latn": (
+                [("WeChat", "WeChat"), ("viber", "viber"), ("Telegram", "Telegram")],
+                ["Rustam", "kanal", "optom"],
+            ),
+            "uz-Cyrl": (
+                [("Телеграм", "Телеграм"), ("вайбер", "вайбер"), ("тг", "тг")],
+                ["Рустам", "канал", "оптом"],
+            ),
+            "ru": (
+                [("Ватсап", "Ватсап"), ("Скайп", "Скайп"), ("Телеграмм", "Телеграмм")],
+                ["Иван", "доставка", "склад"],
+            ),
+        },
+    ),
+    "MESSENGER_ID_RE": (
+        kw.MESSENGER_ID_RE,
+        _id,
+        {
+            "uz-Latn": (
+                [
+                    ("WeChat: rustam_cn88", "rustam_cn88"),
+                    ("viber rustam_88 orqali", "rustam_88"),
+                    ("Telegram: namuna_tekstil", "namuna_tekstil"),
+                    ("tg namuna_tekstil", "namuna_tekstil"),
+                ],
+                ["whatsapp orqali yozing", "tg kanal", "Telegram guruhimiz"],
+            ),
+            "uz-Cyrl": (
+                [
+                    ("Телеграм: namuna_tekstil", "namuna_tekstil"),
+                    ("вайбер rustam_77", "rustam_77"),
+                    ("тг namuna_88", "namuna_88"),
+                ],
+                ["телеграм орқали", "вайбер бор", "тг канал"],
+            ),
+            "ru": (
+                [
+                    ("WeChat ID: rustam_cn88", "rustam_cn88"),
+                    ("Скайп: namuna.savdo", "namuna.savdo"),
+                    ("Ватсап: +77010000000", "+77010000000"),
+                ],
+                ["пишите в телеграм", "ватсап есть", "скайп звонок"],
+            ),
+        },
+    ),
     "TG_RE": (
         kw.TG_RE,
         _first,
@@ -385,12 +636,21 @@ CASES: dict[str, tuple[re.Pattern[str], Extract, Cases]] = {
                     ("Kanalimiz: t.me/namuna_optom", "namuna_optom"),
                     ("Admin @namuna_admin ga yozing", "namuna_admin"),
                     ("https://t.me/namuna_tekstil_uz", "namuna_tekstil_uz"),
+                    # A phone keyboard capitalises a sentence's first letter.
+                    ("T.me/namuna_tekstil ga yozing", "namuna_tekstil"),
+                    ("Kanal: T.ME/namuna_tekstil", "namuna_tekstil"),
+                    ("Https://T.me/namuna_optom", "namuna_optom"),
+                    # Telegram's two other link hosts.
+                    ("telegram.me/namuna_tekstil", "namuna_tekstil"),
+                    ("https://telegram.dog/namuna_optom", "namuna_optom"),
                 ],
                 [
                     "Pochta: info@namuna.example.uz",
                     "t.me/joinchat/AAAAAE",
                     "@abc qisqa",
                     "t.me/+AbCdEf",
+                    "T.ME/JOINCHAT/AAAAAE",
+                    "T.me/S/namuna_optom",
                 ],
             ),
             "uz-Cyrl": (
@@ -412,6 +672,41 @@ CASES: dict[str, tuple[re.Pattern[str], Extract, Cases]] = {
                     "@12345abc",
                     "Подписка t.me/joinchat/AAA",
                 ],
+            ),
+        },
+    ),
+    "PINFL_RE": (
+        kw.PINFL_RE,
+        _whole,
+        {
+            "uz-Latn": (
+                [
+                    ("JSHSHIR 31234567890123", "31234567890123"),
+                    ("pasport, JShShIR:31234567890124.", "31234567890124"),
+                    ("31234567890125 raqamli", "31234567890125"),
+                ],
+                [
+                    # a 2GIS firm id is 17 digits; a 13- or 15-digit run is none
+                    "2GIS: 70000001012345678",
+                    "hisob 3123456789012",
+                    "kod 312345678901234",
+                ],
+            ),
+            "uz-Cyrl": (
+                [
+                    ("ЖШШИР 31234567890126", "31234567890126"),
+                    ("ЖШШИР: 31234567890127, паспорт", "31234567890127"),
+                    ("(31234567890128)", "31234567890128"),
+                ],
+                ["СТИР 301234567", "тел 998900000001", "рақам 1234-5678-9012-34"],
+            ),
+            "ru": (
+                [
+                    ("ПИНФЛ 31234567890129", "31234567890129"),
+                    ("ПИНФЛ:31234567890130 паспорт", "31234567890130"),
+                    ("номер 31234567890131.", "31234567890131"),
+                ],
+                ["ИНН 301234567", "счёт 20208000123456789012", "ID 70000001012345678"],
             ),
         },
     ),
@@ -566,6 +861,77 @@ CASES: dict[str, tuple[re.Pattern[str], Extract, Cases]] = {
             ),
         },
     ),
+    # 04 §6 gate 3 (T-19): a Chinese exporter's name; read on names only.
+    "SUPPLIER_NAME_RE": (
+        kw.SUPPLIER_NAME_RE,
+        _whole,
+        {
+            "uz-Latn": (
+                [
+                    ("Yiwu Namuna Trading Co., Ltd", "Trading Co."),
+                    ("Guangzhou Namuna Co.,Ltd.", "Co.,Ltd."),
+                    ("Namuna Import & Export", "Import & Export"),
+                    ("Ningbo Namuna Imp. & Exp. Co", "Imp. & Exp."),
+                    ("义乌市纳木纳有限公司", "有限公司"),
+                    ("Yiwu Namuna Co., Limited", "Co., Limited"),
+                    ("Guangzhou Namuna Company Limited", "Company Limited"),
+                ],
+                [
+                    "Namuna Savdo MChJ",
+                    "Namuna Import MChJ",
+                    "Coltd mebel",
+                    "Limited edition",
+                ],
+            ),
+            "uz-Cyrl": (
+                [
+                    ("Хитой фирмаси Yiwu Namuna Co. Ltd", "Co. Ltd"),
+                    ("Етказиб берувчи: Namuna Trading Co.", "Trading Co."),
+                    ("Завод: Namuna Imp & Exp", "Imp & Exp"),
+                ],
+                ["Намуна савдо МЧЖ", "Намуна импорт", "Колтд мебел"],
+            ),
+            "ru": (
+                [
+                    ("Поставщик Shenzhen Namuna Co., Ltd", "Co., Ltd"),
+                    ("Фабрика Namuna Import&Export", "Import&Export"),
+                    ("Компания Namuna Trading Co. (Китай)", "Trading Co."),
+                ],
+                ["ООО «Намуна Трейдинг»", "Импорт и экспорт из Китая", "Ltd товары"],
+            ),
+        },
+    ),
+    # 04 §6 gate 3 (T-19): a website title in Chinese.
+    "CJK_RE": (
+        kw.CJK_RE,
+        _whole,
+        {
+            "uz-Latn": (
+                [
+                    ("Sayt nomi: 义乌纳木纳", "义"),
+                    ("Namuna 家具 fabrikasi", "家"),
+                    ("灯具 optom", "灯"),
+                ],
+                ["Namuna Mebel", "Xitoydan mebel", "Ōzbekiston"],
+            ),
+            "uz-Cyrl": (
+                [
+                    ("Сайт: 纺织品 Намуна", "纺"),
+                    ("Намуна 有限公司", "有"),
+                    ("Хитой 工厂", "工"),
+                ],
+                ["Намуна мебел", "Хитойдан мато", "Ўзбекистон"],
+            ),
+            "ru": (
+                [
+                    ("Сайт фабрики 照明", "照"),
+                    ("ООО 纳木纳", "纳"),
+                    ("Каталог 鞋子", "鞋"),
+                ],
+                ["Мебель из Китая", "Каталог товаров", "Ёлки оптом"],
+            ),
+        },
+    ),
     "B2B_RE": (
         kw.B2B_RE,
         _whole,
@@ -631,6 +997,256 @@ CASES: dict[str, tuple[re.Pattern[str], Extract, Cases]] = {
                     ("Кашгар — Ташкент", "Кашгар"),
                 ],
                 ["из Турции", "местное производство", "Казахстан"],
+            ),
+        },
+    ),
+    # T-18: 04 §5.1's detections (the rule signals of services/signals.py).
+    "NON_CN_ORIGIN_RE": (
+        kw.NON_CN_ORIGIN_RE,
+        _whole,
+        {
+            # only a country named as the origin (04 §5.1); a destination or
+            # a mention is not one (T-18 review)
+            "uz-Latn": (
+                [
+                    ("Turkiyadan mato keldi", "Turkiyadan"),
+                    ("Yevropadan uskunalar", "Yevropadan"),
+                    ("Erondan kafel", "Erondan"),
+                    ("Koreya mahsuloti", "Koreya mahsuloti"),
+                    ("Turkiya ishlab chiqarishi", "Turkiya ishlab chiqarishi"),
+                ],
+                [
+                    "Xitoydan mato",
+                    "evro remont",
+                    "turkcha",
+                    "Rossiyaga ham yetkazib beramiz",
+                    "Turkiyada filialimiz bor",
+                ],
+            ),
+            "uz-Cyrl": (
+                [
+                    ("Туркиядан мато", "Туркиядан"),
+                    ("Россиядан юк", "Россиядан"),
+                    ("Эрондан кафел", "Эрондан"),
+                    ("Корея маҳсулоти", "Корея маҳсулоти"),
+                ],
+                ["Тошкентдан", "евро ремонт", "туркча", "Россияга етказамиз"],
+            ),
+            "ru": (
+                [
+                    ("ткани из Турции", "из Турции"),
+                    ("товары из России", "из России"),
+                    ("плитка из Ирана", "из Ирана"),
+                    ("косметика из Южной Кореи", "из Южной Кореи"),
+                    ("Производство: Турция", "Производство: Турция"),
+                    ("мебель производства Европы", "производства Европы"),
+                ],
+                [
+                    "из Китая",
+                    "евроремонт",
+                    "турецкий",
+                    "доставка по Узбекистану и России",
+                    "работа с Россией",
+                ],
+            ),
+        },
+    ),
+    # The country words alone: the quote of a model's other_origin verdict.
+    "NON_CN_COUNTRY_RE": (
+        kw.NON_CN_COUNTRY_RE,
+        _whole,
+        {
+            "uz-Latn": (
+                [
+                    ("Koreya kosmetikasi", "Koreya"),
+                    ("Rossiyaga yetkazamiz", "Rossiyaga"),
+                    ("Turkiyadan", "Turkiyadan"),
+                ],
+                ["Xitoydan mato", "evro remont", "turkcha"],
+            ),
+            "uz-Cyrl": (
+                [
+                    ("Туркиядан мато", "Туркиядан"),
+                    ("Эрон гиламлари", "Эрон"),
+                    ("Корея", "Корея"),
+                ],
+                ["Тошкентдан", "евро ремонт", "туркча"],
+            ),
+            "ru": (
+                [
+                    ("ткани из Турции", "Турции"),
+                    ("доставка по России", "России"),
+                    ("плитка из Ирана", "Ирана"),
+                ],
+                ["из Китая", "евроремонт", "турецкий"],
+            ),
+        },
+    ),
+    "TONNES_RE": (
+        kw.TONNES_RE,
+        _first,
+        {
+            "uz-Latn": (
+                [
+                    ("2 tonna mato", "2"),
+                    ("1,5 tonnadan ortiq", "1,5"),
+                    ("10 tonnalik yuk", "10"),
+                ],
+                ["tonnadan sotamiz", "tonnel qurilishi", "2 tonnelga"],
+            ),
+            "uz-Cyrl": (
+                [
+                    ("2 тонна шакар", "2"),
+                    ("5 тоннадан", "5"),
+                    ("3 тоннали юк", "3"),
+                ],
+                ["тоннадан сотамиз", "тоннел", "2 тоннелга"],
+            ),
+            "ru": (
+                [
+                    ("3 тонны груза", "3"),
+                    ("10 тонн", "10"),
+                    ("0,5 тонны", "0,5"),
+                    ("по 2 тонне", "2"),
+                ],
+                ["тоннель", "тонна груза", "2 тоннеля"],
+            ),
+        },
+    ),
+    "VACANCY_IMPORT_RE": (
+        kw.VACANCY_IMPORT_RE,
+        _whole,
+        {
+            "uz-Latn": (
+                [
+                    ("VED menejeri kerak", "VED"),
+                    ("tashqi savdo bo'limiga", "tashqi savdo"),
+                    ("xitoy tilini biladigan", "xitoy tilini"),
+                ],
+                ["savdo menejeri", "tashqi reklama", "xitoy taomlari", "vedomost"],
+            ),
+            "uz-Cyrl": (
+                [
+                    ("ВЭД менежери", "ВЭД"),
+                    ("ташқи савдо бўлими", "ташқи савдо"),
+                    ("хитой тилини билиш", "хитой тилини"),
+                ],
+                ["савдо менежери", "ташқи реклама", "хитой таомлари"],
+            ),
+            "ru": (
+                [
+                    ("Менеджер ВЭД", "ВЭД"),
+                    ("оформление деклараций", "деклараций"),
+                    ("закупки оборудования в Китае", "закупки оборудования в Китае"),
+                    ("со знанием китайского языка", "китайского языка"),
+                ],
+                [
+                    "менеджер по продажам",
+                    "закупщик продуктов",
+                    "китайская кухня",
+                    "ведущий специалист",
+                ],
+            ),
+        },
+    ),
+    "STATE_BODY_RE": (
+        kw.STATE_BODY_RE,
+        _whole,
+        {
+            "uz-Latn": (
+                [
+                    ("Toshkent shahar hokimligi", "hokimligi"),
+                    ("Davlat soliq qo'mitasi", "Davlat"),
+                    ("5-maktab", "maktab"),
+                    ("Sog'liqni saqlash vazirligi", "vazirligi"),
+                ],
+                [
+                    "savdo markazi",
+                    "hokim aka",
+                    "agent",
+                    "davomat",
+                    # state registration, a state body as the customer (T-18 review)
+                    "Davlat ro'yxatidan o'tkazilgan sana",
+                    "Maktablar uchun mebel",
+                ],
+            ),
+            "uz-Cyrl": (
+                [
+                    ("Тошкент шаҳар ҳокимлиги", "ҳокимлиги"),
+                    ("Давлат солиқ қўмитаси", "Давлат"),
+                    ("12-мактаб", "мактаб"),
+                    ("ИИБ ходими", "ИИБ"),
+                ],
+                [
+                    "савдо маркази",
+                    "агент",
+                    "давомат",
+                    "дукон",
+                    "Давлат рўйхатидан ўтказилган",
+                    "Шифохоналар учун ускуналар",
+                ],
+            ),
+            "ru": (
+                [
+                    ("Министерство здравоохранения", "Министерство"),
+                    ("ГУП «Намуна»", "ГУП"),
+                    ("городская поликлиника", "поликлиника"),
+                    ("МВД", "МВД"),
+                ],
+                ["министр туризма", "клиника", "магазин"],
+            ),
+        },
+    ),
+    # Gate 7 on a name (T-19 review): a state body by its shape; a founder's
+    # name and an equipment trader's are no match.
+    "STATE_BODY_NAME_RE": (
+        kw.STATE_BODY_NAME_RE,
+        _whole,
+        {
+            "uz-Latn": (
+                [
+                    ("Yunusobod tumani hokimligi", "hokimligi"),
+                    ("Davlat soliq qoʻmitasi", "Davlat soliq qoʻmitasi"),
+                    ("Davlat unitar korxonasi «Namuna»", "Davlat unitar"),
+                    ("Sog'liqni saqlash vazirligi", "vazirligi"),
+                    ("12-son maktab", "12-son maktab"),
+                    ("5-maktab", "5-maktab"),
+                    ("Toshkent shahar 3-son shifoxonasi", "3-son shifoxonasi"),
+                    ("Respublika ko'z shifoxonasi", "shifoxonasi"),
+                ],
+                [
+                    "Davlatbek Savdo",
+                    "Davlat Mebel Plus",
+                    "IP Davlatov",
+                    "Davlat Xizmat Servis",
+                    "Maktab Mebel Import",
+                    "Maktab Jihozlari Savdo",
+                    "Shifoxona Jihozlari Savdo",
+                    "Namuna Reklama Agentligi",
+                    "Maktablar uchun mebel",
+                ],
+            ),
+            "uz-Cyrl": (
+                [
+                    ("Тошкент шаҳар ҳокимлиги", "ҳокимлиги"),
+                    ("Давлат солиқ қўмитаси", "Давлат солиқ қўмитаси"),
+                    ("12-мактаб", "12-мактаб"),
+                    ("ИИБ", "ИИБ"),
+                ],
+                ["Давлатбек Савдо", "Мактаб Жиҳозлари", "Давлатов Мебел"],
+            ),
+            "ru": (
+                [
+                    ("Министерство здравоохранения", "Министерство"),
+                    ("ГУП «Намуна»", "ГУП"),
+                    ("городская поликлиника №5", "поликлиника"),
+                    (
+                        "Государственный налоговый комитет",
+                        "Государственный налоговый комитет",
+                    ),
+                    ("школа № 5", "школа № 5"),
+                ],
+                ["ИП Давлатов", "Школьная мебель оптом", "Больничное оборудование"],
             ),
         },
     ),
@@ -903,3 +1519,31 @@ def test_short_words_do_not_inflect() -> None:
     assert kw.terms_re(["опт"]).search("оптика") is None
     assert kw.terms_re(["Иу"]).search("Иуда") is None
     assert kw.terms_re(["Иу"]).search("Иу бозори") is not None
+
+
+def test_a_price_list_is_three_prices_or_more_than_1500_characters() -> None:
+    # 03 §2.3: «≥ 3 prices … or > 1,500 chars» — the tout rule's count (T-14).
+    assert kw.PRICELIST_MIN_CHARS == 1500
+    assert kw.pricelist_shaped("x" * 1501) is True
+    assert kw.pricelist_shaped("x" * 1500) is False
+    assert kw.pricelist_shaped("stul 250000 so'm, stol 900000 so'm") is False
+    assert kw.pricelist_shaped("stul 250000 so'm, stol 900000 so'm, 30$") is True
+
+
+@pytest.mark.parametrize(
+    ("username", "competitor"),
+    [
+        ("halolcargo", True),
+        ("chinacargouz", True),
+        ("mkexpress", True),
+        ("xitoy_logistika", True),
+        ("namuna_dostavka24", True),
+        ("Namuna_Kargo", True),
+        ("namuna_tekstil", False),
+        ("optom_bozor", False),
+        (None, False),
+    ],
+)
+def test_a_glued_username_names_a_forwarder(username, competitor) -> None:
+    # COMPETITOR_RE's word bounds cannot see inside «halolcargo» (T-14).
+    assert kw.competitor_handle(username) is competitor
