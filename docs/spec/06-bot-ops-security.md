@@ -52,6 +52,19 @@ posts into a group.
 Every handler has a test in `tests/test_bot_commands.py` (F-13) driven by MIYA's fake-bot
 pattern (`tests/test_jarvis_cards.py::_owner_message`, `_Callback`).
 
+As built (T-20, T-21, T-31, T-36 and the seam review, wave 4, at `48cc857`):
+
+- **`/lidlar`** answers the owner at any hour: it ignores `REVIEW_HOURS`, `QUIET_HOURS` and `REVIEW_DAILY_CAP` (only `REVIEW_BURST_MAX` applies; Open question 10) and sends nothing while `/toxtat` is on. It runs `reviews.ensure_pending` first (a candidate that just reached `review` is not invisible), claims each card before it is sent (`cards.claim_owner_review`, `FOR UPDATE OF lead_reviews SKIP LOCKED`, §1.6's order) and fills the burst past a card it cannot show, which leaves the queue (`cards.set_aside`, §1.3). It writes the pending rows it creates as well as the asked ones. `/lidlar holat` also lists the auto-approved candidates a push refused (`lead_candidates.push_note`, 02 §2.9; five shown, the count says the rest).
+- **`/manbalar`** prints «avto» only when it is in effect (`auto_push` and `AUTO_APPROVE`); the ℹ️ view says «aniqlik yetarli, lekin hali yoqilmagan — lidlar sizning kartangizdan oʻtadi» for a source that earned it while `AUTO_APPROVE` is off, and lists no smoke run as a run. One tap on a row the weekly job paused for low precision resumes it (the source stays on) and takes its line out of the open `source_low_precision` alert; a breaker's pause is left alone.
+- **`/chats`** reads «{hits} signal (7 kun) / jami {seen} xabar»: `chat_monitors.seen_count` is a lifetime count and no seven-day count is stored (Open question 11).
+- **`/xarajat`** is rendered by T-20 (`cards.render_xarajat`), not T-21.
+- **`/toxtat`** stops every paid call too: `costs.ask` refuses `paused` first (04 §8), and a manager card waits as `pending` until `/yoq`.
+- **`/dnc`** refuses another country's number (its tail-9 may be an Uzbek one: «+998…», a bare tail-9 or `@user` only) and names a holder by its root company.
+- **`/vazn`** writes the next free version above every stored one, so an owner edit made while a `fit_weights` proposal waits supersedes it (T-40 re-proposes).
+- **`/stir`** writes `evidence(url='owner:/stir:<company_id>')` (`evidence.url` is NOT NULL) and refuses a STIR a purged firm keeps («Bu STIR soʻrov boʻyicha oʻchirilgan firmaga tegishli (/unut). Yozilmadi.», `stir.purged`); its «E4 re-run» is `next_enrich_at = now` alone, which nothing reads until T-24.
+- **`/unut`** always plans `reason='legal_request'` (`make purge REASON=…` takes the others); the plan lives in memory for 10 minutes (a restart closes it as `expired`); the plan card adds «⚠️ Nom boʻyicha topildi — avval /qidir <uuid> bilan shu kompaniya ekanini tekshiring.» when only the name match found the firm; `@username` plans by the ids the username was seen on (`purge.plan_handle`, §5.4); a purge that stopped part-way is found again and planned again; the answers are `unut.done`, `unut.closed`, `unut.running`, `unut.unfinished`, `unut.failed`. A phone held by no company is `make purge PHONE=`'s only (Open question 17).
+- **`/yordam`** lists exactly the router's commands (the owner's includes `/tel`); every command is registered once; a forwarded message runs no command; `set_my_commands` is set per chat (the owner's menu, the manager menu, an empty default). «⛔ Baza javob bermayapti» answers a connection error only; the error answer goes only to the owner or a listed manager, in their own private chat.
+
 ### 1.3 Review card
 
 Rendered by `services/cards.render_review(view: CandidateView) -> Card(text, keyboard, hash)`;
@@ -114,6 +127,15 @@ answered card answers «Bu karta eskirgan — /lidlar» and nothing else (idempo
 
 What wave 3's push gate needs from the card (T-19/T-28 as built at `8a1935e`; T-20/T-21 build it): the shared-phone approval writes `lead_reviews.note = 'shared_ok'` exactly — the owner's word, which a later refusal is written after («shared_ok · <refusal>», `push_gate.noted`) and which the card strips when it shows a refusal (`push_gate.owner_word`); the card shows `push_gate.lead_contact`'s phone, the one 🔒 writes; a pending or asked card whose candidate left `review` (`score_job`'s `review → hold` when the phone went, 04 §5.2) is stale — edit it, never transition; an approved candidate's refusal that sends it back (`push_gate.TO_REVIEW`, 04 §7) arrives as a new card; an auto-approved candidate's transient push refusals have no owner row and go to the log only until `/lidlar` gets a home for them (T-21). `review_cards_job` calls `gates.evaluate` before every card (04 §6). `/push tekshir` (§1.2) exists as services (`crm_push.push_tekshir_view`, `render_push_check`, `push_tekshir_confirm`, 05 §B.1); its handler and the `pt:` buttons are T-20's.
 
+As built (T-20, T-21, T-30 and the seam review, wave 4, at `48cc857`; `services/cards.py`, `services/reviews.py`):
+
+- **Lines.** The quote line reads «🔎 «{quote}» — {author} · {source}, {dd.mm.yyyy}», the author being the cited message's `sender_name` or `@sender_username`; the matched contact shows on the 📞 line as «👤 … (raqam egasi)» only when that person holds the phone shown (Open question 13). The verdict's lines «🤖 AI xulosasi: …», «🤖 AI xulosasi: byudjet tugadi» and «⚠️ AI: yuk 1 kubdan kam koʻrinadi (ball qoʻshilmadi)» sit between 🔗 and 🧮 (04 §4.4). A converted volume reads «taxminan 15 kub (5 tonna)» (05 §B.1). Segment labels A «Bozor optom», E «Elektronika».
+- **The handoff variant** is chosen when `score_breakdown.gates.no_phone` is set and the lead phone is not usable (04 §1.1 — a shared phone is not), not only when it is absent; its ⋯ fold has no ✏️ Telefon. A tap whose letter the card's layout lacks answers «Bu tugma eskirgan»; a tap on an answered or expired card, or on one whose candidate moved on, closes the row (`expired`, note `stale:<state>`, buttons stripped) and never transitions the candidate. Managers read «Bu karta eskirgan» without «/lidlar».
+- **A card that cannot be shown leaves the queue** (`cards.set_aside`): a failed gate takes the score job's walk with that gate (hold, or suppression for a DNC); `no_quote` (expired signals too), `no_username` and `too_long` hold the candidate `CARD_REFUSED_HOLD` = 7 d; `score_low` — `candidates.live_score` under 60 — holds it the same way, except on a card a push refusal sent back (04 §7 item 13). Refusals are noted `refused:<code>`.
+- **⏭** adds 24 h to `expires_at`, sets `lead_reviews.remind_at` = tap + 24 h (02 §2.9, `0003_review_flow`) and strips the message's buttons; the card is asked again as a fresh message on the first run inside `REVIEW_HOURS` after `remind_at`, with `expires_at ≥ resend + REVIEW_EXPIRY_HOURS`; the sweep never expires a ⏭ card before it was asked again, and a second ⏭ on the same message is stale.
+- **Footers.** ✅'s failure footer keeps «⚠️ CRM javob bermadi — qayta soʻrayman» (`attempts_spent` and `erp_refused` are `push_gate.TO_REVIEW` codes: the owner is asked again), and «⏳ {Bugun|Ertaga|dd.mm.yyyy} 09:30 da yuboriladi» while a push waits for its window. 👤 has three forms and never a numeric id: «👤 Menejerga yuborildi — {the manager's Telegram first name}» (or without a name), «👤 Menejerga navbatda — hali yetkazilmadi» until the job delivers the manager card — the owner's card is then edited once (`follow_handoff`) — and «👤 Kutishda — menejer qoʻshilgach yuboriladi» while `MANAGER_TELEGRAM_IDS` is empty (§3.4's «empty = Telegram-only prospects wait in hold»: the candidate is held 30 d with a pending manager row whose `by_telegram_id` is NULL).
+- **Re-judging live cards.** `refresh_live` re-renders `REFRESH_MAX` = 20 live owner cards per run (the newest 10 plus a window over the rest that moves each 2-minute slot) and edits only on a changed `card_hash`; it and the ⏭ resend hold the card's row (`FOR UPDATE SKIP LOCKED`) across the Telegram edit, so a tap landing meanwhile waits and its own edit comes last. A card closed during `/toxtat` or while no bot was wired loses its buttons on the first run after (`strip_closed`, `STRIP_WINDOW` = 14 d, then `card_message_id` is cleared).
+- **Answers.** 🔀 excludes the candidate as `merged` even when `merge_into` moved it onto a target with no open candidate (an unmerge moves it back, still excluded). ✏️'s wait is in process memory (`PhoneWaits`, 5 min; a bot restart drops it); the corrected phone resets the shared flag and is refused when another contact holds it.
 ### 1.4 `/holat` and `/xarajat` layouts
 
 ```
@@ -135,6 +157,8 @@ Qidiruv ${s}: Brave {q} · Yandex {q} (bepul) · SearXNG {q} · Places {q} · 2G
 Apify ${p} · proksi ${p}
 Eng qimmat kompaniyalar: {name} ${x} …
 ```
+
+As built (T-36 and its review, wave 4): each enabled source's line reads «{title} {icon} {age} · bugun {n} yangi · aniqlik {p}% ({pushes_30d})[ · avto]» — `bugun {n} yangi` sums `collector_runs.new_companies` of the runs started since Tashkent midnight, which the resolver credits to the minting run (02 §2.2); «avto» only while `AUTO_APPROVE` is on. A «Natija (30 kun)» block of `metrics.Results` follows the sources (pushes, hot, contacted in one business day, real importer rate and precision, quoted, the `won` proxy — each labelled, «hali yoʻq» when nothing is counted) and «⚠️ Sinflanmagan yoʻqotish sabablari: …» (the first 10, «· va yana N ta sabab»); when the numbers cannot be read the rest of `/holat` still answers.
 
 ### 1.5 `callback_data` grammar, parser, fence
 
@@ -198,6 +222,8 @@ dict the routers are built from) and every handler key is producible by some sam
 expects `None` (a trailing newline, `rv:1:p\n`, among them). An unparsed `callback_data` is answered by nobody and the button spins 15 s
 (MIYA #937) — hence (a) and (b) together.
 
+As built (T-20, wave 4): the patterns read ASCII digits only (`[0-9]`; `\d` also matches fullwidth and Arabic-Indic digits), and a `ch:t:<monitor_id>` ref above `chat_monitors.id`'s int4 range answers «Bu tugma eskirgan». `mh:n` (`no_reply`) is in the grammar and the state table but no button produces it (Open question 12).
+
 ### 1.6 Delivery budget and quiet hours
 
 | Setting | Default | Rule |
@@ -222,6 +248,8 @@ inside `REVIEW_HOURS` and sends what is `pending`. The burst and daily caps abov
 reaches a card on the next job run.
 
 As built (seam review wave 4): a card is sent before its row is written (`asked`, the chat and message ids). When the database fails between the two, the next run sends the card again; the copy already in the chat is edited to «⚠️ Bu karta yozib olinmadi — qayta yuboriladi.» with no buttons (`reviews._recorded`, the owner's, the managers' and the re-sent cards alike), so a chat never holds two live copies of one card.
+
+As built (T-20, T-21 and the seam review, wave 4): «cards never go out in quiet hours» binds `review_cards_job`; the owner's own `/lidlar` is exempt (§1.2). `REVIEW_DAILY_CAP` counts first asks and ⏭ resends to the owner in the Tashkent day (`reminder_log(kind='review_resent', ref=review_id)`, 02 §2.13); a manager's card is not in the owner's cap. `REVIEW_DAYS` (Mon–Sat) is a constant in `services/reviews.py` beside `REVIEW_HOURS` (Open question 14). The `DIGEST_TIME` validator now exists: Settings refuses a time outside `REVIEW_HOURS` or inside `QUIET_HOURS` at start, and `make doctor` says it in Uzbek.
 
 ### 1.7 Manager handoff — Telegram-only prospects
 
@@ -260,6 +288,8 @@ pins: round-robin, allowlist (a non-listed id tapping `mh:` gets nothing), `/tel
 person-tier contact with all three legal columns, and no Telethon call exists anywhere in
 `bot/` (the AST fence of §5.3 covers the package).
 
+As built (T-21, T-30 and the seam review, wave 4): `send_pending_managers` reads up to its sweep limit, delivers at most `REVIEW_BURST_MAX` and skips for the rest of the run a manager Telegram refused, so one who blocked the bot holds back nobody — but is never reassigned (the month-2 rota). A ⏭ manager card whose manager left `MANAGER_TELEGRAM_IDS` goes to another. The card carries its opener when it is sent (`reviews.ensure_manager_opener` before the claim, 04 §4.5) and shows it whole (≤ 520, `DraftOpener`'s bound — the «≤ 220» above is the ERP note's, 05 §B.1). `/tel` runs the gates over the new phone before the approval: a refused company takes the gate's walk and the manager reads «Raqam yozildi, lekin lid CRMʼga yuborilmaydi …». The ownership of a manager card is `reviews.answer`'s question alone, under the candidate lock.
+
 ### 1.8 Daily digest (`digest_job`, `DIGEST_TIME`, owner only)
 
 ```
@@ -276,6 +306,13 @@ Sizni {pending} ta karta kutmoqda → /lidlar
 
 Lines with nothing to say are omitted. `reminder_log(kind='digest', ref=date)` prevents a
 second digest after a restart.
+
+As built (T-35, the integration and the seam review, wave 4, at `48cc857`; `services/digest.py`):
+
+- The ERP line is 07 §3.2's measure, read from T-36's `metrics` (one home): «ERP (30 kun): 1 ish kunida bogʻlanildi {pct}% ({n}/{of}) · …», pushes dated by the live delivered row; under 40 % with ≥ 20 pushes «⚠️ Menejer javobi: …, maqsad ≥ 40% (faqat ERP koʻrgani)» (07 §3, R9). `make push-test`'s company is in no count of «Kecha».
+- Lines the layout did not name: «🔁 Avtomatik push yoqildi|oʻchirildi: {manba} — aniqlik {p}% ({n} push)» (the numbers when the weekly job made them within 8 days; an «on» flip adds «AUTO_APPROVE oʻchiq — bu manbalarning kartalari hali ham sizga keladi» while it is off), «⏸ {manba}: aniqlik {p}% — bir haftaga toʻxtatildi», at most 3 flips («🔁 … yana N ta oʻzgarish — /manbalar») and 2 pauses («⏸ … yana N ta manba — /manbalar»); the smoke line ✓/✗/skipped with the changed and skipped names, and «⚠️ Haftalik tekshiruv N kundan beri boʻlmadi — serverdagi cron (make smoke-cron)» after 8 days; the dead-man line («Tashqi kuzatuvchi sozlanmagan», or «oxirgi signalni olmadi (HTTP n / javob yoʻq)»); the card-cap line; «ERP qabul qilmadi» by reason; «⚠️ Sinflanmagan yoʻqotish sabablari: …» (the first 10, «· va yana N ta sabab»); «Menejer javob bermadi: {n}» and «Menejerlar kecha: notoʻgʻri/B2C N». Quotes-sent stays out (Open question 20).
+- `fit` keeps the message under 4,096 UTF-16 units of the HTML (never splitting a surrogate pair), keeping the first and the last lines and «Tizim», dropping middle lines first; a flip whose line it dropped is not remembered as told (`digest.told`), so the next digest says it. The flips seen are remembered in `runtime_flags('digest_auto_push')` only when a digest is delivered.
+- An undelivered digest is retried while it is due — 5, 15, 30 min, then hourly (`DIGEST_RETRY`), a new day restarting the backoff — and caught up at start-up; with no bot or no owner wired the job returns at once. Two speakers at once send one digest (the day's claim under a lock).
 
 ## 2. Telegram reader account
 
@@ -387,6 +424,8 @@ clientscrapper`, `CMD ["python", "-m", "clientscrapper.worker.main"]`. Image ≈
 | `import-clients FILE= [APPLY=1]` | `tools/import_clients.py` → `suppression(manual_import)`; dry run by default; a written import deletes its file from `data/imports/` (the export is every client's phones) |
 | `erp-sync WALK=full\|delta\|outcomes\|quarter\|year [ACCEPT_SHRINK=1]` | `tools/erp_sync.py --<walk>`: one ERP feed walk by hand, the run the scheduler makes; exit 0 ran, 1 failed, 3 skipped (disabled, feeds not configured, already running); any other `WALK` stops make |
 | `push-test` | 05 §B.1 synthetic push |
+| `mvp-report [START=YYYY-MM-DD]` | `tools/mvp_report.py`: 07 §3.2's four numbers (T-36) |
+| `smoke [FULL=1]` / `smoke-cron` | the live smoke tests in the Dockerfile `smoke` stage through the compose `smoke` service (`--no-deps`; the quarterly full run with `FULL=1`); `smoke-cron` prints the host crontab lines, guarded to Tashkent time (07 §1.12, `docs/SMOKE.md`) |
 | `purge COMPANY=<uuid> \| PHONE=<tail9> \| TG_USER=<id> \| TG_HANDLE=@<username> [REASON=legal_request\|dnc\|b2c\|owner] [APPLY=1]` | `tools/purge.py` (§5.4; make variables, not flags — `make purge --company` is a make error) |
 | `reload` | `compose up -d --force-recreate worker userbot bot` after editing `.env` |
 | `logs` / `ps` / `psql` / `bot` / `worker` / `userbot` | tails and shells |
@@ -479,6 +518,10 @@ PUSH_WINDOW=09:30-17:30
 PUSH_DAYS=1-6
 # a number the owner controls; used by make push-test and the day-1 checklist (05 §B.1, 07 §5.6)
 TEST_PHONE=
+# «price given» ERP stage-name fragments, ;-separated; every won stage counts too (01 §7 decision 5a)
+QUOTE_STAGE_NAMES=narx
+# true = a source that earned auto-push sends its hot leads without the owner's card (T-39); false until the owner decides
+AUTO_APPROVE=false
 # --- Owner bot cadence ---
 REVIEW_HOURS=09:00-18:00
 REVIEW_BURST_MAX=10
@@ -595,6 +638,7 @@ missed nightly outcomes walks (`erp_feeds.NIGHTLY_MAX_AGE`) to the scheduler's o
 | `spend_high` | warning | ≥ `SPEND_ALERT_PCT` of either cap | «⚠️ Xarajat {pct}% ga yetdi (${d}/${cap})» |
 | `no_signals_24h` | warning | userbot enabled, ≥ 1 chat on, zero `interactions` in 24 h | «⚠️ 24 soatda bitta ham Telegram signal yoʻq — chatlar oʻlikmi? `/chats`» |
 | `push_failing` | warning | 3 consecutive candidates failed on 5xx (the ERP's 503 «unavailable» included) or a connection error after their three in-attempt tries | «⚠️ ERP javob bermayapti ({n} ta push muvaffaqiyatsiz)» |
+| `push_rejected` | warning | a push answered with a 4xx other than 404 — a proxy or a wrong `CRM_BASE_URL` (05 §B.1); told first by `crm_push`, cleared by the next push the ERP accepts (wave 4, T-35) | «⚠️ ERP pushni rad etdi (HTTP {code}): .env dagi CRM_BASE_URL va ERP oldidagi proksini tekshiring; lid koʻrib chiqishga qaytdi» / «✅ ERP pushlarni yana qabul qilyapti — tiklandi» |
 | `push_unconfirmed` | warning | a delivered `push_log` row (`sent` or `unknown`, not superseded) older than 48 h that no outcomes walk has shown — checked only while the feeds are configured and that night's `cursor` and `recent` walks completed (02 §2.10 rule 5); rule 5 re-pushes each such id once by itself | «⚠️ {n} ta push 48 soatdan beri ERPda koʻrinmadi — bir marta qayta yuborildi; qolganini `/push tekshir` bilan koʻring» |
 | `feed_contract` | warning | one key for every contract break of 05 §B.2 / §B.6, which raise only this key, with `{code}` ∈ `bad_request` (an ERP 400, or any 4xx but 401/403/404; the detail carries its `bad_cursor` / `bad_since`) / `rule_changed` / `runaway` (past `MAX_PAGES`, or a `next` equal to the cursor just sent) / `shape` (`FeedShapeError`: non-JSON, a missing key, a row with a PII key). `feed_rule_changed`, `feed_shape` and `feed_503` are only fake-ERP modes (05 §B.4), never keys | «⚠️ ERP feed shakli oʻzgardi ({code}) — dasturchi kerak» |
 | `suppression_shrunk` | warning | full pull < 90 % of previous count | «⚠️ ERP roʻyxati {pct}% ga qisqardi — oʻchirish toʻxtatildi» |
@@ -623,12 +667,16 @@ Dead-man: the worker GETs `DEADMAN_PING_URL` every `DEADMAN_PING_MINUTES` from `
 (a healthchecks.io-style monitor with a 15-minute grace; the free tier is UNVERIFIED — check
 the plan before relying on it). This is the only alarm that does not depend on the bot.
 
+As built (T-35, T-36 and the seam review, wave 4, at `48cc857`): `TOLD_FIRST_ELSEWHERE` = {`cost_cap`, `push_404`, `erp_redirect`, `push_rejected`}; when the owning job could not deliver its line it leaves `reminder_log(kind='undelivered:<key>')` — one row per key, moved to the newest such moment (`costs.note_undelivered`) — and the sweep says the key, at most once inside its repeat window and only after its last recovery; a quiet-hours hold is no failed delivery. The money keys stay once a Tashkent day (`health.DAILY_KEYS`, 04 Q11's recommended option). `job_failing` is said per subject — `job:<id>`, `run:<key>[.<variant>]`, `resolve_backlog` — each on its own `ALERT_REPEAT_HOURS` clock, so a second failing job is never hidden behind the first. `source_low_precision` pauses and names enabled sources only; its recovery line is «✅ Past aniqlik pauzasi tugadi — tiklandi»; a flip of `auto_push` is told by the weekly job outside `QUIET_HOURS`, or by the first sweep after them (`runtime_flags('precision_flips')`, its `told_at` claim given back when undelivered). The dead-man ping's last answer (`at`, `ok`, `status`) rides the next `worker` heartbeat's detail; the digest reads it, `/holat` does not.
+
 ### 4.3 Alert routing
 
 Owner only, through the bot (`notify()` with the plain-text retry, delivered-then-marked).
 Managers receive only their own cards. Problems that depend on a component are never reported
 by that component (the bot watches the worker, the worker watches the userbot and itself, the
 outside watcher watches the worker).
+
+As built (T-35 and the seam review, wave 4): the bot's watchdog also says `job_failing` for the health sweep (`health.sweep_failing`, subject `job:health`, from `job:health` heartbeats with a streak of 3 while the worker is fresh) and falls back to `health.status_from_beats` when the shared gather raises; it never announces that recovery (the sweep does). A sweep APScheduler skips because the last one never ended is a failed run (`still_running`, «ishi tugamayapti: oxirgi N ta navbati oʻtkazib yuborildi»), so a hung sweep is said. The worker that takes the leader lock back after a blip closes the dead leader's runs and hands the missed jobs to its scheduler (`take_over`); a standing-by worker resumes only on an answered acquire.
 
 ### 4.4 Backups
 
@@ -655,6 +703,8 @@ outside watcher watches the worker).
 - Not in the dump: `EVIDENCE_DIR` (cards and ERP notes need only `evidence.url/excerpt`, which
   are rows). Optional `restic` to object storage is an ops choice, not v1.
 - `make update` begins with a backup that must succeed.
+
+As built (the seam review, wave 4): the nightly backup document goes with `disable_notification` (it is sent at 03:45, inside `QUIET_HOURS`) and a file under a megabyte reads «<1 MB»; the drill beat carries `proved_at` across skips, and `catch_up` hands an overdue drill to the scheduler at start (`restore_drill_failed`, §4.2).
 
 ### 4.5 Logs
 
@@ -798,6 +848,15 @@ As built (seam review wave 4): `execute` locks the plan's lineages (`FOR UPDATE`
 
 As built (seam review wave 4): the plan and the result cards count the leads the ERP received (`erp_leads`: a `sent` or `unknown` push) and say «⚠️ ERPʼga yuborilgan lid: N ta — ism va telefoni ERPda qoladi: uni ERPning oʻzida oʻchiring.» — 05 has no erasure call, so a purge here never reaches the lead the managers work in the ERP.
 
+As built (T-31, its review and the seam review, wave 4, at `48cc857`; `services/purge.py`, `services/retention.py`, `tools/purge.py`):
+
+- `execute` runs in table groups, files last. Its claim (`purge_log.error='running'`) commits in a transaction of its own before anything is collected, so a second tap closes nothing; `purge_log.error` is `running` while an execute holds the row (or after its process stopped), `failed:<class>` after a failed group, `cancelled` or `expired` for `/unut`'s two closings; a `make purge` dry run writes no row.
+- A purged company that still holds rows groups 2 and 3 remove is `unfinished` (`purge.unfinished`); `/unut` and `make purge` find it again — by STIR, uuid, the merged source's uuid, a leftover contact's phone or `@username` — and plan it again. `make purge` prints its refusals in Uzbek and reads `PHONE=` as written (+998 … or a tail-9; another country's number refused).
+- The suppression keys of a `legal_request` or `dnc` purge include the poster of every message the subject's observations came from (a positive `tg_user_id`, a channel's negative peer id skipped, and the `tg_username`) — Open question 16. A firm that loses signals with the subject's messages is re-scored, not purged (`Scope.bystanders`, `signals.mark_stale`).
+- A merged source gives up a STIR or domain only when another non-merged company holds the same value (`purge._released`); a key only it had stays, so the resolver answers «purged». `/stir` refuses such a STIR (§1.2).
+- Every NULL the purge writes into a JSONB column is SQL NULL (`sa.null()`; no model sets `none_as_null`, so a Python `None` would store JSON `null`). A kept (push-history) candidate loses `score_breakdown.opener`/`opener_meta` — the one free text there, a draft asked with the firm's name; `lead_candidates.push_note` holds only the gate's coded refusal words and stays with a kept candidate.
+- `evidence_over_cap` clears only on a run whose directory started within `EVIDENCE_MAX_GB`; a directory over the cap with nothing left to free stays reported (Open question 19).
+
 ### 5.5 Suppression precedence and overrides
 
 `services/suppression.is_suppressed()` (02 §2.8) orders hits by
@@ -863,6 +922,8 @@ weights, 02 AC 1); nothing here waits for a `0002`. The table says where 06 read
 9. `DEADMAN_PING_URL` configured and a test alert received on the owner's phone; `make backup` run once by hand and the file seen in Telegram; `make restore … DRY=1` on the file.
 10. Legal: pd.gov.uz registration filed (owner); `docs/huquqiy-memo.md` §4 checklist signed off; managers briefed on `docs/sotuv-playbook.md` §2 (own account, 10:00–17:00, opt-out line).
 11. Week 1 settings: `REVIEW_DAILY_CAP=20`, `PUSH_DAILY_CAP=10`, one manager in `MANAGER_TELEGRAM_IDS`; raise after the first weekly review.
+12. Smoke cron installed: `(crontab -l; make -s smoke-cron) | crontab -` (`docs/SMOKE.md`; the lines fire in Tashkent time whatever the host's zone); `make smoke` run once by hand and its line seen in the next digest.
+13. `QUOTE_STAGE_NAMES` set to the ERP's «price given» stage name fragment(s) (Open question 21); `AUTO_APPROVE=false` until the owner's go (Open question 22).
 
 ### 7.2 Haftalik koʻrik (egasi uchun, dushanba 10:00, 20 daqiqa)
 
@@ -888,6 +949,23 @@ weights, 02 AC 1); nothing here waits for a `0002`. The table says where 06 read
 7. Should `/qidir` be available to managers (shows suppression kind, which reveals «client of ours» for a phone)? Recommended: yes — that is exactly what stops a wrong call.
 8. `QUIET_HOURS=21:00-08:00` for warnings; the owner may prefer MIYA's `23:30-07:30` so evening pushes' failures are seen the same night.
 9. **App-service healthchecks (T-08).** §3.1's compose gives only `db` a healthcheck; «healthy» for worker, userbot and bot is «running + a fresh heartbeat». Add a heartbeat-based container healthcheck per app service (`tools/healthcheck <component>` reading `heartbeats.last_seen_at`) so `make ps` and `docker compose up --wait` say it — recommended once each process beats — or keep the heartbeat as the only signal?
+
+Raised by the wave-4 build (2026-10-29) — each an owner decision the build took a default for:
+
+10. **`/lidlar` at any hour** (T-20). As built it ignores `QUIET_HOURS` and `REVIEW_DAILY_CAP` as well as `REVIEW_HOURS` («the owner asked»). ⭐ (a) keep; (b) honour quiet hours (a `/lidlar` at 23:00 answers «ertalab 09:00 da»).
+11. **`/chats` message count** (T-20). No seven-day count is stored, so the line says «jami {seen} xabar» (lifetime). ⭐ (a) keep; (b) add a seven-day counter (a migration on `chat_monitors`).
+12. **«⌛ Javob bermadi» on the manager card** (T-20/T-21). `mh:n` (`no_reply`) is in the grammar, the state table and the footer texts, but no button produces it, so a card whose prospect stayed silent expires at 72 h and is counted as «Menejer javob bermadi» — the manager's silence. ⭐ (a) add it as the fifth button; (b) drop `mh:n` from the grammar.
+13. **The card's words** (T-21). The failure and waiting footers, the three 👤 forms, «⚠️ Ball tushdi (N/100) …» and the quote line «🔎 «q» — {author} · {source}, {date}» with «👤 … (raqam egasi)» (§1.3 as built). ⭐ (a) keep as built; Bekzod reads them on the first cards and dictates changes; (b) review the texts before the pilot.
+14. **`REVIEW_DAYS`** (T-21) — Mon–Sat is a constant beside the `REVIEW_HOURS` setting. ⭐ (a) keep; (b) a setting.
+15. **The manager's ❌ and source precision** (§1.7 vs 05 §B.2). As built the answer excludes the company (`suppression(b2c)`) and is not counted: precision is ERP-outcome-only, and a handoff lead the manager judged never reached the ERP. ⭐ (a) keep it out of precision (the digest counts the answers); (b) count it as a negative for the source (05 §B.2 gains a second input).
+16. **Third parties in a legal purge** (T-31). Every poster of a message the subject's observations came from becomes a legal key, which may suppress a third party who posted about the firm. ⭐ (a) keep — over-suppression only means the agent never cards that poster, under-suppression lets the subject return through its own post; (b) only the subject's own ids.
+17. **`/unut` for a phone no company holds** (T-31). `/unut <phone>` plans a company only; `make purge PHONE=` covers a phone seen only in messages. ⭐ (a) widen `/unut` to `plan_contact` when no company holds the phone — a legal request should not need the server's terminal; (b) keep the terminal for it.
+18. **Templates A–E** (T-30, `docs/sotuv-playbook.md` §3.0, the price-free first messages). ⭐ (a) Bekzod reads and approves or edits them before the pilot; (b) start with them and adjust after week 1.
+19. **«Over the cap, nothing left to free»** (T-31). The `evidence_over_cap` text says old files were deleted early even when none could be. ⭐ (a) a second text «… boʻshatadigan eski fayl qolmadi — diskni kengaytiring yoki `EVIDENCE_MAX_GB` ni oshiring»; (b) keep one text.
+20. **Quotes sent in the digest** (T-35). The count (stage-name snapshots, labelled approximate) is in `/holat` and the MVP report. ⭐ (a) keep it out of the digest, which runs near its 4,096 limit; (b) add a line.
+21. **`QUOTE_STAGE_NAMES`** (T-36). The default fragment «narx» was not checked against the ERP's stage names. ⭐ (a) on day 1 read the funnel's stage names in the ERP and set the fragment(s); (b) keep «narx».
+22. **Who turns `AUTO_APPROVE` on, and when** (T-36/T-39, with Open question 2). ⭐ (a) off for the pilot; on by the owner's word once T-39 lands and a source has held ≥ 15 pushes at ≥ 60 % for two weekly runs; (b) on as soon as a source earns it.
+23. **A low-precision pause on a sub-source** (T-36). The weekly job pauses the source a lead is attributed to, which can be an attribution-only row (`search_brave`, `maps_google`, `directories_*`) the runner never reads. ⭐ (a) pause that sub-source alone — the fan-out collectors skip it (T-22, T-25, T-33); (b) pause the parent row.
 
 ## Acceptance criteria
 
@@ -974,3 +1052,11 @@ Not applied here (other files' homes): 2, 5, 11, 16, 20–23, 25, 26, 28, 32, 36
 - §1.3: the 🔒 phone is `push_gate.lead_contact`'s; the «CRM javob bermadi — qayta soʻrayman» footer cannot be kept in the same month (T-20/T-21 reword it); what the push gate needs from the card (`shared_ok` exactly, the stale card, refusals back to a card, `gates.evaluate` before every card, `/push tekshir` as services).
 - §4.2: `batch_stuck`'s text follows the ladder («ishlar keyingi tunda qayta yuboriladi, 3-urinishdan keyin tezkor yoʻl oʻzi oladi»); `anthropic_silence` counts classify's queue and instant jobs left pending, never the batch lane.
 - §5.1: a tout carries no person data; a display name keeps only its name-shaped words. §5.2: `pseudonyms.unmasked` is the one list `assert_masked` and the PII fence ask (the four patterns, `PINFL_RE`, foreign and long numbers, messenger ids).
+
+**Wave 4 as built (2026-10-29)** — folded from the T-20, T-21, T-30, T-31, T-35 and T-36 builds, their reviews and fixes, the integration (`wt/integ4`) and the seam review's fixes, checked against `bot/`, `services/cards.py`, `services/reviews.py`, `services/digest.py`, `services/health.py`, `services/purge.py`, `services/erp_feeds.py`, the Makefile and `.env.example` at `48cc857` (the seam review's own edits to §1.3, §1.6, §1.7, §3.3, §4.2 and §5.4 kept as they were):
+
+- §1.2: `/lidlar` (at any hour, the claim, `ensure_pending`, `/lidlar holat`'s auto-approved list), `/manbalar` («avto» with `AUTO_APPROVE`, the paused row resumed by one tap), `/chats` (lifetime count), `/xarajat` (T-20's), `/toxtat` (paid calls, manager cards), `/dnc`, `/vazn`, `/stir`, `/unut`, `/yordam` and the error answer as built.
+- §1.3: the quote and AI lines, the handoff variant by usable phone, stale taps, cards set aside, ⏭'s `remind_at`, the footers, the refresh rotation and row locks, 🔀 and ✏️ as built. §1.4: `/holat`'s source line and «Natija (30 kun)». §1.5: ASCII digits, the int4 ref, `mh:n` without a button. §1.6: `/lidlar`'s exemption, the cap counting resends, `REVIEW_DAYS`, the `DIGEST_TIME` validator. §1.7: the managers' burst, the opener, `/tel`'s gates. §1.8: the digest's lines, caps, `fit`, the retry.
+- §3.3: `mvp-report`, `smoke`, `smoke-cron`. §3.4: `QUOTE_STAGE_NAMES`, `AUTO_APPROVE`. §4.2: the `push_rejected` row; `undelivered:<key>`, `job_failing` per subject, the low-precision rule and the flip telling as built. §4.3: the watchdog and the hung sweep, `take_over`. §4.4: the silent backup document, the drill's `proved_at`. §5.4: the purge as built (the claim, `unfinished`, third-party keys, released keys, SQL NULL, the kept candidate's opener, the cap rule). §7.1: steps 12–13.
+- Open questions 10–23 added (each with the build's default as ⭐).
+

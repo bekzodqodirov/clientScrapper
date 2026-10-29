@@ -158,6 +158,8 @@ CREATE UNIQUE INDEX ux_collector_runs_one_running ON collector_runs (source_key)
 ```
 W/R: collectors / `/holat`, `source_precision_job`, breaker logic (403/429 streak over the last 5 runs).
 
+As built (T-35, T-36 and its review, wave 4, at `48cc857`): `new_companies` has two writers — the runner writes 0 when a run ends (none of its observations is visible before its commit), and the resolver adds one per company it creates to the run whose evidence minted it (`companies.count_minted`, in the resolving transaction; evidence reused from an older run credits that older run). `/holat`'s «bugun N yangi» sums the runs started since Tashkent midnight, so a run started at 23:58 whose companies resolve after midnight counts toward the day before. A smoke outcome is a row `status='skipped'` (or `failed`, `error='host_blocked'`) with `meta.note='smoke'`, written only by the live recorder (07 §1.12); `collector_silent`'s clock and the `/manbalar` source card filter it out (`smoke.not_smoke()`).
+
 ### 2.3 `evidence` — an immutable fetched artefact
 
 ```sql
@@ -300,6 +302,8 @@ CREATE INDEX ix_contacts_instagram   ON contacts (instagram) WHERE instagram IS 
 ```
 Rules: **a company row is never deleted** — purge sets `state='purged'` (06 §5.4) — so `merged_into` is `ON DELETE RESTRICT` and `ck_companies_merged` is the lineage rule; a merge target is pinned by `merge_log.target_company_id` RESTRICT as well. Purging a merged source sets `state='purged'` **and** `merged_into = NULL` in the same UPDATE, or the CHECK refuses it. `ux_contacts_one_person` is the "one person per company" law; a second decision maker replaces the first (old row anonymised, not deleted). Company-tier rows hold switchboard phones, `info@`, the @company handle. `google_place` id_value is the only thing kept from Places for longer than 30 days (policy): a Places phone copied into `contacts` (`source_key='maps_google'`) is cleared by retention step R4b (§4) unless a push already used it. A poster's personal Telegram id is person-tier — `contacts.telegram_id`, never `company_ids` (`ID_TYPES` has no `tg_user`). W/R: resolver (`services/companies.py`), enrichment, bot `edit_phone` / `/stir`, merge, retention / scorer, card, push, suppression gate.
 
+As built (T-30, T-31, T-20 and the seam review, wave 4, at `48cc857`): `verdict` holds the validated `RelevanceVerdict` (reasons and role pass the owner-text validator, names removed) and `verdict_at` is the time the question's bundle was built, not the apply time (04 §4.1); an answer to a question older than the standing verdict changes nothing; both are refreshed every `VERDICT_FRESH` = 30 d. `is_state_body` is written by a verdict with a verified quote and read by nothing yet (04 Open question 25). A purge sets `display_name='[oʻchirilgan]'`, `address := NULL` (a sole trader's address may be a home) and `verdict := NULL` as SQL NULL (06 §5.4). `ux_companies_stir` excludes only `merged`, so a purged root keeps its STIR and the resolver answers «purged»: `/stir` refuses such a STIR (`stir.purged`) instead of hitting the index.
+
 ### 2.5 `observations` — one parsed finding, before resolution
 
 ```sql
@@ -414,6 +418,8 @@ CREATE INDEX ix_model_jobs_company ON model_jobs (company_id);
 Lifecycle as MIYA `ConversationWindow`: `pending → submitted → applied | failed`; `fallback` = batch gave up after 3 attempts and the instant lane took it. `pseudonyms` never leaves the process; `request` must contain no raw phone/handle — `tests/test_pseudonymised_requests.py` greps stored requests for `\+998\d{9}|@[a-z0-9_]{5,}`. W/R: enrich/score jobs, `model_batch_submit/collect` / scorer (signals), cost accounting.
 
 As built (T-15, T-16, their reviews and the integration, at `8a1935e`): `request` = `{op, model, prompt_version, system_sha256 (first 16 hex), schema_sha256, max_tokens, effort, user (the masked text), tools}` — not the system prompt, which is frozen per prompt version and named by its hash; a batch job's request may also carry `doubled` / `nudged` (its next submission asks for twice the output / with the JSON nudge, 04 §4.8), and an instant job that took a batch fallback carries `fallback_of` (the batch job's id). `pseudonyms` is keyed by the bracketed tokens (`{"<PHONE_1>": "+998…", "<TG_1>": "…"}`, the strings `restore` replaces) and keeps only the tokens the request carries. A `fallback` row's `applied_at` is the moment the instant lane finished with it (R6's `coalesce(applied_at, created_at)` then keeps it 30 days from then); the instant answer is a row of its own (`kind='verdict'`, `lane='instant'`). `company_id` of a `classify` job asked before its company existed is set by `candidates.after_classify`/`after_resolve` once the resolver names the company — gate 1's and gate 2's ImportSignal reads join on it (04 §6). Claims are `FOR NO KEY UPDATE SKIP LOCKED` (the `usage_log.model_job_id` key-share does not wait on a held job). `enqueue` keeps one `pending` job per company (04 §4.8).
+
+As built (T-30 and its review, wave 4): `request.asked_at` is the moment the bundle was built (at `enqueue`, and when a waiting job's text is replaced), kept across the submit rewrite — `model_jobs.asked_at(job)` falls back to `created_at`; `apply_verdict` stamps `companies.verdict_at` with it. A `draft` job carries `company_id`, so a purge clears its request and result with the company's; a purge also clears every job whose `pseudonyms` name the subject (06 §5.4), and a draft made across a purge forgets its own request (`forget_job`).
 
 ### 2.7 `signals`, `scoring_weights`
 
@@ -571,12 +577,15 @@ CREATE TABLE lead_candidates (
   rejected_at        timestamptz,
   pushed_at          timestamptz,
   last_scored_at     timestamptz,
+  push_note          text,                   -- 0003_review_flow: an auto-approved candidate's push refusals (the gate's coded words; no owner card carries them)
+  push_noted_at      timestamptz,            -- 0003_review_flow
   created_at         timestamptz NOT NULL DEFAULT now(),
   updated_at         timestamptz NOT NULL DEFAULT now(),
   CONSTRAINT ck_lead_candidates_excluded CHECK (state <> 'excluded' OR exclude_reason IS NOT NULL),
   CONSTRAINT ck_lead_candidates_pushed   CHECK (state <> 'pushed' OR (external_id IS NOT NULL AND pushed_at IS NOT NULL)),
   CONSTRAINT ck_lead_candidates_approved CHECK (state NOT IN ('approved','pushed') OR (approved_at IS NOT NULL AND approved_by IS NOT NULL)),
-  CONSTRAINT ck_lead_candidates_scored   CHECK (state NOT IN ('scored','review','approved','pushed') OR score IS NOT NULL)
+  CONSTRAINT ck_lead_candidates_scored   CHECK (state NOT IN ('scored','review','approved','pushed') OR score IS NOT NULL),
+  CONSTRAINT ck_lead_candidates_push_note CHECK (length(push_note) <= 500)   -- 0003_review_flow, the bound of lead_reviews.note
   -- no CHECK on suppressed_by (§0: it is ON DELETE SET NULL); trigger trg_lead_candidates_suppressed (§2.16) refuses
   -- the step INTO 'suppressed' without a pointer, and lets the FK's own SET NULL pass later
 );
@@ -605,6 +614,7 @@ CREATE TABLE lead_reviews (
   by_telegram_id  bigint,
   note            text CHECK (length(note) <= 500),
   expires_at      timestamptz,
+  remind_at       timestamptz,               -- 0003_review_flow: when a card put off with ⏭ is asked again (06 §1.3)
   created_at      timestamptz NOT NULL DEFAULT now(),
   CONSTRAINT ck_lead_reviews_answered CHECK ((state IN ('approved','declined','merged')) = (answered_at IS NOT NULL)),
   CONSTRAINT ck_lead_reviews_asked    CHECK (state <> 'asked' OR (asked_at IS NOT NULL AND card_message_id IS NOT NULL AND expires_at IS NOT NULL))
@@ -613,6 +623,7 @@ CREATE UNIQUE INDEX ux_lead_reviews_live ON lead_reviews (candidate_id, kind) WH
 CREATE UNIQUE INDEX ux_lead_reviews_card ON lead_reviews (card_chat_id, card_message_id) WHERE card_message_id IS NOT NULL;
 CREATE INDEX ix_lead_reviews_expiry    ON lead_reviews (expires_at) WHERE state = 'asked';
 CREATE INDEX ix_lead_reviews_candidate ON lead_reviews (candidate_id);
+CREATE INDEX ix_lead_reviews_remind    ON lead_reviews (remind_at) WHERE state = 'asked' AND remind_at IS NOT NULL;   -- 0003_review_flow
 ```
 
 **Candidate state machine** (`services/candidates.TRANSITIONS`, enforced in Python; the DB checks values and invariants only). Tier: `hot` = score ≥ 60 and a usable phone; `warm` = 40–59, or ≥ 60 without phone; `cold` = < 40.
@@ -639,6 +650,18 @@ As built (T-18, its review, the integration and the E2E review, at `8a1935e`; `s
 - `→ approved` refuses a candidate with no usable phone on every path. An `approved` row is never re-scored by `score_job`; `crm_push.push_one` re-scores it (the score, never the state) before the claim, and a total below 60 sends it back to `review` with «Ball tushdi» (04 §7 item 13; E2E review).
 
 **Review state machine** (`services/reviews.py`, MIYA `approvals.py` shape + `merged`; one machine for both `kind`s): `pending` (created by `review_cards_job` — every 2 min inside `REVIEW_HOURS`, 06 §1.6 — from candidates in state `review`; a `kind='manager'` row is created by the owner's `handoff` answer) → `asked` (card sent; `expires_at = asked_at + 72 h`) → `approved | declined | merged` (one tap) or `expired` (sweep; owner card: candidate → `hold`, `hold_until = now + 7 d`, re-asked at most twice, `reminder_log(kind='review_expired', ref=candidate_id)`; manager card: digest line «Menejer javob bermadi»). `later` keeps `asked` and adds 24 h; `edit_phone` keeps `asked`, updates the contact and re-renders. Owner answers `push`/`handoff` → `approved`; `decline`/`dnc`/`not_b2b`/`competitor` → `declined`; `merge` → `merged`. Manager answers (06 §1.7): `contacted` → `approved` (the candidate stays `hold` until `/tel`); `said_no`/`wrong_or_b2c`/`no_reply` → `declined`. The callback-data grammar (`rv:<review_id>:<a>` with one-letter codes, `mh:*` for manager cards) is 06 §1.5's, not restated here; `tests/test_bot_callbacks.py` demands the parser accept every button the keyboards build. W/R: `review_cards_job`, bot / bot, `/lidlar`, `/holat`.
+
+As built (T-20, T-21, T-30, T-31 and the seam review, wave 4, at `48cc857`; `services/reviews.py`, `services/cards.py`, `services/push_gate.py`, `services/openers.py`; migration `0003_review_flow`, §5):
+
+- **⏭ `later`** adds 24 h to `expires_at` and sets `remind_at` = tap + 24 h; the row stays `asked`, its message loses its buttons, and the card job sends the card again as a fresh message on its first run inside `REVIEW_HOURS` after `remind_at`, with `expires_at = greatest(expires_at, resend + REVIEW_EXPIRY_HOURS)`. The sweep never expires an `asked` row whose `remind_at` is set and not yet resent; the ⏭ claim requires `remind_at IS NULL`, so a second ⏭ is stale. Each owner resend writes `reminder_log(kind='review_resent', ref=review_id)`, which `REVIEW_DAILY_CAP` counts with the first asks (06 §1.6).
+- **`expired`** keeps `card_message_id` until the job has stripped its buttons (`strip_closed`, within `STRIP_WINDOW` = 14 d), then clears it. A tap on an answered or expired card, or one whose candidate left `review`, closes the row as `expired` with `note='stale:<state>'`; a card that cannot be shown or a ✅ the push refused writes `note='refused:<code>'`. `note` values as built: the owner's `shared_ok` (04 §7 item 4), `stale:<state>`, `refused:<code>`, and a push refusal written after the owner's word.
+- **`handoff`** with `MANAGER_TELEGRAM_IDS` empty is accepted: the candidate is held 30 d and the `kind='manager'` row is `pending` with `by_telegram_id` NULL until a manager is listed; a ⏭ manager card whose manager left the list is re-picked (the least loaded today).
+- **`merge`** excludes the candidate as `merged` in every case — also when `companies.merge_into` moved it onto a target that had no open candidate (it then sits on the target; an unmerge moves it back still excluded, and a newer signal reopens the company).
+- **The manager's `wrong_or_b2c`** also writes `suppression(b2c, company_id, source='owner_bot', reason='manager_report')`; the manager's `said_no` and the owner's `dnc` write the company's STIR among the DNC keys. A `/tel` phone given over the person's older number replaces it on the same person row with `legal_basis='pre_contract_request'`, the cited message as `source_url` and `now()`; the gates run over the new phone before `→ approved`.
+- **`push`** re-scores under the tap's company → candidate locks; under 60 the candidate is held 7 d (`refused:score_low`, 04 §7 item 13). A card whose candidate cannot be shown leaves the queue (`cards.set_aside`): the gate's walk, else `hold_until = now + 7 d` (`CARD_REFUSED_HOLD`).
+- **`push_note`** (0003): `push_gate.record_refusals` writes a refusal on the newest owner review row; an auto-approved candidate has none and none is invented, so its refusals go to `push_note`/`push_noted_at` (the gate's coded words only, never a name or a phone), which `/lidlar holat` lists for `approved` rows with `approved_by LIKE 'auto:%'`. It stays with a kept candidate and goes with a deleted one (a purge, R6).
+- **`score_breakdown`** gains `opener` (the text the ERP note's NIMA DEYISH and the manager card read) and `opener_meta` (`source`, `segment`, `lang`, `why`, `flags`, `model_job_id`, `at`), carried by a re-score (`candidates.CARRIED_KEYS`); a purge strips both from a candidate it keeps (06 §5.4).
+- Lock order as built for the cards: `companies` → `lead_candidates` → `lead_reviews`; the card job's edits hold the card's row `FOR UPDATE SKIP LOCKED` across the Telegram call, the owner's cards are claimed one at a time (`FOR UPDATE OF lead_reviews SKIP LOCKED`), and the sweep locks its pairs in company-id order.
 
 ### 2.10 `push_log` — every attempt to hand a lead to the ERP
 
@@ -814,7 +837,7 @@ with an `external_id` of that company) that are not in the set are deleted, miss
 
 | Label | Desired rows / flags |
 |---|---|
-| `won`, `landed_client` | `suppression(client, phone_tail = push_log.phone_tail, reason='outcome:<external_id>')`; `companies.state='client'` — the ERP feed brings the hashed `phone_hash` row for the same phone a day later (05 §B.2), so the phone is never carded again even while the feed lags |
+| `won`, `landed_client` | `suppression(client, phone_tail = push_log.phone_tail, reason='outcome:<external_id>')`; `companies.state='client'` — the ERP feed brings the hashed `phone_hash` row for the same phone a day later (05 §B.2), so the phone is never carded again even while the feed lags. As built (01 §7 decision 2a, T-36 `b11d95f`): also `suppression(client, source='outcomes')` on the company's `tg_username`, `instagram`, `domain` and `stir` over its lineage (`outcomes.company_keys`, the set `lost_no_contact` uses) |
 | `dropped_suppressed` | `suppression(client, phone_tail, reason='erp_belt:<external_id>')` — the ERP refused this phone: a stale feed copy, or a 7–8-digit card the feed can never carry (05 §A.8); no `companies.state` change (the belt does not say client or lost); health problem `suppression_stale_hit`, cleared by the next completed full pull |
 | `lost_no_contact` | `suppression(lost, …)` on the pushed `phone_tail` and the company's `tg_username`, `instagram`, `domain`, `stir`, `reason='outcome:<external_id>'` (the ERP suppresses by phone only) |
 | `lost_price` / `lost_not_importer` | `suppression(cooldown, company_id, expires_at = label_changed_at + 180 d / 365 d)` |
@@ -832,6 +855,8 @@ the number), `companies.is_competitor` (the owner clears it by hand), every row 
 own them). `source_precision_job`: `precision_30d = positives / (positives + negatives)` over outcomes
 whose `first_read_at` is within 30 d, ignoring `pending`/`neutral`, per `source_key`. W/R: `erp_sync`
 outcomes walks / `source_precision_job`, `/holat`, `tools/fit_weights.py`.
+
+As built (T-36 and its review, wave 4): the `won`/`landed_client` rows on the company's keys are `KEPT_WHILE_STANDING`, like `lost_no_contact`'s `lost` rows — an anonymised contact or a handle that moved to another company does not reopen a client while the label stands — and the label's retraction takes them all back; another company on the same handle is refused, not suppressed. The four named kinds plus the pushed tail are closed, not the company's other phone tails (05 Open question 19). Decision 1a's unclassed labels are read from these rows (`label='lost_other'` with a non-null `lost_reason`, grouped by the normalised label; no table of their own). `outcomes.delivery_order` is the one rule for which `push_log` row an outcome is about — the live delivered row, then any delivered row, then the oldest attempt — and `metrics` dates a push by it. Every writer of a push's answer (`crm_push._record`, `outcomes.promote`) clears the ✅ card's `card_hash` (`outcomes.footer_moved`), so the card job repaints its footer. `source_precision_job` (05 §B.2 as built) stores its flips in `runtime_flags('precision_flips')`.
 
 ### 2.12 `interactions`, `chat_monitors` — the Telegram reader
 
@@ -937,20 +962,22 @@ CREATE INDEX ix_usage_log_collector_run    ON usage_log (collector_run_id);
 
 CREATE TABLE reminder_log (                                 -- MIYA verbatim
   id      bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-  kind    text NOT NULL,                                     -- alert:<key>|recovered:<key> (health, MIYA constants, 06 §4.1)|review_expired|push_unconfirmed|digest|source_paused
+  kind    text NOT NULL,                                     -- alert:<key>|recovered:<key> (health, MIYA constants, 06 §4.1)|review_expired|push_unconfirmed|digest|source_paused; as built (wave 4) also review_resent|undelivered:<key>
   ref     text NOT NULL,
   sent_at timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX ix_reminder_log_kind_ref_sent ON reminder_log (kind, ref, sent_at);
 
 CREATE TABLE runtime_flags (                                -- switches that must survive a restart and be read by bot, worker and userbot (06 §6)
-  key        text PRIMARY KEY,                               -- 'paused' {"since","reason"} | 'flood_until' | 'review_hours_override'
+  key        text PRIMARY KEY,                               -- 'paused' {"since","reason"} | 'flood_until' | 'review_hours_override'; as built also 'problem:<key>', 'anthropic_probe', 'precision_flips', 'digest_auto_push'
   value      jsonb NOT NULL,
   updated_at timestamptz NOT NULL DEFAULT now(),
   updated_by text NOT NULL                                   -- 'owner:<tg_id>' | 'userbot' | 'worker:<job>'
 );
 ```
 The budget controller is 04 §8 and its signature is the only one: `costs.ask(session, *, operation, est_usd, call, price, now, …)` sums `usage_log.cost_usd` for today (Tashkent) and the month and refuses **before** the call in the order month → day → family → op; ahead of it the collector's `Budget.can_spend` (03 §1.2) checks the per-source budget `Budget.usd = sources.daily_cost_cap_usd − spend(source_key)`. A refusal is persisted here as a row with `cost_usd=0, units=0, model='refused:<code>'` — the bot is another process and cannot read a worker counter, so `/xarajat` and the digest count these rows. `runtime_flags` holds the switches the three processes share (`/toxtat` → `paused`, the userbot's `flood_until`); writers upsert with `updated_at = now()`. W/R: every paid caller, `health.beat`, bot (`/toxtat`, `/yoq`), userbot (`flood_until`) / `/xarajat`, `/holat`, health, `policy.paused()`.
+
+As built (T-08, T-21, T-35, T-36 and the seam review, at `48cc857`): `reminder_log` kinds also `review_resent` (`ref` = the review id; an owner resend, counted by `REVIEW_DAILY_CAP`) and `undelivered:<key>` (`ref` = the key; one row per key, moved to the newest moment its own teller could not deliver it — `costs.note_undelivered` — so the sweep says a told-first key); a per-subject key's `alert:` row carries `<key>:<subject>` in `ref` (`job_failing`'s subjects: `job:<id>`, `run:<key>[.<variant>]`, `resolve_backlog`); `digest`'s `ref` is the Tashkent date. R6 deletes every kind at 90 d — `review_expired` included, so a candidate reopened after 90 days may be asked twice more (Open question 13). `runtime_flags` rows as built: `problem:<key>` {`since`, `until`, `detail`} (a raised health problem, deleted when it clears), `anthropic_probe` {`at`} (the half-open probe slot), `precision_flips` {`flips`, `told_at`} (the weekly job's auto_push flips with their numbers; `told_at` is the once-only telling claim, given back when undelivered) and `digest_auto_push` (the source flags the last delivered digest saw). These hold source keys and numbers only — configuration, outside retention, no person data. `costs.ask` reads `runtime_flags('paused')` first (`costs.global_pause`, its one reading; a `paused` refusal is the row `model='refused:paused'`, remembered `PAUSE_RECHECK` = 1 min).
 
 ### 2.14 `merge_log`, `purge_log`
 
@@ -985,6 +1012,8 @@ CREATE TABLE purge_log (
 CREATE INDEX ix_purge_log_subject ON purge_log (subject_kind, subject_hash);
 ```
 Merge (`services/companies.merge_into`, MIYA `people.merge_into` shape): refused when both have different STIRs or different registry-confirmed domains; re-points every FK row of the source, records their ids in `moved`, copies identity fields the target lacks (`carried`), demotes the source's open candidate to `excluded(merged)`, sets `source.state='merged', merged_into=target`. Undo within 24 h re-points the ids in `moved` and clears `carried` fields; later than that the owner splits by hand. Purge (`services/purge.plan_company/execute`, MIYA shape): count first, then delete contacts/observations/interactions/model_jobs of the subject, anonymise `push_log.payload`, keep `outcomes` and hashed `suppression`; the log row never holds the name or phone, only the hash.
+
+As built (T-31, its review and the seam review, wave 4): `purge_log.error` is `running` while an execute holds the row (committed on its own before anything is collected) or after its process stopped, `failed:<ExceptionClass>` after a failed group, `cancelled` or `expired` (`/unut`'s two closings); `/unut` writes the row with its plan counts at plan time, `executed`/`executed_at` only on execution, and a `make purge` dry run writes no row. `plan`/`executed` counts include `erp_leads` (the `sent` or `unknown` pushes whose lead stays in the ERP); `executed.cards` lists `[chat id, message id]` of the cards the purge left in the owner's and managers' chats, recorded in group 1's transaction and dropped once closed or after 14 days; a retention R1 row's `executed` gains `orphans`. `subject_hash` hashes the root's canonical key on the Tashkent day. A purged company that still holds rows groups 2 and 3 remove is `unfinished` and is planned again.
 
 ### 2.15 `sheet_rows` (optional, Sheets mirror)
 
@@ -1051,9 +1080,9 @@ CREATE TRIGGER trg_lead_candidates_suppressed BEFORE INSERT OR UPDATE OF state O
 ## 3. Evidence files on disk
 
 - Root `EVIDENCE_DIR=/data/evidence` (compose volume `evidence:/data/evidence`, uid 10001, mode 0750). Path `<yy>/<sha256>.gz`, `yy` = two-digit year of `fetched_at` in Tashkent, `sha256` = hash of the **raw** bytes before gzip (level 6). Written to `<path>.tmp` then `os.replace` — a crash never leaves a half file.
-- One file per distinct body: the same bytes at two URLs are two `evidence` rows and one file. Deletion only when no row with `raw_path IS NOT NULL` shares the `sha256`.
+- One file per distinct body: the same bytes at two URLs are two `evidence` rows and one file. Deletion only when no row with `raw_path IS NOT NULL` shares the `sha256`. As built (T-31): a file's identity is its `raw_path` (`<yy>/<sha256>.gz`), so the same bytes fetched in two Tashkent years are two files, and `purge_raw`, `drop_rows` and the orphan sweep compare `raw_path`.
 - Two caps: the fetch reads at most **5 MB** of an answer (03 §1.1; a cut answer is `FetchResult.truncated`, counted in the run's `meta.fetch_truncated`), and the store keeps a file only for a body of at most **2 MB** — larger bodies, and every cut one, get `raw_path=NULL`, `excerpt` and `bytes` still recorded, `evidence.meta.truncated=true` on the row and the count in the run's `meta.truncated`.
-- A file is written only for a row its transaction inserted, and only after that transaction commits (`after_commit`); a rollback of the transaction or of the savepoint the row was stored in drops the write, so no file exists that no row points to. A crash between the commit and the write leaves a row whose file is missing (harmless: `open_raw` answers None, the excerpt still quotes; the next store of the same bytes heals it, `keep_raw`). Nothing yet sweeps an orphan `<path>.tmp` left by a crash mid-write — the retention task (T-31) owns that sweep.
+- A file is written only for a row its transaction inserted, and only after that transaction commits (`after_commit`); a rollback of the transaction or of the savepoint the row was stored in drops the write, so no file exists that no row points to. A crash between the commit and the write leaves a row whose file is missing (harmless: `open_raw` answers None, the excerpt still quotes; the next store of the same bytes heals it, `keep_raw`). As built (T-31): R1 sweeps an orphan `<path>.tmp` older than `TMP_GRACE` = 1 h (`evidence.sweep_tmp`) and every stored `<yy>/<sha256>.gz` no row names by `raw_path` and older than the same grace (`evidence.sweep_orphans` — rows re-read by `sha256` in pages of 500 just before each page is unlinked; a file of any other shape, a symlink, or a path outside the root is never touched), so a purge or an R2a that stopped between its commit and its unlink is cleaned up by the next 04:15 run.
 - Not part of `pg_dump` backups (MIYA `backup.py` unchanged). Losing the directory loses nothing a card or ERP note needs — `url`, `fetched_at`, `excerpt` live in the row. Optional `restic` to object storage is an ops choice (§9).
 - API: `services/evidence.store(session, *, source_key, url, body: bytes, content_type, fetched_at, source_ref, excerpt, title, lang, published_at, collector_run_id, meta, root) -> Evidence` (the existing row when the same bytes at the same URL were stored before — evidence is immutable); `open_raw(evidence, *, root) -> bytes | None`; `purge_raw(session, evidence, *, now, root) -> bool` — it takes the session because it must check whether another row still shares the file before unlinking it.
 
@@ -1075,12 +1104,22 @@ CREATE TRIGGER trg_lead_candidates_suppressed BEFORE INSERT OR UPDATE OF state O
 
 Wave 3 (2026-10-29), for T-31: a rejected Telegram post's **evidence** row keeps up to 600 characters of the message in its `excerpt` with no end date (R1 removes only the file at 180 d), so the 30-day retention of unconverted posts (R2a, 03 §2.3) does not reach the evidence — R2a's step must also clear (or delete) the excerpt of an intent post's evidence that no observation converted, while keeping what the weekly competitor-offer diff reads from a tout's message. The poster's Telegram id has one place in `parsed` (`handles.tg_user_id`, §2.5 as built), so R3 needs no change for it.
 
+As built (T-31, its review and the seam review, wave 4, at `48cc857`; `services/retention.py`):
+
+- **R1** matches a shared file by `raw_path` and also sweeps the orphans of §3; `executed.orphans`.
+- **R2a** also drops the deleted posts' own evidence rows and files when nothing else cites them — no non-rejected observation, no signal, no remaining message (`R2A_EVIDENCE`) — which meets the wave-3 note above; a page a live observation reads stays.
+- **R4** takes a company's latest push as the one that decides. **R5** skips candidates whose `exclude_reason` is `merged` (a merge is not an owner exclusion).
+- **R6**'s statements are guarded `IS NOT NULL`, so the `purge_log` counts show what changed; an untaken fallback job whose request is nulled is given up in the same statement (`applied_at := coalesce(applied_at, now())`), or the verdict lane would treat it as in flight for ever. The hold sweep takes a swept candidate's cards, `push_note` and opener with it, and wave 4's `reminder_log` kinds (`digest`, `alert:*`, `review_expired`, `review_resent`) all age out at 90 d.
+- **R6b** leaves a symlink alone; `IMPORT_KEPT` = 1 d.
+- `evidence_over_cap` (06 §3.5) clears only on a run whose directory started within `EVIDENCE_MAX_GB`.
+
 ## 5. Alembic plan
 
 - `alembic/env.py` = MIYA's minus the pgvector `render_item`; imports `clientscrapper.db.models` to populate `Base.metadata`; `compare_type=True, compare_server_default=True`. `alembic.ini` as MIYA (ruff post-write hook, URL from settings). The compose `init` service runs `alembic upgrade head`; `worker`, `bot`, `userbot` `depends_on: init: condition: service_completed_successfully`.
 - **`0001_initial`** (`revision="0001_initial"`, `down_revision=None`): `upgrade()` in this order — extension `pg_trgm`; the **7** functions (`cs_phone_tail`, `cs_username_key`, `cs_domain_key`, `cs_touch_updated_at`, `cs_append_only`, `cs_scoring_weights_frozen`, `cs_candidate_suppressed_by`); tables exactly in the order of §2 (`sources, collector_runs, evidence, companies, company_aliases, company_ids, contacts, observations, model_jobs, signals, scoring_weights, suppression, lead_candidates, lead_reviews, push_log, outcomes, interactions, chat_monitors, heartbeats, usage_log, reminder_log, runtime_flags, merge_log, purge_log, sheet_rows` — 25 tables; `runtime_flags`, `companies.dup_of/dup_score`, `lead_reviews.kind`, `chat_monitors.status/priority`, `evidence.meta`, `interactions.fwd_from_peer_id` are day-1 columns, not a `0002`); triggers; `op.bulk_insert` of the 23 `sources` rows (§2.1, rendered as literals so `alembic upgrade head --sql` works) and the 26 `scoring_weights` version-1 rows inserted **unapproved** (`proposed_by='seed'`), then approved the way every later version is — the activation UPDATE of §2.7, `UPDATE scoring_weights SET approved_by='seed', approved_at=now() WHERE version=1` (it also keeps `--sql` free of a server-side `now()` inside the insert). `downgrade()` drops in reverse, then functions, then the extension. `0001` was edited in place by the T-01/T-02 review **before it ran anywhere** (its docstring lists every departure from the first draft of this file — all folded into the DDL above); from now on it is frozen and every change is a new migration. The migration carries its own frozen tuples (CHECK lists) — `tests/test_enums_frozen.py` compares them with `db/enums.py`.
 - Later migrations: `000N_<slug>.py`, one concern each, minted by `make revision m="…"` — `scripts/revision_id.py` gives the id (N = one past the highest number in `alembic/versions`; a gap stays a gap) and `alembic.ini` `file_template = %%(rev)s` makes the file `<id>.py`; widening a CHECK = `op.drop_constraint` + `op.create_check_constraint` with the new tuple, plus the tuple change in `enums.py` in the same commit; new source = a data migration inserting the `sources` row (`tenders`, phase 2 in 03 §3, is **not** among the 23 seeded rows: the FK refuses `source_key='tenders'` and `tests/test_sources_seed.py` pins both facts — its row arrives with a data migration in the task that builds the collector); new weight version = never a migration (runtime through `/vazn` or `fit_weights`). Known follow-up: `cs_domain_key` may strip `'^(www\.)+'` (§1) in a later migration.
 - **`0002_erp_contract`** (T-10, the first task that needs it; 05 §B.2, 2026-10-24 «T-07 as built»): `outcomes.no_contact boolean NOT NULL DEFAULT false`; `push_log.superseded_at timestamptz`; `ux_push_log_delivered` dropped and recreated `WHERE status IN ('sent','unknown') AND superseded_at IS NULL`. Additive only, on top of the reviewed `0001_initial`, unchanged by that review. The DDL blocks of §2.10/§2.11 show the state after `0002`, marked in their comments; `test_migrations`/`compare_metadata` run against head.
+- **`0003_review_flow`** (T-21; built as `0004` in its lane and renumbered `0003` at the wave-4 integration, `7984a10`, before any database applied it — no other lane added a migration, so the chain has no hole): `lead_reviews.remind_at timestamptz` + `ix_lead_reviews_remind` (`WHERE state = 'asked' AND remind_at IS NOT NULL`); `lead_candidates.push_note text` + `push_noted_at timestamptz` + `ck_lead_candidates_push_note` (`length(push_note) <= 500`). Additive only; `downgrade` reverses both. The §2.9 DDL shows the state after `0003`, marked in its comments. The `tests/test_makefile.py` tree pins (the next number, the probe revision) read this tree with `0003` at head.
 - `tests/test_migrations.py` (needs postgres; skips loudly, never silently): on an empty scratch database `upgrade head` gives the counts of §10 AC 1; `compare_metadata(ctx, Base.metadata) == []`; **and** `Base.metadata.create_all` builds every table in a probe schema inside a rolled-back transaction, and every constraint (`pg_get_constraintdef`), index (`pg_get_indexdef`) and column default must equal the migration's as the server prints them — `alembic check` misses a flipped operator inside a CHECK; `upgrade head --sql` builds the same schema and seeds; no CHECK spans a SET NULL FK (§0); then `downgrade base` leaves zero tables in `public`, then `upgrade head` again.
 
 ## 6. SQLAlchemy layout
@@ -1165,6 +1204,7 @@ Follow-on rows the `won` label produces (same transaction as the upsert, §2.11)
 10. `enrich_site` is seeded with 150 pages/day, while 04 §3 E2 draws its 150 pages from `sources.registry_lookup.daily_page_budget` — two budgets for one fetch. Decide before T-19 which row E2 counts against (recommended: `enrich_site`, the row its evidence carries).
 11. `erp_sync.title_uz` is «ERP (fullprompt)» — the repository's codename on an owner screen (`/manbalar`). Recommended: «ERP (GSR)» in the data migration that next touches `sources`.
 12. **Stem a role or keep it as written?** (T-14.) The resolver stores the role a bio or a profile writes («direktori»), §8 writes `'direktor'`, and `role_rank` reads either. Stemming makes the ERP note's «Masʼul» line uniform; keeping it is verbatim evidence. Recommended: keep it as written (it is evidence), and show the stem only on the card if the owner asks.
+13. **How long an owner's silence counts** (T-21/T-31). «Re-asked at most twice» counts `reminder_log(kind='review_expired')` rows, and R6 deletes every `reminder_log` row at 90 d, so a candidate reopened by a new signal after 90 days can be asked twice more. ⭐ (a) keep — a lead quiet for a quarter that speaks again is a new ask, and R6 stays one rule; (b) keep `review_expired` rows while their candidate exists (R6 skips the kind).
 
 ## 10. Acceptance criteria
 
@@ -1245,3 +1285,11 @@ Not applied here (other files' homes): 10, 13, 14, 18, 19 (02's `/dnc`, `/vazn`,
 - §2.10: `sending` counted with `sent|unknown`, the stored body re-sent, rule 5 when the re-push itself fails (the supersede taken back; the id's highest attempt), rule 6 across attempts, the `error` column, an outage that spends every attempt (05 Open question 18).
 - §2.12: `chat_monitors.role='buyers'` defined (@Optom_bozor seeded so), `processed_at` as the classifier's queue and the collector's row locks, the `cs_interaction` payload conventions (the resolver's announcement wakes the scorer alone).
 - §4: the evidence excerpt of a rejected Telegram post outlives R2a (T-31). §8: the role kept as written, `is_decision_maker` behind 04 §9.1's 54 → 72. Open question 12 (stem roles) added.
+
+**Wave 4 as built (2026-10-29)** — folded from the T-20, T-21, T-30, T-31, T-35 and T-36 builds, their reviews and fixes, the integration (`wt/integ4`, the migration renumbered `0004` → `0003_review_flow` in `7984a10`) and the seam review's fixes, each checked against the code at `48cc857` (`alembic/versions/0003_review_flow.py`, `db/models/`, `services/reviews.py`, `services/push_gate.py`, `services/cards.py`, `services/purge.py`, `services/retention.py`, `services/evidence.py`, `services/outcomes.py`, `services/erp_feeds.py`, `services/digest.py`, `services/model_jobs.py`):
+
+- §2.9: the `0003_review_flow` columns in the DDL (`lead_reviews.remind_at` + `ix_lead_reviews_remind`, `lead_candidates.push_note`/`push_noted_at` + `ck_lead_candidates_push_note`) and an as-built block — ⏭'s resend, `expired` and the buttons, the `note` values, the handoff with no manager, `merge` always `excluded(merged)`, the manager's ❌ and `/tel`, the ✅ re-score, `push_note`, `score_breakdown.opener`/`opener_meta`, the cards' lock order.
+- §2.2 `new_companies`' second writer and the smoke rows; §2.4 `verdict_at`, `is_state_body`, what a purge writes, a purged root's STIR; §2.6 `request.asked_at`; §2.11 decision 2a's rows, `delivery_order`, `footer_moved`; §2.13 the new `reminder_log` kinds and `runtime_flags` rows; §2.14 `purge_log` as built.
+- §3 the file's identity is `raw_path`, the `.tmp` and orphan sweeps exist; §4 R1, R2a, R4, R5, R6, R6b as built; §5 `0003_review_flow`.
+- Open question 13 added: the 90-day life of `review_expired` rows.
+
