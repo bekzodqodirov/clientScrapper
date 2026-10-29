@@ -964,9 +964,17 @@ async def digest_job(
     not delivered — or whose run raised — is tried again (``DIGEST_RETRY``)
     while it is still due."""
     now = now or datetime.now(settings.tz)
+    speak = notify or _seams.notify
+    if speak is _not_wired:
+        # No owner bot in this process (no token or no owner): nothing can
+        # be delivered before a start-up wires one, so the digest is neither
+        # read nor tried again all day (seam review wave 4) — the next
+        # start-up's catch-up sends it while it is due.
+        log.warning("digest not sent: the owner bot is not wired")
+        return "undelivered"
     outcome: digest.SendOutcome = "undelivered"
     try:
-        outcome = await digest.send(notify or _seams.notify, now=now)
+        outcome = await digest.send(speak, now=now)
     finally:
         if outcome == "undelivered":
             _retry_digest(scheduler, now)

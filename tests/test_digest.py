@@ -1170,3 +1170,22 @@ async def test_a_sent_digest_that_dropped_a_flip_tells_it_tomorrow(
     assert flag is not None and flag.value["hh_vacancies"] is False
     _, flips, _ = await digest._sources(session, NOW + timedelta(days=1))
     assert [f.key for f in flips] == ["hh_vacancies"]
+
+
+async def test_with_no_owner_bot_the_digest_is_not_read_nor_retried(session, monkeypatch):
+    """No bot token or no owner: the process can deliver nothing until a
+    start-up wires the bot, so the digest is not loaded every backoff step
+    (seam review wave 4); the catch-up at the next start-up sends it."""
+    from clientscrapper.worker import main as worker
+
+    monkeypatch.setattr(worker._seams, "notify", worker._not_wired)
+    monkeypatch.setattr(worker, "_digest_retry", worker._DigestRetry())
+    scheduler = worker.build_scheduler()
+
+    async def never(*a, **k):
+        raise AssertionError("the digest was read")
+
+    monkeypatch.setattr(digest, "load", never)
+    assert await worker.digest_job(scheduler, now=NOW) == "undelivered"
+    assert getattr(scheduler.get_job("digest"), "next_run_time", None) is None
+    assert await digest_rows(session) == []
