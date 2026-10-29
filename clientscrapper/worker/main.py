@@ -39,7 +39,9 @@ never the batch lane's fallbacks, which only the 23:30 run takes);
 once on ``cs_interaction``); ``crm_push`` (T-28,
 ``services/crm_push.crm_push_job``, every minute, sending only inside the
 push window) and ``reconcile`` (T-28, ``crm_push.reconcile_job``, every 10
-minutes: a crashed claim, the ``unknown`` outcomes walk, rule 5's re-push).
+minutes: a crashed claim, the ``unknown`` outcomes walk, rule 5's re-push);
+``retention`` (T-31, ``services/retention.retention_job``, 04:15: 02 §4's
+steps, each in its own transaction with its own ``purge_log`` row).
 
 **The event-driven path** (04 §0, 01 N-06). A slot with ``wakes_on`` also
 runs when its ``NOTIFY`` channel speaks: :func:`listen_for_wakes` holds a
@@ -118,6 +120,7 @@ from clientscrapper.services import (
     health,
     model_jobs,
     restore_drill,
+    retention,
     verdict,
 )
 from clientscrapper.services import http as http_layer
@@ -357,7 +360,7 @@ def job_table() -> tuple[JobSlot, ...]:
         JobSlot("source_precision", ("0 4 * * 0",), "T-36"),
         # --- 06: digest, retention --------------------------------------------------
         JobSlot("digest", (_at(settings.digest_time_parsed),), "T-35"),
-        JobSlot("retention", ("15 4 * * *",), "T-31"),
+        JobSlot("retention", ("15 4 * * *",), "T-31", retention.retention_job),
     )
 
 

@@ -35,6 +35,7 @@ from clientscrapper.services import (
     erp_feeds,
     health,
     model_jobs,
+    retention,
 )
 from clientscrapper.worker import main as worker
 
@@ -111,6 +112,8 @@ BUILT = {
     "reconcile",
     # T-30: the instant verdicts and the openers (services/verdict).
     "verdict",
+    # T-31: retention (services/retention, 02 §4).
+    "retention",
 }
 # The ERP slots and the ErpSync variant each runs (03 §3, 05 §B.2).
 ERP_VARIANTS = {
@@ -253,6 +256,20 @@ def test_the_push_and_reconcile_slots_are_crm_push_s_jobs():
     ):
         job = scheduler.get_job(job_id)
         assert job is not None and job.func is func
+
+
+def test_the_retention_slot_is_retention_s_job_at_04_15_tashkent():
+    """T-31 fills the slot T-08 left (02 §4: daily 04:15 Tashkent)."""
+    [slot] = [s for s in worker.job_table() if s.id == "retention"]
+    assert (slot.job, slot.triggers, slot.wakes_on) == (
+        retention.retention_job,
+        ("15 4 * * *",),
+        None,
+    )
+    job = worker.build_scheduler().get_job("retention")
+    assert job is not None and job.func is retention.retention_job
+    fire = job.trigger.get_next_fire_time(None, NOW)
+    assert (fire.hour, fire.minute, fire.utcoffset()) == (4, 15, timedelta(hours=5))
 
 
 class _Moved:

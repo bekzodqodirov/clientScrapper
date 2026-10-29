@@ -31,6 +31,8 @@ import logging
 import os
 import re
 import secrets
+import stat
+from collections.abc import Collection, Iterable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -59,6 +61,10 @@ DEFAULT_RETENTION: Final = timedelta(days=180)
 RETENTION: Final = {"maps_google": timedelta(days=30)}
 TASHKENT: Final = ZoneInfo("Asia/Tashkent")
 _PENDING: Final = "evidence_pending_raw"
+# A write lives for milliseconds between its ``.tmp`` and ``os.replace``: a
+# ``.tmp`` this old is a crash mid-write, and retention sweeps it (02 §3, T-31).
+TMP_SUFFIX: Final = ".tmp"
+TMP_GRACE: Final = timedelta(hours=1)
 
 log = logging.getLogger(__name__)
 
@@ -348,4 +354,114 @@ async def purge_raw(
     evidence.raw_path = None
     evidence.raw_deleted_at = now
     await session.flush()
+    return removed
+
+
+# --- retention and purge (02 §3, §4; 06 §5.4) ----------------------------------------
+
+
+def _inside(base: Path, rel: str) -> Path | None:
+    """``base / rel`` when it stays under ``base`` (``raw_path`` is written by
+    this module alone; the guard keeps an unlink from ever leaving the root)."""
+    path = base / rel
+    try:
+        path.resolve().relative_to(base.resolve())
+    except ValueError:
+        return None
+    return path
+
+
+def raw_size(evidence: Evidence, *, root: Path | None = None) -> int:
+    """The bytes the row's file takes on disk; 0 when it has none."""
+    if evidence.raw_path is None:
+        return 0
+    path = _inside(root or evidence_root(), evidence.raw_path)
+    try:
+        return path.stat().st_size if path is not None else 0
+    except OSError:
+        return 0
+
+
+def stored_bytes(*, root: Path | None = None) -> int:
+    """What the evidence directory takes on disk: every regular file under it
+    (files, a crash's ``.tmp`` included)."""
+    base = root or evidence_root()
+    total = 0
+    for dirpath, _, names in os.walk(base):
+        for name in names:
+            try:
+                found = os.lstat(os.path.join(dirpath, name))
+            except OSError:
+                continue
+            if stat.S_ISREG(found.st_mode):
+                total += found.st_size
+    return total
+
+
+def sweep_tmp(
+    *, now: datetime, root: Path | None = None, grace: timedelta = TMP_GRACE
+) -> int:
+    """Unlink every ``*.tmp`` under the evidence root older than ``grace``:
+    what a crash between ``write_raw``'s write and its ``os.replace`` left
+    (02 §3). A write in flight is younger and stays. Returns the count."""
+    base = root or evidence_root()
+    if not base.is_dir():
+        return 0
+    cutoff = now.timestamp() - grace.total_seconds()
+    removed = 0
+    for path in base.rglob(f"*{TMP_SUFFIX}"):
+        try:
+            found = path.lstat()
+            if not stat.S_ISREG(found.st_mode) or found.st_mtime >= cutoff:
+                continue
+            path.unlink()
+            removed += 1
+        except FileNotFoundError:
+            continue
+        except OSError:
+            log.warning("evidence tmp not removed", extra={"raw": path.name})
+    return removed
+
+
+async def drop_rows(session: AsyncSession, ids: Collection[int]) -> list[str]:
+    """Delete these evidence rows (retention R2a, a purge) in the caller's
+    transaction; their observations and signals go with them (CASCADE). The
+    answer is the ``raw_path`` values they held that no remaining row holds:
+    the files to unlink once the transaction commits (02 §3: «deletion only
+    when no row with raw_path IS NOT NULL shares» the file) — a rollback then
+    leaves every file a row still names."""
+    if not ids:
+        return []
+    held = await session.scalars(
+        sa.delete(Evidence)
+        .where(Evidence.id.in_(sorted(ids)))
+        .returning(Evidence.raw_path)
+    )
+    paths = sorted({p for p in held if p is not None})
+    if not paths:
+        return []
+    still = set(
+        await session.scalars(
+            sa.select(Evidence.raw_path).where(Evidence.raw_path.in_(paths)).distinct()
+        )
+    )
+    return [p for p in paths if p not in still]
+
+
+def unlink_raw(paths: Iterable[str], *, root: Path | None = None) -> int:
+    """Unlink files ``drop_rows`` named (after the commit); a file already
+    gone is not an error. Returns how many were removed."""
+    base = root or evidence_root()
+    removed = 0
+    for rel in paths:
+        path = _inside(base, rel)
+        if path is None:
+            continue
+        try:
+            path.unlink()
+            removed += 1
+        except FileNotFoundError:
+            continue
+        except OSError:
+            log.warning("evidence file not removed", extra={"raw": path.name})
     return removed
