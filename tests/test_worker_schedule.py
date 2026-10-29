@@ -602,6 +602,47 @@ async def test_a_job_s_beat_counts_the_raises_in_a_row(session):
     assert beat.detail["failures"] == 1
 
 
+# Wave 4's jobs (T-21, T-30, T-35, T-36, T-31): each is a built slot whose
+# runs beat job:<id>, so 06 §4.2's job_failing names it by its own subject
+# and the digest's «Tizim» line counts it — the same as the jobs before them.
+WAVE4_JOBS = ("review_cards", "verdict", "source_precision", "digest", "retention")
+
+
+def test_wave_4_s_jobs_are_built_slots_of_their_tasks():
+    table = {s.id: s for s in worker.job_table()}
+    assert {job: table[job].task for job in WAVE4_JOBS} == {
+        "review_cards": "T-21",
+        "verdict": "T-30",
+        "source_precision": "T-36",
+        "digest": "T-35",
+        "retention": "T-31",
+    }
+    assert all(table[job].job is not None for job in WAVE4_JOBS)
+    registered = {j.id for j in worker.build_scheduler().get_jobs()}
+    assert set(WAVE4_JOBS) <= registered
+
+
+@pytest.mark.parametrize("job_id", WAVE4_JOBS)
+async def test_a_wave_4_job_that_raises_every_run_is_its_own_job_failing_line(
+    session, monkeypatch, job_id
+):
+    from clientscrapper.services import digest
+
+    monkeypatch.setattr(settings, "backup_age_recipient", "")
+    await _fresh(session)
+    for _ in range(health.JOB_FAILING_STREAK):
+        await worker.record_job_event(job_id, ok=False, error="RuntimeError")
+    status = await health.gather(session, now=NOW)
+    [failing] = [p for p in health.problems(status) if p.key == "job_failing"]
+    assert [subject for subject, _ in failing.subjects] == [health.job_subject(job_id)]
+    assert f"<code>{job_id}</code> ishi oxirgi 3 marta xato bilan tugadi" in (
+        failing.text
+    )
+    view = (await digest.load(session, now=NOW)).view
+    assert view.problems >= 1
+    assert "Tizim: hammasi joyida" not in digest.render_digest(view)
+
+
 async def _fresh(session, now=NOW):
     for name in health.COMPONENTS:
         await health.beat(session, name, detail={"enabled": True}, now=now)
@@ -641,7 +682,8 @@ async def test_a_collector_that_fails_every_run_is_told(session, monkeypatch):
     monkeypatch.setattr(settings, "collectors_enabled", True)
     source = await session.get(m.Source, "hh_vacancies")
     assert source is not None
-    was = (source.enabled, source.cron)
+    # The run moves last_run_at too: put back with the rest (07 §1.0).
+    was = (source.enabled, source.cron, source.last_run_at)
     source.enabled, source.cron = True, "20 */4 * * *"
     await session.commit()
     try:
@@ -664,7 +706,7 @@ async def test_a_collector_that_fails_every_run_is_told(session, monkeypatch):
     finally:
         source = await session.get(m.Source, "hh_vacancies", populate_existing=True)
         assert source is not None
-        source.enabled, source.cron = was
+        source.enabled, source.cron, source.last_run_at = was
         await session.commit()
         if worker._shared.fetcher is not None:
             await worker._shared.fetcher.aclose()
