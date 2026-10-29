@@ -29,6 +29,7 @@ from clientscrapper.config import settings
 from clientscrapper.db.models import LeadReview, Suppression
 from clientscrapper.db.session import session_scope
 from clientscrapper.services import candidates, cards, owner, reviews
+from tests import gate_fixtures
 from tests.ast_tools import PACKAGE, dotted_name, imported_modules, is_under, tree_of
 from tests.gate_fixtures import NOW
 from tests.review_fixtures import (
@@ -388,3 +389,197 @@ def test_no_module_of_the_bot_imports_telethon():
     }
     assert len(found) >= 10  # the scan reads the package
     assert {k: v for k, v in found.items() if v} == {}
+
+
+# --- the rules a string edit could break, pinned -------------------------------------
+
+
+async def test_tel_writes_its_own_basis_on_the_person_row(session, setup):
+    """06 §1.7: the phone the prospect gave a manager is a pre-contract
+    request — the row takes that basis, the cited message as its source and
+    now as its time, whatever the row said before (its handle came from a
+    bio three days ago)."""
+    cand, manager = await held_lead(session)
+    [person] = await contacts_of(session, cand)
+    person.legal_basis = "public_source"
+    person.source_url = "https://t.me/namuna_tg"
+    person.collected_at = NOW - timedelta(days=3)
+    await session.commit()
+    w = world(session_scope)
+    await w.say(f"/tel {manager.id} +998 90 000 00 77", user=MANAGER)
+    [after] = await contacts_of(session, cand)
+    assert (after.id, after.phone) == (person.id, "+998900000077")
+    assert (after.legal_basis, after.source_url, after.collected_at) == (
+        "pre_contract_request",
+        "https://t.me/namuna_optom/61",
+        NOW,
+    )
+
+
+async def test_tel_on_an_asked_card_answers_it_contacted(session, setup):
+    """/tel before 📞: the card is answered «contacted» by the phone itself."""
+    cand, manager = await held_lead(session)
+    await session.commit()
+    w = world(session_scope)
+    await w.say(f"/tel {manager.id} +998 90 000 00 77", user=MANAGER)
+    row = await fresh(session, manager)
+    assert (row.state, row.answer, row.answered_at) == ("approved", "contacted", NOW)
+    assert (await fresh(session, cand)).approved_by == f"manager:{MANAGER}"
+
+
+async def test_tel_on_a_card_answered_otherwise_is_refused(session, setup):
+    """«⌛ Javob bermadi» closed the card (the candidate stays in its hold):
+    a later /tel on it writes nothing and approves nothing."""
+    cand, manager = await held_lead(session)
+    await session.commit()
+    await reviews.answer(session, manager.id, "no_reply", by=MANAGER, now=NOW)
+    await session.commit()
+    w = world(session_scope)
+    await w.say(f"/tel {manager.id} +998 90 000 00 77", user=MANAGER)
+    assert w.fake.texts() == [t("tel.stale")]
+    found = await fresh(session, cand)
+    assert (found.state, found.approved_by) == ("hold", None)
+    [person] = await contacts_of(session, found)
+    assert person.phone is None
+
+
+async def test_tel_runs_the_gates_over_the_new_phone(session, setup):
+    """A phone the agent may not call (here a DNC'd number) is written but
+    approves nothing: the candidate takes the gate's walk and the manager
+    is told the lead will not reach the CRM."""
+    cand, manager = await held_lead(session)
+    dnc = await gate_fixtures.row(session, "dnc", "phone_tail", "900000077")
+    await session.commit()
+    w = world(session_scope)
+    await w.say(f"/tel {manager.id} +998 90 000 00 77", user=MANAGER)
+    [said] = w.fake.texts()
+    assert said.startswith("Raqam yozildi, lekin lid CRMʼga yuborilmaydi")
+    found = await fresh(session, cand)
+    assert (found.state, found.approved_by, found.suppressed_by) == (
+        "suppressed",
+        None,
+        dnc.id,
+    )
+
+
+async def test_a_manager_card_whose_candidate_left_hold_is_closed(session, setup):
+    cand, manager = await held_lead(session)
+    message = manager.card_message_id
+    cand.state = "excluded"
+    cand.exclude_reason = "b2c"
+    await session.commit()
+    sender = FakeSender()
+    report = await reviews.run_cards(sender, now=NOW)
+    assert (report.stale, report.stripped) == (1, 1)
+    assert sender.strips == [(MANAGER, message)]
+    row = await fresh(session, manager)
+    assert (row.state, row.note) == ("expired", "stale:excluded")
+
+
+async def test_a_pending_manager_card_of_a_candidate_out_of_hold_is_not_sent(
+    session, setup
+):
+    cand = await lead(
+        session,
+        person=True,
+        username=USERNAME,
+        phone_number=None,
+        state="excluded",
+        fields={"exclude_reason": "b2c"},
+    )
+    pending = await card(session, cand, kind="manager", by_telegram_id=MANAGER)
+    await session.commit()
+    sender = FakeSender()
+    assert (await reviews.run_cards(sender, now=NOW)).managers == 0
+    assert sender.tried == []
+    assert (await fresh(session, pending)).state == "pending"
+
+
+async def test_a_manager_who_blocked_the_bot_does_not_hold_back_the_others(
+    session, setup
+):
+    """Two older cards of a manager Telegram refuses, one newer of another:
+    the refused manager is tried once, the other's card goes out."""
+    made = []
+    for nn, to in ((61, OTHER_MANAGER), (62, OTHER_MANAGER), (63, MANAGER)):
+        cand = await lead(
+            session, nn, person=True, username=USERNAME, phone_number=None, state="hold"
+        )
+        made.append(
+            await card(
+                session,
+                cand,
+                kind="manager",
+                by_telegram_id=to,
+                created_at=NOW - timedelta(minutes=10 - nn % 10),
+            )
+        )
+    await session.commit()
+    sender = FakeSender(refuse={OTHER_MANAGER})
+    report = await reviews.run_cards(sender, now=NOW)
+    assert report.managers == 1
+    assert sender.tried == [(OTHER_MANAGER, made[0].id), (MANAGER, made[2].id)]
+    assert [(await fresh(session, r)).state for r in made] == [
+        "pending",
+        "pending",
+        "asked",
+    ]
+
+
+async def test_a_second_later_tap_tells_a_manager_without_lidlar(session, setup):
+    cand, manager = await held_lead(session)
+    await session.commit()
+    w = world(session_scope)
+    await w.press(cb.manager(manager.id, "l"), user=MANAGER)
+    assert w.fake.answers() == ["⏭ Keyinroq — ertaga qayta yuboraman"]
+    await w.press(cb.manager(manager.id, "l"), user=MANAGER)
+    assert w.fake.answers() == ["Bu karta eskirgan"]
+    row = await fresh(session, manager)
+    assert row.expires_at == NOW + timedelta(hours=72 + 24)
+
+
+# --- ✏️ through the bot: the owner's next message is the phone -------------------------
+
+
+async def test_edit_phone_through_the_bot_rewrites_the_card_in_place(session, setup):
+    cand = await lead(session)
+    review = await card(session, cand, state="asked")
+    await session.commit()
+    w = world(session_scope)
+    await w.press(cb.review(review.id, "e"))
+    assert w.fake.answers() == [t("review.phone_ask")]
+    await w.say("+998 90 000 00 71")
+    [edited] = w.fake.named("EditMessageText")
+    assert (edited["chat_id"], edited["message_id"]) == (OWNER, review.card_message_id)
+    lines = edited["text"].splitlines()
+    assert next(x for x in lines if x.startswith("📞")).startswith("📞 +998 90 000 00 71")
+    assert lines[-1] == "✏️ Telefon tuzatildi"
+    buttons = [
+        b["callback_data"]
+        for row in edited["reply_markup"]["inline_keyboard"]
+        for b in row
+    ]
+    assert cb.review(review.id, "p") in buttons  # it still waits for an answer
+    assert w.fake.texts()[-1] == t("review.phone_done")
+    [contact] = await contacts_of(session, cand)
+    assert contact.phone == "+998900000071"
+    row = await fresh(session, review)
+    assert (row.state, row.answer) == ("asked", "edit_phone")
+    # The stored hash is the card's own (footer aside): no refresh edit follows.
+    sender = FakeSender()
+    assert await reviews.refresh_live(reviews.SessionLocal, sender, now=NOW) == 0
+
+
+async def test_edit_phone_waits_five_minutes_and_no_longer(session, setup):
+    cand = await lead(session)
+    review = await card(session, cand, state="asked")
+    await session.commit()
+    w = world(session_scope)
+    await w.press(cb.review(review.id, "e"))
+    w.deps.clock = lambda: NOW + reviews.EDIT_PHONE_WINDOW + timedelta(seconds=1)
+    await w.say("+998 90 000 00 71")
+    assert w.fake.texts() == [t("help_owner")]
+    assert w.fake.named("EditMessageText") == []
+    [contact] = await contacts_of(session, cand)
+    assert contact.phone == "+998900000061"
+    assert (await fresh(session, review)).answer is None

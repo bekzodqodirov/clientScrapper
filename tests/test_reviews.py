@@ -1140,3 +1140,222 @@ async def test_a_refresh_skips_a_card_a_tap_holds(session, setup):
         assert await asyncio.wait_for(refreshed, timeout=10) == 0
         await holder.rollback()
     assert sender.edits == []
+
+
+# --- the card job's other steps, pinned -------------------------------------------
+
+
+async def test_a_card_closed_while_paused_loses_its_buttons_after_yoq(session, setup):
+    """No strip while /toxtat holds (nothing goes to Telegram); the first run
+    after /yoq strips it — once: the row then forgets the message."""
+    cand = await lead(session)
+    review = await card(session, cand, state="asked")
+    message = review.card_message_id
+    await owner.pause(session, by=f"owner:{OWNER}", reason=None, now=NOW)
+    await session.commit()
+    sender = FakeSender()
+    t = NOW + timedelta(hours=72)
+    report = await reviews.run_cards(sender, now=t)
+    assert (report.expired, report.held, sender.strips) == (1, "paused", [])
+    await owner.resume(session)
+    await session.commit()
+    stripped = []
+    for _ in range(3):
+        t += timedelta(minutes=2)
+        stripped.append((await reviews.run_cards(sender, now=t)).stripped)
+    assert stripped == [1, 0, 0]
+    assert sender.strips == [(OWNER, message)]
+    row = await fresh(session, review)
+    assert (row.state, row.card_chat_id, row.card_message_id) == ("expired", OWNER, None)
+
+
+async def test_an_owner_card_expiring_on_an_approved_candidate_only_closes(
+    session, setup
+):
+    """The sweep holds only a candidate still waiting in review: one the
+    owner's push (or the source) already approved keeps its state, and no
+    silence is counted."""
+    cand = await lead(
+        session,
+        state="approved",
+        fields={"approved_by": "auto:telegram_monitor", "approved_at": NOW},
+    )
+    review = await card(session, cand, state="asked")
+    await session.commit()
+    [closed] = await reviews.expire_due(session, now=NOW + timedelta(hours=72))
+    await session.commit()
+    assert closed.review_id == review.id
+    assert (await fresh(session, review)).state == "expired"
+    found = await fresh(session, cand)
+    assert (found.state, found.approved_by) == ("approved", "auto:telegram_monitor")
+    assert await reviews.expired_count(session, cand.id) == 0
+
+
+async def test_the_sweep_locks_its_pairs_in_company_order(session, setup, monkeypatch):
+    """The order ``merge_into`` locks two companies in (by id), whatever
+    order the cards expire in."""
+    made = [await lead(session, nn) for nn in (61, 62, 63)]
+    by_company = sorted(made, key=lambda c: c.company_id)
+    # The first company to lock expires last.
+    for minutes, cand in enumerate(reversed(by_company)):
+        await card(
+            session, cand, state="asked", expires_at=NOW + timedelta(minutes=minutes)
+        )
+    await session.commit()
+    locked: list[object] = []
+    real = push_gate.lock_for_push
+
+    async def recording(session_, candidate_id):
+        locked.append(candidate_id)
+        return await real(session_, candidate_id)
+
+    monkeypatch.setattr(push_gate, "lock_for_push", recording)
+    assert len(await reviews.expire_due(session, now=NOW + timedelta(hours=1))) == 3
+    await session.commit()
+    assert locked == [c.id for c in by_company]
+
+
+async def test_a_refresh_re_judges_every_live_card_within_a_few_runs(session, setup):
+    """30 live cards, 20 a run: the newest 10 every run and a window of the
+    other 20 that moves on, so the oldest are judged too (their stored hash
+    is not the card's: each judged card is edited once)."""
+    made = []
+    for i, nn in enumerate(range(51, 81)):
+        cand = await lead(session, nn)
+        made.append(
+            await card(session, cand, state="asked", asked_at=NOW - timedelta(minutes=i))
+        )
+    await session.commit()
+    sender = FakeSender()
+    first = await reviews.refresh_live(reviews.SessionLocal, sender, now=NOW)
+    second = await reviews.refresh_live(
+        reviews.SessionLocal, sender, now=NOW + reviews.REFRESH_SLOT
+    )
+    assert (first, second) == (20, 10)
+    edited = [rid for _, _, _, _, rid in sender.edits]
+    assert sorted(edited) == sorted(r.id for r in made)
+    assert edited[:10] == [r.id for r in made[:10]]
+
+
+async def test_a_later_card_is_not_refreshed_before_it_is_asked_again(session, setup):
+    """⏭ took the old message's buttons; the job re-renders the card only
+    when it sends it again."""
+    cand = await lead(session)
+    review = await card(session, cand, state="asked")
+    await session.commit()
+    await tapped(session, review, "later")
+    company = await company_of(session, cand)
+    company.display_name = "Namuna Mato Savdo"
+    await session.commit()
+    sender = FakeSender()
+    assert await reviews.refresh_live(reviews.SessionLocal, sender, now=NOW) == 0
+    assert sender.edits == []
+
+
+@pytest.mark.parametrize(
+    ("attempt", "error"),
+    [(3, "http_5xx"), (1, "http_4xx")],
+)
+async def test_a_failed_push_says_the_owner_is_asked_again(
+    session, setup, attempt, error
+):
+    """06 §1.3: «⚠️ CRM javob bermadi — qayta soʻrayman» — the refusal sends
+    the candidate back to review (attempts_spent / erp_refused are in
+    push_gate.TO_REVIEW), so a new card comes."""
+    assert {"attempts_spent", "erp_refused"} <= push_gate.TO_REVIEW
+    cand = await lead(session, state="approved", fields={"approved_by": "owner:1001"})
+    log = await gate_fixtures.push(
+        session,
+        cand,
+        sent_at=NOW - timedelta(minutes=5),
+        phone_tail="900000061",
+        attempt=attempt,
+        status="failed",
+        finished_at=NOW - timedelta(minutes=4),
+    )
+    log.error = error
+    await session.commit()
+    footer = await reviews.push_footer(session, cand, now=NOW)
+    assert footer == "⚠️ CRM javob bermadi — qayta soʻrayman"
+
+
+async def test_an_owner_answer_on_the_wrong_kind_of_card_is_refused(session, setup):
+    """``reviews.answer`` takes a kind's own answers only: a manager's code on
+    an owner card, an owner's code on the manager card of its own manager."""
+    cand = await lead(session)
+    owner_card = await card(session, cand, state="asked")
+    held = await lead(session, 62, person=True, username="namuna_tg", state="hold")
+    manager_card = await card(
+        session, held, kind="manager", state="asked", by_telegram_id=MANAGER
+    )
+    await session.commit()
+    for review_id, code, by in (
+        (owner_card.id, "contacted", OWNER),
+        (manager_card.id, "push", MANAGER),
+        (manager_card.id, "handoff", MANAGER),
+    ):
+        with pytest.raises(reviews.Refused) as refused:
+            await reviews.answer(session, review_id, code, by=by, now=NOW)
+        await session.rollback()
+        assert refused.value.code == "wrong_card", code
+    assert [(await fresh(session, r)).state for r in (owner_card, manager_card)] == [
+        "asked",
+        "asked",
+    ]
+    assert (await fresh(session, cand)).state == "review"
+    assert (await fresh(session, held)).state == "hold"
+
+
+async def test_edit_phone_judges_the_new_number_afresh(session, setup):
+    """The shared flag described the old number: the corrected one starts
+    unshared (``check_shared_phone`` may flip it on, never off)."""
+    cand = await lead(session)
+    [contact] = await contacts_of(session, cand)
+    contact.shared_phone = True
+    review = await card(session, cand, state="asked")
+    await session.commit()
+    await reviews.edit_phone(session, review.id, "+998 90 000 00 71", by=OWNER, now=NOW)
+    await session.commit()
+    [after] = await contacts_of(session, cand)
+    assert (after.phone, after.shared_phone) == ("+998900000071", False)
+
+
+async def test_edit_phone_refuses_a_number_another_contact_holds(session, setup):
+    cand = await lead(session)
+    company = await company_of(session, cand)
+    other = await gate_fixtures.contact(session, company, gate_fixtures.phone(72))
+    other_id = other.id
+    review = await card(session, cand, state="asked")
+    await session.commit()
+    with pytest.raises(reviews.Refused) as refused:
+        await reviews.edit_phone(
+            session, review.id, "+998 90 000 00 72", by=OWNER, now=NOW
+        )
+    await session.rollback()
+    assert refused.value.code == "phone_taken"
+    found = await fresh(session, cand)
+    phones = {c.id: c.phone for c in await contacts_of(session, found)}
+    assert phones[other_id] == "+998900000072"
+    assert sorted(phones.values()) == ["+998900000061", "+998900000072"]
+    assert (await fresh(session, review)).answer is None
+
+
+async def test_only_an_auto_approved_candidate_is_listed_with_its_push_note(
+    session, setup
+):
+    """/lidlar holat lists the candidates no owner card speaks for: an
+    owner-approved one carries its note on the card, not here."""
+    auto = await lead(
+        session, 61, state="approved", fields={"approved_by": "auto:telegram_monitor"}
+    )
+    mine = await lead(
+        session, 62, state="approved", fields={"approved_by": f"owner:{OWNER}"}
+    )
+    for cand in (auto, mine):
+        cand.push_note = "Agent toʻxtatilgan (/toxtat)"
+        cand.push_noted_at = NOW
+    await session.commit()
+    holat = await cards.lidlar_holat(session)
+    company = await company_of(session, auto)
+    assert holat.auto_waiting_total == 1
+    assert [w.display_name for w in holat.auto_waiting] == [company.display_name]
