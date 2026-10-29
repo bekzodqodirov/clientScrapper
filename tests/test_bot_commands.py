@@ -1576,6 +1576,24 @@ async def test_stir_the_company_holds_already_and_a_merged_holder(w):
         assert company is not None and company.stir == "300000055"
 
 
+async def test_stir_a_purged_firm_holds_is_refused_not_given_to_another(w):
+    # A purged root keeps its STIR (purge._released: the resolver answers
+    # «purged» for that key), and ux_companies_stir counts it — so /stir on
+    # another company is refused in words, never an IntegrityError, and the
+    # purged firm's STIR is not handed to a firm that could be carded.
+    async with w.db() as s:
+        await gate_fixtures.firm(
+            s, purge.PURGED_NAME, stir="300000056", state="purged", legal_form=None
+        )
+        other = await lead(s, 64, name="Namuna STIR Uch")
+        other_company = other.company_id
+    await w.say(f"/stir {other.id} 300000056")
+    assert w.last() == t("stir.purged")
+    async with w.db() as s:
+        company = await s.get(Company, other_company, populate_existing=True)
+        assert company is not None and company.stir is None
+
+
 async def test_the_cancel_buttons_write_nothing(w):
     async with w.db() as s:
         cand = await lead(s, name="Namuna Bekor Savdo")

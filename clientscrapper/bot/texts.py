@@ -283,6 +283,9 @@ UZ: Final[Mapping[str, str]] = MappingProxyType(
             "kartadagi 🔀."
         ),
         "stir.has_other": "{name} da boshqa STIR bor: {other}. Oʻzgartirilmadi.",
+        "stir.purged": (
+            "Bu STIR soʻrov boʻyicha oʻchirilgan firmaga tegishli (/unut). Yozilmadi."
+        ),
         # --- the process (bot/main.py; printed, then the process ends) ----------
         "start.no_token": "ASSISTANT_BOT_TOKEN boʻsh — bot ishga tushmaydi.",
         "start.no_owner": (

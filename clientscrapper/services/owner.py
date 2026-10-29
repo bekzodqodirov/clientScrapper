@@ -18,9 +18,11 @@ transaction (the bot commits):
   hand»); ``erp_feeds.clear_breaker`` is the feed's narrower rule;
 * **/stir** — the registry queue's manual answer (04 §3 E4, captcha path):
   the STIR on the candidate's company (refused when another company holds
-  it — that company is answered, nothing is merged), an evidence row that
-  says the owner gave it, and the candidate's ``next_enrich_at = now`` so
-  E4 re-runs.
+  it — that company is answered, nothing is merged — and when a purged firm
+  holds it: a purged root keeps its STIR so the resolver answers «purged»,
+  06 §5.4, and ``ux_companies_stir`` counts it), an evidence row that says
+  the owner gave it, and the candidate's ``next_enrich_at = now`` so E4
+  re-runs.
 """
 
 from __future__ import annotations
@@ -310,7 +312,9 @@ async def source_info(
 # --- /stir (04 §3 E4, captcha path) ------------------------------------------------
 
 
-StirOutcome = Literal["written", "same", "held", "has_other", "bad_stir", "no_candidate"]
+StirOutcome = Literal[
+    "written", "same", "held", "purged", "has_other", "bad_stir", "no_candidate"
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -376,6 +380,18 @@ async def set_stir(
 
     if holder is not None:
         return result("held", other_id=holder.id, other_name=holder.display_name)
+    # A purged firm's STIR stays its own (purge._released keeps a root's): it
+    # is not handed to a firm that could be carded, and the unique index
+    # (``state <> 'merged'``) would refuse the write anyway.
+    purged = await session.scalar(
+        sa.select(Company.id).where(
+            Company.stir == stir,
+            Company.state == "purged",
+            Company.id.not_in(lineage),
+        )
+    )
+    if purged is not None:
+        return result("purged")
     if company.stir is not None and company.stir.strip() != stir:
         return result("has_other", other_stir=company.stir.strip())
     if company.stir is not None:
