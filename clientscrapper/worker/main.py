@@ -63,10 +63,11 @@ APScheduler's own numbering). A collector's primary cadence is its
 seeded value and a test keeps the two equal.
 
 Alerts reach the owner through one seam, :func:`set_owner_notifier`: a
-callable ``(text) -> delivered`` with no recipient argument. The owner bot
-wires it (T-20, ``bot/deliver.to_person`` with ``OWNER_TELEGRAM_ID``); until
-then nothing is delivered, nothing is marked said, and every problem stays
-due. Nothing in this process sends a message to anyone else, ever.
+callable ``(text) -> delivered`` with no recipient argument, wired by
+``connect_owner_bot`` (``bot/deliver.to_person`` with ``OWNER_TELEGRAM_ID``)
+when a bot token and an owner are configured; without them nothing is
+delivered, nothing is marked said, and every problem stays due. Nothing in
+this process sends a message to anyone else, ever.
 """
 
 from __future__ import annotations
@@ -159,6 +160,31 @@ def set_backup_sender(send: Callable[[Path, str], Awaitable[bool]] | None) -> No
 
 async def notify(text: str) -> bool:
     return await _seams.notify(text)
+
+
+def connect_owner_bot() -> Any | None:
+    """The owner seams over the owner bot (T-20): with a token and an owner,
+    the notifier and the backup sender are ``bot/deliver``'s — whose
+    ``to_person`` refuses every chat but the owner's; without them nothing
+    is delivered and nothing is marked said. The bot client, or None.
+    aiogram is imported here, not at the top: the scheduler's tests import
+    this module and need no Telegram client."""
+    from clientscrapper.bot import deliver
+
+    if not deliver.configured():
+        return None
+    bot = deliver.make_bot()
+    set_owner_notifier(deliver.owner_notifier(bot))
+    set_backup_sender(deliver.document_sender(bot))
+    return bot
+
+
+async def disconnect_owner_bot(bot: Any | None) -> None:
+    set_owner_notifier(None)
+    set_backup_sender(None)
+    if bot is not None:
+        with contextlib.suppress(Exception):
+            await bot.session.close()
 
 
 # --- the table -------------------------------------------------------------------
@@ -1139,10 +1165,12 @@ async def backup_now(*, now: datetime | None = None) -> int:
     good manual run clears ``backup_failed`` (the runbook's «verify: backup
     beat ok=true»). 0 when the file was written, else 1 (``make update``
     stops)."""
+    bot = connect_owner_bot()
     wire()
     try:
         result = await backup_job(now=now)
     finally:
+        await disconnect_owner_bot(bot)
         await engine.dispose()
     # The JSON log line is what the operator reads (create_backup logs the
     # file and its size, or the failure).
@@ -1155,12 +1183,14 @@ async def backup_now(*, now: datetime | None = None) -> int:
 
 async def run() -> None:
     setup_logging("worker")
+    bot = connect_owner_bot()
     wire()
     stop = asyncio.Event()
     installed = install_stop_signals(stop)
     leader = Leadership()
     if not await wait_for_leadership(leader, stop):
         await leader.release()
+        await disconnect_owner_bot(bot)
         await engine.dispose()
         remove_stop_signals(installed)
         log.info("worker stopped before it led")
@@ -1215,6 +1245,7 @@ async def run() -> None:
         if _shared.fetcher is not None:
             await _shared.fetcher.aclose()
         await leader.release()
+        await disconnect_owner_bot(bot)
         await engine.dispose()
         remove_stop_signals(installed)
         log.info("worker stopped")

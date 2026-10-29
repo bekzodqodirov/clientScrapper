@@ -30,9 +30,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from clientscrapper.config import settings
 from clientscrapper.db import enums
-from clientscrapper.db.models import UsageLog
+from clientscrapper.db.models import RuntimeFlag, UsageLog
 from clientscrapper.db.session import SessionLocal, session_scope
-from clientscrapper.services import costs, usage
+from clientscrapper.services import costs, owner, usage
 from clientscrapper.services.costs import CostCapReached, Ledger, OpTotals, decide
 from clientscrapper.services.usage import Priced
 
@@ -194,6 +194,16 @@ def test_the_order_is_month_then_day_then_family_then_operation():
         (ledger(classify="0.29"), None),
     ]
     assert [code("classify", "0.01", led) for led, _ in ladder] == [c for _, c in ladder]
+
+
+@pytest.mark.parametrize("est", [None, "0", "0.001", "20"])
+def test_the_owners_pause_is_the_first_rung(est):
+    # 06 §1.2 /toxtat: «no paid call» — ahead of unpriced, every cap and the
+    # free ops alike.
+    everything_breached = ledger(month="300", other="20")
+    assert code("classify", est, everything_breached, paused=True) == "paused"
+    assert code("serp_searxng", est, ledger(), paused=True) == "paused"
+    assert not costs.is_cap(costs.PAUSED)
 
 
 def test_the_daily_boundary_is_reaching_the_cap():
@@ -1003,6 +1013,62 @@ async def test_without_an_own_transaction_the_callers_savepoint_takes_the_row(
         sa.text("SELECT count(*) FROM pg_locks WHERE locktype = 'advisory'")
     )
     assert held == 0  # the session lock was given back
+
+
+async def pause(session: AsyncSession, value: Any = None) -> None:
+    """/toxtat's flag as ``owner.pause`` writes it — or ``value`` written over
+    it — committed: ask's own transaction reads it."""
+    await owner.pause(session, by="owner:1", reason=None, now=NOW)
+    if value is not None:
+        await session.execute(
+            sa.update(RuntimeFlag)
+            .where(RuntimeFlag.key == costs.PAUSE_FLAG)
+            .values(value=value)
+        )
+    await session.commit()
+
+
+async def test_no_paid_call_goes_out_while_the_owner_paused_the_agent(session):
+    owner = Owner()
+    costs.set_cap_notifier(owner)
+    await pause(session)
+    calls = Calls()
+    for op in (classify, brave):
+        with pytest.raises(CostCapReached) as refused:
+            await op(session, calls=calls)
+        assert refused.value.code == "paused"
+    with pytest.raises(CostCapReached):
+        await free(session, "serp_searxng")
+    assert calls.n == 0
+    assert [(r["operation"], r["model"], r["cost_usd"]) for r in await rows(session)] == [
+        ("classify", "refused:paused", D(0)),
+        ("serp_brave", "refused:paused", D(0)),
+        ("serp_searxng", "refused:paused", D(0)),
+    ]
+    # Remembered a minute (no further row), never told: the owner set it.
+    with pytest.raises(CostCapReached):
+        await classify(session, now=NOW + timedelta(seconds=30))
+    assert len(await rows(session)) == 3
+    assert costs.refused_until("classify", NOW) == NOW + costs.PAUSE_RECHECK
+    assert owner.told == []
+
+
+async def test_a_paid_call_goes_out_at_once_after_yoq(session):
+    await pause(session)
+    with pytest.raises(CostCapReached):
+        await classify(session)
+    assert await owner.resume(session)
+    await session.commit()
+    calls = Calls(SimpleNamespace(usage=sdk_usage(input_tokens=300, output_tokens=150)))
+    # The same minute: the remembered refusal re-reads the flag, it is gone.
+    assert await classify(session, calls=calls, now=NOW + timedelta(seconds=5))
+    assert calls.n == 1
+    assert [r["model"] for r in await rows(session)] == ["refused:paused", EXTRACT]
+
+
+async def test_a_false_pause_flag_stops_nothing(session):
+    await pause(session, False)
+    assert await free(session, "serp_searxng") == "ok"
 
 
 async def test_anthropic_silence_refuses_claude_calls_while_health_says_so(session):

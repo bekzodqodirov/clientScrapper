@@ -34,6 +34,13 @@ rungs: at the daily cap paid calls stop while the collectors carry on with the
 free part (06 §4.2 ``cost_cap``), and the free ops are capped by their query
 counts instead. A paid call estimated at $0 is refused as unpriced.
 
+The owner's global pause (06 §1.2 ``/toxtat``: «no paid call») is the
+first rung: while ``runtime_flags('paused')`` is set every call is refused
+``paused`` — persisted like any refusal, never told (the owner set it), and
+remembered only ``PAUSE_RECHECK`` so ``/yoq`` frees the calls at once rather
+than at the next hour. ``global_pause`` is the flag's one reading (the
+runner, the push gate, the joiner and the bot ask it too).
+
 Days and months are the business calendar in ``TIMEZONE`` (Asia/Tashkent):
 every function takes ``now`` and rows are stamped with it.
 """
@@ -54,7 +61,7 @@ import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from clientscrapper.config import settings, within
-from clientscrapper.db.models import Company, ReminderLog, Source, UsageLog
+from clientscrapper.db.models import Company, ReminderLog, RuntimeFlag, Source, UsageLog
 from clientscrapper.db.session import session_scope
 from clientscrapper.services.usage import (
     ALLOCATIONS,
@@ -92,6 +99,8 @@ CAP_DAY_OP: Final = "cost_cap_day_op:"
 CAP_MONTH_OP: Final = "cost_cap_month_op:"
 OP_WINDOW: Final = "op_window:"
 ANTHROPIC_SILENCE: Final = "anthropic_silence"
+# /toxtat's global pause: ahead of every rung (06 §1.2).
+PAUSED: Final = "paused"
 REFUSED_PREFIX: Final = "refused:"
 # A claim whose call raised after dispatch (timeout, connection reset): the
 # estimate stays counted, and ``usage_log.model`` says ``failed:<error class>``
@@ -104,6 +113,24 @@ CAP_ALERT_CODES: Final = frozenset({CAP_DAILY, CAP_MONTHLY})
 # Every rung that is a cap (money or count) starts so; the others —
 # unpriced, op_window, anthropic_silence — refuse a call for another reason.
 CAP_PREFIX: Final = "cost_cap"
+
+
+# ``runtime_flags`` key of the global pause (``/toxtat`` sets it, ``/yoq``
+# deletes it) and how long a paused refusal is remembered in a process.
+PAUSE_FLAG: Final = "paused"
+PAUSE_RECHECK: Final = timedelta(minutes=1)
+
+
+def flag_set(value: Any) -> bool:
+    """Is a ``runtime_flags`` switch on? Absent, null and false are off."""
+    return value not in (None, False)
+
+
+async def global_pause(session: AsyncSession) -> bool:
+    """``/toxtat`` holds ``runtime_flags('paused')`` (the flag's one
+    reading)."""
+    row = await session.get(RuntimeFlag, PAUSE_FLAG, populate_existing=True)
+    return row is not None and flag_set(row.value)
 
 
 def is_cap(code: str) -> bool:
@@ -283,12 +310,16 @@ def decide(
     monthly_cap: Decimal,
     serp_overflow: bool = False,
     anthropic_down: bool = False,
+    paused: bool = False,
 ) -> str | None:
-    """The refusal code for this call, or None to let it through — 04 §8's
-    rungs in their order. Money rungs refuse at ``spend + est ≥ cap`` (reaching
-    a cap exactly is over it) and are skipped only for a call that is free by
-    definition at $0 (``usage.free_call``); unit rungs refuse at
-    ``units + 1 > cap``. ``local_time`` is ``now`` in TIMEZONE."""
+    """The refusal code for this call, or None to let it through — the
+    owner's pause first (``paused``, 06 §1.2), then 04 §8's rungs in their
+    order. Money rungs refuse at ``spend + est ≥ cap`` (reaching a cap exactly
+    is over it) and are skipped only for a call that is free by definition at
+    $0 (``usage.free_call``); unit rungs refuse at ``units + 1 > cap``.
+    ``local_time`` is ``now`` in TIMEZONE."""
+    if paused:
+        return PAUSED
     if est_usd is None or not est_usd.is_finite():
         return UNPRICED
     family = FAMILY[operation]
@@ -807,7 +838,10 @@ async def ask[T](
             raise ValueError("est_usd < 0")
     held = _refused.get(operation)
     if held is not None and _local(now, None) < held[0]:
-        raise CostCapReached(held[1], operation)
+        if held[1] != PAUSED or await global_pause(session):
+            raise CostCapReached(held[1], operation)
+        # /yoq came: the pause no longer holds.
+        del _refused[operation]
 
     down_until = (
         await _anthropic_down_until(session, now)
@@ -835,6 +869,7 @@ async def ask[T](
             monthly_cap=settings.monthly_cost_cap_usd,
             serp_overflow=overflow,
             anthropic_down=down,
+            paused=await global_pause(s),
         )
         attach = await _key_shared(s, wanted)
         row = UsageLog(
@@ -858,6 +893,8 @@ async def ask[T](
     rows.note(claim_id, wanted, attached)
     if code is not None:
         until = next_hour(now)
+        if code == PAUSED:
+            until = min(until, now + PAUSE_RECHECK)
         if code == ANTHROPIC_SILENCE and down_until is not None:
             # Remembered only until health's next probe slot: kept to the
             # hour, an op refused at 10:02 would miss the slot that frees at

@@ -473,16 +473,22 @@ _HANDLE_FORM: Final = re.compile(
 )
 
 
+class ForeignPhone(ValueError):
+    """``/dnc`` with a number outside Uzbekistan: its tail-9 may be an Uzbek
+    number's (``+7 999 123 45 67`` → ``991234567``), so it is not keyed."""
+
+
 def dnc_command_entry(arg: str) -> Entry:
-    """``/dnc <phone|@user>`` (06 §1.2): a phone → its tail, else a Telegram
-    handle written as one (``@name``, ``t.me/name``) — a bare word is
-    neither. ValueError for anything else."""
+    """``/dnc <phone|@user>`` (06 §1.2: ``+998… | tail-9 | @user``): an
+    Uzbek phone → its tail, else a Telegram handle written as one (``@name``,
+    ``t.me/name``) — a bare word is neither. ``ForeignPhone`` for another
+    country's number, ValueError for anything else."""
     text = arg.strip()
-    phone = normalise.phone_e164(text)
+    phone = normalise.make_phone(text)
     if phone is not None:
-        tail = keys.phone_tail(phone)
-        if tail is not None:
-            return Entry("dnc", "phone_tail", tail)
+        if phone.country != "UZ":
+            raise ForeignPhone(phone.e164)
+        return Entry("dnc", "phone_tail", phone.tail)
     if _HANDLE_FORM.match(text):
         handle = normalise.telegram_key(text)
         if handle is not None:
@@ -603,6 +609,7 @@ __all__ = [
     "ContactKeys",
     "DncResult",
     "Entry",
+    "ForeignPhone",
     "Hit",
     "Key",
     "add",

@@ -623,9 +623,9 @@ def _parse_iso(value: Any) -> datetime | None:
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=settings.tz)
 
 
-def flag_set(value: Any) -> bool:
-    """Is a ``runtime_flags`` switch on? Absent, null and false are off."""
-    return value not in (None, False)
+# Is a ``runtime_flags`` switch on? (one home: ``costs.flag_set``, which the
+# pause every paid call reads lives beside.)
+flag_set = costs.flag_set
 
 
 def flood_of(value: Any) -> tuple[datetime | None, int | None]:

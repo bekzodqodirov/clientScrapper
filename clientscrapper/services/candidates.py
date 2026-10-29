@@ -635,10 +635,14 @@ def _carried(
     return merged
 
 
-def _handoff(breakdown: Mapping[str, Any] | None) -> bool:
-    """``score_breakdown.gates.no_phone`` is set (the phone-less handoff)."""
+def is_handoff(breakdown: Mapping[str, Any] | None) -> bool:
+    """``score_breakdown.gates.no_phone`` is set (the phone-less handoff;
+    the owner card's handoff variant reads this too, 06 §1.3)."""
     gates = (breakdown or {}).get("gates")
     return isinstance(gates, Mapping) and gates.get("no_phone") is True
+
+
+_handoff = is_handoff
 
 
 async def _attribute(session: AsyncSession, candidate: LeadCandidate) -> None:

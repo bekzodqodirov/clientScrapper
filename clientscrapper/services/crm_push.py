@@ -393,10 +393,14 @@ def _day(at: datetime) -> str:
     return at.astimezone(settings.tz).strftime("%d.%m.%Y")
 
 
-def _url_line(s: SignalEvidence) -> str:
-    """The URL is never cut: one over URL_MAX is named by its evidence id."""
+def url_line(s: SignalEvidence) -> str:
+    """The URL is never cut: one over URL_MAX is named by its evidence id
+    (the note's and the owner card's 🔗 line, one rule)."""
     url = clean(s.url) or ""
     return url if url and text_len(url) <= URL_MAX else f"evidence #{s.evidence_id}"
+
+
+_url_line = url_line
 
 
 def nega_topildi(c: CandidateView) -> str:
@@ -429,44 +433,71 @@ def firma_of(c: CandidateView) -> str | None:
     return clip_words(name, COMPANY_MAX)
 
 
-def _origin(c: CandidateView) -> str | None:
-    for key, word in (("cn_origin", "ha"), ("cn_sector_prior", "ehtimol")):
+# Whether the goods come from China, as the note and the owner card say it:
+# a cited China origin is «ha», a China-dominant sector «ehtimol».
+CHINA_WORDS: Final = (("cn_origin", "ha"), ("cn_sector_prior", "ehtimol"))
+
+
+def china_signal(c: CandidateView) -> tuple[SignalEvidence, str] | None:
+    """The signal that says China and its word (``CHINA_WORDS``), or None."""
+    for key, word in CHINA_WORDS:
         found = next((s for s in c.signals if s.key == key), None)
-        if found is None:
-            continue
-        hint = verified_quote(found, known=known_names(c))
-        if hint:
-            return f"Xitoy: {word} («{_clip_points(hint, ORIGIN_HINT_MAX)}»)"
-        return f"Xitoy: {word}"
+        if found is not None:
+            return found, word
     return None
+
+
+def _origin(c: CandidateView) -> str | None:
+    said = china_signal(c)
+    if said is None:
+        return None
+    found, word = said
+    hint = verified_quote(found, known=known_names(c))
+    if hint:
+        return f"Xitoy: {word} («{_clip_points(hint, ORIGIN_HINT_MAX)}»)"
+    return f"Xitoy: {word}"
 
 
 def _goods(c: CandidateView) -> list[str]:
     return [g for g in (clean(x) for x in c.goods[:GOODS_MAX]) if g]
 
 
+def stated_m3(c: CandidateView) -> Decimal | None:
+    """The stated volume a note or card names, when one was stated."""
+    return c.stated_m3 if c.stated_m3 is not None and c.stated_m3 > 0 else None
+
+
+def band_of(c: CandidateView) -> str | None:
+    """The volume band said when nothing was stated: the company's band (a
+    ``BAND_HAJM`` key), or «container» when the band is unknown and a
+    container signal stands; None when there is no band to say."""
+    band = c.volume_band
+    if band not in BAND_HAJM and any(s.key == "vol_container" for s in c.signals):
+        band = "container"
+    return band if band in BAND_HAJM else None
+
+
 def _hajm(c: CandidateView, *, per_month: bool) -> str | None:
     words: str | None = None
-    if c.stated_m3 is not None and c.stated_m3 > 0:
-        words = f"{fmt_number(c.stated_m3)} kub"
+    stated = stated_m3(c)
+    if stated is not None:
+        words = f"{fmt_number(stated)} kub"
     else:
-        band = c.volume_band
-        if band not in BAND_HAJM and any(s.key == "vol_container" for s in c.signals):
-            band = "container"
-        words = BAND_HAJM.get(band)
+        band = band_of(c)
+        words = BAND_HAJM[band] if band is not None else None
     if words is None:
         return None
     month = clean(c.per_month) if per_month else None
     return f"HAJM: {words}" + (f" · {month}" if month else "")
 
 
-def _ball(c: CandidateView, *, detail: bool) -> str:
-    line = f"BALL: {c.score}/100"
-    if not detail:
-        return line
+def ball_parts(c: CandidateView) -> list[str]:
+    """The score's breakdown in the owner's words — «hajm 30», «Xitoy 20» …
+    and «minus N» when negatives counted; empty without a breakdown (the
+    note's BALL section and the owner card's 🧮 line, one rule)."""
     groups = c.breakdown.get("groups")
     if not isinstance(groups, Mapping):
-        return line
+        return []
 
     def used(name: str) -> str:
         group = groups.get(name)
@@ -492,6 +523,14 @@ def _ball(c: CandidateView, *, detail: bool) -> str:
         )
         if total:
             parts.append(f"minus {fmt_number(abs(total))}")
+    return parts
+
+
+def _ball(c: CandidateView, *, detail: bool) -> str:
+    line = f"BALL: {c.score}/100"
+    parts = ball_parts(c) if detail else []
+    if not parts:
+        return line
     return f"{line} ({', '.join(parts)})"
 
 
@@ -1586,8 +1625,12 @@ __all__ = [
     "PushPayload",
     "PushResult",
     "ReconcileJobReport",
+    "ball_parts",
+    "band_of",
     "build_payload",
     "canonical_sha256",
+    "china_signal",
+    "cited",
     "clean",
     "clip_words",
     "collapse",
@@ -1610,5 +1653,7 @@ __all__ = [
     "render_push_check",
     "resendable",
     "settle_crashed",
+    "stated_m3",
     "text_volume",
+    "url_line",
 ]
