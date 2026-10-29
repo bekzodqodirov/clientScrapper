@@ -39,6 +39,40 @@ VOID: Final = frozenset(
         "wbr",
     }
 )
+# Elements a browser lays out as blocks (and ``br``): their text is spaced.
+BLOCK: Final = frozenset(
+    {
+        "address",
+        "article",
+        "aside",
+        "blockquote",
+        "br",
+        "dd",
+        "div",
+        "dl",
+        "dt",
+        "footer",
+        "h1",
+        "h2",
+        "h3",
+        "h4",
+        "h5",
+        "h6",
+        "header",
+        "hr",
+        "li",
+        "main",
+        "nav",
+        "ol",
+        "p",
+        "section",
+        "table",
+        "td",
+        "th",
+        "tr",
+        "ul",
+    }
+)
 # Elements whose text is not the page's visible text.
 NOT_TEXT: Final = frozenset({"script", "style", "noscript", "template"})
 
@@ -124,7 +158,9 @@ class Node:
             if isinstance(item, str):
                 parts.append(item)
             elif item.tag not in NOT_TEXT:
-                stack.extend(reversed(item.children))
+                # A block's text never glues to its neighbour's.
+                edge = [" "] if item.tag in BLOCK else []
+                stack.extend([*edge, *reversed(item.children), *edge])
         return " ".join("".join(parts).split())
 
     def raw(self) -> str:

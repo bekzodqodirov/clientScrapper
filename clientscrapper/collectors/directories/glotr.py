@@ -21,8 +21,10 @@ VERIFIED (tests/fixtures/directories/README.md «glotr.uz»):
   site's own ``Organization`` JSON-LD (glotr's help desk) is never read. The
   name is ``h1``; the website the seller-info line with ``i.fa-globe``.
   «Проверено — … через систему Soliq.uz» in ``div.seller-info__checked`` →
-  ``entity_solid``; ``SKU_VELOCITY`` or more product cards on the showcase →
-  ``marketplace_velocity`` (page 1 alone — a total is not printed). The spec's
+  ``entity_solid``; ``SKU_VELOCITY`` or more products on the showcase →
+  ``marketplace_velocity`` (page 1 alone — a total is not printed — and each
+  product once: the recorded showcase prints 27 cards of 19 products, a
+  second block repeating eight, so it stays under the line). The spec's
   other branch («manufacturer = Chinese brand») needs the brand list
   (``collectors/brands.py``, T-34): owed.
 * **negative** — an unknown showcase is a soft 404: a redirect to
@@ -52,6 +54,9 @@ SOURCE_KEY: Final = "directories_glotr"
 _SLUG = r"([a-z0-9][a-z0-9-]{0,199})"
 SHOWCASE_HREF: Final = re.compile(rf"\A/showcase/{_SLUG}/(?:\?[^#]*)?\Z")
 SHOWCASE_PATH: Final = re.compile(rf"\A/showcase/{_SLUG}/\Z")
+# A product's own page: «…-p-<id>/». The showcase repeats some products in a
+# second block (8 of the recorded 27 cards), so SKUs are counted by this id.
+PRODUCT_HREF: Final = re.compile(r"-p-(\d{1,12})/\Z")
 CHECKED: Final = "Проверено"
 SOLIQ: Final = "Soliq.uz"
 # The product titles a showcase's goods are read from (page 1).
@@ -153,13 +158,13 @@ def parse_showcase(body: bytes, *, url: str, fetched_at: datetime) -> list[Obser
     checked = root.find("div", cls="seller-info__checked")
     note = checked.text() if checked else ""
     solid = CHECKED in note and SOLIQ in note
-    products = root.find_all("div", cls="product-card__parent")
-    titles: list[str] = []
-    for card in products:
+    products: dict[str, str | None] = {}
+    for card in root.find_all("div", cls="product-card__parent"):
         link = card.find("a", cls="product-card__link")
-        title = common.squash(link.text()) if link else None
-        if title and title not in titles and len(titles) < GOODS_TITLES:
-            titles.append(title)
+        product = PRODUCT_HREF.search(link.get("href") or "") if link else None
+        if link is not None and product is not None:
+            products.setdefault(product.group(1), common.squash(link.text()))
+    titles = [t for t in products.values() if t][:GOODS_TITLES]
     description = _string(business.get("description"))
     attrs: dict[str, Any] = {"site": SITE, "sku_count": len(products)}
     if solid:
