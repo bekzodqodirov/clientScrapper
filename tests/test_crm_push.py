@@ -47,6 +47,7 @@ from clientscrapper.services import (
     purge,
     push_gate,
     scoring,
+    signals,
 )
 from clientscrapper.services.candidates import CandidateView, PersonView
 from clientscrapper.services.crm_push import PushPayload
@@ -485,6 +486,38 @@ def test_a_stated_volume_is_kub_and_routes_by_itself():
     # < 1 m³: no kub.
     p3 = crm_push.build_payload(view(stated_m3=Decimal("0.5"), signals=(quiet,)))
     assert p3.kub is None
+
+
+def test_a_converted_volume_is_said_never_sent_as_kub():
+    """05 §A.2/§B.1: ``kub`` goes only for a STATED volume — the mapped kub
+    becomes the lead's quoted volume. «5 tonna» is 15 m³ by the agent's
+    1 t ≈ 3 m³ (seam review: it went out as ``kub: "15"``, «HAJM: 15 kub»)."""
+    tonnes = sig(quote="5 tonna mato", excerpt="Guangzhoudan 5 tonna mato kerak")
+    reading = signals.estimated(tonnes.quote)
+    assert reading is not None and (reading.m3, reading.quote) == (Decimal(15), "5 tonna")
+    p = crm_push.build_payload(
+        view(stated_m3=None, estimated_m3=reading, signals=(tonnes,))
+    )
+    assert p.kub is None
+    assert "HAJM: taxminan 15 kub (5 tonna)" in p.note.split("\n")
+    # It still routes: the number right before the first «kub» is the estimate.
+    assert crm_push.text_volume(p.name + "\n" + crm_push.landed_note(p)) == Decimal(15)
+    assert signals.estimated("yarim fura mato") is not None
+    assert signals.estimated("5 kub mato kerak") is None
+    assert signals.estimated(None) is None
+
+
+async def test_a_weight_quote_reaches_the_erp_with_no_kub(world):
+    cand = await world.lead(quote="5 tonna mato kerak", value=Decimal(15))
+    lineage = [cand.company_id]
+    assert await push_gate.stated_m3(world.session, lineage) is None
+    est = await push_gate.estimated_m3(world.session, lineage)
+    assert est is not None and (est.m3, est.quote) == (Decimal(15), "5 tonna")
+    result = await world.push(cand)
+    assert result.status == "sent", result
+    [(_, _, body)] = world.fake.posted
+    assert "kub" not in body
+    assert "HAJM: taxminan 15 kub (5 tonna)" in body["note"]
 
 
 def test_text_volume_is_parse_measure_s():

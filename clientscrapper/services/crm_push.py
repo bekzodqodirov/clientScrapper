@@ -80,6 +80,7 @@ from clientscrapper.services.pseudonyms import (
 )
 from clientscrapper.services.push_gate import Refusal, text_len
 from clientscrapper.services.retry import with_backoff
+from clientscrapper.services.signals import VolumeReading
 from clientscrapper.services.text import well_formed
 
 log = logging.getLogger(__name__)
@@ -502,6 +503,13 @@ def stated_m3(c: CandidateView) -> Decimal | None:
     return c.stated_m3 if c.stated_m3 is not None and c.stated_m3 > 0 else None
 
 
+def estimate_words(reading: VolumeReading) -> str:
+    """«taxminan 15 kub (5 tonna)»: the agent's conversion first (the ERP's
+    textVolume routes by the number right before the first «kub»), the
+    poster's own words after it — never the guillemets of a stated volume."""
+    return f"taxminan {fmt_number(reading.m3)} kub ({clean(reading.quote)})"
+
+
 def band_of(c: CandidateView) -> str | None:
     """The volume band said when nothing was stated: the company's band (a
     ``BAND_HAJM`` key), or «container» when the band is unknown and a
@@ -517,6 +525,8 @@ def _hajm(c: CandidateView, *, per_month: bool) -> str | None:
     stated = stated_m3(c)
     if stated is not None:
         words = f"{fmt_number(stated)} kub"
+    elif c.estimated_m3 is not None:
+        words = estimate_words(c.estimated_m3)
     else:
         band = band_of(c)
         words = BAND_HAJM[band] if band is not None else None

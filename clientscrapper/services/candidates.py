@@ -105,6 +105,7 @@ from clientscrapper.services import (
     validators,
 )
 from clientscrapper.services.scoring import ScoreResult, Tier
+from clientscrapper.services.signals import VolumeReading
 
 log = logging.getLogger(__name__)
 
@@ -1133,6 +1134,9 @@ class CandidateView:
     breakdown: Mapping[str, Any]
     opener: str | None = None
     per_month: str | None = None
+    # A weight or a half truck converted to m³ (``push_gate.estimated_m3``):
+    # said as «taxminan», never sent as ``kub``.
+    estimated_m3: VolumeReading | None = None
 
 
 # The groups a note's first line may cite, in the order it prefers them.
@@ -1259,6 +1263,7 @@ async def load_view(
         person=person,
         signals=tuple(sorted(found, key=_signal_rank)),
         stated_m3=await push_gate.stated_m3(session, lineage),
+        estimated_m3=await push_gate.estimated_m3(session, lineage),
         score=candidate.score or 0,
         breakdown=breakdown,
         opener=opener if isinstance(opener, str) and opener.strip() else None,

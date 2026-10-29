@@ -246,11 +246,16 @@ def _goods(view: CandidateView) -> str:
 
 
 def volume_label(view: CandidateView) -> str | None:
-    """«2 kub» (stated, as the poster said it) | 1–3 kub | 3–10 kub | fura |
-    konteyner; None when there is neither (the line is left out)."""
+    """«2 kub» (stated, as the poster said it) | taxminan 15 kub («5 tonna»)
+    (a weight or a half truck the agent converted: the guillemets hold only
+    the poster's words) | 1–3 kub | 3–10 kub | fura | konteyner; None when
+    there is neither (the line is left out)."""
     stated = crm_push.stated_m3(view)
     if stated is not None:
         return f"«{crm_push.fmt_number(stated)} kub»"
+    if view.estimated_m3 is not None:
+        reading = view.estimated_m3
+        return f"taxminan {crm_push.fmt_number(reading.m3)} kub («{reading.quote}»)"
     band = crm_push.band_of(view)
     return BAND_UZ[band] if band is not None else None
 

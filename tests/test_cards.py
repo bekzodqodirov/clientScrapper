@@ -21,7 +21,7 @@ from decimal import Decimal
 import pytest
 
 from clientscrapper.bot import keyboards
-from clientscrapper.services import cards, gates
+from clientscrapper.services import cards, gates, signals
 from clientscrapper.services.candidates import PersonView
 from clientscrapper.services.cards import CardRefused, ManagerView, ReviewView
 from clientscrapper.services.suppression import Hit
@@ -461,3 +461,14 @@ def test_a_card_stays_under_3500_characters_at_its_longest():
     long_goods = tuple(f"tovar nomi {n} juda uzun nom bilan" for n in range(20))
     big = view(goods=long_goods, display_name="Namuna " * 40, stated_m3=Decimal(999))
     assert len(cards.render_review(review(candidate=big)).text) <= cards.CARD_MAX
+
+
+def test_a_converted_volume_reads_as_the_agents_estimate():
+    """«5 tonna» is the poster's word and 15 m³ the agent's 1 t ≈ 3 m³: the
+    guillemets hold only the poster's words (seam review: the card said
+    «15 kub» — oʻzi yozgan)."""
+    reading = signals.estimated("5 tonna mato")
+    v = view(stated_m3=None, estimated_m3=reading)
+    assert cards.volume_label(v) == "taxminan 15 kub («5 tonna»)"
+    stated = view(stated_m3=Decimal(2), estimated_m3=reading)
+    assert cards.volume_label(stated) == "«2 kub»"

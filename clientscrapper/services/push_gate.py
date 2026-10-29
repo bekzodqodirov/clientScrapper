@@ -97,6 +97,7 @@ from clientscrapper.services import (
     erp_feeds,
     gates,
     scoring,
+    signals,
 )
 from clientscrapper.services.pseudonyms import TOKEN_TRACE_RE, unmasked
 from clientscrapper.services.suppression import CLIENT_KINDS, Hit
@@ -482,18 +483,46 @@ def _contact_refusals(contact: Contact | None, *, shared_ok: bool) -> list[Refus
     return []
 
 
+async def _stated_rows(
+    session: AsyncSession, lineage: Sequence[uuid.UUID]
+) -> list[tuple[Decimal, str | None]]:
+    rows = await session.execute(
+        sa.select(Signal.value, Signal.quote).where(
+            Signal.company_id.in_(list(lineage)),
+            Signal.key.in_(sorted(STATED_KEYS)),
+            Signal.value.is_not(None),
+        )
+    )
+    return [(Decimal(v), q) for v, q in rows.all()]
+
+
 async def stated_m3(
     session: AsyncSession, lineage: Sequence[uuid.UUID]
 ) -> Decimal | None:
-    """The stated volume a ``kub`` may carry (item 11): the largest stated
-    amount over the lineage — the one home ``crm_push`` reads too."""
-    value = await session.scalar(
-        sa.select(sa.func.max(Signal.value)).where(
-            Signal.company_id.in_(list(lineage)),
-            Signal.key.in_(sorted(STATED_KEYS)),
-        )
-    )
-    return Decimal(value) if value is not None else None
+    """The stated volume a ``kub`` may carry (item 11): the largest amount
+    over the lineage that the poster stated — the one home ``crm_push``
+    reads too. A weight or a half truck converted to m³ (``signals.estimated``)
+    is the agent's estimate, never a stated volume (05 §A.2: the mapped
+    ``kub`` becomes the lead's quoted volume and the deal's quote);
+    ``estimated_m3`` names it."""
+    values = [
+        v for v, q in await _stated_rows(session, lineage) if not signals.estimated(q)
+    ]
+    return max(values, default=None)
+
+
+async def estimated_m3(
+    session: AsyncSession, lineage: Sequence[uuid.UUID]
+) -> signals.VolumeReading | None:
+    """The largest converted amount over the lineage (``signals.estimated``):
+    the note's «HAJM: taxminan 15 kub (5 tonna)», the card's «taxminan 15 kub
+    («5 tonna»)» — never ``kub``."""
+    readings = [
+        r
+        for r in (signals.estimated(q) for _, q in await _stated_rows(session, lineage))
+        if r is not None
+    ]
+    return max(readings, key=lambda r: r.m3, default=None)
 
 
 async def _attempt_refusals(
