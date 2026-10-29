@@ -949,6 +949,9 @@ async def run_collector(
             if blocked:
                 detail["problem"] = BLOCKED_PROBLEM
                 detail["blocked_hosts"] = blocked
+            with contextlib.suppress(Exception):
+                # A collector's extras never cost the beat (base.beat_detail).
+                detail = {**collector.beat_detail(), **detail}
             await health.beat(session, component, detail=detail, now=end)
             await session.commit()
         except BaseException as exc:

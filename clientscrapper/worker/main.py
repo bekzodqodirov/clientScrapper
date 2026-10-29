@@ -43,6 +43,9 @@ any hour, the cards inside ``REVIEW_HOURS``, through the owner bot's
 ``services/crm_push.crm_push_job``, every minute, sending only inside the
 push window) and ``reconcile`` (T-28, ``crm_push.reconcile_job``, every 10
 minutes: a crashed claim, the ``unknown`` outcomes walk, rule 5's re-push);
+``directories`` (T-22, ``run_collector(Directories)``: the weekly diff on
+``sources.directories.cron``, and ``directories_full``, the monthly full
+crawl, as the ``full`` variant);
 ``source_precision`` (T-36, ``erp_feeds.source_precision_job``, Sunday 04:00:
 the 30-day precision, ``auto_push`` both ways, the low-precision pause);
 ``retention`` (T-31, ``services/retention.retention_job``, 04:15: 02 §4's
@@ -112,6 +115,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 
 from clientscrapper.collectors import erp_sync, runner
 from clientscrapper.collectors.base import Collector
+from clientscrapper.collectors.directories import Directories
 from clientscrapper.collectors.runner import run_collector
 from clientscrapper.collectors.telegram_monitor import TelegramMonitor
 from clientscrapper.config import settings
@@ -320,8 +324,26 @@ def job_table() -> tuple[JobSlot, ...]:
         ),
         _collector("olx_business", "0 7 * * *", "T-27", "olx_business", primary=True),
         _collector("olx_business_full", "0 7 * * 4", "T-27", "olx_business", "full"),
-        _collector("directories", "0 23 * * 4", "T-22", "directories", primary=True),
-        _collector("directories_full", "0 23 1-7 * *", "T-22", "directories", "full"),
+        # T-22: the directories — the weekly diff on the row's own cron, the
+        # monthly full crawl (one site a night, 1st–7th) as its variant.
+        JobSlot(
+            "directories",
+            ("0 23 * * 4",),
+            "T-22",
+            collector_job(Directories),
+            source_key=Directories.key,
+            primary=True,
+            note="weekly diff; on a 1st–7th night it runs that night's full crawl",
+        ),
+        JobSlot(
+            "directories_full",
+            ("0 23 1-7 * *",),
+            "T-22",
+            collector_job(Directories, "full"),
+            source_key=Directories.key,
+            variant="full",
+            note="one site a night (SubSource.full_night)",
+        ),
         _collector("hh_vacancies", "20 */4 * * *", "T-23", "hh_vacancies", primary=True),
         _collector("exhibitors", "0 9 * * 1", "T-32", "exhibitors", primary=True),
         _collector("maps", "0 10 * * 2", "T-33", "maps", primary=True, note="text"),

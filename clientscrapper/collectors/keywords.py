@@ -909,6 +909,27 @@ LEGAL_FORM_RE = re.compile(
     rf"ТОО|JV|QO{_A}?SHMA)(?!\w)",
     re.I,
 )
+# An individual entrepreneur's legal form (03 §2.6, T-22): the name before it is
+# a person's and the taxpayer number beside it a natural person's — the
+# directory parsers keep neither as company data. LEGAL_FORM_RE's ИП, YaTT and
+# ЯТТ, plus the directories' own abbreviations «ИндП» and «ИнП»
+# (tests/fixtures/directories/README.md «Scrubbing» item 4) and the Latin «IP»
+# only as a whole word in capitals («Ip» is a syllable). «ИП ООО» / «IP OOO»
+# is a foreign enterprise (иностранное предприятие) with limited liability,
+# no person: an ИП followed by a company form is not this one.
+_COMPANY_AFTER = r"(?!\s+(?:ООО|OOO|MChJ|МЧЖ|АО|AO|AJ|АЖ|ЗАО|ХК|XK|QK|ҚК)(?!\w))"
+INDIVIDUAL_FORM_RE = re.compile(
+    rf"(?<!\w)(?:(?i:ИП|ИндП|ИнП|YaTT|ЯТТ)|IP)(?!\w){_COMPANY_AFTER}"
+)
+# A directory's wholesale rubric or section (03 §2.6 ``directory_wholesale``):
+# «Оптовая торговля», «Оптово-розничная торговля», «Стройматериалы оптом»,
+# «Ulgurji savdo» and the slugs «stroymaterialy-optom», «optovaya-torgovlya».
+# B2B_RE is the wrong reader here: its «опт» is whole-word only and «оптовая» is
+# none of its terms. «опт» alone still needs a word end («оптика» is no rubric).
+WHOLESALE_RUBRIC_RE = re.compile(
+    r"(?<!\w)(?:оптов\w*|оптом\w*|опт(?!\w)|optom\w*|optov\w*|ulgurji\w*|улгуржи\w*)",
+    re.I,
+)
 # A Chinese-side supplier's name (04 §6 gate 3: «Co\.?,?\s*Ltd|有限公司|Trading
 # Co\.|Imp(ort)?\s*&\s*Exp(ort)?» without a UZ legal form or address): the
 # English company endings of a Chinese exporter's card, and 有限公司 («limited
