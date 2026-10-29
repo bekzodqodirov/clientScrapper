@@ -64,6 +64,9 @@ UZ: Final[Mapping[str, str]] = MappingProxyType(
         "lidlar.holat_oldest": "Koʻrib chiqishdagi eng eski karta: {age}",
         "lidlar.holat_no_review": "Koʻrib chiqishda karta yoʻq.",
         "lidlar.send_failed": "⚠️ Kartani yuborib boʻlmadi — birozdan keyin /lidlar",
+        "lidlar.paused": (
+            "⏸ Agent toʻxtatilgan — karta koʻrsatilmaydi. Davom ettirish: /yoq"
+        ),
         "state.found": "topildi",
         "state.enriching": "boyitilmoqda",
         "state.scored": "ball olgan",

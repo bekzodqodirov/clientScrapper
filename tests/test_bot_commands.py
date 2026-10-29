@@ -299,6 +299,18 @@ async def test_lidlar_sends_the_card_and_marks_it_asked(w):
     assert w.fake.texts() == [t("lidlar.none")]
 
 
+async def test_lidlar_shows_no_card_while_the_agent_is_paused(w):
+    async with w.db() as s:
+        cand = await lead(s)
+        review = await pending_card(s, cand)
+    await w.say("/toxtat")
+    await w.say("/lidlar")
+    assert w.fake.texts() == [t("lidlar.paused")]
+    async with w.db() as s:
+        row = await s.get(LeadReview, review.id, populate_existing=True)
+        assert row is not None and row.state == "pending"
+
+
 async def test_lidlar_does_not_show_a_card_its_gate_now_refuses(w):
     async with w.db() as s:
         cand = await lead(s)
@@ -817,3 +829,31 @@ def test_plans_are_taken_once_and_expire():
     assert plans.take("dnc", first, now=NOW) is None
     late = plans.put("dnc", "b", now=NOW)
     assert plans.take("dnc", late, now=NOW + timedelta(minutes=11)) is None
+
+
+# --- the worker's owner seam (T-20 wires it) ---------------------------------------
+
+
+async def test_the_worker_tells_the_owner_through_the_bot(configured, monkeypatch):
+    from clientscrapper.worker import main as worker
+
+    bot, fake = fake_bot()
+    monkeypatch.setattr(deliver, "make_bot", lambda token=None: bot)
+    connected = worker.connect_owner_bot()
+    try:
+        assert connected is bot
+        assert await worker.notify("⛔ sinov") is True
+        sent = [(f["chat_id"], f["text"]) for f in fake.named("SendMessage")]
+        assert sent == [(OWNER, "⛔ sinov")]
+    finally:
+        await worker.disconnect_owner_bot(connected)
+    assert await worker.notify("⛔ yana") is False
+    assert len(fake.named("SendMessage")) == 1
+
+
+async def test_the_worker_stays_silent_without_a_bot(monkeypatch):
+    from clientscrapper.worker import main as worker
+
+    monkeypatch.setattr(settings, "assistant_bot_token", "")
+    assert worker.connect_owner_bot() is None
+    assert await worker.notify("⛔ sinov") is False

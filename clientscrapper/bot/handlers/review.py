@@ -2,7 +2,8 @@
 """``/lidlar`` and the review card's buttons (06 §1.2, §1.3).
 
 ``/lidlar`` sends the next ≤ ``REVIEW_BURST_MAX`` pending owner cards now —
-the owner asked, so ``REVIEW_HOURS`` and ``QUIET_HOURS`` do not apply — in
+the owner asked, so ``REVIEW_HOURS`` and ``QUIET_HOURS`` do not apply; the
+global pause does (``/toxtat``: no card until ``/yoq``) — in
 06 §1.6's order, each rendered by ``services/cards`` with the gates
 evaluated at that moment. A card the gates now refuse is not shown: its
 candidate takes the score job's own walk out of ``review``
@@ -30,7 +31,7 @@ from clientscrapper.bot import keyboards, pages
 from clientscrapper.bot.handlers.common import Deps, Tap, edit_keyboard, reply, toast
 from clientscrapper.bot.texts import t
 from clientscrapper.config import settings
-from clientscrapper.services import cards
+from clientscrapper.services import cards, owner
 
 log = logging.getLogger(__name__)
 
@@ -44,6 +45,10 @@ async def lidlar(message: Message, command: CommandObject, deps: Deps) -> None:
     now = deps.clock()
     sent = skipped = 0
     async with deps.session_factory() as session:
+        if await owner.paused(session):
+            # 06 §1.2 /toxtat: «… no push, no card …» until /yoq.
+            await reply(message, t("lidlar.paused"))
+            return
         ids = await cards.next_owner_reviews(session, limit=settings.review_burst_max)
         for review_id in ids:
             view = await cards.review_view(session, review_id, now=now)
