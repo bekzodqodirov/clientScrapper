@@ -698,6 +698,21 @@ def check(
                 "ichiga qoʻy."
             )
         )
+    quiet = _range(value("QUIET_HOURS") or "21:00-08:00")
+    if quiet is None:
+        found.append(
+            _error(
+                "❌ QUIET_HOURS oʻqilmadi — «SS:DD-SS:DD» boʻlsin, masalan 21:00-08:00."
+            )
+        )
+    elif digest is not None and _within(digest, *quiet):
+        found.append(
+            _error(
+                f"❌ DIGEST_TIME={value('DIGEST_TIME')} QUIET_HOURS="
+                f"{value('QUIET_HOURS')} ichida — dayjest egasini tunda bezovta "
+                "qiladi; vaqtni tinch soatlardan tashqariga qoʻy."
+            )
+        )
 
     # C9: memory and swap.
     mem_kib = _meminfo_kib(meminfo, "MemTotal")

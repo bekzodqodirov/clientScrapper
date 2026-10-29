@@ -46,6 +46,10 @@ PRICE_ERROR = (
 TIME_ERROR = "vaqt «SS:DD» koʻrinishida boʻlsin, masalan 09:00"
 RANGE_ERROR = "oraliq «SS:DD-SS:DD» koʻrinishida boʻlsin, masalan 09:30-17:30"
 DAYS_ERROR = "kunlar 1–7 (dushanba=1) boʻlsin: «1-6» yoki «1,2,3,4,5»"
+DIGEST_HOURS_ERROR = (
+    "DIGEST_TIME REVIEW_HOURS ichida va QUIET_HOURS dan tashqarida boʻlsin "
+    "(masalan 09:00) — dayjest egasini tunda bezovta qilmasin"
+)
 IDS_ERROR = "Telegram id raqamlari vergul bilan: «111111111,222222222»"
 
 
@@ -239,6 +243,18 @@ class Settings(BaseSettings):
                 if isinstance(value, str) and value.lstrip().startswith("#"):
                     raise ValueError(COMMENT_VALUE_ERROR.format(key=str(key).upper()))
         return data
+
+    @model_validator(mode="after")
+    def _digest_inside_the_day(self) -> Settings:
+        """06 §1.6: DIGEST_TIME inside REVIEW_HOURS and outside QUIET_HOURS —
+        the digest goes out while cards are sent, never in the owner's night
+        (``digest_due`` reads REVIEW_HOURS alone; seam review wave 4)."""
+        digest = self.digest_time_parsed
+        if not within(digest, *self.review_hours_parsed) or within(
+            digest, *self.quiet_hours_parsed
+        ):
+            raise ValueError(DIGEST_HOURS_ERROR)
+        return self
 
     @field_validator("log_level", mode="before")
     @classmethod

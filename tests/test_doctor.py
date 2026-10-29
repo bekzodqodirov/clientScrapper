@@ -10,6 +10,7 @@ import json
 from pathlib import Path
 
 import httpx
+import pytest
 from dotenv import dotenv_values
 
 from clientscrapper.config import Settings
@@ -117,6 +118,34 @@ def test_the_digest_must_fall_inside_review_hours():
     env = _filled()
     env.update(DIGEST_TIME="20:00")
     assert any("DIGEST_TIME" in e for e in _errors(_check(env)))
+
+
+def test_the_digest_must_fall_outside_quiet_hours():
+    """06 §1.6 «inside REVIEW_HOURS and outside QUIET_HOURS» (seam review
+    wave 4: a 07:30 digest with REVIEW_HOURS 07:00-18:00 passed every check
+    and went out in the owner's night); the Settings validator says the same
+    at start."""
+    env = _filled()
+    env.update(DIGEST_TIME="07:30", REVIEW_HOURS="07:00-18:00", QUIET_HOURS="21:00-08:00")
+    assert any("QUIET_HOURS" in e for e in _errors(_check(env)))
+    env.update(QUIET_HOURS="21:00-07:00")
+    assert not any("DIGEST_TIME" in e for e in _errors(_check(env)))
+    with pytest.raises(ValueError, match="QUIET_HOURS"):
+        Settings(  # type: ignore[call-arg]
+            _env_file=None,
+            digest_time="07:30",
+            review_hours="07:00-18:00",
+            quiet_hours="21:00-08:00",
+        )
+    assert (
+        Settings(  # type: ignore[call-arg]
+            _env_file=None,
+            digest_time="07:30",
+            review_hours="07:00-18:00",
+            quiet_hours="21:00-07:00",
+        ).digest_time_parsed.hour
+        == 7
+    )
 
 
 def test_a_database_that_is_not_up_yet_only_warns():
