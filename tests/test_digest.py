@@ -669,3 +669,32 @@ async def test_load_reads_a_whole_morning(session, monkeypatch):
     text = digest.render_digest(view)
     assert "CRMʼga 1/" in text and "yutuq 1 (birinchi yuk oʻrniga, taxminiy)" in text
     assert "Tashqi kuzatuvchi sozlanmagan" in text
+
+
+async def test_a_refused_dead_man_ping_reaches_the_digest(session, monkeypatch):
+    """The ping the worker made (06 §7.2) is observed by the monitor's fake
+    transport, carried in the next «worker» beat and said in the morning:
+    a watcher that answers 404 never alarms on the day it should."""
+    import httpx
+
+    from clientscrapper.worker import main as worker
+
+    pinged: list[str] = []
+
+    def refuse(request: httpx.Request) -> httpx.Response:
+        pinged.append(str(request.url))
+        return httpx.Response(404)
+
+    monkeypatch.setattr(settings, "deadman_ping_url", "https://hc.example.uz/ping/namuna")
+    monkeypatch.setattr(worker._deadman, "last", None)
+    monkeypatch.setattr(worker._deadman, "seen", None)
+    transport = httpx.MockTransport(refuse)
+    await worker.heartbeat_job(None, transport=transport)  # beat, then the ping
+    await worker.heartbeat_job(None, transport=transport)  # beat carrying it
+    assert pinged == ["https://hc.example.uz/ping/namuna"]
+    view = (await digest.load(session, now=NOW)).view
+    assert view.deadman == digest.DeadmanLine(configured=True, ok=False, status=404)
+    assert (
+        "⚠️ Tashqi kuzatuvchi oxirgi signalni olmadi (HTTP 404) — manzilni tekshiring"
+        in digest.render_digest(view).split("\n")
+    )
