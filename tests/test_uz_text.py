@@ -343,8 +343,48 @@ def test_the_lead_note_and_push_texts_render_clean():
 
 RENDERERS = (
     ("services/cards.py", "render_review", "T-20"),
+    ("services/cards.py", "render_mvp", "T-36"),
     ("services/digest.py", "render_digest", "T-35"),
 )
+
+
+def _numbers_rendered() -> list[str]:
+    """T-36: /holat's numbers block and the MVP report, full and empty,
+    with an unclassed label that carries its own apostrophe (a «…» quote)."""
+    from datetime import date
+    from decimal import Decimal
+
+    from clientscrapper.services import cards, metrics
+
+    since = NOW_RENDER.replace(day=1)
+    full = metrics.Results(
+        since=since,
+        until=NOW_RENDER,
+        pushed=33,
+        hot=31,
+        importer=metrics.Ratio(2, 4),
+        precision=metrics.Ratio(1, 3),
+        contacted=metrics.Ratio(4, 7),
+        quoted=metrics.Ratio(2, 5),
+        first_shipment=metrics.Ratio(1, 33),
+        unclassed=(metrics.Unclassed("Mijoz o'ylab koʻradi", 2, NOW_RENDER),),
+    )
+    empty = metrics.Results(since=since, until=NOW_RENDER)
+    spend = (metrics.SpendDay(date(2026, 10, 3), Decimal("5.2"), Decimal("7.2")),)
+    reports = [
+        metrics.MvpReport(
+            start=date(2026, 10, 1),
+            now=NOW_RENDER,
+            week2_start=since,
+            week2_end=NOW_RENDER,
+            week2_hot=hot,
+            results=results,
+            spend=days,
+        )
+        for hot, results, days in ((22, full, spend), (0, empty, ()))
+    ]
+    out = ["\n".join(cards.render_results(r)) for r in (full, empty)]
+    return out + [cards.render_mvp(r) for r in reports]
 
 
 def _cards_rendered() -> list[str]:
@@ -402,6 +442,11 @@ def test_rendered_cards_notes_and_digest_follow_the_rules(module, function, task
     if function == "render_review":
         rendered = _cards_rendered()
         assert len(rendered) == 2 * (7 + 1) + 3
+        assert [t for t in rendered if problems(t, rendered=True)] == []
+        return
+    if function == "render_mvp":
+        rendered = _numbers_rendered()
+        assert len(rendered) == 4
         assert [t for t in rendered if problems(t, rendered=True)] == []
         return
     # The renderers take views a later task defines; that task feeds its

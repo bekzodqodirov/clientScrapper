@@ -666,6 +666,44 @@ async def test_holat_shows_the_layout_and_the_problems(w):
     assert any(line.startswith("Muammolar: ") for line in lines)
 
 
+async def test_holat_shows_the_pilot_s_numbers_and_the_unclassed_labels(w):
+    """07 §3.2's numbers over the last 30 days (tests/pilot_fixtures.pilot;
+    tools/mvp_report prints the same), each approximate one labelled, and
+    the lost-reason label no class matched (01 §7 decisions 1a, 3a, 5a, 6a)."""
+    from tests import pilot_fixtures as pf
+
+    w.deps.clock = lambda: pf.PILOT_NOW
+    async with w.db() as s:
+        await pf.pilot(s)
+    await w.say("/holat")
+    lines = w.last().splitlines()
+    start = next(i for i, line in enumerate(lines) if line.startswith("Natija ("))
+    assert lines[start : start + 6] == [
+        "Natija (30 kun): push 33 · ≥60 ball 31",
+        "  Bogʻlanildi 1 ish kunida: 57% (4/7) — faqat ERP koʻrgani",
+        "  Haqiqiy importyor: 50% (2/4) · aniqlik 33% (1/3)",
+        "  Narx aytildi / bogʻlanildi: ~40% (2/5) — taxminiy, bosqich nomidan",
+        "  Yutildi: 3% (1/33) — taxminiy: «yutildi» birinchi yuk oʻrniga",
+        "⚠️ Sinflanmagan yoʻqotish sabablari: «Mijoz bilan kelishmadi» 1 ta — "
+        "dasturchiga ayting, aniqlik hisobiga qoʻshilsin",
+    ]
+    assert lines[start + 6].startswith("Muammolar: ")
+
+
+async def test_holat_answers_without_the_numbers_when_they_cannot_be_read(w, monkeypatch):
+    from clientscrapper.services import metrics
+
+    async def broken(*_: object, **__: object) -> None:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(metrics, "holat", broken)
+    await w.say("/holat")
+    lines = w.last().splitlines()
+    assert lines[0].startswith("🩺 Agent holati — ")
+    assert not any(line.startswith("Natija (") for line in lines)
+    assert any(line.startswith("Muammolar: ") for line in lines)
+
+
 async def test_xarajat_shows_the_day_and_the_month(w):
     await w.say("/xarajat")
     assert w.last().splitlines()[0].startswith("💸 Xarajat — bugun $0.00 (0% / $")

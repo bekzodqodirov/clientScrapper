@@ -44,7 +44,7 @@ def _moment(text: str) -> datetime:
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="mvp_report", description="07 §3.2 MVP report")
     parser.add_argument(
-        "--start", type=date.fromisoformat, help="the pilot's first day, YYYY-MM-DD"
+        "--start", type=date.fromisoformat, help="the first day of the pilot, YYYY-MM-DD"
     )
     parser.add_argument(
         "--now", type=_moment, help="read as of this moment (ISO, Tashkent if naive)"
