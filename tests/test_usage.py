@@ -239,6 +239,19 @@ def test_priced_anthropic_treats_missing_counts_as_zero_and_unknown_models_as_un
     assert (priced.input_tokens, priced.output_tokens, priced.units) == (10, 0, D(0))
 
 
+def test_an_answer_with_no_usage_at_all_is_unpriced_not_free():
+    # The SDK builds a response without validating it: a message whose usage
+    # object is missing keeps the estimate (04 §8), never a $0 row.
+    priced = usage.priced_anthropic(EXTRACT, None, batch=True, model_job_id=7)
+    assert priced.cost_usd is None
+    assert (priced.input_tokens, priced.output_tokens, priced.model_job_id) == (
+        None,
+        None,
+        7,
+    )
+    assert (priced.model, priced.batch) == (EXTRACT, True)
+
+
 def test_the_pricing_module_loads_without_the_settings():
     # The doctor diagnoses a .env the settings refuse to load, and it reads the
     # price table and the allocations from here: neither may pull them in.

@@ -21,6 +21,10 @@ forced a change — each is named in a comment beside it:
   needs a word start and a separator, else «big shop» read as the handle
   «shop» and «Instagramda» as «da»;
 * STIR_RE's label needs a word start («Martin 301234567» is not a STIR);
+* TG_RE's link is read in any case and on telegram.me / telegram.dog too
+  («T.me/namuna_optom» opens a sentence on a phone keyboard);
+* PINFL_RE (a 14-digit run) is new: the normaliser, the pseudonymiser and
+  the output hygiene ask the one pattern;
 * LEGAL_FORM_RE gained МЧЖ, ХЧК and СП, the Cyrillic forms of MChJ, XChK, SP;
 * TONNES_RE, VACANCY_IMPORT_RE, NON_CN_ORIGIN_RE and STATE_BODY_RE are not
   03 §1.4's: they are 04 §5.1's detections of ``vol_stated_*`` (tonnes),
@@ -611,6 +615,29 @@ COMPETITOR_NAME_RE = re.compile(
     rf"логистика{_UZ_CYRL}|логистик(?:ами|ах|ам|ой|а|е|и|у)?|логистическ\w*)(?!\w)",
     re.I,
 )
+# The same said by a Telegram username glued into one word («halolcargo»,
+# «chinacargouz», «mkexpress»), which COMPETITOR_RE's word bounds cannot see:
+# a username is Latin letters, digits and «_» only, so these are its Latin
+# stems, looked for inside the name (``competitor_handle``).
+COMPETITOR_HANDLE_STEMS = (
+    "cargo",
+    "kargo",
+    "express",
+    "logist",
+    "ekspeditor",
+    "dostavka",
+    "broker",
+    "rastamoj",
+    "vikup",
+)
+
+
+def competitor_handle(username: str | None) -> bool:
+    """A username that names a forwarder inside itself (COMPETITOR_HANDLE_STEMS)."""
+    name = (username or "").lower()
+    return any(stem in name for stem in COMPETITOR_HANDLE_STEMS)
+
+
 # B2C / personal use.
 B2C_RE = re.compile(
     rf"(?<!\w)(?:o{_A}?zim\s+uchun|ўзим\s+учун|для\s+себя|1\s*(?:dona|шт\.?|штук[аи]?)|"
@@ -702,15 +729,32 @@ def price_count(text: str) -> int:
     return sum(1 for _ in PRICE_RE.finditer(text))
 
 
+def pricelist_shaped(text: str) -> bool:
+    """03 §2.3's price-list shape, which the tout rule counts per sender:
+    PRICELIST_MIN_PRICES prices or more, or longer than PRICELIST_MIN_CHARS."""
+    return price_count(text) >= PRICELIST_MIN_PRICES or len(text) > PRICELIST_MIN_CHARS
+
+
 # The normaliser validates operator codes (services/keys.phone_e164 / phone_kind).
 PHONE_RE = re.compile(
     r"(?<!\d)(?:\+?998[\s\-]?)?\(?(\d{2})\)?[\s\-]?(\d{3})[\s\-]?(\d{2})[\s\-]?(\d{2})(?!\d)"
 )
 # Names ending in "bot" and reserved t.me paths are rejected by
-# services/normalise.telegram_key, not here.
+# services/normalise.telegram_key, not here. The link is matched in any case —
+# a phone keyboard writes «T.me/…» at a sentence start, and a pasted link may
+# be «TELEGRAM.ME/…» — and on Telegram's two other link hosts, telegram.me and
+# telegram.dog; the pseudonymiser masks with this pattern (04 §4.2), so a
+# spelling it does not read reaches the model.
 TG_RE = re.compile(
-    r"(?:(?:https?://)?t\.me/(?!joinchat|\+|s/)|(?<![\w@])@)([A-Za-z][A-Za-z0-9_]{4,31})"
+    r"(?:(?i:(?:https?://)?(?:www\.)?(?:t|telegram)\.(?:me|dog)/(?!joinchat|\+|s/))"
+    r"|(?<![\w@])@)([A-Za-z][A-Za-z0-9_]{4,31})"
 )
+# A PINFL (the personal identification number of a passport) is 14 digits: a
+# maximal run of exactly 14, so a 17-digit 2GIS firm id or Graph user id holds
+# none (02 §2.5). Never stored, never sent (06 §5.2): the normaliser drops a
+# field carrying one, the pseudonymiser masks it as ``<ID>`` and the output
+# hygiene of 04 §4.7 drops a model field that carries one.
+PINFL_RE = re.compile(r"(?<!\d)\d{14}(?!\d)")
 # The label branch needs a word start («big shop» is not the handle «shop») and
 # a separator: a colon or dash, an «@», or at least one space — «Instagram
 # namuna_shop» is a handle and the pseudonymiser must mask it (04 §4.2), while

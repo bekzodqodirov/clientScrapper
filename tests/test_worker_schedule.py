@@ -22,6 +22,7 @@ from apscheduler.events import JobExecutionEvent
 from clientscrapper.collectors import erp_sync
 from clientscrapper.collectors.base import Collector, Observation
 from clientscrapper.collectors.runner import run_collector
+from clientscrapper.collectors.telegram_monitor import TelegramMonitor
 from clientscrapper.config import settings
 from clientscrapper.db import models as m
 from clientscrapper.services import (
@@ -32,6 +33,7 @@ from clientscrapper.services import (
     crontab,
     erp_feeds,
     health,
+    model_jobs,
 )
 from clientscrapper.worker import main as worker
 
@@ -94,6 +96,13 @@ BUILT = {
     "erp_sync_year",
     # T-17: the resolver.
     "resolve",
+    # T-14: the Telegram collector, woken by NOTIFY cs_interaction too.
+    "telegram_monitor",
+    # T-15: the classifier, woken by the collector's NOTIFY.
+    "classify",
+    # T-16: the batch lane (services/model_jobs).
+    "model_batch_submit",
+    "model_batch_collect",
     # T-18: the scorer.
     "score",
     # T-28: the push and its reconcile.
@@ -164,6 +173,32 @@ async def test_each_erp_slot_runs_erpsync_with_its_variant(monkeypatch):
     assert ran == [(erp_sync.ErpSync, v) for v in ERP_VARIANTS.values()]
 
 
+async def test_the_telegram_slot_runs_the_telegram_collector(monkeypatch):
+    """T-14 fills the slot T-08 left: run_collector(TelegramMonitor), no
+    variant, primary on sources.telegram_monitor.cron, woken by the reader's
+    NOTIFY (04 §0)."""
+    ran: list[tuple[type, str | None]] = []
+
+    async def record(cls, *, fetcher, now, variant=None, **kw):
+        ran.append((cls, variant))
+
+    monkeypatch.setattr(worker, "run_collector", record)
+    [slot] = [s for s in worker.job_table() if s.id == "telegram_monitor"]
+    assert (slot.source_key, slot.variant, slot.primary, slot.wakes_on) == (
+        "telegram_monitor",
+        None,
+        True,
+        "cs_interaction",
+    )
+    assert slot.job is not None
+    try:
+        await slot.job()
+    finally:
+        await worker.shared_fetcher().aclose()
+        worker._shared.fetcher = None
+    assert ran == [(TelegramMonitor, None)]
+
+
 def test_the_resolver_is_the_resolve_slot_s_job():
     [slot] = [s for s in worker.job_table() if s.id == "resolve"]
     assert slot.job is companies.resolve_job
@@ -179,7 +214,8 @@ def test_the_scorer_is_the_score_slot_s_job_and_wakes_on_cs_interaction():
     scheduler = worker.build_scheduler()
     job = scheduler.get_job("score")
     assert job is not None and job.func.__name__ == "woken_score"
-    assert worker.wake_channels() == {"cs_interaction": ("score",)}
+    # The channel's slots upstream first: each stage wakes the next (04 §0).
+    assert worker.waking()["cs_interaction"] == ("telegram_monitor", "classify", "score")
 
 
 def test_the_push_and_reconcile_slots_are_crm_push_s_jobs():
@@ -224,18 +260,16 @@ async def test_a_notify_on_cs_interaction_runs_score_at_once(session):
     does not wait for the 15-minute sweep."""
     scheduler = _Moved({"score"})
     stop = asyncio.Event()
-    listener = asyncio.create_task(worker.listen_for_wakes(scheduler, stop))
+    connected = asyncio.Event()
+    listener = asyncio.create_task(
+        worker.listen_for_wakes(scheduler, stop, connected=connected.set)
+    )
     try:
-        for _ in range(100):
-            listening = await session.scalar(
-                sa.text(
-                    "SELECT count(*) FROM pg_stat_activity "
-                    "WHERE query = 'LISTEN \"cs_interaction\"'"
-                )
-            )
-            if listening:
-                break
-            await asyncio.sleep(0.05)
+        await asyncio.wait_for(connected.wait(), 10)
+        # The connect wake (what was said while nobody listened) moved it once.
+        assert [job_id for job_id, _ in scheduler.moved] == ["score"]
+        scheduler.moved.clear()
+        worker._wakes.pending.clear()
         before = datetime.now(TZ)
         await session.execute(sa.text("SELECT pg_notify('cs_interaction', '42')"))
         await session.commit()
@@ -249,6 +283,7 @@ async def test_a_notify_on_cs_interaction_runs_score_at_once(session):
     [(job_id, at)] = scheduler.moved
     assert job_id == "score"
     assert before - timedelta(seconds=1) <= at <= datetime.now(TZ)
+    worker._wakes.pending.clear()
 
 
 async def test_a_wake_while_the_job_runs_makes_it_run_once_more():
@@ -259,15 +294,32 @@ async def test_a_wake_while_the_job_runs_makes_it_run_once_more():
         runs.append(len(runs))
         if len(runs) == 1:
             # a notification arrives in the middle of the first run
-            assert worker.wake(scheduler, "score", NOW) is True
+            assert worker.wake(scheduler, ("score",), now=NOW) == ["score"]
 
-    await worker.woken("score", job)()
+    await worker.wakeable("score", job)()
     assert runs == [0, 1]
     assert scheduler.moved == []  # a running job is not moved, it goes round again
     assert worker._wakes.pending == set() and worker._wakes.running == set()
-    assert worker.wake(scheduler, "score", NOW) is True
+    assert worker.wake(scheduler, ("score",), now=NOW) == ["score"]
     assert scheduler.moved == [("score", NOW)]
     worker._wakes.pending.clear()
+
+
+def test_the_batch_lane_slots_run_model_jobs():
+    """04 §0: model_batch_submit 23:30, model_batch_collect every 30 min
+    00:30–08:00 — the two jobs of services/model_jobs (T-16)."""
+    table = {s.id: s for s in worker.job_table()}
+    assert table["model_batch_submit"].job is model_jobs.model_batch_submit_job
+    assert table["model_batch_collect"].job is model_jobs.model_batch_collect_job
+    scheduler = worker.build_scheduler()
+    for slot_id, func in (
+        ("model_batch_submit", model_jobs.model_batch_submit_job),
+        ("model_batch_collect", model_jobs.model_batch_collect_job),
+    ):
+        job = scheduler.get_job(slot_id)
+        assert job is not None and job.func is func
+    [submit] = _next("model_batch_submit", NOW, 1)
+    assert submit == datetime(2026, 10, 24, 23, 30, tzinfo=TZ)
 
 
 def test_wire_registers_the_suppression_probe():

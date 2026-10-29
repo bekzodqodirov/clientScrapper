@@ -24,11 +24,17 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Final, Literal
 
 from clientscrapper.collectors.keywords import (
+    B2B_RE,
+    BULKY_RES,
+    CHINA_RE,
     CITY_RES,
+    COMPANION_RE,
+    GEO_RE,
     IG_RE,
     INTENT_RE,
     LEGAL_FORM_RE,
     PHONE_RE,
+    PINFL_RE,
     STIR_RE,
     TASHKENT_PLACES_RE,
     TG_RE,
@@ -71,6 +77,7 @@ __all__ = [
     "canonical_city",
     "find_legal_form",
     "find_stir",
+    "given_name_shaped",
     "instagram_handles",
     "is_person_shaped",
     "legal_form_code",
@@ -78,12 +85,16 @@ __all__ = [
     "make_phone",
     "parse_phones",
     "parsed_kind",
+    "person_names",
     "phone_e164",
     "phone_kind",
+    "phone_matches",
     "phone_tail",
+    "surname_shaped",
     "telegram_handles",
     "telegram_key",
     "to_observation_json",
+    "trade_word",
     "website_key",
 ]
 
@@ -113,17 +124,26 @@ def make_phone(raw: str, *, city: str | None = None) -> Phone | None:
     return Phone(e164=e164, tail=tail, kind=phone_kind(e164), country=country, raw=raw)
 
 
+def phone_matches(text: str) -> list[re.Match[str]]:
+    """``PHONE_RE``'s matches in ``text``, valid or not, in order — except a
+    number inside a labelled STIR («ИНН 301234567»), which is the company's
+    tax id, not a phone (the pseudonymiser masks exactly these, 04 §4.2)."""
+    stir_spans = [m.span(1) for m in STIR_RE.finditer(text)]
+    return [
+        match
+        for match in PHONE_RE.finditer(text)
+        if not any(s < match.end() and match.start() < e for s, e in stir_spans)
+    ]
+
+
 def parse_phones(text: str, *, limit: int = 5) -> list[Phone]:
     """``PHONE_RE`` over ``text``: valid numbers, deduplicated by tail, in order of
     appearance, at most ``limit``. A number inside a labelled STIR («ИНН
-    301234567») is the company's tax id, not a phone, and is skipped."""
-    stir_spans = [m.span(1) for m in STIR_RE.finditer(text)]
+    301234567») is the company's tax id, not a phone, and is skipped
+    (``phone_matches``)."""
     phones: list[Phone] = []
     seen: set[str] = set()
-    for match in PHONE_RE.finditer(text):
-        start, end = match.span()
-        if any(s < end and start < e for s, e in stir_spans):
-            continue
+    for match in phone_matches(text):
         phone = make_phone(match.group(0))
         if phone is None or phone.tail in seen:
             continue
@@ -155,7 +175,7 @@ TG_RESERVED: Final = frozenset(
     }
 )
 _TG_LINK = re.compile(
-    r"\A(?:[A-Za-z]+://)?(?:www\.)?(?:t\.me|telegram\.me)/(?P<path>.*)\Z",
+    r"\A(?:[A-Za-z]+://)?(?:www\.)?(?:t\.me|telegram\.me|telegram\.dog)/(?P<path>.*)\Z",
     re.I | re.DOTALL,
 )
 
@@ -508,17 +528,34 @@ _PERSON_MAX_TOKENS = 3
 # names, and a person-shaped name loses its place as the company name.
 PERSON_HONORIFICS: Final = frozenset({"aka", "opa"})
 _LOOSE_FIRST_NAMES: Final = frozenset(loose_key(n) for n in FIRST_NAMES)
+# A given name keeps its identity under «-jon» (affectionate) and «-bek» (a
+# title worn as part of the name): «Akmaljon», «Sardorbek» are Akmal, Sardor.
+_GIVEN_SUFFIXES: Final = ("jon", "bek")
 
 
-def _surname_shaped(token: str) -> bool:
+def surname_shaped(token: str) -> bool:
+    """A ``name_key`` token with a surname or patronymic suffix and a stem of
+    at least three letters («karimov», «aliyeva», «rustamovich»)."""
     return any(
         token.endswith(s) and len(token) - len(s) >= _SURNAME_STEM_MIN
         for s in _SURNAME_SUFFIXES
     )
 
 
-def _first_name(token: str) -> bool:
-    return token in FIRST_NAMES or loose_key(token) in _LOOSE_FIRST_NAMES
+def given_name_shaped(token: str) -> bool:
+    """A ``name_key`` token that is a given name in ``FIRST_NAMES`` (spelling
+    variants alike, ``loose_key``), bare or with «-jon»/«-bek»."""
+    if token in FIRST_NAMES or loose_key(token) in _LOOSE_FIRST_NAMES:
+        return True
+    for suffix in _GIVEN_SUFFIXES:
+        stem = token.removesuffix(suffix)
+        if (
+            stem != token
+            and len(stem) >= _SURNAME_STEM_MIN
+            and (stem in FIRST_NAMES or loose_key(stem) in _LOOSE_FIRST_NAMES)
+        ):
+            return True
+    return False
 
 
 def is_person_shaped(key: str) -> bool:
@@ -532,13 +569,110 @@ def is_person_shaped(key: str) -> bool:
         return False
     if _INITIALS.fullmatch(key):
         return True
-    if any(_surname_shaped(t) or t in PERSON_HONORIFICS for t in tokens):
+    if any(surname_shaped(t) or t in PERSON_HONORIFICS for t in tokens):
         return True
     return (
         len(tokens) <= 2
-        and _first_name(tokens[0])
+        and given_name_shaped(tokens[0])
         and not any(t in GENERIC_TOKENS for t in tokens)
     )
+
+
+# --- Person names in free text (04 §4.2) --------------------------------------------
+
+# The trade vocabulary of 03 §1.4: a word one of these reads is a business
+# word, never a person's name («Xitoy», «Kafel», «Optom», «Chorsu»).
+_TRADE_RES: Final = (B2B_RE, CHINA_RE, COMPANION_RE, GEO_RE, *BULKY_RES.values())
+# A word as people write it: letters, an apostrophe only inside (oʻ, gʻ, ʼ).
+_WORD_RE: Final = re.compile(r"[^\W\d_]+(?:['ʻʼ‘’`ʹ][^\W\d_]+)*")
+# Two words are one name only when nothing but spaces or a hyphen parts them.
+_JOINED_RE: Final = re.compile(r"[ \t\-]+")
+_PERSON_CLUSTER_MAX = 4
+
+
+def trade_word(word: str) -> bool:
+    """Is ``word`` a business word: a generic one (``GENERIC_TOKENS``), a
+    legal form, or a term of the keyword lists (China, places, wholesale,
+    bulky goods, a buyers' group)?"""
+    key = name_key(word)
+    if not key or key in GENERIC_TOKENS or LEGAL_FORM_RE.fullmatch(word):
+        return True
+    return any(pattern.fullmatch(word) for pattern in _TRADE_RES)
+
+
+def _word_kind(word: str) -> str:
+    key = name_key(word)
+    if " " in key or not key:
+        return "other"
+    if key in PERSON_HONORIFICS:
+        return "honorific"
+    trade = trade_word(word)
+    if given_name_shaped(key):
+        return "given_trade" if trade else "given"
+    if trade:
+        return "trade"
+    if word[:1].isupper():
+        return "surname" if surname_shaped(key) else "capital"
+    return "other"
+
+
+def person_names(text: str | None) -> list[str]:
+    """The words of ``text`` that name a person, as written, in order — what
+    the pseudonymiser masks beside a sender's own name (04 §4.2: «bio-stated
+    person names»). A name is a run of adjacent words (a space or a hyphen
+    between) of given names (``given_name_shaped``), capitalised surnames
+    (``surname_shaped``) and capitalised words, holding a given name or a
+    surname and not followed by a business word: «Menejer: Dilshod Karimov»
+    names Dilshod and Karimov, «Oʻtkir Gʻaniyev» both, «Sardor Savdo MChJ» and
+    «Kafel savdo» nobody (a company's name stays, 04 §4.2), «Malika bozori»
+    nobody (a given name that is also a place counts only beside a surname).
+    In a run with a given name, the capitalised words that are neither are
+    left («Menejer Dilshod»: a title). A word before «aka»/«opa» is a name.
+    """
+    words = [(m.group(0), m.start(), m.end()) for m in _WORD_RE.finditer(text or "")]
+    kinds = [_word_kind(w) for w, _, _ in words]
+    found: list[str] = []
+
+    def joined(left: int, right: int) -> bool:
+        gap = (text or "")[words[left][2] : words[right][1]]
+        return bool(_JOINED_RE.fullmatch(gap))
+
+    name_kinds = {"given", "given_trade", "surname", "capital"}
+    i = 0
+    while i < len(words):
+        if kinds[i] not in name_kinds:
+            if (
+                kinds[i] == "honorific"
+                and i
+                and joined(i - 1, i)
+                and kinds[i - 1]
+                in (
+                    *name_kinds,
+                    "other",
+                )
+            ):
+                found.append(words[i - 1][0])
+            i += 1
+            continue
+        j = i
+        while j + 1 < len(words) and kinds[j + 1] in name_kinds and joined(j, j + 1):
+            j += 1
+        cluster = range(i, j + 1)
+        has = {kinds[k] for k in cluster}
+        company = j + 1 < len(words) and joined(j, j + 1) and kinds[j + 1] == "trade"
+        if (
+            len(cluster) <= _PERSON_CLUSTER_MAX
+            and not company
+            and ("given" in has or "surname" in has)
+        ):
+            keep = (
+                {"given", "given_trade", "surname"}
+                if "given" in has or "given_trade" in has
+                else {"surname", "capital"}
+            )
+            found += [words[k][0] for k in cluster if kinds[k] in keep]
+        i = j + 1
+    return list(dict.fromkeys(found))
 
 
 # --- Observation (03) → observations.parsed (02 §2.5, 04 §1.6) ---------------------
@@ -617,9 +751,9 @@ _HINT_SIGNALS: Final = {
 }
 _VOLUME_BASES: Final = frozenset({"stated", "container_words", "weight", "proxy", "none"})
 # A PINFL is 14 digits; a field carrying one is dropped (02 §2.5 validators).
-# Exactly 14: a 2GIS firm id or a Graph user id is a 17-digit run, and holds
-# no PINFL (dropping it would lose the id the resolver matches on).
-_PINFL = re.compile(r"(?<!\d)\d{14}(?!\d)")
+# ``PINFL_RE`` is keywords' (one home): exactly 14, so a 2GIS firm id or a
+# Graph user id, a 17-digit run, holds none (dropping it would lose the id the
+# resolver matches on).
 _EXCERPT_MAX = 600
 
 
@@ -651,7 +785,7 @@ class _Pinfl:
     def __call__(self, value: str | None) -> str | None:
         if value is None:
             return None
-        if _PINFL.search(value):
+        if PINFL_RE.search(value):
             self.dropped = True
             return None
         return value
@@ -776,7 +910,11 @@ def to_observation_json(
     # HR person's above all (03 §2.7).
     if kind == "intent_post" and handles["telegram"] is None and obs.person_telegram:
         handles["telegram"] = telegram_key(obs.person_telegram)
-    handles["tg_user_id"] = attrs.get("tg_user_id") if person_ok else None
+    # A poster's Telegram id is person-tier (06 §5.1): its one place in
+    # ``parsed`` is ``handles.tg_user_id``, which retention R3 strips at 30 d
+    # (02 §4). Left in the ``hints.collector.attrs`` copy, it would outlive R3.
+    tg_user_id = attrs.pop("tg_user_id", None)
+    handles["tg_user_id"] = tg_user_id if person_ok else None
     handles["instagram"] = instagram_key(obs.instagram) if obs.instagram else None
 
     if kind == "intent_post":

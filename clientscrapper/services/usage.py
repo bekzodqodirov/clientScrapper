@@ -563,7 +563,17 @@ def priced_anthropic(
     are read from ``usage.server_tool_use.web_search_requests`` and recorded
     as the row's units; the 1-hour share of the cache writes from
     ``usage.cache_creation.ephemeral_1h_input_tokens`` (priced 2×; the row's
-    ``cache_write_tokens`` keeps the total)."""
+    ``cache_write_tokens`` keeps the total). An answer that came with no
+    usage at all (the SDK builds a response without validating it) is
+    unpriced: the row keeps the estimate, never $0 (04 §8)."""
+    if usage is None:
+        return Priced(
+            cost_usd=None,
+            model=model,
+            batch=batch,
+            model_job_id=model_job_id,
+            company_id=company_id,
+        )
     input_tokens = _count(usage, "input_tokens")
     output_tokens = _count(usage, "output_tokens")
     cache_read = _count(usage, "cache_read_input_tokens")

@@ -29,6 +29,15 @@ and of the run is kept, and the run ends ``partial``. The ``collector_runs`` row
 carries the 02 §2.2 counters; ``unchanged``, ``skipped_robots``, ``note`` and
 the rest go into ``meta``.
 
+Bytes a collector read without the Fetcher (``Collector.supply``: the rows the
+Telegram reader stored, 03 §2.3) are kept the same way; an evidence row such
+a collector names that another process wrote outside any run and that holds
+no observation yet (the reader's weekly channel about) is adopted — its
+observations are this run's to write. Then ``Collector.after_write`` hears
+where every observation landed (``Placed``), in a savepoint before the commit:
+a failure there costs its own writes only, is counted
+(``meta.dropped.after_write``) and ends the run ``partial``.
+
 Endings: ``ok``; ``partial`` when the database refused a row, or when a
 page/dollar budget, a cost cap (or any
 ``costs.ask`` refusal, ``meta.refused`` naming its code — through the Fetcher
@@ -49,7 +58,7 @@ import hashlib
 import json
 import logging
 from collections import Counter
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -60,7 +69,13 @@ import sqlalchemy as sa
 from sqlalchemy.exc import DataError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from clientscrapper.collectors.base import Budget, Collector, Observation
+from clientscrapper.collectors.base import (
+    Budget,
+    Collector,
+    Observation,
+    Placed,
+    Supplied,
+)
 from clientscrapper.config import settings
 from clientscrapper.db.models import CollectorRun, Evidence, RuntimeFlag, Source
 from clientscrapper.db.models import Observation as ObservationRow
@@ -108,6 +123,9 @@ _REFUSED: Final = (IntegrityError, DataError, ValueError)
 # 'partial' — what it found is not all stored.
 BAD_EVIDENCE: Final = "bad_evidence"
 BAD_OBSERVATION: Final = "bad_observation"
+# meta.dropped key for a Collector.after_write that raised: its writes are
+# undone, the run's rows are kept, the run ends 'partial'.
+AFTER_WRITE: Final = "after_write"
 
 SessionFactory = Callable[[], AsyncSession]
 GateFactory = Callable[[AsyncSession, int], CostGate]
@@ -236,6 +254,7 @@ class _Written:
     truncated: int = 0
     dropped: Counter[str] = field(default_factory=Counter)
     by_source: dict[str, dict[str, int]] = field(default_factory=dict)
+    placed: list[Placed] = field(default_factory=list)
 
     def bump(self, source: str, what: str) -> None:
         counts = self.by_source.setdefault(source, {"evidence": 0, "observations": 0})
@@ -251,6 +270,9 @@ class _Group:
     meta: dict[str, Any]
     fetched_at: datetime
     members: list[Observation] = field(default_factory=list)
+    # Bytes the collector supplied (Collector.supply), not a fetch: an
+    # evidence row stored outside any run may be adopted (_write_group).
+    supplied: bool = False
 
 
 async def global_pause(session: AsyncSession) -> bool:
@@ -346,10 +368,24 @@ def _merge(into: _Written, part: _Written) -> None:
     into.serp_hits += part.serp_hits
     into.truncated += part.truncated
     into.dropped.update(part.dropped)
+    into.placed.extend(part.placed)
     for source, counts in part.by_source.items():
         mine = into.by_source.setdefault(source, {"evidence": 0, "observations": 0})
         for what, n in counts.items():
             mine[what] += n
+
+
+async def _adoptable(session: AsyncSession, evidence: Evidence) -> bool:
+    """An evidence row another process wrote outside any run (the Telegram
+    reader's weekly about, 03 §2.3) that no observation cites yet."""
+    if evidence.collector_run_id is not None:
+        return False
+    cited = await session.scalar(
+        sa.select(ObservationRow.id)
+        .where(ObservationRow.evidence_id == evidence.id)
+        .limit(1)
+    )
+    return cited is None
 
 
 async def _write_group(
@@ -364,10 +400,24 @@ async def _write_group(
 ) -> _Written:
     written = _Written()
     existing = await evidence_store.find(session, group.url, group.sha256)
-    if existing is not None and existing.collector_run_id != run_id:
+    if (
+        existing is not None
+        and existing.collector_run_id != run_id
+        and not (group.supplied and await _adoptable(session, existing))
+    ):
         # Same bytes at the same URL as an earlier run: nothing new to say.
-        evidence_store.keep_raw(session, existing, group.body, root=root)
+        if group.body:
+            evidence_store.keep_raw(session, existing, group.body, root=root)
         written.unchanged_observations += len(group.members)
+        written.placed.extend(
+            Placed(obs, existing.id, None)
+            for obs in group.members
+            if obs.kind != "serp_hit"
+        )
+        return written
+    if existing is None and not group.body and group.supplied:
+        # A stored row the collector named is gone: nothing to cite.
+        written.dropped["no_evidence"] += len(group.members)
         return written
     first = group.members[0]
     single = len(group.members) == 1
@@ -398,22 +448,20 @@ async def _write_group(
         mark = (obs.source, obs.source_ref, group.sha256)
         if mark in seen or await _recently_seen(session, obs, group.sha256, now=now):
             written.duplicates += 1
+            written.placed.append(Placed(obs, row.id, None))
             continue
         try:
             # Its own savepoint: a row the database refuses costs that row,
             # not the page's other observations.
             async with session.begin_nested():
-                session.add(
-                    ObservationRow(
-                        evidence_id=row.id,
-                        ordinal=ordinal,
-                        source_key=obs.source,
-                        status="new",
-                        parsed=to_observation_json(
-                            obs, collector_version=collector_version
-                        ),
-                    )
+                observation = ObservationRow(
+                    evidence_id=row.id,
+                    ordinal=ordinal,
+                    source_key=obs.source,
+                    status="new",
+                    parsed=to_observation_json(obs, collector_version=collector_version),
                 )
+                session.add(observation)
                 await session.flush()
         except _REFUSED as exc:
             written.dropped[BAD_OBSERVATION] += 1
@@ -426,6 +474,7 @@ async def _write_group(
         seen.add(mark)
         written.new_observations += 1
         written.bump(obs.source, "observations")
+        written.placed.append(Placed(obs, row.id, observation.id))
     await session.flush()
     return written
 
@@ -439,10 +488,14 @@ async def write_observations(
     collector_version: str,
     now: datetime,
     root: Path | None,
+    supplied: Mapping[tuple[str, str], Supplied] | None = None,
 ) -> _Written:
     """Evidence + observation rows for one run's findings (no commit). Each
     evidence group is one savepoint: a group the database refuses is dropped
-    and counted, never the whole run."""
+    and counted, never the whole run. ``supplied`` are the bytes the collector
+    read without the Fetcher (``Collector.supply``), by ``(url, sha256)``: an
+    observation finds its own bytes at its own URL, so two messages with the
+    same words are two evidence rows, each at its own link."""
     written = _Written()
     known = set(await session.scalars(sa.select(Source.key)))
     groups: dict[tuple[str, str], _Group] = {}
@@ -453,7 +506,14 @@ async def write_observations(
         if obs.source not in known:
             written.dropped["unknown_source"] += 1
             continue
-        if obs.raw_sha256:
+        given = (
+            (supplied or {}).get((obs.url, obs.raw_sha256)) if obs.raw_sha256 else None
+        )
+        if given is not None and obs.raw_sha256 not in ledger.bodies:
+            url, sha, body = strip_secrets(given.url), given.sha256, given.body or b""
+            content_type = given.content_type or "text/plain"
+            meta, fetched_at = dict(given.meta), given.fetched_at
+        elif obs.raw_sha256:
             result = ledger.bodies.get(obs.raw_sha256)
             if result is None:
                 written.dropped["no_evidence"] += 1
@@ -471,7 +531,9 @@ async def write_observations(
             continue
         key = (url, sha)
         if key not in groups:
-            groups[key] = _Group(url, sha, body, content_type, meta, fetched_at)
+            groups[key] = _Group(
+                url, sha, body, content_type, meta, fetched_at, supplied=given is not None
+            )
         groups[key].members.append(obs)
 
     seen: set[tuple[str, str, str]] = set()
@@ -747,6 +809,7 @@ async def run_collector(
             collector = collector_cls(run_fetcher, serp)
             collector.variant = variant
             collector.started_at = now
+            collector.evidence_root = evidence_root
 
             status, error = "ok", None
             # A paid call the collector made itself (services/extraction's
@@ -799,6 +862,7 @@ async def run_collector(
                     collector_version=version,
                     now=now,
                     root=evidence_root,
+                    supplied=collector.supplied,
                 )
             except Exception as exc:
                 await session.rollback()
@@ -810,9 +874,25 @@ async def run_collector(
                     type(exc).__name__,
                     extra={"source": key, "run_id": run_id},
                 )
+            else:
+                try:
+                    # Its own savepoint: a hook that fails costs its writes,
+                    # never the run's evidence and observations.
+                    async with session.begin_nested():
+                        await collector.after_write(session, list(written.placed))
+                except Exception as exc:
+                    written.dropped[AFTER_WRITE] += 1
+                    log.warning(
+                        "collector %s: after_write failed: %s",
+                        key,
+                        type(exc).__name__,
+                        extra={"source": key, "run_id": run_id},
+                    )
 
             if status == "ok" and (
-                written.dropped[BAD_EVIDENCE] or written.dropped[BAD_OBSERVATION]
+                written.dropped[BAD_EVIDENCE]
+                or written.dropped[BAD_OBSERVATION]
+                or written.dropped[AFTER_WRITE]
             ):
                 status = "partial"
             stats = run_fetcher.stats

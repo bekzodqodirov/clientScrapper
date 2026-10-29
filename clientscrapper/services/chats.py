@@ -35,12 +35,21 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from clientscrapper.db.enums import CHAT_ROLES
-from clientscrapper.db.models import ChatMonitor, RuntimeFlag, Source
+from clientscrapper.db.models import ChatMonitor, Interaction, RuntimeFlag, Source
 from clientscrapper.services.keys import username_key
 
 log = logging.getLogger(__name__)
 
 SOURCE_KEY: Final = "telegram_monitor"
+# The reader's insert transaction ends with ``NOTIFY cs_interaction, '<id>'``
+# (02 §2.12); the worker's telegram_monitor, classify and score jobs wake on
+# it (04 §0). The one home of the channel's name: the reader, the collector
+# and the worker all read it here.
+INTERACTION_CHANNEL: Final = "cs_interaction"
+# ``evidence.meta.kind`` of a chat's weekly about (03 §2.3): the reader stores
+# it (userbot/about.py), the telegram_monitor collector makes the profile
+# observation of it.
+ABOUT_EVIDENCE_KIND: Final = "telegram_about"
 
 # 02 §2.12 priority column: 0 owner /chats qoʻsh · 1 linked discussion group ·
 # 2 companion group · 3 resolved username · 5 seed.
@@ -61,10 +70,30 @@ def channel_peer_id(channel_id: int) -> int:
     return -(_CHANNEL_MARK + channel_id) if channel_id > 0 else channel_id
 
 
+def is_channel_peer(peer_id: int) -> bool:
+    """A marked peer id that names a channel or a supergroup (not a user, whose
+    id is positive, nor a basic group, ``-<id>`` under the mark)."""
+    return peer_id < -_CHANNEL_MARK
+
+
+def bare_channel_id(peer_id: int) -> int:
+    """The bare id of a marked channel or supergroup id (``t.me/c/<bare>/…``);
+    any other id as its absolute value."""
+    return -peer_id - _CHANNEL_MARK if is_channel_peer(peer_id) else abs(peer_id)
+
+
 @dataclass(frozen=True, slots=True)
 class Seed:
     username: str
     role: str = "market"
+
+
+# ``chat_monitors.role='buyers'``: a chat whose posts are its audience's, not
+# its own — a companion «xaridorlar» group an about names, or a classifieds
+# channel such as @Optom_bozor (03 §2.3: «the lead is the poster, not the
+# channel»). What such a chat publishes as itself is a poster's ad, never the
+# chat speaking for itself (collectors/telegram_monitor.speaker_of).
+BUYERS_ROLE: Final = "buyers"
 
 
 # 03 §2.3. Buyer-side groups first, then wholesaler channels, then the
@@ -75,7 +104,7 @@ class Seed:
 # @cargo5566 and the religion/B2C clones of «Optom bozor» are excluded.
 SEEDS: Final[tuple[Seed, ...]] = (
     Seed("optom_tavarlar_uz"),
-    Seed("optom_bozor"),
+    Seed("optom_bozor", role=BUYERS_ROLE),  # classifieds: the lead is the poster
     Seed("optomelonuz"),
     Seed("pekinoptom_uz"),
     Seed("abusaxiyoptomm"),
@@ -108,6 +137,11 @@ UNRESOLVABLE_KEEP: Final = timedelta(days=30)
 NOT_A_CHAT: Final = "not_a_public_chat"
 # 03 §2.3: a channel silent this long is not queued.
 SILENT_AFTER: Final = timedelta(days=90)
+# 03 §2.3: a poster's bio (``interactions.sender_bio``, which only
+# userbot/about.py reads) is good for 30 days — the reader copies it to the
+# sender's newer rows instead of asking again, and the telegram_monitor
+# collector reads it from any of them when a message's own row has none yet.
+BIO_CACHE: Final = timedelta(days=30)
 
 
 @dataclass(frozen=True, slots=True)
@@ -386,6 +420,39 @@ async def joined_count(session: AsyncSession) -> int:
         .where(ChatMonitor.status == "joined", ChatMonitor.chat_type != "private")
     )
     return int(count or 0)
+
+
+def about_readable() -> sa.ColumnElement[bool]:
+    """A chat whose about the reader reads (``userbot/about.channels_due``)
+    and the telegram_monitor collector may turn into a profile: a queued
+    channel E3 found (priority 3), or a joined chat the owner has not switched
+    off — never the calibration chat. One predicate for both, so an about the
+    reader would not read now is not used either."""
+    return sa.and_(
+        ChatMonitor.role != "calibration",
+        sa.or_(
+            sa.and_(
+                ChatMonitor.status == "queued",
+                ChatMonitor.priority == PRIORITY_RESOLVED,
+            ),
+            sa.and_(
+                ChatMonitor.status == "joined",
+                ChatMonitor.monitor_enabled.is_(True),
+            ),
+        ),
+    )
+
+
+def counted_only(row: Interaction) -> bool:
+    """A stored message the telegram_monitor collector counted and nothing
+    more (a person's price list with no buyer trigger, kept so the tout rule
+    can count it, 02 §2.12): handled, with no evidence and no observation.
+    Every other handled row carries its evidence."""
+    return (
+        row.processed_at is not None
+        and row.evidence_id is None
+        and row.observation_id is None
+    )
 
 
 async def readable_ids(session: AsyncSession) -> list[int]:
@@ -753,6 +820,33 @@ async def forget_pending(
     flag.value = {"names": names, "unresolvable": gone}
     flag.updated_by = UPDATED_BY
     await session.flush()
+
+
+async def known_bios(
+    session: AsyncSession, sender_ids: Iterable[int], *, now: datetime
+) -> dict[int, str]:
+    """The newest bio read within BIO_CACHE of each of ``sender_ids``, from any
+    of the sender's rows (``''``: read, and empty); a sender none of whose
+    rows has one is absent. The one home of the cache rule: the reader's
+    ``about.cached_bio`` and the collector both ask here."""
+    ids = sorted({int(i) for i in sender_ids})
+    if not ids:
+        return {}
+    rows = await session.execute(
+        sa.select(Interaction.sender_id, Interaction.sender_bio)
+        .where(
+            Interaction.sender_id.in_(ids),
+            Interaction.sender_bio.is_not(None),
+            Interaction.occurred_at > now - BIO_CACHE,
+        )
+        .distinct(Interaction.sender_id)
+        .order_by(Interaction.sender_id, Interaction.occurred_at.desc())
+    )
+    return {
+        int(sender): str(bio)
+        for sender, bio in rows.tuples().all()
+        if sender is not None and bio is not None
+    }
 
 
 async def source_config(session: AsyncSession) -> dict[str, Any]:

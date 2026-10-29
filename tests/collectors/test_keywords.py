@@ -486,12 +486,21 @@ CASES: dict[str, tuple[re.Pattern[str], Extract, Cases]] = {
                     ("Kanalimiz: t.me/namuna_optom", "namuna_optom"),
                     ("Admin @namuna_admin ga yozing", "namuna_admin"),
                     ("https://t.me/namuna_tekstil_uz", "namuna_tekstil_uz"),
+                    # A phone keyboard capitalises a sentence's first letter.
+                    ("T.me/namuna_tekstil ga yozing", "namuna_tekstil"),
+                    ("Kanal: T.ME/namuna_tekstil", "namuna_tekstil"),
+                    ("Https://T.me/namuna_optom", "namuna_optom"),
+                    # Telegram's two other link hosts.
+                    ("telegram.me/namuna_tekstil", "namuna_tekstil"),
+                    ("https://telegram.dog/namuna_optom", "namuna_optom"),
                 ],
                 [
                     "Pochta: info@namuna.example.uz",
                     "t.me/joinchat/AAAAAE",
                     "@abc qisqa",
                     "t.me/+AbCdEf",
+                    "T.ME/JOINCHAT/AAAAAE",
+                    "T.me/S/namuna_optom",
                 ],
             ),
             "uz-Cyrl": (
@@ -513,6 +522,41 @@ CASES: dict[str, tuple[re.Pattern[str], Extract, Cases]] = {
                     "@12345abc",
                     "Подписка t.me/joinchat/AAA",
                 ],
+            ),
+        },
+    ),
+    "PINFL_RE": (
+        kw.PINFL_RE,
+        _whole,
+        {
+            "uz-Latn": (
+                [
+                    ("JSHSHIR 31234567890123", "31234567890123"),
+                    ("pasport, JShShIR:31234567890124.", "31234567890124"),
+                    ("31234567890125 raqamli", "31234567890125"),
+                ],
+                [
+                    # a 2GIS firm id is 17 digits; a 13- or 15-digit run is none
+                    "2GIS: 70000001012345678",
+                    "hisob 3123456789012",
+                    "kod 312345678901234",
+                ],
+            ),
+            "uz-Cyrl": (
+                [
+                    ("ЖШШИР 31234567890126", "31234567890126"),
+                    ("ЖШШИР: 31234567890127, паспорт", "31234567890127"),
+                    ("(31234567890128)", "31234567890128"),
+                ],
+                ["СТИР 301234567", "тел 998900000001", "рақам 1234-5678-9012-34"],
+            ),
+            "ru": (
+                [
+                    ("ПИНФЛ 31234567890129", "31234567890129"),
+                    ("ПИНФЛ:31234567890130 паспорт", "31234567890130"),
+                    ("номер 31234567890131.", "31234567890131"),
+                ],
+                ["ИНН 301234567", "счёт 20208000123456789012", "ID 70000001012345678"],
             ),
         },
     ),
@@ -1325,3 +1369,31 @@ def test_short_words_do_not_inflect() -> None:
     assert kw.terms_re(["опт"]).search("оптика") is None
     assert kw.terms_re(["Иу"]).search("Иуда") is None
     assert kw.terms_re(["Иу"]).search("Иу бозори") is not None
+
+
+def test_a_price_list_is_three_prices_or_more_than_1500_characters() -> None:
+    # 03 §2.3: «≥ 3 prices … or > 1,500 chars» — the tout rule's count (T-14).
+    assert kw.PRICELIST_MIN_CHARS == 1500
+    assert kw.pricelist_shaped("x" * 1501) is True
+    assert kw.pricelist_shaped("x" * 1500) is False
+    assert kw.pricelist_shaped("stul 250000 so'm, stol 900000 so'm") is False
+    assert kw.pricelist_shaped("stul 250000 so'm, stol 900000 so'm, 30$") is True
+
+
+@pytest.mark.parametrize(
+    ("username", "competitor"),
+    [
+        ("halolcargo", True),
+        ("chinacargouz", True),
+        ("mkexpress", True),
+        ("xitoy_logistika", True),
+        ("namuna_dostavka24", True),
+        ("Namuna_Kargo", True),
+        ("namuna_tekstil", False),
+        ("optom_bozor", False),
+        (None, False),
+    ],
+)
+def test_a_glued_username_names_a_forwarder(username, competitor) -> None:
+    # COMPETITOR_RE's word bounds cannot see inside «halolcargo» (T-14).
+    assert kw.competitor_handle(username) is competitor

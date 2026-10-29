@@ -18,12 +18,19 @@ clock must be derived from the real clock.
 ``CS_TIME_TRAVEL=newyear`` or ``=+Nd`` runs the suite at another moment
 (tests/timetravel.py, CI's ``time-travel`` job); it is for runs without a
 database.
+
+No test reaches the model (06 §5.2): ``model_api`` installs a
+``FakeAnthropic`` transport on ``services/extraction`` for every test and
+fails the test whose request still carried a phone, a handle, an e-mail or a
+14-digit run, or that called the model with no answer scripted. A test that
+expects a call asks for ``model_api`` by name and queues its answers.
 """
 
 from __future__ import annotations
 
 import os
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
+from typing import TYPE_CHECKING
 
 import pytest
 import sqlalchemy as sa
@@ -32,6 +39,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from clientscrapper.db import models as _models  # noqa: F401 - populates Base.metadata
 from clientscrapper.db.base import Base
 from clientscrapper.db.session import SessionLocal, engine
+
+if TYPE_CHECKING:
+    from tests.fakes import FakeAnthropic
 
 # Migration-seeded configuration, never wiped between tests. A test that flips
 # sources.enabled/config or activates a weights version snapshots what it
@@ -115,3 +125,25 @@ async def session() -> AsyncIterator[AsyncSession]:
     # Each test runs on its own event loop; a pooled connection must not
     # outlive the loop that opened it.
     await engine.dispose()
+
+
+@pytest.fixture(autouse=True)
+def model_api() -> Iterator[FakeAnthropic]:
+    """The Messages API for this test: a fake transport, no network, and the
+    PII fence on every request body (06 §5.2). Imported here, not at the
+    top: conftest is loaded before ``CS_TIME_TRAVEL`` starts (see
+    ``pytest_configure``), and these modules must be imported in the
+    travelled time like every test module."""
+    from clientscrapper.services import extraction
+    from tests.fakes import FakeAnthropic
+
+    fake = FakeAnthropic()
+    extraction.set_client(fake.client())
+    extraction.reset_grammar_memory()
+    yield fake
+    extraction.set_client(None)
+    extraction.reset_grammar_memory()
+    if fake.leaks:
+        pytest.fail(f"a model request carried personal data: {fake.leaks}")
+    if fake.unexpected:
+        pytest.fail(f"{fake.unexpected} model request(s) with no scripted answer")

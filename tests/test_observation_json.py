@@ -101,9 +101,11 @@ def test_a_telegram_intent_post_is_the_02_example():
             "competitor_words": False,
             "china_words": True,
             "state_words": False,
+            # The poster's id has one place, handles.tg_user_id, which R3
+            # strips at 30 d (02 §4): never a copy under the collector's attrs.
             "collector": {
                 "signal_types": ["volume_m3_3plus", "china_origin"],
-                "attrs": {"tg_user_id": 5100000001, "volume_m3": 25},
+                "attrs": {"volume_m3": 25},
             },
             "pinfl_dropped": False,
         },

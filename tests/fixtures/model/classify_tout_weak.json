@@ -1,0 +1,13 @@
+{
+  "speaker_role": "tout",
+  "b2b": true,
+  "b2c_markers": false,
+  "goods": ["mebel"],
+  "goods_category": "furniture",
+  "origin_cn": "explicit",
+  "volume_m3_est": null,
+  "volume_basis": "none",
+  "volume_quote": null,
+  "frequency": "repeat",
+  "confidence": 0.55
+}
