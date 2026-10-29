@@ -68,6 +68,7 @@ from clientscrapper.db.models import (
     Company,
     Contact,
     LeadCandidate,
+    LeadReview,
     Outcome,
     PushLog,
     Suppression,
@@ -520,7 +521,33 @@ async def promote(session: AsyncSession, pushes: Sequence[Delivery]) -> int:
             .where(LeadCandidate.id == candidate_id, LeadCandidate.state == "approved")
             .values(state="pushed", pushed_at=sent_at, external_id=external_id)
         )
+    await footer_moved(session, [row[1] for row in promoted])
     return len(promoted)
+
+
+async def footer_moved(session: AsyncSession, candidate_ids: Sequence[uuid.UUID]) -> None:
+    """A push's status moved: the ✅ card of each candidate must follow it
+    (06 §1.3 «✅ CRMʼga yuborildi {hh:mm}»). Its ``card_hash`` is cleared,
+    and ``reviews.refresh_push_footers`` re-renders every ✅ card with no
+    hash however long ago the attempt finished — an ``unknown`` push the
+    night's walk promotes, or a push that finished just before a
+    ``/toxtat`` longer than ``PUSH_FOOTER_WINDOW``. Called by every writer
+    of a push's outcome (``crm_push._record``, ``promote``), in its own
+    transaction: the review row is the last of the lock order (companies,
+    lead_candidates, lead_reviews)."""
+    if not candidate_ids:
+        return
+    await session.execute(
+        sa.update(LeadReview)
+        .where(
+            LeadReview.candidate_id.in_(sorted(set(candidate_ids))),
+            LeadReview.kind == "owner",
+            LeadReview.state == "approved",
+            LeadReview.answer == "push",
+            LeadReview.card_message_id.is_not(None),
+        )
+        .values(card_hash=None)
+    )
 
 
 # --- the effects (02 §2.11): derived, not appended ----------------------------------

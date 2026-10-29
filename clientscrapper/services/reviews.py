@@ -71,7 +71,8 @@ candidate that has none, then — not while ``/toxtat`` holds, and only when a
 bot is wired — the keyboards of the closed cards (every closed card whose
 message may still show buttons, ``card_message_id`` cleared once stripped, so
 a card closed while paused loses them after ``/yoq``), the ✅ cards whose push
-just finished (their footer follows it), the live cards whose content changed
+just finished or whose push a later answer moved (their footer follows it:
+``outcomes.footer_moved`` clears the card's hash), the live cards whose content changed
 (``card_hash``: edited only on a change; the newest and a rotating window of
 the rest each run), and inside ``REVIEW_HOURS`` (Mon–Sat, never in
 ``QUIET_HOURS``) the sending: the cards put off with ⏭, then the next
@@ -1624,12 +1625,21 @@ async def refresh_live(
 async def refresh_push_footers(
     session_factory: SessionFactory, sender: CardSender, *, now: datetime
 ) -> int:
-    """✅ cards whose push finished within ``PUSH_FOOTER_WINDOW``: the
-    footer follows it (06 §1.3 «✅ CRMʼga yuborildi {hh:mm}»), edited only on
-    a change, the card's row held across the edit. A tap's own edit that
-    lands after this one (the push was faster than the tap's edit) is put
-    right by the next run inside the window: its hash differs. Returns the
-    edits."""
+    """✅ cards whose push finished within ``PUSH_FOOTER_WINDOW``, and
+    every ✅ card a push's later answer marked (``outcomes.footer_moved``:
+    no ``card_hash`` — an ``unknown`` push the ERP's feed shows the next
+    night, or an answer that landed just before a long ``/toxtat``) and
+    answered within ``STRIP_WINDOW``: the footer follows the push (06 §1.3 «✅ CRMʼga
+    yuborildi {hh:mm}»), edited only on a change, the card's row held across
+    the edit. A tap's own edit that lands after this one (the push was
+    faster than the tap's edit) is put right by the next run inside the
+    window: its hash differs. Returns the edits."""
+    recent = sa.and_(
+        PushLog.finished_at >= now - PUSH_FOOTER_WINDOW, PushLog.finished_at <= now
+    )
+    marked = sa.and_(
+        LeadReview.card_hash.is_(None), LeadReview.answered_at >= now - STRIP_WINDOW
+    )
     async with session_factory() as session:
         rows = list(
             await session.scalars(
@@ -1640,8 +1650,7 @@ async def refresh_push_footers(
                     LeadReview.state == "approved",
                     LeadReview.answer == "push",
                     LeadReview.card_message_id.is_not(None),
-                    PushLog.finished_at >= now - PUSH_FOOTER_WINDOW,
-                    PushLog.finished_at <= now,
+                    sa.or_(recent, marked),
                 )
                 .distinct()
             )

@@ -13,6 +13,7 @@ to a ``FakeSender`` that records them. Synthetic data only (07 §1.0).
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncIterator
 from datetime import datetime, timedelta
 
 import pytest
@@ -31,14 +32,18 @@ from clientscrapper.services import (
     cards,
     classify,
     companies,
+    crm_push,
+    outcomes,
     owner,
     push_gate,
     reviews,
 )
+from clientscrapper.services.erp_feeds import ErpClient
 from clientscrapper.services.push_gate import Refusal
 from clientscrapper.worker import main as worker
 from tests import classify_fixtures as cf
 from tests import gate_fixtures
+from tests.fake_erp import FakeErp
 from tests.fakes import message, model_fixture
 from tests.gate_fixtures import NOW
 from tests.review_fixtures import (
@@ -56,6 +61,7 @@ from tests.review_fixtures import (
 )
 
 QUEUED = "✅ Navbatda — CRMʼga yuboriladi"
+ERP_BASE = "https://erp.test"
 CONTAINER = model_fixture("classify_container_no_number.json")
 enabled = cf.enabled
 offline = cf.offline
@@ -64,6 +70,21 @@ offline = cf.offline
 @pytest.fixture
 def setup(monkeypatch: pytest.MonkeyPatch) -> None:
     configure(monkeypatch, managers=(MANAGER, OTHER_MANAGER))
+
+
+async def no_sleep(_: float) -> None:
+    return None
+
+
+@pytest.fixture
+async def erp_world(session, monkeypatch) -> AsyncIterator[ErpClient]:
+    """The feeds fresh, pushing on, a fake ERP that answers 200."""
+    monkeypatch.setattr(settings, "crm_base_url", ERP_BASE)
+    async with gate_fixtures.erp_ready(session, monkeypatch):
+        fake = FakeErp(gate_fixtures.KEY, clock=lambda: NOW)
+        yield ErpClient(
+            ERP_BASE, gate_fixtures.KEY, transport=fake.transport(), sleep=no_sleep
+        )
 
 
 async def tapped(session, review, code, *, by=OWNER, now=NOW, target=None):
@@ -586,6 +607,76 @@ async def test_a_pushed_cards_footer_follows_the_push(session, setup):
     assert (
         await reviews.refresh_push_footers(reviews.SessionLocal, sender, now=later) == 0
     )
+
+
+async def test_an_unknown_push_the_feed_shows_later_moves_the_footer(session, setup):
+    """06 §1.3: the footer follows ``push_log.sent`` however late it lands —
+    an ``unknown`` push the night's outcomes walk promotes, long after
+    ``PUSH_FOOTER_WINDOW`` (seam review: the card said «⏳ CRM javobi
+    nomaʼlum» for good)."""
+    cand = await lead(session, state="approved")
+    review = await card(
+        session, cand, state="approved", answer="push", card_message_id=813
+    )
+    review.card_chat_id = OWNER
+    log = await gate_fixtures.push(
+        session,
+        cand,
+        sent_at=NOW - timedelta(minutes=3),
+        finished_at=NOW - timedelta(minutes=2),
+        phone_tail="900000061",
+        status="unknown",
+    )
+    await session.commit()
+    sender = FakeSender()
+    assert await reviews.refresh_push_footers(reviews.SessionLocal, sender, now=NOW) == 1
+    assert sender.edits[-1][2].splitlines()[-1] == cards.footer("push_unknown")
+    found = await outcomes.deliveries(session, [log.external_id])
+    assert await outcomes.promote(session, [found[log.external_id]]) == 1
+    await session.commit()
+    morning = NOW + timedelta(days=1)
+    assert (
+        await reviews.refresh_push_footers(reviews.SessionLocal, sender, now=morning) == 1
+    )
+    assert sender.edits[-1][2].splitlines()[-1] == "✅ CRMʼga yuborildi 10:58"
+    assert (
+        await reviews.refresh_push_footers(reviews.SessionLocal, sender, now=morning) == 0
+    )
+    # Marked cards are read only while young (STRIP_WINDOW, like the strips).
+    await outcomes.footer_moved(session, [cand.id])
+    await session.commit()
+    old = NOW + reviews.STRIP_WINDOW + timedelta(minutes=1)
+    assert await reviews.refresh_push_footers(reviews.SessionLocal, sender, now=old) == 0
+
+
+async def test_a_push_answered_before_a_long_pause_moves_the_footer_after_it(
+    session, setup, erp_world
+):
+    """The push lands, /toxtat holds the card job for an hour: the first run
+    after /yoq still puts «✅ CRMʼga yuborildi» on the ✅ card
+    (``crm_push._record`` marks it, ``outcomes.footer_moved``)."""
+    cand = await lead(session, state="approved")
+    review = await card(
+        session, cand, state="approved", answer="push", card_message_id=814
+    )
+    review.card_chat_id = OWNER
+    review.card_hash = "0" * 64
+    await session.commit()
+    async with reviews.SessionLocal() as s:
+        result = await crm_push.push_one(s, cand.id, now=NOW, erp=erp_world)
+    assert result.status == "sent", result
+    await owner.pause(session, by="owner:1", reason=None, now=NOW)
+    await session.commit()
+    sender = FakeSender()
+    held = await reviews.run_cards(sender, now=NOW + timedelta(minutes=2))
+    assert (held.held, held.footers) == ("paused", 0)
+    await owner.resume(session)
+    await session.commit()
+    later = NOW + timedelta(hours=1)
+    report = await reviews.run_cards(sender, now=later)
+    assert report.footers == 1
+    [(_, message, text, _, _)] = sender.edits
+    assert (message, text.splitlines()[-1]) == (814, "✅ CRMʼga yuborildi 11:00")
 
 
 async def test_an_approved_candidates_refusal_comes_back_as_a_new_card(session, setup):

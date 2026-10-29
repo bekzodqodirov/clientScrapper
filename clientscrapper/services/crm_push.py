@@ -1097,7 +1097,8 @@ async def _record(
     row = await _lock_push(session, push_log_id)
     assert row is not None
     prior = await _lock_push(session, repush_of) if repush_of is not None else None
-    if row.status in ("sending", "unknown"):
+    moved = row.status in ("sending", "unknown")
+    if moved:
         row.status = answer.status
         row.http_status = answer.http_status
         row.error = answer.error
@@ -1119,6 +1120,10 @@ async def _record(
                 refusal = Refusal(6, "attempts_spent")
             if refusal is not None:
                 await push_gate.record_refusals(session, candidate, [refusal], now=now)
+    if moved:
+        # The ✅ card follows the push even when this answer lands just
+        # before a /toxtat longer than reviews.PUSH_FOOTER_WINDOW.
+        await outcomes.footer_moved(session, [candidate_id])
     if breaker is not None:
         await erp_feeds.trip_breaker(
             session, breaker, status=answer.http_status or 0, now=now, by="push"
