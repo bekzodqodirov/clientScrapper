@@ -7,8 +7,7 @@ from __future__ import annotations
 import re
 
 from clientscrapper.collectors.base import Observation
-from clientscrapper.collectors.directories import stop_reason
-from clientscrapper.collectors.directories import nuxt
+from clientscrapper.collectors.directories import nuxt, stop_reason
 from clientscrapper.collectors.directories import topuz as tz
 from clientscrapper.collectors.directories.markup import parse
 from tests.collectors.directories_pages import page

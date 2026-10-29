@@ -54,6 +54,16 @@ row's own observation where it has one. A stop on a budget, a deadline or a
 breaker keeps what was found, the list rows of the cards not reached
 included.
 
+**One bad request costs that request** (the T-22 review): a list page or a
+card that fails in transport once the Fetcher's retries are spent
+(``TRANSPORT_FAILURES``), or that the Fetcher refuses for a reason of its own
+(``FetchError``), costs that seed or that card — a card's list row is kept —
+and is counted (``list_status.transport``, ``card_errors``); a page its
+parser cannot read likewise (``parse_errors``, logged by type). Only
+``TRANSPORT_STREAK`` transport failures in a row on one site end that site's
+night (``stops.transport``, its rows kept): the host stopped answering, and the
+other sites still run.
+
 Requests go through the run's ``Fetcher`` alone (robots.txt per host, the
 per-host pace — 0.3 req/s for these hosts, under 03 §2.6's 0.5 rps; glotr's
 ``Crawl-delay: 10`` wins — the breaker, the page budget). The run's session
@@ -64,6 +74,7 @@ lookups open a short session of their own.
 
 from __future__ import annotations
 
+import logging
 from collections import Counter
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
@@ -80,7 +91,9 @@ from clientscrapper.db.models import Observation as ObservationRow
 from clientscrapper.db.models import Source
 from clientscrapper.db.session import SessionLocal
 from clientscrapper.services.http import (
+    TRANSPORT_FAILURES,
     BudgetExhausted,
+    FetchError,
     FetchResult,
     HostPaused,
     RobotsDisallowed,
@@ -88,6 +101,8 @@ from clientscrapper.services.http import (
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
+
+log = logging.getLogger(__name__)
 
 PARENT: Final = "directories"
 Mode = Literal["diff", "full"]
@@ -99,6 +114,12 @@ FULL_NIGHTS: Final = range(1, 8)
 MAX_LIST_PAGES: Final = 60
 # A full crawl leaves alone a company observed this recently.
 CARD_FRESH: Final = timedelta(days=45)
+# Transport failures in a row that end one site's night: its host stopped
+# answering (the other sites still run).
+TRANSPORT_STREAK: Final = 5
+# What one request can raise that costs that request only; BudgetExhausted
+# and HostPaused (a breaker) stop the run and are caught before these.
+REQUEST_FAILURES: Final = (*TRANSPORT_FAILURES, FetchError)
 OWED_PROM: Final = (
     "refused by the site: Cloudflare 403 on robots.txt and /tags/optom/ "
     "(2026-10-29) — re-check from the VPS"
@@ -264,10 +285,16 @@ def _report() -> dict[str, Any]:
         "held_rows": 0,
         "known": 0,
         "card_missing": 0,
+        "card_errors": 0,
+        "parse_errors": 0,
         "robots": 0,
         "stops": Counter[str](),
         "list_status": Counter[str](),
     }
+
+
+class _SiteDown(Exception):
+    """``TRANSPORT_STREAK`` transport failures in a row on one site."""
 
 
 class Directories(Collector):
@@ -280,6 +307,7 @@ class Directories(Collector):
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self._ran: dict[str, str] = {}
+        self._streak = 0
 
     def beat_detail(self) -> dict[str, Any]:
         return {"mode": self.run_meta.get("mode"), "subsources": dict(self._ran)}
@@ -304,12 +332,41 @@ class Directories(Collector):
             assert sub.spec is not None
             stats = report[sub.site] = _report()
             self._ran[sub.site] = "ran"
-            for seed in seeds_for(sub, config):
-                stats["seeds"] += 1
-                await self._seed(
-                    sub.spec, seed, budget, mode=mode, now=now, stats=stats, seen=seen
-                )
+            self._streak = 0
+            try:
+                for seed in seeds_for(sub, config):
+                    stats["seeds"] += 1
+                    await self._seed(
+                        sub.spec, seed, budget, mode=mode, now=now, stats=stats, seen=seen
+                    )
+            except _SiteDown:
+                stats["stops"]["transport"] += 1
         return self.found
+
+    def _failed(self, spec: SiteSpec, url: str, exc: Exception) -> None:
+        """One request failed in transport: counted toward the site's streak."""
+        log.warning(
+            "directories: %s failed: %s",
+            spec.site,
+            type(exc).__name__,
+            extra={"source": spec.source_key, "url": url},
+        )
+        if isinstance(exc, TRANSPORT_FAILURES):
+            self._streak += 1
+            if self._streak >= TRANSPORT_STREAK:
+                raise _SiteDown(spec.site)
+
+    @staticmethod
+    def _unreadable(
+        spec: SiteSpec, url: str, exc: Exception, stats: dict[str, Any]
+    ) -> None:
+        stats["parse_errors"] += 1
+        log.warning(
+            "directories: %s page unreadable: %s",
+            spec.site,
+            type(exc).__name__,
+            extra={"source": spec.source_key, "url": url},
+        )
 
     async def _seed(
         self,
@@ -335,12 +392,23 @@ class Directories(Collector):
             except RobotsDisallowed:
                 stats["robots"] += 1
                 return
+            except (BudgetExhausted, HostPaused):
+                raise
+            except REQUEST_FAILURES as exc:
+                stats["list_status"]["transport"] += 1
+                self._failed(spec, url, exc)
+                return
+            self._streak = 0
             if not usable(result):
                 stats["list_status"][answer_of(result)] += 1
                 return
-            page = spec.parse_list(
-                result.body, url=result.final_url, fetched_at=result.fetched_at
-            )
+            try:
+                page = spec.parse_list(
+                    result.body, url=result.final_url, fetched_at=result.fetched_at
+                )
+            except Exception as exc:
+                self._unreadable(spec, url, exc, stats)
+                return
             stop = stop_reason(
                 page, spec=spec, asked=url, final=result.final_url, firsts=firsts
             )
@@ -391,34 +459,53 @@ class Directories(Collector):
                 continue
             todo.append(entry)
         for index, entry in enumerate(todo):
-            if not needs_card(entry):
-                self._keep_row(entry, stats)
-                continue
-            assert entry.card_url is not None
             try:
-                card = await self.fetcher.get(
-                    entry.card_url, source=spec.source_key, budget=budget
-                )
-            except (BudgetExhausted, HostPaused):
+                await self._entry(spec, entry, budget, stats)
+            except (BudgetExhausted, HostPaused, _SiteDown):
                 # Nothing parsed is lost: the rows of the cards not reached.
-                for rest in todo[index:]:
+                for rest in todo[index + 1 :]:
                     self._keep_row(rest, stats)
                 raise
-            except RobotsDisallowed:
-                stats["robots"] += 1
-                self._keep_row(entry, stats)
-                continue
-            found = (
-                spec.parse_card(card.body, url=card.final_url, fetched_at=card.fetched_at)
-                if usable(card)
-                else []
+
+    async def _entry(
+        self, spec: SiteSpec, entry: Entry, budget: Budget, stats: dict[str, Any]
+    ) -> None:
+        """One company of a list page: its card, or its list row."""
+        if not needs_card(entry):
+            self._keep_row(entry, stats)
+            return
+        assert entry.card_url is not None
+        try:
+            card = await self.fetcher.get(
+                entry.card_url, source=spec.source_key, budget=budget
             )
-            if found:
-                stats["cards"] += 1
-                self.found.extend(found)
-            else:
-                stats["card_missing"] += 1
-                self._keep_row(entry, stats)
+        except (BudgetExhausted, HostPaused):
+            self._keep_row(entry, stats)
+            raise
+        except RobotsDisallowed:
+            stats["robots"] += 1
+            self._keep_row(entry, stats)
+            return
+        except REQUEST_FAILURES as exc:
+            stats["card_errors"] += 1
+            self._keep_row(entry, stats)
+            self._failed(spec, entry.card_url, exc)
+            return
+        self._streak = 0
+        found: list[Observation] = []
+        if usable(card):
+            try:
+                found = spec.parse_card(
+                    card.body, url=card.final_url, fetched_at=card.fetched_at
+                )
+            except Exception as exc:
+                self._unreadable(spec, entry.card_url, exc, stats)
+        if found:
+            stats["cards"] += 1
+            self.found.extend(found)
+        else:
+            stats["card_missing"] += 1
+            self._keep_row(entry, stats)
 
     def _keep_row(self, entry: Entry, stats: dict[str, Any]) -> None:
         if entry.observation is None:
@@ -435,6 +522,7 @@ __all__ = [
     "MAX_LIST_PAGES",
     "PARENT",
     "SUBSOURCES",
+    "TRANSPORT_STREAK",
     "Directories",
     "SubSource",
     "crawl_mode",

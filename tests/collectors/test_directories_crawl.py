@@ -10,6 +10,7 @@ snapshots the rows it switches and puts them back (07 §1.0).
 
 from __future__ import annotations
 
+import dataclasses
 from collections import Counter
 from datetime import datetime, timedelta
 from itertools import pairwise
@@ -20,7 +21,9 @@ import httpx
 import pytest
 import sqlalchemy as sa
 
+from clientscrapper.collectors import directories
 from clientscrapper.collectors.directories import Directories
+from clientscrapper.collectors.directories import goldenpages as gp
 from clientscrapper.collectors.runner import run_collector
 from clientscrapper.db.models import CollectorRun, Evidence, Heartbeat, Source
 from clientscrapper.db.models import Observation as ObservationRow
@@ -492,3 +495,108 @@ async def test_an_unchanged_list_page_is_parsed_from_the_stored_copy(
     assert "304" not in gold["list_status"]
     assert gold["pages"] == 2 and gold["known"] == 28
     assert second.meta["unchanged"] >= 1
+
+
+def timeout(request: httpx.Request) -> httpx.Response:
+    raise httpx.ConnectTimeout("no answer", request=request)
+
+
+async def test_a_card_that_never_answers_costs_that_card_not_the_night(
+    session, rows, tmp_path
+):
+    """The Fetcher's retries spent, a transport error on one card: its list
+    row is kept and the crawl goes on — the other cards, the other sites."""
+    clock = FakeClock(THURSDAY)
+    web = Web(clock)
+
+    def company(request: httpx.Request) -> httpx.Response:
+        if Web.query(request) == {"Id": "85641"}:
+            return timeout(request)
+        return web.company(request)
+
+    web.site.add("https://www.goldenpages.uz/company/", company)
+    report = await run(web, clock, tmp_path)
+    assert report.status == "ok", report
+    gold = report.meta["subsources"]["goldenpages"]
+    assert (gold["card_errors"], gold["cards"]) == (1, 0)
+    by_source = await observations(session)
+    gold_rows = {o["source_ref"] for o in by_source["directories_goldenpages"]}
+    assert "goldenpages:85641" in gold_rows and len(gold_rows) == 28
+    # The crawl went on past the dead card: top.uz and glotr ran too.
+    assert by_source["directories"] and by_source["directories_glotr"]
+
+
+async def test_a_list_page_that_never_answers_costs_that_seed(session, rows, tmp_path):
+    clock = FakeClock(THURSDAY)
+    web = Web(clock)
+
+    def rubrics(request: httpx.Request) -> httpx.Response:
+        if Web.query(request) == {"Id": "1424"}:
+            return timeout(request)
+        return web.rubrics(request)
+
+    web.site.add("https://www.goldenpages.uz/rubrics/", rubrics)
+    report = await run(web, clock, tmp_path)
+    assert report.status == "ok", report
+    gold = report.meta["subsources"]["goldenpages"]
+    assert gold["list_status"]["transport"] == 1
+    # The next seed (106080, the China rubric) was read.
+    assert gold["pages"] == 1
+    by_source = await observations(session)
+    assert len(by_source["directories_goldenpages"]) == 8
+
+
+async def test_a_host_that_stops_answering_stops_its_own_site_only(
+    session, rows, tmp_path
+):
+    """Five transport failures in a row on one site end that site's crawl
+    (its list rows kept); the other sites still run."""
+    clock = FakeClock(THURSDAY)
+    web = Web(clock)
+    web.site.add("https://www.goldenpages.uz/company/", timeout)
+    report = await run(web, clock, tmp_path)
+    assert report.status == "ok", report
+    gold = report.meta["subsources"]["goldenpages"]
+    assert gold["card_errors"] == 5 and gold["stops"]["transport"] == 1
+    cards = [s for s in web.site.seen if s.path == "/company/"]
+    assert len(cards) == 5 * 3  # five cards, the Fetcher's three attempts each
+    by_source = await observations(session)
+    assert len(by_source["directories_goldenpages"]) == 20  # rubric 1424's rows
+    assert by_source["directories"] and by_source["directories_glotr"]
+
+
+async def test_a_page_the_parser_cannot_read_costs_that_page(session, rows, tmp_path):
+    for key in ("directories_yellowpages", "directories_glotr"):
+        await switch(key, enabled=False)
+    clock = FakeClock(THURSDAY)
+    web = Web(clock)
+    real = gp.SPEC.parse_card
+
+    def broken(body: bytes, *, url: str, fetched_at: datetime) -> list:
+        if url.endswith("85641"):
+            raise ValueError("a layout nobody recorded")
+        return real(body, url=url, fetched_at=fetched_at)
+
+    def broken_list(body: bytes, *, url: str, fetched_at: datetime):
+        if "106080" in url:
+            raise ValueError("a layout nobody recorded")
+        return gp.SPEC.parse_list(body, url=url, fetched_at=fetched_at)
+
+    spec = dataclasses.replace(gp.SPEC, parse_card=broken, parse_list=broken_list)
+    sub = next(s for s in directories.SUBSOURCES if s.site == "goldenpages")
+    patched = tuple(
+        dataclasses.replace(s, spec=spec) if s is sub else s
+        for s in directories.SUBSOURCES
+    )
+    original = directories.SUBSOURCES
+    directories.SUBSOURCES = patched
+    try:
+        report = await run(web, clock, tmp_path)
+    finally:
+        directories.SUBSOURCES = original
+    assert report.status == "ok", report
+    gold = report.meta["subsources"]["goldenpages"]
+    assert gold["parse_errors"] == 2
+    by_source = await observations(session)
+    refs = {o["source_ref"] for o in by_source["directories_goldenpages"]}
+    assert "goldenpages:85641" in refs and len(refs) == 20

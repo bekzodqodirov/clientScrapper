@@ -189,6 +189,14 @@ class ProxyUnavailable(FetchError):
     """``proxy=True`` with PROXY_URL blank."""
 
 
+# What a request can still raise once the retries are spent when the network
+# itself failed — a timeout, a dropped connection, a protocol error, too many
+# redirects, an undecodable body — and not a refusal of this layer's own
+# (``FetchError``). A caller that must outlive one bad request catches it by
+# this name: a collector may not import httpx (07 §1.2).
+TRANSPORT_FAILURES: Final = (httpx.HTTPError,)
+
+
 # --- the shapes the layer exchanges ------------------------------------------------
 
 
