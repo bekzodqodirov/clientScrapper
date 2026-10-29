@@ -835,6 +835,11 @@ def test_the_window_is_tashkent_time(now, opens):
         ({"kub": "2"}, "kub"),  # no stated volume
         ({"note": "Qoʻngʻiroq: <PHONE_1>"}, "pseudonym:note"),
         ({"note": "Pasport: <ID>"}, "pseudonym:note"),
+        # Every kind pseudonyms mints (its TOKEN_TRACE_RE, one home).
+        ({"note": "Masʼul: <NAME_1> (rahbar)"}, "pseudonym:note"),
+        ({"telegram": "@<TG_1>"}, "pseudonym:telegram"),
+        ({"instagram": "<IG_2>"}, "pseudonym:instagram"),
+        ({"evidence": "pochta <EMAIL_1>"}, "pseudonym:evidence"),
         ({"firma": "Namuna\x00 MChJ"}, "ill_formed:firma"),
         ({"evidence": "bad \ud83d half"}, "ill_formed:evidence"),
         ({"score": 72}, "type:score"),
