@@ -1222,7 +1222,7 @@ Not applied here (other files' homes): 10, 13, 14, 18, 19 (02's `/dnc`, `/vazn`,
 - §2.11 «What the inputs mean»: «earliest wins» only during the arrival's first 24 h (`stampFirstContacts` re-reads a stamped arrival only while `created_at ≥ now − 1 day`), the `at` that can move backwards then, and who each kind of evidence counts from (`contactEvidenceSql`); `lost_reason` is NULL before the dictionary except a text equal to a setting label, which comes back verbatim (`outcomesPage`'s `labelled`).
 - §8 row 9: the payload example in `PushPayload`'s body order (`utm_source` after `note`), `kub` only because the volume was stated.
 
-**T-07 third review (2026-10-24)** — checked against fullprompt `agent-feed` at `a4f9f433` (DECISIONS #1473–#1475, `inbound-notify.ts` `markContactedFromBot`, `service.ts` `setFollowUp`, `first-contact.ts`, AGENT-FEED.md §5):
+**T-07 third review (2026-10-24)** — checked against fullprompt `agent-feed` at `a4f9f433` (DECISIONS #1563–#1565, `inbound-notify.ts` `markContactedFromBot`, `service.ts` `setFollowUp`, `first-contact.ts`, AGENT-FEED.md §5):
 
 - §2.10 rule 4: the ERP's 503 «normally» means no ledger row — a ledger row can commit while its answer is lost (the retry is a replay; the arrival shows as `created`, never contacted), and a repeating half-way failure adds a lenta note per POST (05 §A.13 (i), (iii)).
 - §2.10 rule 7: the in-flight chain is per copy of the landing module (one lander per channel) and its wait has no bound (05 §A.13 (iv)).

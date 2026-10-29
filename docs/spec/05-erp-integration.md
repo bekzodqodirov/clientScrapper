@@ -1,7 +1,9 @@
 # 05 — ERP integration (fullprompt branch `agent-feed` + agent push/feeds)
 
 Scope: both sides of the ERP contract. **Part A is what was built** on fullprompt branch
-`agent-feed` (head `d138b3bc`, 2026-10-24) — a summary for the Python side, not a proposal.
+`agent-feed` (head `efc0ec27`, 2026-10-29: built at `d138b3bc` on 2026-10-24, merged with `main`
+`a4e1b1c8` in `2ac5bf7c`, the merge review's fixes on top — A.0) — a summary for the Python side, not a
+proposal.
 **Part B** is `clientscrapper/services/crm_push.py` and `services/erp_feeds.py`, written to consume
 Part A. Tables referenced on the agent side (`push_log`, `outcomes`, `suppression`,
 `lead_candidates`, `sources.config`) are defined in `02-data-model.md` §2.8–2.11; this file does not
@@ -51,19 +53,39 @@ runs `pnpm db:migrate && pnpm db:seed`.
 
 ## A. fullprompt — what was built on `agent-feed`
 
-### A.0 Status (2026-10-24)
+### A.0 Status (2026-10-24, the merge 2026-10-29)
 
+- **After the merge (2026-10-29).** `agent-feed` took `origin/main` `a4e1b1c8` in `2ac5bf7c` (main's
+  AI sotuvchi and the rounds before it, migrations 0136-0138 — the journal is now 139 files, still none
+  of this branch's own), and the ERP renumbered this branch's DECISIONS +90 because main had taken
+  those numbers first: the build's and its four reviews' old numbers 1455-1477 are **#1545-#1567** (this spec cites
+  the new numbers; `tests/test_spec_erp_citations.py` fences it). The merge review's fixes are on top
+  (head `efc0ec27`, ERP DECISIONS #1568-#1570): (1) a Telegram Business away or greeting message — the
+  ERP account's own robot, flagged `auto_sent` by the listener — is no first contact, so
+  `contacted_at` / `contact_kind` never report it (it also silenced the owner's advert reminder);
+  (2) the AI sotuvchi's ✅'d reply to a lead whose source is `agent` waits for THIS agent's playbook
+  window — Monday-Saturday 10:00-17:00 Tashkent, never Sunday, Friday 12:00-14:00 avoided, no night
+  exception — and a ✅ that could only go after the question is a day old is refused `window_closed`
+  (fullprompt docs/AGENT-FEED.md §2a; built as the owner's ⭐ (a), owed to him as a confirmation);
+  (3) a person can no longer tag a lead «Agent (qidiruv)» by a hand-posted form (`source_not_pickable`);
+  (4) the doors screen's hint on the agent door names the agent server's `.env`. Nothing the AI drafts
+  reaches a prospect without the owner's ✅, and it never writes first. **The wire is unchanged:**
+  `agent-feed.ts`, `agent-feed-door.ts`, `inbound-webhook.ts`, `clip.ts` and both feed routes are
+  identical from `d138b3bc` to `efc0ec27`; the one landing change is main's — `inboundMatch` never joins
+  an arrival onto a lead ABOUT a colleague's client (0136 `lead_about_client`). The captured fixtures
+  stay valid. An AI-approved reply reaches the outcomes as `contact_kind: "telegram"`, exactly like a
+  seller's own message. Still: no PR open, nothing merged into `main`, nothing deployed.
 - Repository `bekzodqodirov/fullprompt`, branch `agent-feed`, pushed to `origin/agent-feed` at
   **`d138b3bc`** (2026-10-24 11:20 UTC). Fourteen commits (`git rev-list 7bea3051..d138b3bc`) over
   `origin/main` at `7bea3051` — the merge commit of PR #129 into `main` (parents `71025447` and `24607e8c`; the PR's
   head, the tip of `claude/gsr-logistics-wms-phase1-o8h4en`, is `24607e8c`, an ancestor of it), so the
   agent-feed PR targets `main`: the build (`98437a75`, `2ebafe83`, `fec8e1b4`,
-  `0bd4bcdc`, `abcc9e6a` — DECISIONS #1455–#1459), the first review's fixes (`70a28720`, `c6537cae`,
-  `f2d96526` — #1460–#1466), the second review's fixes (`aefbf278`, `23fe1736` — #1467–#1472) and
-  the third review's (`bfb5625b` code, `a4f9f433` docs — #1473–#1475: cuts back to UTF-16 units with a
+  `0bd4bcdc`, `abcc9e6a` — DECISIONS #1545–#1549), the first review's fixes (`70a28720`, `c6537cae`,
+  `f2d96526` — #1550–#1556), the second review's fixes (`aefbf278`, `23fe1736` — #1557–#1562) and
+  the third review's (`bfb5625b` code, `a4f9f433` docs — #1563–#1565: cuts back to UTF-16 units with a
   whole-emoji back-off, NUL storable on every door, a `ref` that never throws, the `external_id`
   spelled as postgres stores it) and the fourth review's (`021a2ca5` code, `d138b3bc` docs —
-  #1476–#1477: an `external_id` too long for the ledger's index lands whole).
+  #1566–#1567: an `external_id` too long for the ledger's index lands whole).
 - **The fourth review, for the agent.** An `external_id` that the ledger's unique index
   (`lead_intakes_external_idx`, a btree on `(channel, external_id)`) refuses for its size used to fail
   the ledger row AFTER the lead and its lenta note (54000): a 503 on every retry here, a 200 with an
@@ -77,23 +99,24 @@ runs `pnpm db:migrate && pnpm db:seed`.
   Every id the index holds keeps its own spelling. The agent's ids are `cs:<uuid>:<yyyymm>`, 46
   bytes, so the agent is not affected: nothing changes in the push, the reconcile or the outcomes
   logic (§B.1, §B.2).
-- **No PR is open, nothing is merged, nothing is deployed.** No migration: the journal stays at 136
-  files, so a deploy is checked by the build stamp at `/api/version`, not by the migration count.
+- **No PR is open, nothing is merged, nothing is deployed.** No migration of its own: the journal is
+  main's (136 files at `d138b3bc`, 139 after the merge), so a deploy is checked by the build stamp at `/api/version`, not by the migration count.
 - 42 files, +4370 / −79 (the 41st, the extended `tests/integration/field-map.integration.test.ts`,
   came with the third review; the 42nd, the new `tests/unit/intake-id.test.ts`, with the fourth). The
   wire contract's ERP-side home is `docs/AGENT-FEED.md` (443 lines; §0 the
   owner's five steps in Uzbek, §1 the door, §2 the landing, §3 the feeds, §4 privacy, §5 honest limits,
   §6 the «Boshqa» fallback).
 - Gates of the last round (the fourth review): full vitest 676 files / 7642 tests green; 5 red proofs
-  by string edit with a hash-verified restore, all red (#1477). The third review's: a freshly
+  by string edit with a hash-verified restore, all red (#1567). The third review's: a freshly
   recreated `gsr_ci` migrated (136 = 136), seeded and demo-seeded; `pnpm typecheck` and `pnpm lint`
   exit 0; full vitest 675 files / 7636 tests green; 12 red proofs by string edit, all red. Playwright
   was not re-run in rounds 2–4 (no UI change); round 1 ran `pnpm build`, the bundle host sweep and five
   e2e specs (16/16) and looked at the doors card at 360 px. Red proofs over the build and the review
-  rounds: 16 + 21 + 16 + 12 + 5 (#1458, #1466, #1472, #1475, #1477). The vitest and e2e counts come
+  rounds: 16 + 21 + 16 + 12 + 5 (#1548, #1556, #1562, #1565, #1567). The vitest and e2e counts come
   from the build session's own report: no fullprompt document records them (DECISIONS records only the
   red proofs) — the PR's CI run is where they are re-checked.
-- The captured fixtures (07 §1.0) were taken at `23fe1736` and stay valid at `d138b3bc`: neither the
+- The captured fixtures (07 §1.0) were taken at `23fe1736` and stay valid at `d138b3bc` and at
+  `efc0ec27` (the merge changes no feed file, first bullet): neither the
   third nor the fourth review changes a captured answer — no captured value reaches a cut (the longest
   captured string is a 128-unit note), none carries a NUL, a lone surrogate or a deep body, and no
   captured `external_id` is longer than 46 bytes, far under the 2,048 bytes at or under which an id is never
@@ -114,7 +137,7 @@ runs `pnpm db:migrate && pnpm db:seed`.
 | `src/modules/wms/crm/inbound-notify.ts` | `startContactClock(intakeId, now, remind)`; `announceArrival` passes `!isReminderExempt(sourceKey)`. |
 | `src/modules/wms/crm/inbound-contact-jobs.ts` | Comment only: the 90-day branch and its measured cost. |
 | `src/modules/wms/crm/analytics.ts` | /crm/tahlil's «Birinchi aloqa» median takes only contacts within `CONTACT_LOOKBACK_DAYS` of the clock (late agent contacts stay in the late counts). |
-| `src/modules/wms/crm/field-map.ts`, `src/modules/wms/crm/service.ts` | `clipUnits` cuts in `normalizeKey`/`capturePairs` (key 80, value 300) and in `addActivity`'s 200-unit audit excerpt — the UTF-16 budget the old `slice` had, so a `lead_field_map` key saved before the deploy is spelled the same and still matches (#1473). |
+| `src/modules/wms/crm/field-map.ts`, `src/modules/wms/crm/service.ts` | `clipUnits` cuts in `normalizeKey`/`capturePairs` (key 80, value 300) and in `addActivity`'s 200-unit audit excerpt — the UTF-16 budget the old `slice` had, so a `lead_field_map` key saved before the deploy is spelled the same and still matches (#1563). |
 | `src/modules/wms/client-cabinet/service.ts` | `activeClientsByPhone` reads a non-array `clients.phones` as no phones (one such card used to fail every arrival). |
 | `src/modules/platform/text/clip.ts` (new) | `storableText` (every lone surrogate and NUL → U+FFFD, one unit for one), `clipUnits` (`storableText(t).slice(0, max)`, minus a high surrogate left dangling at the edge), `storableJson` (`JSON.stringify` untouched, then its `\u0000` and lone `\udXXX` escapes rewritten to `\ufffd` in the output — so two keys of one object that differ only there become one key, postgres keeping the last value). |
 | `src/modules/platform/settings/reason-list.ts` (new), `settings/service.ts`, `src/app/(protected)/admin/settings/page.tsx` | Setting `agent_no_contact_reasons` (default `Qayta qilinmasin`), its validator and the refusal sentence `badValueReasons`. |
@@ -122,7 +145,7 @@ runs `pnpm db:migrate && pnpm db:seed`.
 | `scripts/seed.ts` | `{ key: 'agent', name: 'Agent (qidiruv)', sortOrder: 190 }` (just above «Boshqa» 200; 90 is «Oʻzi keldi»'s). |
 | `src/app/(protected)/crm/(pages)/kelganlar/door-views.ts` (new), `doors.tsx`, `page.tsx` | The doors screen decided on the server: no form or bot link for the agent's door; a door's key sent only to `admin.settings.manage`. |
 | `src/app/(protected)/crm/leads/new/page.tsx`, `crm/leads/[id]/page.tsx`, `src/app/(public)/ariza/page.tsx` | Person doors never claim the agent's source. |
-| `docs/AGENT-FEED.md` (new), `docs/ADS.md` §1 §5.3, `DECISIONS.md` #1455–#1477, `CHANGELOG.md` (Uzbek) | Docs. |
+| `docs/AGENT-FEED.md` (new), `docs/ADS.md` §1 §5.3, `DECISIONS.md` #1545–#1567, `CHANGELOG.md` (Uzbek) | Docs. |
 | `tests/unit/agent-feed.test.ts`, `agent-feed-door.test.ts`, `agent-door-landing.test.ts`, `inbound-source-keys.test.ts`, `text-clip.test.ts`, `intake-id.test.ts`; `tests/integration/agent-feed.integration.test.ts` (1445 lines); `tests/integration/field-map.integration.test.ts` (extended, +30) | Tests (§A.12). |
 
 `platform` imports nothing from `wms` (the reason parser lives in `platform/settings` because the
@@ -156,7 +179,7 @@ A cut never halves an emoji: `clipUnits(t, max)` = `storableText(t).slice(0, max
 surrogate left dangling at the edge is dropped, so an emoji that does not fit is left out whole —
 while a sequence of several code points (a ZWJ family, a flag, a skin tone, a keycap, a letter +
 combining mark) can lose its tail at the cut (AGENT-FEED.md §1). Every string the old `slice` could
-store comes out spelled exactly as before (#1473).
+store comes out spelled exactly as before (#1563).
 
 **The landed note** = the agent's `note`, then one `key: value` line per extra key in the body's own
 key order, then **every whitespace run (line breaks included) collapsed to one space**, trimmed, and
@@ -178,7 +201,7 @@ normalised before the chain key and the replay SELECT, so the outcomes feed hand
 U+FFFD in its place (the agent's own `cs:` ids carry neither). It follows that two `external_id`s
 that differ only by a NUL against a U+FFFD, or by which lone surrogate, are ONE id — the second
 delivery is a replay — and that two `ref` keys of one object that differ only that way collapse to one
-key, the last value kept (AGENT-FEED.md §1, #1477). The agent's payload tests already keep every NUL
+key, the last value kept (AGENT-FEED.md §1, #1567). The agent's payload tests already keep every NUL
 and lone surrogate out of every value (07 §1.6), so neither reaches it. The `name` is not checked for
 a minimum: an empty one becomes `agent · <digits>`.
 
@@ -187,7 +210,7 @@ starting `cs:` (`agent-feed.ts`, `external_id LIKE 'cs:%'`). An id that the ledg
 refuses for its size — only one over 2,048 UTF-8 bytes can be refused, and postgres takes about 2,680
 bytes it cannot compress — is stored as `sha256:` + the hex SHA-256 of its UTF-8 bytes (after the
 U+FFFD rule): it lands, its retry is a replay, and the outcomes feed never shows it. Every id the
-index holds keeps its own spelling (#1476). The agent's ids are far below the limit, so this never
+index holds keeps its own spelling (#1566). The agent's ids are far below the limit, so this never
 applies to them.
 
 **Answer** (captured in `post_*.json`, `err_post_404_*.txt`; the 503 is read from the code):
@@ -212,11 +235,11 @@ so each channel's deliveries meet in one map; production runs one app process) a
 replay; across processes only the ledger's unique index stands (one ledger row, not one lead). The
 wait has no bound (§A.13 (iv)). A landing that failed AFTER its lead was written (only a database
 failure half-way does that now: no text the body carries — an emoji at a cut, a lone surrogate, a
-NUL, a body nested too deep, an id too long for the index — makes a write refuse any more, #1467,
-#1473, #1476) leaves that lead standing with no ledger row; the retry normally JOINS it, so the
+NUL, a body nested too deep, an id too long for the index — makes a write refuse any more, #1557,
+#1563, #1566) leaves that lead standing with no ledger row; the retry normally JOINS it, so the
 outcome reads `joined` and the seller hears «🔁 Qayta yozdi» about a lead whose «🆕» never came
 (AGENT-FEED.md §1, §5) — §A.13 lists when it makes a second lead or comes back `capped` instead. One
-input-driven cause that repeats on every attempt is known (AGENT-FEED.md §1, §5; #1477): a body of
+input-driven cause that repeats on every attempt is known (AGENT-FEED.md §1, §5; #1567): a body of
 tens of megabytes — `ref` is the whole body, nothing caps a route handler's body, and postgres
 refuses a jsonb past its limits (measured in postgres, not through the route: an array of twenty
 million zeros, about 40 MB of JSON, is refused; ten million is stored) — would land its lead and fail
@@ -514,8 +537,8 @@ body nested 3,000 deep stored whole and one 50,000 deep kept as `{"_truncated":t
 feed (green on a 17,000-entry copy). `field-map.integration.test.ts` maps the old 80-unit
 spelling of a question with an emoji in its first 80 units and lands the whole question (kub filled);
 `text-clip.test.ts` is a property test that `clipUnits` equals `slice` for every text `slice` could
-store. Red proofs (fullprompt DECISIONS): 16 for the build (#1458), 21 for the first review (#1466),
-16 for the second review (#1472), 12 for the third (#1475), 5 for the fourth (#1477).
+store. Red proofs (fullprompt DECISIONS): 16 for the build (#1548), 21 for the first review (#1556),
+16 for the second review (#1562), 12 for the third (#1565), 5 for the fourth (#1567).
 
 ### A.13 ERP-stated limits the agent designs around
 
@@ -530,7 +553,7 @@ store. Red proofs (fullprompt DECISIONS): 16 for the build (#1458), 21 for the f
 - A contact from a personal Telegram account whose chat sits undecided on the tray is not reported.
 - The fallback clause is permanent: ignore outcome rows whose `external_id` the agent never pushed.
 - A landing that fails half-way (the database, after the lead's INSERT) leaves an orphan lead the
-  retry normally joins (§A.2). Four narrower cases the ERP states (AGENT-FEED.md §5, DECISIONS #1475 —
+  retry normally joins (§A.2). Four narrower cases the ERP states (AGENT-FEED.md §5, DECISIONS #1565 —
   reasoned, not reproduced):
   (i) the ledger row COMMITS and its answer is lost on the way back: the agent is told 503, its retry
   is a replay answered 200, and nothing announces that arrival again — no «🆕», no contact clock — so
@@ -540,7 +563,7 @@ store. Red proofs (fullprompt DECISIONS): 16 for the build (#1458), 21 for the f
   meanwhile (no open lead to join), or comes back `dropped/capped` (no `lead_id`) while the orphan
   stands, when other agent arrivals on that phone filled the cap;
   (iii) a cause that repeated on every attempt would answer 503 to every retry and add one lenta note
-  each — up to 9 notes for the agent's 9 POSTs (§B.1); one is known since #1477 and no agent body
+  each — up to 9 notes for the agent's 9 POSTs (§B.1); one is known since #1567 and no agent body
   reaches it: a body of tens of megabytes (about 40 MB of JSON, measured in postgres), which postgres
   refuses as jsonb after the lead was written (§A.2) — the agent's bodies are a few KB;
   (iv) the in-flight chain is per copy of the landing module — each channel that carries an id has one
@@ -632,7 +655,7 @@ OPENER_MAX = 220
 NAME_MAX = 120          # after the ERP's whitespace collapse; every limit here is measured by text_len() below
 COMPANY_MAX = 200       # leads.company on a created lead
 PAIR_KEY_MAX, PAIR_VALUE_MAX, PAIRS_MAX = 80, 300, 30  # ERP capturePairs
-def text_len(s: str) -> int: return len(s.encode("utf-16-le")) // 2   # UTF-16 units — the measure of both agent-feed (clipUnits, DECISIONS #1473) and production 7bea3051, which the «Boshqa» fallback posts to (trim() = .replace(/\s+/g, ' ').trim().slice(0, max)); a cut never halves an emoji on agent-feed, and on production an emoji at a cut throws after the lead is written
+def text_len(s: str) -> int: return len(s.encode("utf-16-le")) // 2   # UTF-16 units — the measure of both agent-feed (clipUnits, DECISIONS #1563) and production 7bea3051, which the «Boshqa» fallback posts to (trim() = .replace(/\s+/g, ' ').trim().slice(0, max)); a cut never halves an emoji on agent-feed, and on production an emoji at a cut throws after the lead is written
 PUSH_DAYS = range(0, 6)                                # Mon–Sat
 PUSH_FROM, PUSH_TO = time(9, 30), time(17, 30)         # Asia/Tashkent (02 §2.10 item 2)
 ATTEMPT_DELAYS = {2: timedelta(minutes=5), 3: timedelta(minutes=30)}   # between push_log attempts (the HTTP tries INSIDE one attempt are with_backoff's, below)
@@ -1182,7 +1205,8 @@ quarter 90 d / year neither — `since` always ends in `Z`), `test_outcomes_igno
 `auto_push_forbidden`), `test_manual_import_retired_after_full_pull`, `test_suppression_fresh`
 (26 h / 3 h / `salt_id` edges; feed unconfigured → true), `test_feeds_not_called_during_fallback`.
 Recorded fixtures: `tests/fixtures/erp/` — captured from `agent-feed` at `23fe1736` on a seeded
-database (07 §1.0 lists the files) and still valid at `d138b3bc`: neither the third nor the fourth
+database (07 §1.0 lists the files) and still valid at `d138b3bc` and after the merge at `efc0ec27`
+(A.0): neither the third nor the fourth
 review changes a captured answer (no captured value reaches a cut or carries a NUL, a lone surrogate
 or a deep body, and no captured `external_id` is over 46 bytes, A.0);
 `tests/test_erp_feeds_contract.py` runs the parsers over them.
@@ -1254,7 +1278,7 @@ SUPPRESSION (full, salt changed)              OUTCOMES (nightly)
 8. ~~Fixtures captured or hand-written?~~ — resolved: captured from `23fe1736` (07 §1.0).
 9. 02 §2.10 rule 5's one re-push needs `push_log.superseded_at` (migration `0002_erp_contract`, T-10). Accept, or keep `unknown`/`sent` rows blocking for ever and leave every unconfirmed push to `/push tekshir`? (Recommended: accept — without it a 2xx row can never be retried, because `ck_push_log_sent` forbids `failed` on a 2xx.)
 10. AGENT-FEED.md §0 step 4 says arrivals before the `kub` mapping route by rule B; the code reads a «N kub» from the note first (A.14 — VERIFIED 2026-10-24: `mapped.volumeM3 ?? textVolume(name, note)` in `landOnce`, and AGENT-FEED.md line 46 still says «kubsiz qoida (B)»). Since the agent now writes every band with a number (§B.1 `BAND_HAJM`), nearly every agent push routes by rule A before and after the mapping. Ask the ERP session to correct the sentence; nothing to ask the owner.
-11. The orphan lead (A.2, A.13): the ERP chose not to claim the ledger row first (again at #1473, which would have closed the class for any input postgres refuses next). The agent lives with `joined` after a 503; is a «🔁 Qayta yozdi» about a never-announced lead acceptable to the owner, or should the ERP adopt the claim-first ledger later?
+11. The orphan lead (A.2, A.13): the ERP chose not to claim the ledger row first (again at #1563, which would have closed the class for any input postgres refuses next). The agent lives with `joined` after a 503; is a «🔁 Qayta yozdi» about a never-announced lead acceptable to the owner, or should the ERP adopt the claim-first ledger later?
 
 Owner decisions that came out of the T-07 verification (2026-10-24) — each is asked of Bekzod in
 Uzbek in **01 §7** (the numbered question there, its options and the ⭐ recommendation); here only
@@ -1297,7 +1321,8 @@ Raised by the wave-3 build (2026-10-29), agent side:
 
 ## Acceptance criteria
 
-- fullprompt `agent-feed` (head `d138b3bc`: built and twice reviewed at `23fe1736`, the third review's fixes `bfb5625b`, the fourth's `021a2ca5`; T-07): `pnpm typecheck && pnpm lint && pnpm test` green on a fresh `gsr_ci` in CI's order (met, by the build session's report: 675 files / 7636 tests after the third review, full vitest 676 files / 7642 tests after the fourth — re-checked by the PR's CI); an arrival carrying an emoji at a cut, a lone surrogate, a NUL (in any field or the `external_id`), a body nested too deep or an `external_id` too long for the ledger's index lands whole with 200 and one note, its retry a replay (met, pinned through the real route; the long id also on the Google door's landing); a `lead_field_map` key saved before the deploy still matches (met); no migration (met); `GET /api/agent/suppression` and `/outcomes` answer 404 without a key or with `X-ERP-Key` only, 400 `bad_cursor`/`bad_since` on a bad cursor or `since`, 503 JSON when the database fails after the key was sent, 200 gzipped ≥ 1 KB with the documented bodies and `resume` (met; captured except the 503 — no capture has the ERP database down — which is read from the code and pinned by fullprompt `tests/unit/agent-feed-door.test.ts` and `agent-door-landing.test.ts`); an `agent` arrival on a client-book (active or inactive, card, person or won/attached lead, 7–8-digit card by suffix) or «Qayta qilinmasin» phone writes `dropped/suppressed`, creates nothing and notifies nobody (met); an `agent` lead has `contact_clock_at` set and `contact_due_at NULL`, is never claimed by `remindUntouched`, and gets `contacted_at` from `stampFirstContacts` for 90 days (met); the agent door answers 503 to a landing that threw and every other door keeps its 200 (met); `tiktok`/form arrivals behave exactly as before (control group, met); the setting is described in 4 locales (met); the seed adds exactly one row (met); `docs/AGENT-FEED.md` lets the Python side be built without reading TypeScript (met). **Still open: the PR, the merge, the deploy and the owner's five steps (A.14).**
+- fullprompt `agent-feed` (head `efc0ec27` after the merge with main `a4e1b1c8` and its review, A.0;
+  before it `d138b3bc`: built and twice reviewed at `23fe1736`, the third review's fixes `bfb5625b`, the fourth's `021a2ca5`; T-07): `pnpm typecheck && pnpm lint && pnpm test` green on a fresh `gsr_ci` in CI's order (met, by the build session's report: 675 files / 7636 tests after the third review, full vitest 676 files / 7642 tests after the fourth — re-checked by the PR's CI); an arrival carrying an emoji at a cut, a lone surrogate, a NUL (in any field or the `external_id`), a body nested too deep or an `external_id` too long for the ledger's index lands whole with 200 and one note, its retry a replay (met, pinned through the real route; the long id also on the Google door's landing); a `lead_field_map` key saved before the deploy still matches (met); no migration (met); `GET /api/agent/suppression` and `/outcomes` answer 404 without a key or with `X-ERP-Key` only, 400 `bad_cursor`/`bad_since` on a bad cursor or `since`, 503 JSON when the database fails after the key was sent, 200 gzipped ≥ 1 KB with the documented bodies and `resume` (met; captured except the 503 — no capture has the ERP database down — which is read from the code and pinned by fullprompt `tests/unit/agent-feed-door.test.ts` and `agent-door-landing.test.ts`); an `agent` arrival on a client-book (active or inactive, card, person or won/attached lead, 7–8-digit card by suffix) or «Qayta qilinmasin» phone writes `dropped/suppressed`, creates nothing and notifies nobody (met); an `agent` lead has `contact_clock_at` set and `contact_due_at NULL`, is never claimed by `remindUntouched`, and gets `contacted_at` from `stampFirstContacts` for 90 days (met); the agent door answers 503 to a landing that threw and every other door keeps its 200 (met); `tiktok`/form arrivals behave exactly as before (control group, met); the setting is described in 4 locales (met); the seed adds exactly one row (met); `docs/AGENT-FEED.md` lets the Python side be built without reading TypeScript (met). **Still open: the PR, the merge, the deploy and the owner's five steps (A.14).**
 - Agent: `make test` green with the fake ERP covering 200 / 404 / 503 / 503 committed (the retry a replay) / non-JSON 5xx (empty-body 500, proxy HTML) / read timeout with the first request still running / replay / joined / orphan-joined / client (fallback) / `throw200` (fallback) / badjson and both feeds; a 404 trips the breaker and alerts once; a 3xx is never followed and trips `erp_redirect`; a 503 is retried and never trips it; a read timeout is never resent inside the attempt and lands as `unknown`, promoted by the next outcomes read; a 2xx with an unreadable body lands as `unknown`, never `sent`; an unconfirmed `sent`/`unknown` row is re-pushed at most once (02 §2.10 rule 5); `salt_id` change forces a full pull before any push; a full pull never sends `since` or `cursor`, and only it deletes; `suppression_fresh()` refuses pushes at 26 h without a full pull or 3 h without a delta; a shrunk full pull deletes nothing; a full pull retires exactly the `manual_import` tails whose hash it carries; the four outcomes walks send the documented params and the stored cursor is the last non-null `resume`; outcome rows the agent never pushed are ignored; labels match the table for every row kind and the local suppression rows follow the labels both ways (retractions); precision/auto-push flips both ways at the thresholds and never on while `auto_push_forbidden`; the fallback (`other` + both headers + `utm_source` after the note) passes the same push tests and makes no feed call; no U+0000 or lone surrogate ever reaches a body, the landed note skips empty values, and every band routes by its low end; `make push-test` makes a new `external_id` every run; `tests/test_no_telegram_writes.py` stays green (nothing here sends to a prospect); no secret in repo or logs (`RedactBodies` covers `X-GSR-Key`/`X-ERP-Key` headers and the payload's `phone`).
 
 ## Review pass changelog
@@ -1318,7 +1343,7 @@ others point here):
 - **36** — §B.3 Routing row marks «keyword rule reads the note» UNVERIFIED with a day-1 `make push-test` check; §A.5 marks the existence of both `clients.created_at`/`updated_at` UNVERIFIED with a `\d clients` check.
 - Not touching this file (already consistent here, or homed elsewhere): 2, 11, 20, 22 (05 is the home and already says what the other files now point to); 1, 4–6, 8–10, 12–15, 19, 23–26, 29–31, 34, 35, 37, 38.
 
-**T-07 as built (2026-10-24)** — fullprompt `agent-feed` at `23fe1736` (ERP DECISIONS #1455–#1472, two review rounds), read from the code and `docs/AGENT-FEED.md`:
+**T-07 as built (2026-10-24)** — fullprompt `agent-feed` at `23fe1736` (ERP DECISIONS #1545–#1562, two review rounds), read from the code and `docs/AGENT-FEED.md`:
 
 - Part A rewritten from a proposal into a summary of the build: status and gates (A.0), the 40-file map (A.1), the door with its 200 / 503 / 5xx-HTML / 404 answers, code-point limits, the landed-note assembly, `company`/`firma`, the replay fence with the in-process per-id chain and the orphan (A.2), the landing order with `no_phone`, per-family caps and the belt before the client check (A.3), the clock with `contact_due_at NULL` and the 90-day look-back (A.4), the GET door (A.5), the 3-part microsecond cursor, `resume`, strict `since`, `limit` (A.6), the suppression kinds incl. person records and won/attached leads, the tail rules (A.7), the belt by `phonesMatch` incl. 7–8-digit whole values (A.8), the outcomes feed's 15 fields with labels-only `lost_reason` and `no_contact` (A.9), the setting (A.10), seed 190 and the doors screen's key gating (A.11), tests (A.12), limits (A.13), what is still to do and the owner's five steps in Uzbek (A.14). §0 kept as the pre-build record, marked superseded.
 - §B.1: `X-GSR-Key` is the header the ERP reads (`X-ERP-Key` sent, ignored); `RESERVED_BODY_KEYS`; field order puts `utm_source` right after `note`; `landed_note()` and its 1000 budget; every limit measured by `text_len` (UTF-16 units — safe for both the new code-point cuts and the old production build the fallback posts to); no resend after a read timeout (`MAY_HAVE_LANDED` → `unknown`), retries only when nothing reached the ERP or it answered 5xx (503 = nothing recorded); the mapping table gains the timeout and 503 rows; the orphan join; same-`external_id` and superseded rows count for no pre-flight; `make push-test` mints a new company (new `external_id`) per run and writes `push_log`.
@@ -1337,27 +1362,27 @@ others point here):
 - A.2 / §B.1: caps are rolling 24 h and the source cap counts every arrival of the source; `RESERVED_BODY_KEYS` extended to `fromPlain`'s whole `known` set plus `user_column_data`, `IDENTITY_KEYS` added; `landed_note()` uses JavaScript's `\s` written out (Python's class differs on U+001C–U+001F, U+0085, U+FEFF).
 - §B.1: a 5xx is retried because a re-send is fenced, not because a 5xx proves nothing landed (a proxy 502/504 can follow a recorded arrival); a new 3xx row (`http_3xx`, never followed, breaker `erp_redirect`); the fallback's 200-on-throw may leave an orphan the re-push joins (fake mode `throw200_orphan`); `make push-test` skips exactly 04 §7 item 13 and gate 1. §B.2 feeds map 3xx the same way.
 - §B.3 Routing: an unknown `/ariza?manba=` lands under «Sayt»; `other` gets bot `ad_<unknown>` links and hand-posted forms.
-- A.0: `7bea3051` is `origin/main` (PR #129's merge; its head `24607e8c`); the vitest/e2e counts are the build session's report, not a repo record. A.12 red proofs 16 + 21 + 16 (DECISIONS #1458, #1466, #1472). A.6/A.7 tail rules: CR, tabs, runs of 16–120 digits. §B.2 step 4: `aefbf278` removed the 998-run chunks from the feed (fragments only from the belt), and no pull predates it. A.7/A.9 examples copied from `suppression_full.json` / `outcomes_since.json`. §B.2 labels note: a free-text reason equal to a setting label comes back verbatim. Acceptance: the 503 is pinned by unit tests, not captured.
+- A.0: `7bea3051` is `origin/main` (PR #129's merge; its head `24607e8c`); the vitest/e2e counts are the build session's report, not a repo record. A.12 red proofs 16 + 21 + 16 (DECISIONS #1548, #1556, #1562). A.6/A.7 tail rules: CR, tabs, runs of 16–120 digits. §B.2 step 4: `aefbf278` removed the 998-run chunks from the feed (fragments only from the belt), and no pull predates it. A.7/A.9 examples copied from `suppression_full.json` / `outcomes_since.json`. §B.2 labels note: a free-text reason equal to a setting label comes back verbatim. Acceptance: the 503 is pinned by unit tests, not captured.
 - Previous editor's open items now checked: production `7bea3051` cuts by UTF-16 units and answers 200 to a thrown landing (resolved, §B.1 `text_len`); `landOnce` routes by `mapped.volumeM3 ?? textVolume(name, note)` (Q10 VERIFIED, still an ERP doc fix); the «📞 Bogʻlandim» note maps to `note` from any presser (A.4). Open questions 12–17 added (owner decisions asked in 01 §7).
 
-**T-07 third review (2026-10-24)** — fullprompt `agent-feed` moved to `a4f9f433` (`bfb5625b` code, `a4f9f433` docs; DECISIONS #1473–#1475). The 11 mismatches the re-verification left were each re-read in the code at that head (`platform/text/clip.ts`, `inbound.ts`, `inbound-webhook.ts`, `field-map.ts`, `inbound-notify.ts`, `service.ts` `setFollowUp`/`moveLead`/`updateLead`, `first-contact.ts`, `agent-feed.ts`, the leads-in route, `docs/AGENT-FEED.md`) or recomputed in Node (`clampLimit`, `textVolume`), then corrected:
+**T-07 third review (2026-10-24)** — fullprompt `agent-feed` moved to `a4f9f433` (`bfb5625b` code, `a4f9f433` docs; DECISIONS #1563–#1565). The 11 mismatches the re-verification left were each re-read in the code at that head (`platform/text/clip.ts`, `inbound.ts`, `inbound-webhook.ts`, `field-map.ts`, `inbound-notify.ts`, `service.ts` `setFollowUp`/`moveLead`/`updateLead`, `first-contact.ts`, `agent-feed.ts`, the leads-in route, `docs/AGENT-FEED.md`) or recomputed in Node (`clampLimit`, `textVolume`), then corrected:
 
 - Part A describes `a4f9f433`: header; A.0 (12 commits, 41 files +4061/−63, three review rounds, 7636 tests, red proofs 16 + 21 + 16 + 12; the fixtures captured at `23fe1736` stay valid — no captured value reaches a cut); A.1 (`storableText`/`clipUnits`/`storableJson`, `storedRef`, the normalised id, AGENT-FEED.md 425 lines, the integration test 1373 lines, `field-map.integration.test.ts`); A.12 (the third review's tests and its 12 red proofs).
 - Every ERP cut is UTF-16 units with a whole-emoji back-off, not code points (A.2 table and landed note, B.1 `LANDED_NOTE_MAX`, `text_len`, `name`, the field-order comment, B.4); only the Telegram preview (`PUSH_PREVIEW`) counts code points.
 - A NUL becomes U+FFFD like a lone surrogate, everywhere, the `ref` and the `external_id` included (the outcomes feed returns such an id with U+FFFD); a body too deep to serialise is `{"_truncated":true}` (A.2; the fake normalises the id before its replay check, B.4). `well_formed` also drops U+0000, because production throws on it after (or at) `createLead` (B.1, B.3 Door row, a payload test).
 - The no-header database failure is `500` with an empty body, not Next's HTML page (A.2 answer table); fake mode `html500` renamed `nonjson5xx` (an empty-body 500, or a proxy's HTML 502), with B.1's mapping row, B.6 and the acceptance criteria.
-- #1475's four cases — a committed ledger row whose answer is lost, a retry that makes a second lead or is capped, a repeating cause adding a note per POST, the per-module-copy chain with no bound on its wait — in A.2, A.13, B.1 (503 «normally» means no ledger row), B.6 (two new rows) and a new fake mode `503_committed`.
+- #1565's four cases — a committed ledger row whose answer is lost, a retry that makes a second lead or is capped, a repeating cause adding a note per POST, the per-module-copy chain with no bound on its wait — in A.2, A.13, B.1 (503 «normally» means no ledger row), B.6 (two new rows) and a new fake mode `503_committed`.
 - A.4: a «📞 Bogʻlandim» press by the responsible person first clears the landing's today booking, an earlier `followup` evidence row, so it reads `followup`; `note` only when the presser is not responsible or the date was already moved; a ✏️-form stage move also reads `followup`, a board move `stage`.
 - A.7: `tailsSql`'s chunk conditions as written — a part made entirely of `998…` numbers → each, else a length that is a multiple of 9 → each 9-digit chunk, else (a 20-digit part, any part over 120) the last nine only.
 - B.4 `clamp_limit`: `js_number` is ECMAScript `StringToNumber` (JS whitespace incl. U+FEFF, signed decimals and `Infinity`, unsigned `0x`/`0o`/`0b`), with the vectors recomputed in Node.
 - B.1 `landed_note`: a value JS `trim()` leaves empty makes no line (`fromPlain`'s `str()`); `js_trim` written out.
 - B.1 `BAND_HAJM`: `textVolume` reads the number right before the first «kub», so «taxminan 1–3 kub» routed as 3 and «3–10 kub» as 10; the words now put the low end there («taxminan 1 kubdan 3 kubgacha» → 1, «taxminan 3 kubdan 10 kubgacha» → 3; container 28 and truck 80 unchanged), with `TEXT_VOLUME_RE` and a routing test; the note template and A.14 follow.
 
-**T-07 fourth review (2026-10-24)** — fullprompt `agent-feed` moved to `d138b3bc` (`021a2ca5` code, `d138b3bc` docs; DECISIONS #1476–#1477). Each fact re-read at that head (`inbound.ts` `record`/`oversizeIdSpelling`/`externalIdSpellings`/`inboundLanded`, `platform/text/clip.ts`, `agent-feed.ts`'s `LIKE 'cs:%'`, `tests/unit/intake-id.test.ts`, the integration test's two new cases, `docs/AGENT-FEED.md` §1 §5, DECISIONS) and the v2 capture re-checked (longest `external_id` 46 bytes, no string over 2,048 bytes):
+**T-07 fourth review (2026-10-24)** — fullprompt `agent-feed` moved to `d138b3bc` (`021a2ca5` code, `d138b3bc` docs; DECISIONS #1566–#1567). Each fact re-read at that head (`inbound.ts` `record`/`oversizeIdSpelling`/`externalIdSpellings`/`inboundLanded`, `platform/text/clip.ts`, `agent-feed.ts`'s `LIKE 'cs:%'`, `tests/unit/intake-id.test.ts`, the integration test's two new cases, `docs/AGENT-FEED.md` §1 §5, DECISIONS) and the v2 capture re-checked (longest `external_id` 46 bytes, no string over 2,048 bytes):
 
 - Header, A.0 (14 commits, 42 files +4370/−79, AGENT-FEED.md 443 lines, the fourth review's gates 676 files / 7642 tests by the build session's report, red proofs 16 + 21 + 16 + 12 + 5, a new bullet stating the fix for the agent: an `external_id` the ledger's unique index refuses for its size — only one over 2,048 UTF-8 bytes can be; postgres takes about 2,680 incompressible bytes — is stored as `sha256:` + hex SHA-256, lands, replays, and never appears in the outcomes feed; the agent's 46-byte ids are not affected, so the push, reconcile and outcomes logic are unchanged); A.1 (`inbound.ts`, `clip.ts`, docs and tests rows; integration test 1445 lines, `intake-id.test.ts`).
-- A.2: two `external_id`s that differ only by NUL vs U+FFFD or by which lone surrogate are one id, and `ref` keys that differ only that way collapse to one key keeping the last value (the agent's payload tests already keep both out, 07 §1.6); the `external_id` paragraph gains the 46 bytes, the `cs:` filter and the hashed spelling; the replay-fence paragraph names #1476 and the one known input-driven repeating cause — a body of tens of MB (about 40 MB of JSON, measured in postgres), 503 on every retry plus a lenta note each, out of the agent's reach. A.13 (iii) and the B.6 half-way row follow.
-- A.12: `intake-id.test.ts`, the long-id integration cases and the control, 5 red proofs (#1477). B.4: the fake does not model the `sha256:` spelling (the agent's ids are 46 bytes); the fixtures stay valid at `d138b3bc`. Acceptance criteria restated at the new head.
+- A.2: two `external_id`s that differ only by NUL vs U+FFFD or by which lone surrogate are one id, and `ref` keys that differ only that way collapse to one key keeping the last value (the agent's payload tests already keep both out, 07 §1.6); the `external_id` paragraph gains the 46 bytes, the `cs:` filter and the hashed spelling; the replay-fence paragraph names #1566 and the one known input-driven repeating cause — a body of tens of MB (about 40 MB of JSON, measured in postgres), 503 on every retry plus a lenta note each, out of the agent's reach. A.13 (iii) and the B.6 half-way row follow.
+- A.12: `intake-id.test.ts`, the long-id integration cases and the control, 5 red proofs (#1567). B.4: the fake does not model the `sha256:` spelling (the agent's ids are 46 bytes); the fixtures stay valid at `d138b3bc`. Acceptance criteria restated at the new head.
 
 **Wave 1 as built (2026-10-24)** — the ten verify:final mismatches, each re-read in fullprompt `agent-feed` at `d138b3bc` (read-only), plus the wave-1 build's push-test note:
 
@@ -1369,6 +1394,11 @@ others point here):
 - A.11, A.13, A.14 step 1, B.3 Door row: the doors fold is drawn only for `admin.settings.manage`; there is no rotate button — a re-mint is «Oʻchirish» then «Yoqish va kalit yaratish» and kills the old key for every sender, so an existing «Boshqa» key is copied, not re-minted (owner text in Uzbek).
 - A.14 step 4 and B.1: `seenKeys()` lists only keys arrivals carried in the last 30 days, so `make push-test` now gives every optional key a synthetic value (`kub: "1"` included) and a dropped key is added by hand through the «Savolni qo'lda qo'shish» row (decided here, without the owner); the zero-uuid `_post` exemption the T-04 guard carries is the pre-T-07 design and T-28 deletes it.
 - B.2: a feed 404 — and a proxy's 401/403 — is `push_404`; any other 4xx is `feed_contract` `bad_request`; 3xx as a push's. B.3 Suppression row: the XLSX «Phones» column from an unfiltered screen with no saved view, ≤ 5,000 rows, inactive cards included. B.4 codec comments: an empty value means absent, the cursor's time survives a round trip (`T24:00:00Z` and `:60` refused), the `since` offset itself in range (`+24:00`, `+12:60`, `+1260` refused).
+
+**The merge with main (2026-10-29)** — fullprompt `agent-feed` merged `origin/main` `a4e1b1c8`
+(`2ac5bf7c`) and took the merge review's fixes (`efc0ec27`, DECISIONS #1568-#1570); A.0's first bullet.
+Every citation of the branch's DECISIONS in 02, 05, 06 and 07 moved +90 (the old 1455-1477 → #1545-#1567),
+fenced by `tests/test_spec_erp_citations.py`.
 
 **Wave 3 as built (2026-10-29)** — folded from the T-28 build, its review and fixes, the integration (`51372f3`) and the E2E seam review (`5219a76`, `06a022c`, `f38f878`), checked against `services/crm_push.py`, `services/push_gate.py`, `services/candidates.py` and `tools/push_test.py` at `8a1935e` (the ERP side unchanged):
 

@@ -932,7 +932,7 @@ Not applied here (other files' homes): 2, 5, 11, 16, 20–23, 25, 26, 28, 32, 36
 - §3.3 `doctor`: `CRM_BASE_URL` must be `https://`; the keyed feed GET runs only while `feeds_configured()` — during the fallback the «Boshqa» key reads nothing, so the old check would have failed `doctor` whenever `CRM_PUSH_ENABLED=true`.
 - §4.6: runbook row for a renamed «Qayta qilinmasin» dictionary label (new losses unsuppressed until the setting lists the new spelling, 05 §B.6).
 
-**T-07 fourth review (2026-10-24)** — fullprompt `agent-feed` moved to `d138b3bc` (DECISIONS #1476–#1477; 05 §A.0):
+**T-07 fourth review (2026-10-24)** — fullprompt `agent-feed` moved to `d138b3bc` (DECISIONS #1566–#1567; 05 §A.0):
 
 - §4.6 «Duplicate pushes suspected»: the orphan after a 503 half-way names the one known input-driven cause that repeats on every attempt — a body of tens of MB (about 40 MB of JSON, measured in postgres), which the agent's few-KB bodies cannot reach. The fourth review's other fix (an `external_id` too long for the ledger's index stored as `sha256:<hex>`) needs nothing here: the agent's ids are 46 bytes.
 
