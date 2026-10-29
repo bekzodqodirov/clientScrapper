@@ -147,6 +147,8 @@ async def candidate(
         last_scored_at=NOW,
         score_breakdown={},
     )
+    if state == "approved":
+        row.approved_by, row.approved_at = "owner:1", NOW
     session.add(row)
     await session.flush()
     return row
@@ -795,9 +797,20 @@ async def test_a_flagged_or_refused_draft_is_never_rendered(
     assert (meta["source"], meta["why"], meta["flags"]) == ("template", why, flags)
     view = await candidates.load_view(session, cand.id, now=NOW)
     card = cards.render_manager(cards.ManagerView(9, replace(view, phone=None), "u_x"))
-    assert f"✍️ Taklif: {crm_push.clip_words(template, cards.OPENER_MAX)}" in card.text
+    # The whole message the manager sends: its question and its opt-out too.
+    assert f"✍️ Taklif: {template}\n" in card.text
+    assert template.endswith("Oyiga taxminan necha kub olasiz? " + redlines.OPTOUT_UZ)
     assert "150" not in card.text
     assert problems(card.text, rendered=True) == set()
+    # The ERP note has less room: whole sentences go, the ending stays.
+    deyish = next(
+        line
+        for line in crm_push.render_note(view).split("\n")
+        if line.startswith("NIMA DEYISH: ")
+    )
+    assert deyish.endswith("Oyiga taxminan necha kub olasiz? " + redlines.OPTOUT_UZ)
+    assert deyish.startswith("NIMA DEYISH: Assalomu alaykum. ")
+    assert len(deyish.removeprefix("NIMA DEYISH: ")) <= crm_push.OPENER_MAX
 
 
 async def test_a_budget_miss_and_a_warm_candidate_get_the_template(
@@ -874,3 +887,477 @@ async def test_the_validator_keeps_the_reasons_owner_text():
     assert checked.leaks == ("reasons",)
     assert checked.result["decision_maker_role"] == "direktor po zakupkam"
     assert redlines.script_of(checked.result["decision_maker_role"]) == "latin"
+
+
+# --- the opener follows the verdict ---------------------------------------------------
+
+
+async def test_a_template_made_before_the_verdict_is_filled_again_for_its_segment(
+    session, model_api
+):
+    """04 §9.3: the verdict sets the segment, then the card's opener is that
+    segment's — not the bazaar template made while the verdict was out."""
+    from tests.fakes import overloaded
+
+    owner, cand = await lead_firm(session, score=50)  # warm: a template, free
+    model_api.queue(overloaded())
+    first = await verdict.verdict_job(now=NOW)
+    assert (first["retried"], first["openers"]) == (1, 1)
+    meta = (await breakdown(session, cand))["opener_meta"]
+    assert (meta["source"], meta["segment"], meta["why"]) == ("template", "A", "not_hot")
+    model_api.queue(message(answer(segment="D")))
+    later = await verdict.verdict_job(now=NOW + timedelta(hours=2))
+    assert (later["applied"], later["openers"]) == (1, 1)
+    assert (await reload(session, owner)).segment == "D"
+    stored = await breakdown(session, cand)
+    assert stored["opener"] == playbook.fill(
+        "D", "uz", goods=["mato", "furnitura"], family="telegram", person=False
+    )
+    assert stored["opener_meta"]["segment"] == "D"
+    # Filled for its segment: the next run leaves it.
+    again = await verdict.verdict_job(now=NOW + timedelta(hours=3))
+    assert again["openers"] == 0
+
+
+async def test_a_stored_draft_stands_when_the_segment_moves(session, model_api):
+    cand = await opener_firm(session)
+    model_api.queue(message({"lang": "uz", "text": GOOD_DRAFT, "hook": "Telegram"}))
+    assert await openers.ensure_opener(session, cand.id, now=NOW) == GOOD_DRAFT
+    await session.commit()
+    owner = await session.get(m.Company, cand.company_id)
+    assert owner is not None
+    owner.segment = "D"
+    await session.commit()
+    report = await verdict.ensure_openers(now=NOW)
+    assert report.openers == 0
+    assert (await breakdown(session, cand))["opener"] == GOOD_DRAFT
+    assert len(model_api.requests) == 1  # never asked again
+
+
+async def test_a_template_for_a_warm_candidate_is_drafted_once_it_is_hot(
+    session, model_api
+):
+    cand = await opener_firm(session, score=50)
+    await openers.ensure_opener(session, cand.id, now=NOW)
+    await session.commit()
+    assert (await breakdown(session, cand))["opener_meta"]["why"] == "not_hot"
+    cand.tier, cand.score = "hot", 70
+    await session.commit()
+    model_api.queue(message({"lang": "uz", "text": GOOD_DRAFT, "hook": "Telegram"}))
+    report = await verdict.ensure_openers(now=NOW)
+    assert report.openers == 1
+    stored = await breakdown(session, cand)
+    assert (stored["opener"], stored["opener_meta"]["source"]) == (GOOD_DRAFT, "draft")
+
+
+@pytest.mark.parametrize(
+    ("state", "card", "made"),
+    [
+        ("approved", None, True),
+        ("hold", "pending", True),
+        ("hold", "asked", True),
+        ("hold", "expired", False),
+        ("hold", None, False),
+        ("scored", None, False),
+    ],
+)
+async def test_who_gets_an_opener(session, model_api, state, card, made):
+    """``review`` and ``approved``, and a ``hold`` whose manager card is live
+    (06 §1.7: the manager reads the opener there; the owner's «Menejerga»
+    may come before the next run)."""
+    owner, cand = await lead_firm(session, state=state, score=50)
+    if card is not None:
+        review = m.LeadReview(candidate_id=cand.id, kind="manager", state=card)
+        if card == "asked":
+            review.asked_at, review.card_message_id, review.card_chat_id = NOW, 7, 9
+            review.expires_at = NOW + timedelta(hours=72)
+        session.add(review)
+        await session.commit()
+    report = await verdict.ensure_openers(now=NOW)
+    assert report.openers == (1 if made else 0)
+    assert ("opener" in await breakdown(session, cand)) is made
+    del owner
+
+
+async def test_an_opener_another_run_stored_meanwhile_stands(
+    session, model_api, monkeypatch
+):
+    """The write re-reads the candidate under its lock: an opener stored
+    while this run made its own is kept (04 §0's one-writer rule)."""
+    cand = await opener_firm(session, score=50)
+    theirs = "Assalomu alaykum. Boshqa yugurish yozgan xabar. " + redlines.OPTOUT_UZ
+    real = openers.make
+
+    async def racing(session_: AsyncSession, view: Any, **kw: Any) -> openers.Made:
+        async with verdict.SessionLocal() as other, other.begin():
+            row = await other.get(m.LeadCandidate, view.candidate_id)
+            assert row is not None
+            row.score_breakdown = {
+                **dict(row.score_breakdown or {}),
+                "opener": theirs,
+                "opener_meta": {"source": "draft", "segment": "A", "lang": "uz"},
+            }
+        return await real(session_, view, **kw)
+
+    monkeypatch.setattr(openers, "make", racing)
+    assert await openers.ensure_opener(session, cand.id, now=NOW) == theirs
+    await session.commit()
+    assert (await breakdown(session, cand))["opener"] == theirs
+
+
+async def test_a_seed_competitors_name_in_a_draft_refuses_it(session, model_api):
+    """``chat_monitors(role='competitor')`` names reach the gate beside its
+    regex (04 §4.5 ``competitor``)."""
+    session.add(
+        m.ChatMonitor(
+            tg_chat_id=-1001000000071,
+            chat_type="channel",
+            title="Sariq Tuya",
+            username="sariq_tuya_uz",
+            role="competitor",
+        )
+    )
+    cand = await opener_firm(session)
+    named = GOOD_DRAFT.replace("Men [Men], GSR Logistics.", "Men [Men], Sariq Tuya emas.")
+    assert redlines.check_opener(named, lang="uz", hooks=["Telegram"]).ok
+    model_api.queue(message({"lang": "uz", "text": named, "hook": "Telegram"}))
+    await openers.ensure_opener(session, cand.id, now=NOW)
+    await session.commit()
+    meta = (await breakdown(session, cand))["opener_meta"]
+    assert (meta["source"], meta["why"], meta["flags"]) == (
+        "template",
+        "flagged",
+        ["competitor"],
+    )
+
+
+def test_the_draft_request_masks_the_company_name_alone():
+    """The fixed lines are the code's own words: «в Telegram-группе» would
+    have been masked as a messenger id (and the request sent with a hole)."""
+    for family in [*playbook.SOURCE_UZ, None]:
+        for lang in ("uz", "ru"):
+            req = openers.user_content(
+                company="Namuna Tekstil Savdo",
+                segment="A",
+                goods=["mato"],
+                source=playbook.source_word(family, lang),  # type: ignore[arg-type]
+                seen_on=NOW,
+                person=True,
+                lang=lang,  # type: ignore[arg-type]
+            )
+            assert req.reverse == {}, (family, lang)
+            assert pseudonyms.unmasked(req.text) == [], (family, lang)
+            assert "<" not in req.text.split("SKELETON:")[0], (family, lang)
+    ru = openers.user_content(
+        company="Rustam Namunov savdo",
+        segment="C",
+        goods=["mato"],
+        source=playbook.source_word("telegram", "ru"),
+        seen_on=NOW,
+        person=False,
+        lang="ru",
+        names=["Rustam Namunov"],
+    )
+    assert ru.text.splitlines()[:4] == [
+        "COMPANY: <NAME_1> <NAME_2> savdo",
+        "SEGMENT: C",
+        "GOODS: mato",
+        "SOURCE: в группе Telegram, 2026-10-27",
+    ]
+    assert ru.reverse == {"<NAME_1>": "Rustam", "<NAME_2>": "Namunov"}
+
+
+# --- when a verdict knows the evidence --------------------------------------------------
+
+
+async def test_a_batch_verdict_is_stamped_with_its_bundles_time(session, model_api):
+    """Evidence fetched while the batch ran is in no bundle: the verdict is
+    older than it, and the next night asks again (04 §4.1)."""
+    owner, _ = await lead_firm(session, state="scored", score=50)
+    model_api.accept_batches()
+    counts = await model_jobs.model_batch_submit_job(now=TUESDAY_NIGHT)
+    assert counts["submitted"] == 1
+    [job] = await jobs(session)
+    assert job.request[model_jobs.ASKED_AT] == TUESDAY_NIGHT.isoformat()
+    new = await evidence(
+        session,
+        owner,
+        "Yangi: 3 ta konteyner kafel Guangzhoudan keladi, optom.",
+        days=0,
+        at=TUESDAY_NIGHT + timedelta(minutes=40),
+    )
+    await session.commit()
+    model_api.end(model_api.batch().id, {job.custom_id: succeeded(answer())})
+    await model_jobs.collect(now=TUESDAY_NIGHT + timedelta(hours=2))
+    owner = await reload(session, owner)
+    assert owner.verdict_at == TUESDAY_NIGHT
+    assert new.id not in job.evidence_ids
+    assert owner.id in await verdict.due_nightly(
+        session, now=TUESDAY_NIGHT + timedelta(days=1)
+    )
+
+
+async def test_an_answer_older_than_the_standing_verdict_changes_nothing(
+    session, model_api
+):
+    owner, _ = await lead_firm(session, state="scored", score=50)
+    model_api.accept_batches()
+    await model_jobs.model_batch_submit_job(now=TUESDAY_NIGHT)
+    [job] = await jobs(session)
+    # An instant verdict asked after the night's bundle was built.
+    standing = answer(segment="C", goods=["uskuna"])
+    owner.verdict, owner.verdict_at, owner.segment = (
+        standing,
+        TUESDAY_NIGHT + timedelta(minutes=30),
+        "C",
+    )
+    await session.commit()
+    model_api.end(model_api.batch().id, {job.custom_id: succeeded(answer(segment="E"))})
+    await model_jobs.collect(now=TUESDAY_NIGHT + timedelta(hours=2))
+    owner = await reload(session, owner)
+    assert (owner.verdict, owner.segment) == (standing, "C")
+    assert owner.verdict_at == TUESDAY_NIGHT + timedelta(minutes=30)
+    assert not [s for s in await signals_of(session, owner) if s.model_job_id == job.id]
+
+
+def test_asked_at_falls_back_to_the_jobs_creation():
+    job = m.ModelJob(request={"user": "x"}, created_at=NOW)
+    assert model_jobs.asked_at(job) == NOW
+    job.request = {"user": "x", model_jobs.ASKED_AT: TUESDAY_NIGHT.isoformat()}
+    assert model_jobs.asked_at(job) == TUESDAY_NIGHT
+    job.request = {"user": "x", model_jobs.ASKED_AT: "not a time"}
+    assert model_jobs.asked_at(job) == NOW
+
+
+# --- «confirmed» needs China or a dealer ------------------------------------------------
+
+
+def test_confirmed_needs_a_quote_that_names_china_or_a_dealers_page():
+    from clientscrapper.services.schemas import RelevanceVerdict
+
+    raw = answer(evidence_quotes=[{"ref": "E1", "quote": "Toshkent, Abu Sahiy bozori"}])
+    blocks = {"E1": E2}
+    plain = validators.relevance_verdict(
+        RelevanceVerdict.model_validate(raw), blocks=blocks, reverse={}
+    )
+    assert plain.result["imports_from_china"] == "likely"
+    assert plain.quote is None
+    dealer = validators.relevance_verdict(
+        RelevanceVerdict.model_validate(raw),
+        blocks=blocks,
+        reverse={},
+        dealer_refs={"E1"},
+    )
+    assert dealer.result["imports_from_china"] == "confirmed"
+    assert dealer.quote == "Toshkent, Abu Sahiy bozori"
+    # The quote that names China wins over the dealer's.
+    both = [
+        {"ref": "E1", "quote": "Toshkent, Abu Sahiy bozori"},
+        {"ref": "E2", "quote": CHINA_QUOTE},
+    ]
+    assert validators.china_quote(both, dealer_refs={"E1"}) == both[1]
+    assert validators.china_quote(both[:1]) is None
+
+
+def test_drafts_of_writes_no_origin_on_a_quote_that_is_neither():
+    ev = m.Evidence(
+        id=31,
+        source_key="telegram_monitor",
+        fetched_at=NOW,
+        published_at=NOW,
+        excerpt=E2,
+    )
+    result = answer(
+        evidence_quotes=[{"ref": "E1", "quote": "Toshkent, Abu Sahiy bozori"}]
+    )
+    drafts = verdict.drafts_of(
+        result, evidence_ids=[31], evidence={31: ev}, model="m", model_job_id=None
+    )
+    assert drafts == []
+    ev.source_key = "brand_dealers"
+    drafts = verdict.drafts_of(
+        result, evidence_ids=[31], evidence={31: ev}, model="m", model_job_id=None
+    )
+    assert [(d.key, d.quote) for d in drafts] == [
+        ("cn_origin", "Toshkent, Abu Sahiy bozori")
+    ]
+
+
+async def test_a_dealers_page_quote_confirms_the_origin(session, model_api):
+    owner = await firm(session, "Namuna Konditsioner")
+    dealer = await evidence(
+        session,
+        owner,
+        "Namuna Konditsioner — rasmiy diler, Toshkent, Chilonzor.",
+        days=1,
+        source="brand_dealers",
+        key="vol_wholesale_bulky",
+    )
+    await evidence(session, owner, E2, days=5, key="vol_wholesale_bulky")
+    await candidate(session, owner, score=70)
+    await session.commit()
+    bundle = await verdict.bundle_for(session, owner)
+    assert bundle is not None and bundle.dealer_refs == frozenset({"E1"})
+    model_api.queue(
+        message(
+            answer(evidence_quotes=[{"ref": "E1", "quote": "rasmiy diler, Toshkent"}])
+        )
+    )
+    await verdict.verdict_batch(now=NOW)
+    owner = await reload(session, owner)
+    assert owner.verdict["imports_from_china"] == "confirmed"
+    origin = [s for s in await signals_of(session, owner) if s.key == "cn_origin"]
+    assert [(s.evidence_id, s.quote) for s in origin] == [
+        (dealer.id, "rasmiy diler, Toshkent")
+    ]
+
+
+# --- what the verdict writes, and where -------------------------------------------------
+
+
+def test_a_weak_supplier_or_state_flag_needs_a_quote():
+    from clientscrapper.services.schemas import RelevanceVerdict
+
+    for flag in ("is_supplier_cn", "is_state_body"):
+        weak = answer(**{flag: True}, confidence=0.6, evidence_quotes=[])
+        checked = validators.relevance_verdict(
+            RelevanceVerdict.model_validate(weak), blocks={"E1": E1}, reverse={}
+        )
+        assert checked.result[flag] is False, flag
+        quoted = answer(**{flag: True}, confidence=0.6)
+        checked = validators.relevance_verdict(
+            RelevanceVerdict.model_validate(quoted), blocks={"E1": E1}, reverse={}
+        )
+        assert checked.result[flag] is True, flag
+        sure = answer(**{flag: True}, confidence=0.9, evidence_quotes=[])
+        checked = validators.relevance_verdict(
+            RelevanceVerdict.model_validate(sure), blocks={"E1": E1}, reverse={}
+        )
+        assert checked.result[flag] is True, flag
+
+
+async def test_the_supplier_and_state_flags_reach_the_company(session, model_api):
+    owner, _ = await lead_firm(session)
+    model_api.queue(
+        message(answer(is_supplier_cn=True, is_state_body=True, confidence=0.9))
+    )
+    await verdict.verdict_batch(now=NOW)
+    owner = await reload(session, owner)
+    assert (owner.is_supplier_cn, owner.is_state_body) == (True, True)
+    keys = {s.key for s in await signals_of(session, owner) if s.model is not None}
+    assert keys == {"cn_origin", "flag_supplier_cn"}
+
+
+async def test_a_role_already_set_is_kept(session, model_api):
+    """04 §4.4: the role goes to the person-tier row only when it has none."""
+    owner, _ = await lead_firm(session)
+    held = await person(session, owner, role="buxgalter")
+    await session.commit()
+    model_api.queue(message(answer()))
+    await verdict.verdict_batch(now=NOW)
+    assert (await reload(session, held)).role == "buxgalter"
+
+
+async def _landed(
+    session: AsyncSession, asked: m.Company, ev: m.Evidence, result: dict[str, Any]
+) -> model_jobs.Landed:
+    job = m.ModelJob(
+        kind="company_verdict",
+        lane="batch",
+        model=settings.batch_model,
+        custom_id=f"cs-{uuid.uuid4()}",
+        status="applied",
+        company_id=asked.id,
+        evidence_ids=[ev.id],
+        created_at=NOW,
+    )
+    session.add(job)
+    await session.flush()
+    return model_jobs.Landed(
+        job_id=job.id,
+        batch_job_id=job.id,
+        lane="batch",
+        model=settings.batch_model,
+        company_id=asked.id,
+        evidence_ids=(ev.id,),
+        validated=validators.Validated(result=result),
+        asked_at=NOW,
+    )
+
+
+async def test_an_answer_for_a_merged_company_lands_on_its_root(session):
+    root = await firm(session, "Namuna Tekstil Savdo")
+    child = await firm(session, "Namuna Tekstil")
+    ev = await evidence(session, child, E1, days=1)
+    landed = await _landed(session, child, ev, answer())
+    child.state, child.merged_into = "merged", root.id
+    await session.flush()
+    await verdict.apply_verdict(session, landed, NOW)
+    await session.commit()
+    root, child = await reload(session, root), await reload(session, child)
+    assert (root.segment, root.verdict_at) == ("A", NOW)
+    assert (child.verdict, child.segment) == (None, None)
+
+
+async def test_a_purged_company_is_written_nothing(session):
+    owner = await firm(session)
+    ev = await evidence(session, owner, E1, days=1)
+    landed = await _landed(session, owner, ev, answer())
+    owner.state = "purged"
+    await session.flush()
+    await verdict.apply_verdict(session, landed, NOW)
+    await session.commit()
+    owner = await reload(session, owner)
+    assert (owner.verdict, owner.segment) == (None, None)
+    assert not [s for s in await signals_of(session, owner) if s.model is not None]
+
+
+@pytest.mark.parametrize(
+    "error", ["invalid", "validator", "apply", "unmasked", "max_tokens"]
+)
+async def test_a_final_failure_is_not_asked_again_on_the_same_evidence(session, error):
+    """A malformed answer twice, a validator, the effects or an unmasked
+    request: asked again they fail the same way, at the same price."""
+    owner, _ = await lead_firm(session)
+    session.add(
+        m.ModelJob(
+            kind="verdict",
+            lane="instant",
+            model=settings.verdict_model,
+            custom_id=f"cs-{uuid.uuid4()}",
+            status="failed",
+            error=error,
+            company_id=owner.id,
+            created_at=NOW - timedelta(minutes=30),
+        )
+    )
+    await session.commit()
+    assert await verdict.due_instant(session, now=NOW) == []
+    # New evidence after it: asked again.
+    await evidence(session, owner, "Yiwudan mebel ham olamiz.", days=0, at=NOW)
+    await session.commit()
+    due = await verdict.due_instant(session, now=NOW + timedelta(minutes=1))
+    assert [d.company_id for d in due] == [owner.id]
+
+
+async def test_the_night_takes_no_more_than_the_room_left(session, monkeypatch):
+    for score in (45, 46, 47):
+        await lead_firm(session, state="scored", score=score)
+    waiting = await firm(session, "Namuna Kutish")
+    session.add(
+        m.ModelJob(
+            kind="company_verdict",
+            lane="batch",
+            model=settings.batch_model,
+            custom_id=f"cs-{uuid.uuid4()}",
+            status="pending",
+            company_id=waiting.id,
+            request={"user": "COMPANY: Namuna Kutish"},
+            created_at=NOW,
+        )
+    )
+    await session.commit()
+    monkeypatch.setattr(model_jobs, "BATCH_MAX", 3)
+    assert await verdict.select_company_verdicts(now=TUESDAY_NIGHT) == 2
+    monkeypatch.setattr(model_jobs, "BATCH_MAX", 1)
+    assert await verdict.select_company_verdicts(now=TUESDAY_NIGHT) == 0

@@ -351,9 +351,14 @@ def _record(
     user: Pseudonymised,
     doubled: bool = False,
     nudged: bool = False,
+    asked_at: str | None = None,
 ) -> dict[str, Any]:
     route = BATCH_ROUTES[op]
-    extra = {key: True for key, on in ((DOUBLED, doubled), (NUDGED, nudged)) if on}
+    extra: dict[str, Any] = {
+        key: True for key, on in ((DOUBLED, doubled), (NUDGED, nudged)) if on
+    }
+    if asked_at is not None:
+        extra[ASKED_AT] = asked_at
     return extraction.request_record(
         op,
         model=model,
@@ -435,10 +440,9 @@ async def enqueue(
     waiting = None if company_id is None else await _pending_for(session, op, company_id)
     if waiting is not None:
         waiting.model = model
-        waiting.request = {
-            **_record(op, kind, model=model, user=user),
-            ASKED_AT: now.isoformat(),
-        }
+        waiting.request = _record(
+            op, kind, model=model, user=user, asked_at=now.isoformat()
+        )
         waiting.pseudonyms = dict(user.reverse) or None
         waiting.evidence_ids = list(evidence_ids)
         await session.flush()
@@ -452,7 +456,7 @@ async def enqueue(
         attempts=0,
         company_id=company_id,
         evidence_ids=list(evidence_ids),
-        request={**_record(op, kind, model=model, user=user), ASKED_AT: now.isoformat()},
+        request=_record(op, kind, model=model, user=user, asked_at=now.isoformat()),
         pseudonyms=dict(user.reverse) or None,
         created_at=now,
     )
@@ -751,8 +755,15 @@ async def _submit_op(
     for p in chosen:
         job = p.job
         job.model = model
+        built = (job.request or {}).get(ASKED_AT)
         job.request = _record(
-            op, kind, model=model, user=p.user, doubled=p.doubled, nudged=p.nudged
+            op,
+            kind,
+            model=model,
+            user=p.user,
+            doubled=p.doubled,
+            nudged=p.nudged,
+            asked_at=built if isinstance(built, str) else None,
         )
         job.batch_id = batch_id
         job.status = "submitted"
