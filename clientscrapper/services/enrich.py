@@ -427,11 +427,16 @@ async def fetched_recently(
     session: AsyncSession, url: str, *, sources: Sequence[str], now: datetime
 ) -> bool:
     """Whether ``url`` is evidence of one of ``sources`` younger than 30 days
-    (04 §3: «not fetched in 30 d»)."""
+    (04 §3: «not fetched in 30 d») — stored under it, or under the page a
+    same-site redirect led it to (apex → www: ``meta.requested_url``)."""
+    stored = strip_secrets(url)
     found = await session.scalar(
         sa.select(Evidence.id)
         .where(
-            Evidence.url == strip_secrets(url),
+            sa.or_(
+                Evidence.url == stored,
+                Evidence.meta["requested_url"].astext == stored,
+            ),
             Evidence.source_key.in_(list(sources)),
             Evidence.fetched_at > now - REFETCH_AFTER,
         )
@@ -534,6 +539,11 @@ class Applied:
 
 def _fetch_meta(result: FetchResult) -> dict[str, Any]:
     meta: dict[str, Any] = {"status": result.status, "final_url": result.final_url}
+    requested = strip_secrets(result.url)
+    if requested != strip_secrets(result.final_url):
+        # The evidence is stored under the URL the page came from; the 30-day
+        # check asks with the URL it would request (``fetched_recently``).
+        meta["requested_url"] = requested
     if result.etag:
         meta["etag"] = result.etag
     if result.last_modified:
@@ -802,11 +812,18 @@ def _clock_check(ctx: Context) -> None:
 
 
 async def _get(
-    fetcher: Fetcher, url: str, *, source: str, budget: PageBudget
+    fetcher: Fetcher,
+    url: str,
+    *,
+    source: str,
+    budget: PageBudget,
+    follow_redirects: bool = True,
 ) -> FetchResult | str:
     """A page, or the word for why there is none."""
     try:
-        return await fetcher.get(url, source=source, budget=budget)
+        return await fetcher.get(
+            url, source=source, budget=budget, follow_redirects=follow_redirects
+        )
     except HostBlocked:
         return "blocked"
     except HostPaused:
@@ -906,6 +923,10 @@ async def _site_page(
     if got.status in (301, 302, 303, 307, 308):
         target = got.headers.get("location")
         return "redirect", {"to": domain_key(target) if target else None}, None
+    if got.not_modified:
+        # A conditional GET answered 304: the stored copy is the page, its
+        # observations already resolved.
+        return "unchanged", {}, None
     if got.status != 200:
         return f"http_{got.status}", {}, None
     parse = company_site.parse_link_hub if hub else company_site.parse_company_site
@@ -1009,13 +1030,20 @@ async def step_e2(ctx: Context, run: Attempt, facts: Facts) -> list[dict[str, An
             about = company_site.about_link(got.body, url=got.final_url)
             if about is not None:
                 _clock_check(ctx)
-                result, found, _ = await _site_page(ctx, run, about, hub=False)
-                pages_left -= 1
-                if result.startswith("budget:"):
-                    run.deferred = True
-                out.append(
-                    entry("E2", result, now=ctx.now, attempt=run.attempt, found=found)
-                )
+                async with ctx.session_factory() as session:
+                    about_fresh = await fetched_recently(
+                        session, about, sources=(SITE_SOURCE,), now=ctx.now
+                    )
+                if about_fresh:
+                    out.append(entry("E2", "fresh", now=ctx.now, attempt=run.attempt))
+                else:
+                    result, found, _ = await _site_page(ctx, run, about, hub=False)
+                    pages_left -= 1
+                    if result.startswith("budget:"):
+                        run.deferred = True
+                    out.append(
+                        entry("E2", result, now=ctx.now, attempt=run.attempt, found=found)
+                    )
         if await _stopped(ctx, run):
             break
     return out
@@ -1037,10 +1065,23 @@ async def step_e3(ctx: Context, run: Attempt, facts: Facts) -> dict[str, Any]:
         if await fetched_recently(session, url, sources=CHANNEL_SOURCES, now=ctx.now):
             return entry("E3", "fresh", now=ctx.now, attempt=run.attempt)
     _clock_check(ctx)
-    got = await _get(ctx.site.fetcher, url, source=SITE_SOURCE, budget=ctx.site.budget)
+    # A name that is a person's account answers ``t.me/s/<name>`` with a
+    # redirect to the person's page: it is not followed, so a person's page
+    # is never read at all (not only never stored).
+    got = await _get(
+        ctx.site.fetcher,
+        url,
+        source=SITE_SOURCE,
+        budget=ctx.site.budget,
+        follow_redirects=False,
+    )
     if isinstance(got, str) and got.startswith("budget:"):
         run.deferred = True
         return entry("E3", got, now=ctx.now, attempt=run.attempt)
+    if isinstance(got, FetchResult) and got.not_modified:
+        # 304 on a channel page stored before: it is a channel, and unchanged
+        # — not a name to send to the reader.
+        return entry("E3", "unchanged", now=ctx.now, attempt=run.attempt)
     page = (
         telegram_page.parse_channel_page(got.body, url=got.final_url)
         if isinstance(got, FetchResult) and got.status == 200

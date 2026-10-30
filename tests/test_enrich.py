@@ -565,6 +565,83 @@ async def test_a_site_fetched_within_30_days_is_not_fetched_again(session, tmp_p
     assert w.urls() == []
 
 
+def site_pages(w: World) -> list[str]:
+    """The company site's pages the run asked for (robots.txt left out)."""
+    return [
+        u
+        for u in w.urls()
+        if "namuna-tekstil.example.uz" in u and not u.endswith("/robots.txt")
+    ]
+
+
+async def back_to_enriching(session, cand: LeadCandidate, at: datetime) -> None:
+    """The candidate put back in enrichment at ``at`` with the phones the
+    first walk found taken away (so S1 does not end the next walk at E1)."""
+    await session.execute(sa.delete(Contact).where(Contact.company_id == cand.company_id))
+    await session.execute(
+        sa.update(LeadCandidate)
+        .where(LeadCandidate.id == cand.id)
+        .values(state="enriching", next_enrich_at=at, enrich_attempts=0)
+    )
+    await session.commit()
+
+
+async def test_a_site_that_redirects_to_www_is_fresh_for_30_days(session, tmp_path):
+    """The evidence is stored under the page a same-site redirect led to
+    (apex → www); the next attempt's 30-day check asks with the URL it would
+    request, and finds it: the site is not fetched again (04 §3)."""
+    company = await firm(session, website_domain="namuna-tekstil.example.uz")
+    await signal(session, company)  # 50; the site's mobile adds 6: 56 < 60
+    cand = await enriching(session, company)
+    await session.commit()
+    www = "https://www.namuna-tekstil.example.uz"
+    routes = {
+        f"{SITE}/": httpx.Response(301, headers={"location": f"{www}/"}),
+        f"{www}/robots.txt": ALLOW_ALL,
+        f"{www}/": site_page("site_landing"),
+        f"{www}/kontakty": site_page("site_contacts"),
+    }
+    async with world(tmp_path, routes) as w:
+        await w.run()
+        first = site_pages(w)
+        assert first == [f"{SITE}/", f"{www}/", f"{www}/kontakty"]
+        await back_to_enriching(session, cand, NOW + timedelta(days=1))
+        await w.run(NOW + timedelta(days=1))
+        second = site_pages(w)
+    cand = await reload(session, cand)
+    assert second == first  # nothing fetched again
+    assert ("E2", "fresh") in steps(cand)
+
+
+async def test_an_about_page_fetched_within_30_days_is_not_fetched_again(
+    session, tmp_path
+):
+    company = await firm(session, website_domain="namuna-tekstil.example.uz")
+    await signal(session, company)
+    session.add(
+        Evidence(
+            source_key="enrich_site",
+            url=f"{SITE}/kontakty",
+            fetched_at=NOW - timedelta(days=10),
+            sha256=f"{seq():064x}",
+            bytes=0,
+            excerpt="",
+            expires_at=NOW + timedelta(days=150),
+        )
+    )
+    cand = await enriching(session, company)
+    await session.commit()
+    routes = {
+        f"{SITE}/": site_page("site_landing"),
+        f"{SITE}/kontakty": site_page("site_contacts"),
+    }
+    async with world(tmp_path, routes) as w:
+        await w.run()
+    cand = await reload(session, cand)
+    assert [s for s in steps(cand) if s[0] == "E2"] == [("E2", "ok"), ("E2", "fresh")]
+    assert f"{SITE}/kontakty" not in w.urls()
+
+
 # --- E3: the public page, never Telethon ------------------------------------------------
 
 
@@ -632,6 +709,11 @@ async def test_e3_a_user_page_is_not_kept_and_the_name_goes_to_the_reader(
         await w.run()
     cand = await reload(session, cand)
     assert ("E3", "queued") in steps(cand)
+    # The redirect to the person's page is not followed: the page is never
+    # read at all, not only never stored.
+    assert "https://t.me/namuna_person" not in w.urls()
+    e3 = next(e for e in cand.score_breakdown["enrichment"] if e["step"] == "E3")
+    assert e3["found"] == {"page": "http_302"}
     flag = await session.get(RuntimeFlag, chats.PENDING_FLAG, populate_existing=True)
     assert flag is not None
     queued = flag.value["names"]["namuna_person"]
@@ -648,6 +730,39 @@ async def test_e3_a_user_page_is_not_kept_and_the_name_goes_to_the_reader(
             .where(Evidence.url.like("https://t.me/%"))
         )
     ) == 0
+
+
+async def test_e3_a_304_on_a_stored_channel_page_is_unchanged_not_queued(
+    session, tmp_path
+):
+    """A month on, the conditional GET of a channel page stored before
+    answers 304: it is the channel, unchanged — not a name for the reader."""
+    company = await firm(session, telegram_channel="namuna_optom")
+    await signal(session, company)
+    cand = await enriching(session, company)
+    await session.commit()
+    page = site_page("tme_channel")
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        if request.headers.get("if-none-match") == '"v1"':
+            return httpx.Response(304, headers={"etag": '"v1"'})
+        return httpx.Response(
+            200,
+            content=page.content,
+            headers={"content-type": "text/html; charset=utf-8", "etag": '"v1"'},
+        )
+
+    later = NOW + timedelta(days=31)
+    async with world(tmp_path, {"https://t.me/s/namuna_optom": answer}) as w:
+        await w.run()
+        assert ("E3", "ok") in steps(await reload(session, cand))
+        await back_to_enriching(session, cand, later)
+        await w.run(later)
+    cand = await reload(session, cand)
+    assert steps(cand)[-1] != ("E3", "queued")
+    assert ("E3", "unchanged") in steps(cand)
+    flag = await session.get(RuntimeFlag, chats.PENDING_FLAG, populate_existing=True)
+    assert flag is None or "namuna_optom" not in (flag.value.get("names") or {})
 
 
 async def test_e3_never_fetches_a_person_s_username(session, tmp_path):
