@@ -20,6 +20,7 @@ from zoneinfo import ZoneInfo
 import httpx
 import pytest
 
+from clientscrapper.config import settings
 from clientscrapper.services import registry
 from clientscrapper.services.http import ROBOTS_AGENT, Fetcher, PageBudget
 from clientscrapper.services.normalise import to_observation_json
@@ -32,6 +33,10 @@ NOW = datetime(2026, 10, 29, 12, 0, tzinfo=TZ)
 FIXTURES = Path(__file__).parent / "fixtures" / "registries"
 CARD = "https://orginfo.uz/ru/organization/cf68f132a2f4/"
 SEARCH = "https://orginfo.uz/ru/search/organizations/"
+# The recorded card's legal address (Qo'qon, Fargʻona), in its two spellings
+# on the page: a test that dresses the card as another firm moves it too.
+FERGANA_ENTITY = "Farg&#x27;ona viloyati, Qo&#x27;qon sh."
+FERGANA = "Farg'ona viloyati, Qo'qon sh."
 
 
 def page(name: str) -> bytes:
@@ -176,13 +181,37 @@ def test_e4_prime_takes_one_card_whose_name_and_city_agree():
     )
     result, card = registry.pick_by_name(cards, "XITOY TOSHKENT MChJ", city="Toshkent")
     assert (result, card.stir if card else None) == ("hit", "313378012")
-    # The company knows another city: none. It knows none: the name decides.
+    # The company knows another city: none. It knows none: none either —
+    # 04 §3 «name + city must agree, else none»: a same-named firm anywhere
+    # in the country would give ours its STIR and its director.
     assert registry.pick_by_name(cards, "Xitoy Toshkent", city="Buxoro") == ("none", None)
-    assert registry.pick_by_name(cards, "Xitoy Toshkent", city=None)[0] == "hit"
+    assert registry.pick_by_name(cards, "Xitoy Toshkent", city=None) == ("none", None)
     # orginfo's fuzzy match («xitoy» finds «XIDOY») is no agreement.
-    assert registry.pick_by_name(cards, "Qodirbobo Xitoy Zamini", city=None) == (
+    assert registry.pick_by_name(cards, "Qodirbobo Xitoy Zamini", city="Toshkent") == (
         "none",
         None,
+    )
+    # A card with no STIR, or with no address, agrees with nothing.
+    stirless = replace(cards[1], stir=None)
+    assert registry.pick_by_name([stirless], "Xitoy Toshkent", city="Toshkent") == (
+        "none",
+        None,
+    )
+    homeless = replace(cards[1], address=None)
+    assert registry.pick_by_name([homeless], "Xitoy Toshkent", city="Toshkent") == (
+        "none",
+        None,
+    )
+    # A card the search list marks liquidated is no candidate (an older firm
+    # under the same name): alone it is none, beside a live one the live one.
+    dead = replace(cards[1], stir="313378013", liquidated=True)
+    assert registry.pick_by_name([dead], "Xitoy Toshkent", city="Toshkent") == (
+        "none",
+        None,
+    )
+    assert registry.pick_by_name([dead, cards[1]], "Xitoy Toshkent", city="Toshkent") == (
+        "hit",
+        cards[1],
     )
     # Two firms of one name: ambiguous, nothing (04 §3 «≥ 2 hits → none»).
     twin = [cards[1], replace(cards[1], stir="313378013")]
@@ -393,6 +422,8 @@ async def test_e4_prime_by_name_reads_one_search_and_the_agreeing_card():
                 .decode()
                 .replace("310514454", "313378012")
                 .replace("ORGINFO", "XITOY TOSHKENT")
+                .replace(FERGANA_ENTITY, "Toshkent sh.")
+                .replace(FERGANA, "Toshkent sh.")
                 .encode(),
             ),
         },
@@ -486,6 +517,116 @@ async def test_all_hosts_down_is_registry_unavailable_and_a_resting_host_is_skip
         [("orginfo", "paused")],
     )
     assert len(site.seen) == before
+
+
+def _timeout(request: httpx.Request) -> httpx.Response:
+    raise httpx.ConnectTimeout("no answer", request=request)
+
+
+async def test_a_host_that_does_not_answer_is_no_answer_and_rests_nothing():
+    """A timeout, DNS or a reset after the Fetcher's retries is the host
+    unable to say (``unreachable``): the chain asks the next host and ends
+    ``registry_unavailable`` (04 §3, retried at the next attempt) — never an
+    exception out of the lookup, and no 24 h rest (that is a captcha's or a
+    403's)."""
+    clock = FakeClock(NOW)
+    site = orginfo_site(clock, **{SEARCH: _timeout})
+    async with fetcher_for(site) as fetcher:
+        found = await registry.lookup(
+            [registry.Orginfo(), registry.MyOrg()],
+            stir="310514454",
+            name=None,
+            city=None,
+            fetcher=fetcher,
+            budget=budget(pages=10, deadline=NOW + timedelta(hours=1)),
+        )
+    assert (found.result, found.rest, found.pages) == (registry.UNAVAILABLE, [], [])
+    assert found.tried == [("orginfo", "unreachable"), ("myorg", "not_built")]
+
+
+async def test_a_programming_error_in_a_host_is_not_swallowed():
+    class Broken(registry.Orginfo):
+        async def by_stir(self, stir, *, fetcher, budget):
+            answer = registry.Answer("none", host=self.host)
+            await self._get("not a url", answer, fetcher=fetcher, budget=budget)
+            return answer
+
+    async with fetcher_for(Site(FakeClock(NOW))) as fetcher:
+        with pytest.raises(ValueError):
+            await registry.lookup(
+                [Broken()],
+                stir="310514454",
+                name=None,
+                city=None,
+                fetcher=fetcher,
+                budget=budget(pages=10, deadline=NOW + timedelta(hours=1)),
+            )
+
+
+async def test_the_registry_pace_is_its_own_under_a_raised_default(monkeypatch):
+    """04 §3 «1 req/3 s» is orginfo's own rate (``HOST_RPS``), not the
+    global default's, which the owner may raise to 5."""
+    monkeypatch.setattr(settings, "collector_rps_default", 2.0)
+    clock = FakeClock(NOW)
+    site = orginfo_site(clock)
+    async with fetcher_for(site) as fetcher:
+        found = await registry.lookup(
+            registry.hosts_on({}),
+            stir="310514454",
+            name=None,
+            city=None,
+            fetcher=fetcher,
+            budget=budget(pages=10, deadline=NOW + timedelta(hours=1)),
+        )
+    assert found.result == "hit"
+    gaps = [b.at - a.at for a, b in zip(site.seen[1:], site.seen[2:], strict=False)]
+    assert gaps and all(g >= 3.0 for g in gaps)
+
+
+async def test_e4_prime_asks_nothing_for_a_company_with_no_city():
+    clock = FakeClock(NOW)
+    site = orginfo_site(clock)
+    async with fetcher_for(site) as fetcher:
+        found = await registry.lookup(
+            registry.hosts_on({}),
+            stir=None,
+            name="Xitoy Toshkent MChJ",
+            city=None,
+            fetcher=fetcher,
+            budget=budget(pages=10, deadline=NOW + timedelta(hours=1)),
+        )
+    assert (found.result, found.pages) == ("none", [])
+    assert site.seen == []
+
+
+async def test_e4_prime_a_card_page_in_another_city_is_a_mismatch():
+    """The search card agreed (Toshkent); the company page it leads to names
+    another city: not the firm the rule agreed to."""
+    clock = FakeClock(NOW)
+    site = orginfo_site(
+        clock,
+        **{
+            SEARCH: html("orginfo_search_name_xitoy_newest_p1"),
+            "https://orginfo.uz/ru/organization/e9beed368894/": httpx.Response(
+                200,
+                content=page("orginfo_organization_cf68f132a2f4")
+                .decode()
+                .replace("310514454", "313378012")
+                .replace("ORGINFO", "XITOY TOSHKENT")
+                .encode(),
+            ),
+        },
+    )
+    async with fetcher_for(site) as fetcher:
+        found = await registry.lookup(
+            registry.hosts_on({}),
+            stir=None,
+            name="Xitoy Toshkent MChJ",
+            city="Toshkent",
+            fetcher=fetcher,
+            budget=budget(pages=10, deadline=NOW + timedelta(hours=1)),
+        )
+    assert (found.result, found.record) == ("mismatch", None)
 
 
 async def test_the_unbuilt_hosts_fetch_nothing():

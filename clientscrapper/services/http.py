@@ -88,6 +88,9 @@ HOST_RPS: Final[Mapping[str, float]] = {
     "catalog.api.2gis.com": 1.0,
     "www.olx.uz": 0.33,
     "2gis.uz": 0.2,
+    # 04 §3 E4: the registry is read at 1 request / 3 s whatever the global
+    # default says.
+    "orginfo.uz": 0.33,
     "html.duckduckgo.com": 0.1,
     "graph.facebook.com": 1.0,
     "api.apify.com": 1.0,
@@ -455,6 +458,14 @@ def _retry_on(exc: BaseException) -> bool:
     return isinstance(exc, _TransientResult) or is_transient_http(exc)
 
 
+def is_transport_failure(exc: BaseException) -> bool:
+    """A request that got no answer — a timeout, DNS, a reset connection, a
+    redirect loop — once the Fetcher's retries are spent: the host could not
+    say, which is not a bug of the caller. Callers that may not import
+    ``httpx`` (the enrichment modules, 07 §1.2) ask this instead."""
+    return isinstance(exc, httpx.RequestError)
+
+
 def _default_wall() -> datetime:
     return datetime.now(settings.tz)
 
@@ -540,7 +551,11 @@ class Fetcher:
         obey_robots: bool = True,
         paid: PaidCall | None = None,
         proxy: bool = False,
+        follow_redirects: bool = True,
     ) -> FetchResult:
+        """One GET. ``follow_redirects=False`` answers a same-site redirect
+        with the 3xx itself instead of reading where it points (E3: a
+        ``t.me/s/<name>`` that redirects to a person's page is never read)."""
         # Merged, not replaced: httpx.URL(url, params=…) would drop the query the
         # caller already wrote (hh's text= and area= under a page=).
         full = str(httpx.URL(url).copy_merge_params(dict(params))) if params else url
@@ -556,6 +571,7 @@ class Fetcher:
             paid=paid,
             proxy=proxy,
             json_body=None,
+            follow_redirects=follow_redirects,
         )
 
     async def post_json(
@@ -583,6 +599,7 @@ class Fetcher:
             paid=paid,
             proxy=False,
             json_body=json,
+            follow_redirects=True,
         )
 
     # -- the pipeline ----------------------------------------------------------------
@@ -601,6 +618,7 @@ class Fetcher:
         paid: PaidCall | None,
         proxy: bool,
         json_body: Any,
+        follow_redirects: bool,
     ) -> FetchResult:
         host = host_of(url)
         if not host:
@@ -635,6 +653,7 @@ class Fetcher:
                 json_body=json_body,
                 proxy=proxy,
                 obey_robots=obey_robots,
+                follow_redirects=follow_redirects,
             )
 
         result = await (self._paid(paid, budget, call, source) if paid else call())
@@ -749,6 +768,7 @@ class Fetcher:
         json_body: Any,
         proxy: bool,
         obey_robots: bool,
+        follow_redirects: bool,
     ) -> FetchResult:
         async def attempt() -> FetchResult:
             result = await self._request(
@@ -762,6 +782,7 @@ class Fetcher:
                 json_body=json_body,
                 proxy=proxy,
                 obey_robots=obey_robots,
+                follow_redirects=follow_redirects,
             )
             if result.status == 429 or result.status >= 500:
                 wait = retry_after_seconds(
@@ -801,9 +822,11 @@ class Fetcher:
         json_body: Any,
         proxy: bool,
         obey_robots: bool,
+        follow_redirects: bool,
     ) -> FetchResult:
-        """One logical request: the hops of a same-site redirect chain, then the
-        breaker's verdict on the final answer."""
+        """One logical request: the hops of a same-site redirect chain (none
+        when ``follow_redirects`` is false), then the breaker's verdict on the
+        final answer."""
         send_headers = {"User-Agent": self.agent, **headers}
         if stored is not None:
             if stored.etag:
@@ -824,7 +847,12 @@ class Fetcher:
                 proxy=proxy,
             )
             location = response_headers.get("location")
-            if status in REDIRECT_CODES and location and hop < MAX_REDIRECTS:
+            if (
+                follow_redirects
+                and status in REDIRECT_CODES
+                and location
+                and hop < MAX_REDIRECTS
+            ):
                 target = urljoin(current, location)
                 if same_site(host_of(current), host_of(target)):
                     if obey_robots:

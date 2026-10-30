@@ -70,6 +70,7 @@ from clientscrapper.services.http import (
     HostPaused,
     PageBudget,
     RobotsDisallowed,
+    is_transport_failure,
 )
 from clientscrapper.services.keys import loose_key, name_key, stir_key
 from clientscrapper.services.normalise import canonical_city, legal_form_in_name
@@ -114,13 +115,26 @@ Result = Literal[
     "paused",
     "robots",
     "http_error",
+    "unreachable",
     "not_built",
     "not_supported",
 ]
 # Answers after which the next host is asked (the host could not say), and
-# those that rest the host 24 h.
+# those that rest the host 24 h. ``unreachable`` is a request that got no
+# answer at all (a timeout, DNS, a reset — ``http.is_transport_failure``):
+# the host could not say, so it is no answer, and it rests nothing (it is
+# asked again at the next attempt, 04 §3 «retried next attempt»).
 UNANSWERED: Final[frozenset[str]] = frozenset(
-    {"captcha", "blocked", "paused", "robots", "http_error", "not_built", "not_supported"}
+    {
+        "captcha",
+        "blocked",
+        "paused",
+        "robots",
+        "http_error",
+        "unreachable",
+        "not_built",
+        "not_supported",
+    }
 )
 RESTING: Final[frozenset[str]] = frozenset({"captcha", "blocked"})
 
@@ -453,9 +467,10 @@ def _same_name(a: str, b: str) -> bool:
 def name_agrees(
     card_name: str, company_name: str, *, card_city: str | None, city: str | None
 ) -> bool:
-    """E4′'s rule (04 §3): the card's name is the company's (its name key,
-    or the loose form of it), and — when the company knows its city — the
-    card's address names the same one."""
+    """A card is the company's when its name is the company's (its name key,
+    or the loose form of it) and — when the company knows its city — the
+    card's address names the same one (E5's finder cards, which may carry
+    no city). E4′ asks more: ``pick_by_name``."""
     if not _same_name(card_name, company_name):
         return False
     return city is None or card_city == city
@@ -464,12 +479,21 @@ def name_agrees(
 def pick_by_name(
     cards: Sequence[RegistryCard], company_name: str, *, city: str | None
 ) -> tuple[Result, RegistryCard | None]:
-    """The one card E4′ may follow: exactly one agreeing card with a STIR
-    → ``hit``; two or more → ``ambiguous``; none → ``none``."""
+    """The one card E4′ may follow (04 §3 «name + city must agree, else
+    none»): a company that knows no city has nothing for a same-named firm
+    elsewhere in the country to agree with → ``none``; a card with no STIR,
+    or one the search list itself marks liquidated, is no candidate (an
+    older firm under the same name — following it would exclude ours as
+    liquidated); exactly one agreeing card → ``hit``; two or more →
+    ``ambiguous``. A lookup by STIR (E4) is not this rule and keeps a
+    liquidated firm's answer."""
+    if city is None:
+        return "none", None
     agreeing = [
         c
         for c in cards
         if c.stir is not None
+        and not c.liquidated
         and name_agrees(c.name, company_name, card_city=c.city, city=city)
     ]
     if len({c.stir for c in agreeing}) > 1:
@@ -678,6 +702,10 @@ class Orginfo(RegistryHost):
             return "paused"
         except RobotsDisallowed:
             return "robots"
+        except Exception as exc:
+            if is_transport_failure(exc):
+                return "unreachable"
+            raise
         refused = _refusal(result)
         if refused is not None:
             return refused
@@ -727,7 +755,8 @@ class Orginfo(RegistryHost):
     ) -> Answer:
         answer = Answer("none", host=self.host)
         query = name_key(name)
-        if len(query) < QUERY_MIN:
+        if len(query) < QUERY_MIN or city is None:
+            # E4′ needs the city to agree (``pick_by_name``): nothing to ask.
             return answer
         got = await self._get(search_url(query), answer, fetcher=fetcher, budget=budget)
         if not isinstance(got, FetchResult):
@@ -742,11 +771,12 @@ class Orginfo(RegistryHost):
         answer = await self._card(
             card.url, answer, stir=card.stir, fetcher=fetcher, budget=budget
         )
-        if (
-            answer.record is not None
-            and answer.record.name
-            and not _same_name(answer.record.name, name)
+        if answer.record is not None and (
+            (answer.record.name and not _same_name(answer.record.name, name))
+            or (answer.record.city is not None and answer.record.city != city)
         ):
+            # The card page names another firm, or another city, than the
+            # search card did: not the one the rule agreed to.
             answer.result, answer.record = "mismatch", None
         return answer
 

@@ -851,6 +851,8 @@ async def test_e4_by_name_for_a_firm_with_no_stir(session, tmp_path):
         .read_text(encoding="utf-8")
         .replace("310514454", "313378012")
         .replace("ORGINFO", "XITOY TOSHKENT")
+        .replace("Farg&#x27;ona viloyati, Qo&#x27;qon sh.", "Toshkent sh.")
+        .replace("Farg'ona viloyati, Qo'qon sh.", "Toshkent sh.")
     )
     routes = {
         SEARCH: registry_page("orginfo_search_name_xitoy_newest_p1"),
