@@ -935,6 +935,46 @@ async def test_a_same_site_redirect_is_followed_and_a_cross_host_one_returned(cl
     assert "t.me" not in {s.request.url.host for s in site.seen}
 
 
+async def test_follow_redirects_false_answers_with_the_redirect_itself(clock):
+    """E3's ``t.me/s/<name>`` of a person's account redirects to the person's
+    page: with ``follow_redirects=False`` that page is never requested."""
+    site = Site(
+        clock,
+        {
+            "https://t.me/robots.txt": ALLOW_ALL,
+            "https://t.me/s/namuna_person": httpx.Response(
+                302, headers={"location": "https://t.me/namuna_person"}
+            ),
+            "https://t.me/namuna_person": page("<html>a person</html>"),
+        },
+    )
+    fetcher = fetcher_for(site)
+    got = await fetcher.get(
+        "https://t.me/s/namuna_person",
+        source="enrich_site",
+        budget=budget(),
+        follow_redirects=False,
+    )
+    assert (got.status, got.final_url) == (302, "https://t.me/s/namuna_person")
+    assert [s.url for s in site.seen] == [
+        "https://t.me/robots.txt",
+        "https://t.me/s/namuna_person",
+    ]
+
+
+def test_a_transport_failure_is_told_from_a_bug():
+    request = httpx.Request("GET", "https://namuna.example.uz/")
+    for exc in (
+        httpx.ConnectTimeout("t", request=request),
+        httpx.ConnectError("dns", request=request),
+        httpx.ReadError("reset", request=request),
+        httpx.TooManyRedirects("loop", request=request),
+    ):
+        assert http.is_transport_failure(exc)
+    for exc in (ValueError("bad url"), RuntimeError("bug"), KeyError("x")):
+        assert not http.is_transport_failure(exc)
+
+
 # --- logs -------------------------------------------------------------------------------
 
 

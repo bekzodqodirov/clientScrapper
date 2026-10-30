@@ -132,6 +132,12 @@ files = [
     # T-32
     "clientscrapper/collectors/exhibitors.py",
     "clientscrapper/collectors/brands.py",
+    # T-24
+    "clientscrapper/services/markup.py",
+    "clientscrapper/services/registry.py",
+    "clientscrapper/services/enrich.py",
+    "clientscrapper/collectors/company_site.py",
+    "clientscrapper/collectors/telegram_page.py",
 ]
 
 # APScheduler 3 ships no type information.

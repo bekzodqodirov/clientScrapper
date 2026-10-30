@@ -141,7 +141,15 @@ SELF_DOMAINS: Final = frozenset({"gsrlogistics.uz", "gsrwms.uz"})
 SELF_CHANNELS: Final = frozenset({"gsrlogistics", "gsrgroupchat"})
 
 How = Literal[
-    "stir", "phone", "telegram", "domain", "instagram", "external_id", "fuzzy", "new"
+    "stir",
+    "phone",
+    "telegram",
+    "domain",
+    "instagram",
+    "external_id",
+    "fuzzy",
+    "new",
+    "enrich",
 ]
 
 # observations.parsed.handles key → company_ids.id_type (04 §1.6 renames). A
@@ -970,6 +978,107 @@ async def resolve_company(
     )
 
 
+async def resolve_into(
+    session: AsyncSession, obs: Observation, company: Company, *, now: datetime
+) -> Resolution:
+    """Give ``company`` the identity of an observation enrichment fetched
+    *for it* (04 §3): its own site, its channel's page, its registry card —
+    pages reached through the company's own keys, so the company is the
+    winner by construction and the name ladder is not asked. The exact-key
+    rule still holds: a key the observation carries that names another
+    company (outside ``company``'s lineage) is that company's — never
+    carried, logged as a conflict, and the other company marked ``dup_of``
+    when the names are close (04 §2.1). The spelling is learnt only when it
+    reads as the company's own (``_name_agrees``). Runs in the caller's
+    transaction, which holds ``company`` (``companies`` first, 04 §0);
+    raises ``ObservationRejected`` for GSR itself or a purged company."""
+    keys = identity_keys(obs.parsed)
+    if (reason := self_refusal(keys)) is not None:
+        raise ObservationRejected(reason)
+    if company.state == "purged":
+        raise ObservationRejected("purged")
+    await _lock(session, keys)
+    lineage = await company_lineage(session, company.id)
+    conflicts: list[tuple[str, uuid.UUID]] = []
+    foreign: set[str] = set()
+    for hit in await _exact_hits(session, keys):
+        if hit.company.id in lineage:
+            continue
+        foreign.add(hit.key)
+        if hit.company.state == "purged":
+            continue
+        if (hit.how, hit.company.id) not in conflicts:
+            conflicts.append((hit.how, hit.company.id))
+            await _note_conflict(session, company, hit)
+    learn_name = await _name_agrees(session, company, keys.name_key)
+    contact = await _carry_identity(
+        session,
+        company,
+        keys,
+        foreign=foreign,
+        learn_name=learn_name,
+        source_key=obs.source_key,
+        now=now,
+    )
+    return Resolution(
+        company=company,
+        how="enrich",
+        score=100.0,
+        created=False,
+        duplicate_of=None,
+        conflict=conflicts[0] if conflicts else None,
+        contact=contact,
+        conflicts=tuple(conflicts),
+    )
+
+
+async def foreign_stir_holder(
+    session: AsyncSession, stir: str, company: Company
+) -> Company | None:
+    """The company outside ``company``'s lineage that holds ``stir`` (a
+    purged firm keeps its own, 06 §1.2), or None. An enrichment page whose
+    STIR is another firm's is that firm's page — E4′'s name-and-city rule
+    found a card that belongs elsewhere (04 §2.1: the STIR outranks every
+    other key)."""
+    lineage = await company_lineage(session, company.id)
+    holder: Company | None = await session.scalar(
+        sa.select(Company)
+        .where(
+            Company.stir == stir,
+            Company.state != "merged",
+            Company.id.not_in(lineage),
+        )
+        .order_by(Company.created_at, Company.id)
+        .limit(1)
+    )
+    return holder
+
+
+async def suggest_duplicate(
+    session: AsyncSession, company: Company, holder: Company, *, how: str
+) -> bool:
+    """``holder``'s key reached ``company`` through a weaker one (a name):
+    nothing is merged; the conflict is logged and, when the names are close
+    (≥ ``REVIEW_LOW``), ``company`` is marked ``dup_of`` the holder for the
+    owner's 🔀 (04 §2.1 «the lower one gets dup_of»). A purged holder is
+    named in the log only."""
+    log.info(
+        "key conflict",
+        extra={"key_type": how, "winner": str(holder.id), "other": str(company.id)},
+    )
+    if holder.state == "purged" or company.dup_of is not None:
+        return False
+    if not (usable_name(company.name_key) and usable_name(holder.name_key)):
+        return False
+    score = _pair_score(holder.name_key, company.name_key)
+    if score < REVIEW_LOW:
+        return False
+    company.dup_of = holder.id
+    company.dup_score = round(score)
+    await session.flush()
+    return True
+
+
 def _new_company(keys: IdentityKeys, observation_id: int, *, now: datetime) -> Company:
     display = keys.display_name or _nameless_label(keys, observation_id)
     key = keys.name_key or _label_key(display)
@@ -1319,10 +1428,18 @@ async def upsert_contact(
         if (
             person is not None
             and match is not person
-            and (role_rank(role_text) <= role_rank(person.role))
+            and (
+                role_rank(role_text) <= role_rank(person.role)
+                or (legal_basis == "public_registry" and _reachable(person))
+            )
         ):
             # The company keeps its decision maker; the newcomer's number is
-            # kept as the firm's, the rest of them is not stored.
+            # kept as the firm's, the rest of them is not stored. A registry's
+            # director (T-24, E4 — a name from a state register, reached by
+            # nobody on Telegram) never displaces the person the company's own
+            # words put here with a Telegram account: the poster whose intent
+            # made the lead is whom the manager writes to (06 §1.3; 04 §2.4's
+            # ranking decides between people who published themselves).
             row = match if match is not None else company_row(phone_only=True)
         else:
             if person is not None and match is not person:
@@ -1355,6 +1472,11 @@ async def upsert_contact(
         if held_tail is not None:
             await check_shared_phone(session, held_tail)
     return row
+
+
+def _reachable(person: Contact) -> bool:
+    """A person-tier row a manager can write to on Telegram."""
+    return person.telegram_id is not None or person.telegram_username is not None
 
 
 def _fill_person(

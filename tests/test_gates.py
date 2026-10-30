@@ -1022,7 +1022,9 @@ async def test_a_liquidated_company_is_excluded_and_a_hokimiyat_too(session):
 
 async def test_not_yet_b2b_waits_for_the_card(session):
     """Gate 1's hold is judged before a card: a warm candidate goes on to
-    enrichment, a hot one is held instead of carded."""
+    enrichment, and so does a hot one (T-24: «may become B2B after
+    enrichment», 04 §6) — it is not carded, and not held while attempts are
+    left; with none left it is held."""
     warm_firm = await firm(session, "Namuna Bir", legal_form=None)
     warm = await candidate(
         session, warm_firm, state="scored", lead=None, last_scored_at=None
@@ -1041,9 +1043,53 @@ async def test_not_yet_b2b_waits_for_the_card(session):
     h = await session.get(LeadCandidate, hot.id, populate_existing=True)
     assert w is not None and h is not None
     assert (w.state, w.tier) == ("enriching", "warm")
-    assert (h.state, h.tier, h.hold_until) == ("hold", "hot", None)
+    assert (h.state, h.tier, h.hold_until) == ("enriching", "hot", None)
+    assert h.next_enrich_at == NOW + candidates.FIRST_ENRICH_DELAY
     assert h.score_breakdown is not None
     assert h.score_breakdown["gates"]["is_b2b"] == "fail:not_b2b"
+
+
+async def test_not_yet_b2b_with_no_attempt_left_is_held(session):
+    """Gate 1's hold with enrichment spent (three attempts): held, never
+    carded, never sent back to an enrichment that has no attempt left."""
+    owner = await firm(session, "Namuna Uch", legal_form=None)
+    lead = await contact(session, owner, phone(60))
+    hot = await candidate(
+        session,
+        owner,
+        state="scored",
+        lead=lead,
+        last_scored_at=None,
+        enrich_attempts=3,
+    )
+    await signal(session, owner)
+    await signal(session, owner, "cn_origin")
+    await session.commit()
+    await candidates.score_batch(now=NOW)
+    h = await session.get(LeadCandidate, hot.id, populate_existing=True)
+    assert h is not None
+    assert (h.state, h.tier, h.hold_until) == ("hold", "hot", None)
+
+
+def test_gated_walk_sends_the_not_yet_b2b_to_enrichment_while_attempts_are_left():
+    hold = gates.Failure("is_b2b", "hold", "not_b2b")
+    other = gates.Failure("not_recent", "hold", "company_push")
+    walk = ("scored", "review")
+    left = {"enrich_left": True}
+    assert candidates.gated_walk("found", walk, hold, **left) == ("scored", "enriching")
+    assert candidates.gated_walk("scored", ("review",), hold, **left) == ("enriching",)
+    assert candidates.gated_walk("hold", walk, hold, **left) == ("scored", "enriching")
+    assert candidates.gated_walk("enriching", walk, hold, **left) == ()
+    # A review row has no step to enriching (02 §2.9); another gate's hold
+    # holds; with no attempt left, gate 1 holds as before.
+    assert candidates.gated_walk("review", (), hold, **left) == ("hold",)
+    assert candidates.gated_walk("scored", ("review",), other, **left) == ("hold",)
+    assert candidates.gated_walk("scored", ("review",), hold) == ("hold",)
+    for state, steps in candidates.ENRICHABLE_STATES.items():
+        current = state
+        for target in steps:
+            candidates.check_transition(current, target)
+            current = target
 
 
 async def test_a_b2c_buyer_is_excluded(session):
