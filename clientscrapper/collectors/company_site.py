@@ -58,6 +58,7 @@ from clientscrapper.collectors.keywords import (
     COMPETITOR_SELF_RE,
     GEO_RE,
     LEGAL_FORM_RE,
+    STIR_RE,
     bulky_categories,
     intl_phones,
 )
@@ -115,7 +116,6 @@ GENERIC_TITLE: Final = frozenset(
 )
 _TITLE_SEPARATORS: Final = re.compile(r"\s+[|—–\-:·•]\s+|\s*\|\s*")
 WHATSAPP_HOSTS: Final = frozenset({"wa.me", "api.whatsapp.com"})
-SHORTENER_HOSTS: Final = frozenset({"clck.ru", "bit.ly", "cutt.ly"})
 
 
 # --- small readers -----------------------------------------------------------------
@@ -314,11 +314,31 @@ def _legal_line(lines: Iterable[str]) -> str | None:
     return None
 
 
-def _excerpt(*parts: str | None) -> str:
-    text = " · ".join(dict.fromkeys(p for p in parts if p))
-    if len(text) > EXCERPT_MAX:
-        text = text[:EXCERPT_MAX].rsplit(" ", 1)[0].rstrip()
-    return text
+def _excerpt(*parts: str | None, keep: Iterable[str | None] = ()) -> str:
+    """The parts joined and cut at ``EXCERPT_MAX``; what ``keep`` names (the
+    legal sentence, the STIR as written) always stays at the end, so the
+    card can quote ``ent_not_micro`` verbatim (02 §2.7: a quote is a piece
+    of the excerpt)."""
+    kept: list[str] = []
+    for item in keep:
+        # «STIR 300000031» inside the legal sentence is kept once.
+        if item and not any(item in k or k in item for k in kept):
+            kept.append(item)
+    tail = " · ".join(kept)
+    room = EXCERPT_MAX - (len(tail) + 3 if tail else 0)
+    text = " · ".join(dict.fromkeys(p for p in parts if p and p not in kept))
+    if len(text) > room:
+        text = text[: max(room, 0)].rsplit(" ", 1)[0].rstrip() if room > 0 else ""
+    return " · ".join(t for t in (text, tail) if t)
+
+
+def stir_text(text: str) -> str | None:
+    """The labelled STIR as the page writes it («STIR 300000031»): the first
+    ``STIR_RE`` hit whose number passes ``stir_key`` (``find_stir``'s rule)."""
+    for match in STIR_RE.finditer(text):
+        if stir_key(match.group(1)) is not None:
+            return match.group(0)
+    return None
 
 
 def own_markers(name: str | None, own: str) -> list[str]:
@@ -406,7 +426,12 @@ def parse_company_site(
     )
     heading = root.find("h1")
     paragraphs = [p.text() for p in root.find_all("p") if p.text()]
-    about = _excerpt(description, heading.text() if heading else None, *paragraphs[:4])
+    about = _excerpt(
+        description,
+        heading.text() if heading else None,
+        *paragraphs[:4],
+        keep=(legal, stir_text(text)),
+    )
     own = "\n".join(p for p in (name, description, *lines) if p)
     types = own_markers(name, own)
     if stir is not None or legal is not None:
@@ -446,7 +471,8 @@ def parse_link_hub(
 ) -> list[Observation]:
     """A link hub page (taplink, linktr.ee …): its phones (``tel:`` and
     WhatsApp links), Telegram, Instagram and the first link to a website of
-    the company's own (``website_key``: no social host, no other hub)."""
+    the company's own (``website_key``: no social host, no link hub — this
+    one or another — no URL shortener)."""
     root = markup.parse(markup.decode(body, content_type))
     hrefs = _hrefs(root, url)
     lines = (root.find("body") or root).lines()
@@ -457,10 +483,7 @@ def parse_link_hub(
         (
             h
             for h in hrefs
-            if h.startswith(("http://", "https://"))
-            and not is_link_hub(h)
-            and website_key(h) is not None
-            and domain_key(h) != domain_key(url)
+            if h.startswith(("http://", "https://")) and website_key(h) is not None
         ),
         None,
     )
@@ -516,7 +539,6 @@ def whatsapp_observation(
 __all__ = [
     "ABOUT_PATHS",
     "PHONES_MAX",
-    "SHORTENER_HOSTS",
     "SITE_SOURCE",
     "STREET_RE",
     "WHATSAPP_HOSTS",

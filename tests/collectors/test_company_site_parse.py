@@ -172,3 +172,251 @@ def test_a_person_s_page_is_no_channel():
     assert (
         tp.parse_channel_page(page("tme_user"), url="https://t.me/namuna_person") is None
     )
+
+
+# --- the contract's branches, one at a time (T-24 review: mutants that
+# survived the happy-path fixtures). Each page here is a few lines of HTML
+# written inline for the one rule it pins — no shape a recording must
+# confirm. ----------------------------------------------------------------------
+
+
+def html(body: str, *, head: str = "") -> bytes:
+    return f"<html><head>{head}</head><body>{body}</body></html>".encode()
+
+
+def parsed(body: str, *, head: str = "", url: str = SITE):
+    found = cs.parse_company_site(html(body, head=head), url=url, fetched_at=AT)
+    assert len(found) == 1
+    return found[0]
+
+
+# Over JS_ONLY_TEXT: a page, not a shell, whatever scripts it carries.
+FILLER = (
+    "<p>Namuna kompaniyasi haqida maʼlumot, mahsulotlar roʻyxati va ish vaqti shu "
+    "sahifada.</p>"
+)
+
+
+def test_a_cargo_self_description_is_a_competitor_under_a_neutral_name():
+    """COMPETITOR_SELF_RE on the page's own words decides, whatever its name
+    says (03 §1.4): «Namuna Savdo» offering «yuk tashish» is a forwarder."""
+    obs = parsed(
+        "<p>Xitoydan yuk tashish xizmati, kargo va rastamojka.</p>",
+        head="<title>Namuna Savdo</title>",
+    )
+    assert obs.company_name_raw == "Namuna Savdo"
+    assert "competitor" in obs.signal_types
+    assert cs.own_markers("Namuna Savdo", "Kargo xizmati: Xitoydan yuk tashish") == [
+        "china_origin",
+        "competitor",
+    ]
+
+
+def test_wholesale_needs_a_bulky_category_beside_it():
+    assert cs.own_markers(None, "Optom savdo, ulgurji narxlar") == []
+    assert cs.own_markers(None, "Mato va gazlama") == []
+    assert cs.own_markers(None, "Optom mato va gazlama") == ["wholesale_bulky"]
+
+
+def test_a_stir_alone_is_entity_solid_and_quoted():
+    obs = parsed(f"{FILLER}<p>STIR 300000041</p>", head="<title>Namuna Savdo</title>")
+    assert (obs.stir, obs.legal_form) == ("300000041", None)
+    assert "entity_solid" in obs.signal_types
+    ref = EvidenceRef(id=1, source_key="enrich_site", fetched_at=AT)
+    drafts = from_rules(ref, to_observation_json(obs), CompanyFacts())
+    quotes = {d.key: d.quote for d in drafts}
+    assert quotes["ent_not_micro"] == "STIR 300000041"
+
+
+def test_the_site_s_legal_block_is_quoted_verbatim():
+    """ent_not_micro cites the footer the page wrote (CLAUDE.md: URL + date +
+    verbatim quote), however long the page before it."""
+    obs = one("site_landing")
+    assert obs.excerpt.endswith('© 2026 "Namuna Tekstil Savdo" MChJ · STIR 300000031')
+    long_page = parsed(
+        "".join(f"<p>{'Optom mato va gazlama ' * 8}{n}</p>" for n in range(6))
+        + "<p>© 2026 «Namuna Uzun» MChJ</p>",
+        head="<title>Namuna Uzun</title>",
+    )
+    assert len(long_page.excerpt) <= cs.EXCERPT_MAX
+    assert long_page.excerpt.endswith("© 2026 «Namuna Uzun» MChJ")
+    ref = EvidenceRef(id=1, source_key="enrich_site", fetched_at=AT)
+    quotes = {
+        d.key: d.quote
+        for d in from_rules(ref, to_observation_json(long_page), CompanyFacts())
+    }
+    assert quotes["ent_not_micro"] == "MChJ"
+
+
+def test_the_legal_sentence_is_the_last_short_line_naming_a_form():
+    obs = parsed(
+        "<p>Hamkorimiz «Boshqa Firma» MChJ bilan ishlaymiz.</p>"
+        f"{FILLER}"
+        "<p>© 2026 «Namuna Oxirgi» XK</p>"
+    )
+    assert obs.company_name_raw == "© 2026 «Namuna Oxirgi» XK"
+    assert obs.legal_form == "XK"
+    long_line = "Biz " + "juda " * 40 + "katta «Namuna» MChJ kompaniyasimiz."
+    assert len(long_line) > 160
+    solid = parsed(f"{FILLER}<p>{long_line}</p>", head="<title>Namuna</title>")
+    assert solid.legal_form is None and "entity_solid" not in solid.signal_types
+
+
+def test_the_address_needs_a_place_and_a_street_word():
+    assert cs.address_line(["Toshkent sh., Chilonzor tumani"]) is None
+    assert cs.address_line(["Bunyodkor koʻchasi, 1-uy"]) is None
+    assert (
+        cs.address_line(["Manzil: Toshkent sh., Bunyodkor koʻchasi, 1-uy"])
+        == "Toshkent sh., Bunyodkor koʻchasi, 1-uy"
+    )
+
+
+def test_a_js_only_shell_needs_a_script_and_almost_no_text():
+    shell = html(
+        "<div id='root'>Yuklanmoqda, kuting...</div><script src='/a.js'></script>"
+    )
+    assert cs.parse_company_site(shell, url=SITE, fetched_at=AT) == []
+    quiet = html("<div>Namuna Savdo. Tel +998 90 000 00 41</div>")
+    assert len(cs.parse_company_site(quiet, url=SITE, fetched_at=AT)) == 1
+
+
+def test_about_link_is_the_first_preferred_same_site_page_never_itself():
+    page_ = html(
+        '<a href="https://boshqa.example.uz/about">x</a>'
+        '<a href="/kontakty">x</a><a href="/about">x</a>'
+    )
+    assert cs.about_link(page_, url=SITE) == f"{SITE}about"
+    assert (
+        cs.about_link(html('<a href="https://boshqa.example.uz/about">x</a>'), url=SITE)
+        is None
+    )
+    assert cs.about_link(html('<a href="/uz/kontakty">x</a>'), url=SITE) == (
+        f"{SITE}uz/kontakty"
+    )
+    assert cs.about_link(html('<a href="/kontakty">x</a>'), url=f"{SITE}kontakty") is None
+
+
+def test_the_name_falls_back_to_the_schema_org_name():
+    org = (
+        '<script type="application/ld+json">'
+        '{"@type": "Organization", "name": "Namuna JSON"}</script>'
+    )
+    assert parsed(FILLER, head=org).company_name_raw == "Namuna JSON"
+
+
+def test_a_page_on_a_host_that_is_no_website_names_no_website():
+    obs = parsed(FILLER, url="https://sites.google.com/view/namuna")
+    assert obs.website is None
+    assert parsed(FILLER).website == SITE
+
+
+def test_phones_are_capped_and_handles_come_from_the_text_too():
+    numbers = [f"+99890000005{n}" for n in range(7)]
+    assert cs.unique_phones(numbers) == numbers[: cs.PHONES_MAX]
+    obs = parsed(
+        "<p>Telegram: @namuna_matn</p>"
+        '<a href="https://namuna.example.uz/instagram/namuna_fake">Instagram</a>'
+    )
+    assert obs.telegram == "namuna_matn"
+    assert obs.instagram is None
+
+
+@pytest.mark.parametrize(
+    ("url", "phone"),
+    [
+        ("https://wa.me/12345678", None),  # 8 digits: too short
+        ("https://wa.me/1234567890123456", None),  # 16 digits: too long
+        ("https://wa.me/998901234", "+998901234"),
+    ],
+)
+def test_a_whatsapp_number_is_9_to_15_digits(url, phone):
+    assert cs.whatsapp_phone(url) == phone
+
+
+def test_a_hub_names_no_hub_as_the_website_keeps_nothing_empty_and_no_wholesale():
+    other_hub = html(
+        '<a href="https://linktr.ee/namuna_x">x</a>'
+        '<a href="https://bit.ly/namuna">x</a>'
+        '<a href="https://namuna-mebel.example.uz/">x</a>'
+        '<a href="https://t.me/namuna_mebel">x</a>'
+        "<p>Optom mebel</p>"
+    )
+    hub = cs.parse_link_hub(other_hub, url="https://taplink.cc/namuna", fetched_at=AT)
+    assert len(hub) == 1
+    assert hub[0].website == "https://namuna-mebel.example.uz/"
+    assert "wholesale_bulky" not in hub[0].signal_types
+    empty = html("<p>Salom</p>")
+    assert cs.parse_link_hub(empty, url="https://taplink.cc/x", fetched_at=AT) == []
+
+
+def channel(
+    posts: list[tuple[str, str]], *, username: bool = True, about: str = ""
+) -> bytes:
+    """A t.me/s/ preview with ``posts`` = [(text, datetime attr)], oldest first."""
+    header = (
+        '<div class="tgme_channel_info_header_username">'
+        '<a href="https://t.me/namuna_kanal">@namuna_kanal</a></div>'
+        if username
+        else ""
+    )
+    items = "".join(
+        f'<div class="tgme_widget_message_text">{text}</div>'
+        f'<time datetime="{when}">x</time>'
+        for text, when in posts
+    )
+    return (
+        "<html><body><div class='tgme_channel_info'>"
+        "<div class='tgme_channel_info_header_title'>Namuna Kanal</div>"
+        f"{header}<div class='tgme_channel_info_description'>{about}</div></div>"
+        f"<section>{items}</section></body></html>"
+    ).encode()
+
+
+def test_the_channel_page_reads_its_newest_posts_and_aware_stamps_only():
+    posts = [(f"Post {n}", f"2026-10-{10 + n:02d}T09:00:00+00:00") for n in range(6)]
+    posts.append(("Eski post", "2026-10-30T09:00:00"))  # no zone: not a moment
+    page_ = tp.parse_channel_page(channel(posts), url=tp.public_url("namuna_kanal"))
+    assert page_ is not None
+    assert page_.posts == ("Post 2", "Post 3", "Post 4", "Post 5", "Eski post")
+    assert page_.newest_post_at == datetime.fromisoformat("2026-10-15T09:00:00+00:00")
+
+
+def test_the_channel_name_falls_back_to_the_url():
+    page_ = tp.parse_channel_page(
+        channel([], username=False), url=tp.public_url("namuna_kanal")
+    )
+    assert page_ is not None and page_.username == "namuna_kanal"
+
+
+def test_the_channel_s_posts_its_stir_and_instagram_are_read():
+    url = tp.public_url("namuna_kanal")
+    page_ = tp.parse_channel_page(
+        channel(
+            [
+                (
+                    "Tel: +998 90 000 00 42 · Instagram: @namuna.kanal",
+                    "2026-10-20T09:00:00+00:00",
+                )
+            ],
+            about="Xitoydan optom mato. STIR 300000042",
+        ),
+        url=url,
+    )
+    assert page_ is not None
+    obs = tp.channel_observation(page_, url=url, fetched_at=AT)
+    assert obs.phones == ["+998 90 000 00 42"]  # from a post, not the description
+    assert obs.instagram == "namuna.kanal"
+    assert obs.stir == "300000042" and "entity_solid" in obs.signal_types
+
+
+def test_a_channel_names_no_hub_or_telegram_link_as_its_website():
+    url = tp.public_url("namuna_kanal")
+    links = (
+        '<a href="https://t.me/namuna_kanal">t</a> <a href="https://taplink.cc/n">h</a>'
+        ' <a href="https://namuna-kanal.example.uz/">s</a>'
+    )
+    page_ = tp.parse_channel_page(channel([], about=links), url=url)
+    assert page_ is not None
+    assert tp.channel_observation(page_, url=url, fetched_at=AT).website == (
+        "https://namuna-kanal.example.uz/"
+    )

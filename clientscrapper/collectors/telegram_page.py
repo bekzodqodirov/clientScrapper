@@ -26,14 +26,12 @@ from clientscrapper.collectors.base import Observation
 from clientscrapper.collectors.company_site import (
     SITE_SOURCE,
     address_line,
-    is_link_hub,
     own_markers,
     text_phones,
     unique_phones,
     whatsapp_phone,
 )
 from clientscrapper.services import markup
-from clientscrapper.services.keys import domain_key
 from clientscrapper.services.normalise import (
     find_stir,
     instagram_handles,
@@ -120,13 +118,12 @@ def channel_observation(
         elif (wa := whatsapp_phone(href)) is not None:
             phones.append(wa)
     phones += text_phones(text)
+    # ``website_key`` refuses t.me itself, a link hub and a shortener.
     website = next(
         (
             h
             for h in page.links
-            if h.startswith(("http://", "https://"))
-            and not is_link_hub(h)
-            and website_key(h) is not None
+            if h.startswith(("http://", "https://")) and website_key(h) is not None
         ),
         None,
     )
@@ -151,7 +148,7 @@ def channel_observation(
         phones=unique_phones(phones, limit=PHONES_MAX),
         telegram=page.username,
         instagram=instagram,
-        website=website if website and domain_key(website) != "t.me" else None,
+        website=website,
         address=address,
         signal_types=types,
         excerpt=excerpt,

@@ -80,10 +80,12 @@ from clientscrapper.collectors.keywords import (
     BULKY_CATEGORIES,
     CHINA_RE,
     CONTAINER_RE,
+    LEGAL_FORM_RE,
     NON_CN_COUNTRY_RE,
     NON_CN_ORIGIN_RE,
     PRICE_RE,
     STATE_BODY_RE,
+    STIR_RE,
     TONNES_RE,
     VACANCY_IMPORT_RE,
     VOLUME_RE,
@@ -566,6 +568,10 @@ def _collector_types(
         elif key == "vol_marketplace_velocity":
             count = _int(attrs.get("ads_count")) or _int(attrs.get("sku_count"))
             value = Decimal(count) if count is not None else None
+        elif key == "ent_not_micro":
+            # The STIR or the legal form as the page wrote it (T-24 review: a
+            # site's footer block is quoted, never an empty quote).
+            quote = _first(STIR_RE, own) or _first(LEGAL_FORM_RE, own)
         elif key in finders:
             quote = _first(finders[key], own)
         drafts.add(key, value=value, quote=quote)

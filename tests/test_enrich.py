@@ -519,9 +519,7 @@ async def test_s3_paid_steps_stop_at_ten_cents_and_the_free_ones_run_on(
     assert run is not None and (run.pages, run.cost_usd) == (2, Decimal("0.08"))
 
 
-async def test_e5_a_finder_whose_source_is_off_or_resting_is_not_asked(
-    session, tmp_path
-):
+async def test_e5_a_finder_whose_source_is_off_or_resting_is_not_asked(session, tmp_path):
     """A finder spends its own row's budget (``serp_layer``): the owner's
     /manba off, or the row resting, keeps it from spending at all."""
     company = await firm(session, "Namuna Mebel Savdo")
@@ -586,7 +584,9 @@ async def test_s3_a_company_at_ten_cents_gets_no_paid_call_whatever_the_estimate
     assert finder.calls == 1  # asked for the second, refused at its request
     assert w.urls("api.search.brave.com") == []
     for company, spent in ((at_cap, "0.10"), (near, "0.08")):
-        total = await costs.spend(session, since=enrich.SPEND_SINCE, company_id=company.id)
+        total = await costs.spend(
+            session, since=enrich.SPEND_SINCE, company_id=company.id
+        )
         assert total.usd == Decimal(spent)
 
 
@@ -1341,9 +1341,9 @@ async def test_stir_makes_e4_run_on_a_review_candidate_and_nothing_else(
     )
     assert steps(cand) == [("E4", "hit")]
     assert cand.score_breakdown["enrichment"][0]["attempt"] is None
-    assert cand.score_breakdown["stir_answered"] == (
-        NOW + timedelta(minutes=10)
-    ).isoformat()
+    assert (
+        cand.score_breakdown["stir_answered"] == (NOW + timedelta(minutes=10)).isoformat()
+    )
     stale = await reload(session, stale)
     assert stale.score_breakdown == answered
     assert "q=300000044" not in " ".join(w.urls())
@@ -1464,9 +1464,10 @@ async def test_an_attempt_s_e4_answers_the_stir_too(session, tmp_path):
         first = await w.run(NOW + timedelta(minutes=10))
         cand = await reload(session, cand)
         assert first.attempts == 1 and ("E4", "hit") in steps(cand)
-        assert cand.score_breakdown["stir_answered"] == (
-            NOW + timedelta(minutes=10)
-        ).isoformat()
+        assert (
+            cand.score_breakdown["stir_answered"]
+            == (NOW + timedelta(minutes=10)).isoformat()
+        )
         await session.execute(
             sa.update(LeadCandidate)
             .where(LeadCandidate.id == cand.id)

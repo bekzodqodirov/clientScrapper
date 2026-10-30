@@ -2027,9 +2027,7 @@ async def enrich_batch(
                         },
                     )
                     report.failed += 1
-                    await failed(
-                        session_factory, run, error=type(exc).__name__, now=now
-                    )
+                    await failed(session_factory, run, error=type(exc).__name__, now=now)
                     continue
                 walked = await finish(session_factory, run, now=now)
                 if attempts:
