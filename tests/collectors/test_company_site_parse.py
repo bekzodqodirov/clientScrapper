@@ -59,6 +59,12 @@ def test_the_landing_page():
     assert obs.signal_types == ["wholesale_bulky", "china_origin", "entity_solid"]
     assert obs.attrs["title"] == "Namuna Tekstil Savdo | Optom mato Toshkentda"
     assert cs.about_link(page("site_landing"), url=SITE) == f"{SITE}kontakty"
+    # 04 §3 E2 «goods»: what the site says it sells, its description and
+    # heading (the classifier and the word rules read goods_text).
+    assert obs.goods_text == (
+        "Xitoydan optom mato va gazlama. Ulgurji savdo, ombor Toshkentda."
+        " · Optom mato va gazlama"
+    )
 
 
 def test_the_landing_page_as_stored_and_its_rule_signals():

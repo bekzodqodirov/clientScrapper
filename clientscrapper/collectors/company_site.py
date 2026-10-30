@@ -341,6 +341,15 @@ def stir_text(text: str) -> str | None:
     return None
 
 
+def _goods(*parts: str | None) -> str | None:
+    """What the site says it sells (04 §3 E2 «goods»): its description and
+    its heading, as 03's other collectors keep a description or a bio in
+    ``goods_text`` — the words the classifier and the word rules read.
+    ``companies.goods`` itself is the validated ImportSignal's (02 §2.2)."""
+    text = " · ".join(dict.fromkeys(p for p in parts if p))
+    return text[:EXCERPT_MAX] or None
+
+
 def own_markers(name: str | None, own: str) -> list[str]:
     """The page's own types (03 §2.1): wholesale beside a bulky category,
     a China word, and the cargo core — by name and by self-description."""
@@ -453,6 +462,7 @@ def parse_company_site(
             instagram=_instagram(hrefs, text, same_as),
             website=website,
             address=_address(lines, org),
+            goods_text=_goods(description, heading.text() if heading else None),
             signal_types=types,
             excerpt=about,
             attrs={"title": title, "page": "site"},
