@@ -204,6 +204,12 @@ entries — every ratio is above the 50 % alert line, MebelExpo the lowest.
   `youtube.com/user/iteuzbekistan`, `linkedin.com/company/automechanika-tashkent/`,
   `linkedin.com/showcase/…` and the like), as do firm names, stands and countries.
 
+## Synthetic (written by hand for T-32, never recorded)
+
+| File | What it stands in for |
+|---|---|
+| `era_no_country_synthetic.json` | **SYNTHETIC.** The ERA DataTables shape of `uzbuild_2026_companies_all.json` with five visibly invented «NAMUNA …» rows (`exhibitor-info-999-9000NN`), three with a `null` country — a shape no recorded list shows (every recorded row prints its country, Day-1 answer 12) — so the legal-form fallback of 03 §2.8 has a parser test: «NAMUNA SAVDO, MChJ» and «НАМУНА ИМПОРТ МЧЖ» are kept on their Uzbek form, «NAMUNA TRADE, LLC» is not (LLC names firms abroad as often); and two printed spellings no `/en/` list carries («Ўзбекистон», «O'zbekiston»). |
+
 ## Recorder lines
 
 One line per file: file · date · url · sha256 · status · bytes · scrubbed · note

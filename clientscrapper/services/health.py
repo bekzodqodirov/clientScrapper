@@ -150,6 +150,7 @@ PROBLEM_KEYS: Final = (
     "ig_token_expired",
     "source_low_precision",
     "evidence_over_cap",
+    "exhibitor_list_short",
 )
 CRITICAL_KEYS: Final = frozenset(
     {
@@ -204,6 +205,7 @@ REPORTED_KEYS: Final = frozenset(
         "ig_token_expired",  # Graph 190 (T-26)
         "source_low_precision",  # source_precision_job (T-36)
         "evidence_over_cap",  # retention R1 (T-31)
+        "exhibitor_list_short",  # the exhibitors collector's lists (T-32)
     }
 )
 PROBLEM_FLAG_PREFIX: Final = "problem:"
@@ -1860,7 +1862,45 @@ def problems(status: Status) -> list[Problem]:
             f"⚠️ Dalil papkasi {_detail(rep['evidence_over_cap'], 'gb')} GB — eski "
             "fayllar muddatidan oldin oʻchirildi",
         )
+    if "exhibitor_list_short" in rep:
+        add(
+            "exhibitor_list_short",
+            _lines(list(exhibitor_list_lines(rep["exhibitor_list_short"]))),
+        )
     return [found[k] for k in PROBLEM_KEYS if k in found]
+
+
+def exhibitor_list_lines(reported: Reported) -> tuple[str, ...]:
+    """One line per show list the exhibitors collector found short or gone
+    (03 §2.8; T-32 raises ``detail={"lists": [{"title", "year", "rows",
+    "expected", "status"}, …]}``)."""
+    items = reported.detail.get("lists")
+    lines: list[str] = []
+    for item in items if isinstance(items, list) else []:
+        if not isinstance(item, Mapping):
+            continue
+        title = item.get("title") or item.get("show") or "?"
+        show = escape(f"{title} {item.get('year') or ''}".strip())
+        if item.get("status") in ("removed", "missing"):
+            lines.append(
+                f"⚠️ {show}: koʻrgazma ishtirokchilari roʻyxati saytda topilmadi — "
+                "olib tashlangan yoki hali chiqmagan; manzilni qoʻlda tekshiring"
+            )
+            continue
+        rows, expected = item.get("rows", "?"), item.get("expected", "?")
+        pct = (
+            f" ({round(100 * rows / expected)}%)"
+            if isinstance(rows, int) and isinstance(expected, int) and expected > 0
+            else ""
+        )
+        lines.append(
+            f"⚠️ {show}: koʻrgazma roʻyxatida {escape(rows)} ta ishtirokchi, "
+            f"tashkilotchi {escape(expected)} ta deydi{pct} — roʻyxat chala, sayt "
+            "oʻzgargan boʻlishi mumkin"
+        )
+    return tuple(lines) or (
+        "⚠️ Koʻrgazma roʻyxati chala olindi — <code>make worker</code> loglari",
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -1955,6 +1995,7 @@ _RECOVERY: Final[Mapping[str, str]] = {
     "ig_token_expired": "✅ Instagram tokeni yangilandi — tiklandi",
     "source_low_precision": "✅ Past aniqlik pauzasi tugadi — tiklandi",
     "evidence_over_cap": "✅ Dalil papkasi chegara ichida — tiklandi",
+    "exhibitor_list_short": "✅ Koʻrgazma roʻyxatlari yana toʻliq — tiklandi",
 }
 
 

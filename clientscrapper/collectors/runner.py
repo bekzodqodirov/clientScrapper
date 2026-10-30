@@ -38,11 +38,13 @@ where every observation landed (``Placed``), in a savepoint before the commit:
 a failure there costs its own writes only, is counted
 (``meta.dropped.after_write``) and ends the run ``partial``.
 
-Endings: ``ok``; ``partial`` when the database refused a row, or when a
-page/dollar budget, a cost cap (or any
-``costs.ask`` refusal, ``meta.refused`` naming its code — through the Fetcher
-or from a paid call the collector made itself, ``costs.ModelUnavailable``) or
-the deadline stopped the run; ``failed`` + ``error='host_blocked'`` when a host
+Endings: ``ok``; ``partial`` when the database refused a row, when the
+collector names what it could not read whole (``Collector.incomplete``, in
+``meta.incomplete``: an exhibitor list under half its organiser's count), or
+when a page/dollar budget, a cost cap (or any ``costs.ask`` refusal,
+``meta.refused`` naming its code — through the Fetcher or from a paid call the
+collector made itself, ``costs.ModelUnavailable``) or the deadline stopped the
+run; ``failed`` + ``error='host_blocked'`` when a host
 breaker tripped — the source is paused 6 h (``paused_until`` for the runner,
 ``breaker_until`` for the health problem ``collector_blocked``, both with
 reason ``host_blocked:<host>``); ``failed`` + the error class for anything
@@ -852,6 +854,10 @@ async def run_collector(
                 status, error = "failed", BLOCKED_ERROR
             elif status == "ok" and run_fetcher.stats.exhausted is not None:
                 status = "partial"
+            elif status == "ok" and collector.incomplete:
+                # The collector read less than it set out to (03 §2.8: a list
+                # under half its organiser's count): partial, and it says why.
+                status = "partial"
 
             try:
                 written = await write_observations(
@@ -913,6 +919,8 @@ async def run_collector(
                 variant=variant, fetcher=run_fetcher, written=written, stopped=stopped
             )
             meta = {**collector.run_meta, **meta}
+            if collector.incomplete:
+                meta["incomplete"] = list(collector.incomplete)
             end = finished()
             await session.execute(
                 sa.update(CollectorRun)

@@ -28,6 +28,8 @@ from ``collectors/erp_sync.JOBS`` (T-09's suppression delta/full, T-10's
 outcomes/quarter/year walks), each ``run_collector(ErpSync, variant=…)``;
 ``resolve`` (T-17, ``services/companies.resolve_job``, every 2 minutes);
 ``telegram_monitor`` (T-14, ``run_collector(TelegramMonitor)``);
+``exhibitors`` (T-32, ``run_collector(Exhibitors)``, Monday 09:00 on
+``sources.exhibitors.cron``: the show lists in their window, 03 §2.8);
 ``classify`` (T-15, ``services/classify.classify_job``, woken by
 ``cs_interaction``); the batch lane (T-16, ``services/model_jobs``):
 ``model_batch_submit`` at 23:30 and ``model_batch_collect`` every 30 minutes
@@ -116,6 +118,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 from clientscrapper.collectors import erp_sync, runner
 from clientscrapper.collectors.base import Collector
 from clientscrapper.collectors.directories import Directories
+from clientscrapper.collectors.exhibitors import Exhibitors
 from clientscrapper.collectors.runner import run_collector
 from clientscrapper.collectors.telegram_monitor import TelegramMonitor
 from clientscrapper.config import settings
@@ -345,7 +348,15 @@ def job_table() -> tuple[JobSlot, ...]:
             note="one site a night (SubSource.full_night), the diff too on its day",
         ),
         _collector("hh_vacancies", "20 */4 * * *", "T-23", "hh_vacancies", primary=True),
-        _collector("exhibitors", "0 9 * * 1", "T-32", "exhibitors", primary=True),
+        JobSlot(
+            "exhibitors",
+            ("0 9 * * 1",),
+            "T-32",
+            collector_job(Exhibitors),
+            source_key=Exhibitors.key,
+            primary=True,
+            note="the calendar's windows, and each show's archive once a year",
+        ),
         _collector("maps", "0 10 * * 2", "T-33", "maps", primary=True, note="text"),
         _collector("maps_details", "30 10 * * *", "T-33", "maps", "details"),
         _collector("maps_2gis", "40 10 * * *", "T-33", "maps", "twogis"),

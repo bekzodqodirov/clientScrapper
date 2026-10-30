@@ -200,6 +200,30 @@ async def heartbeat(session, component: str) -> Heartbeat:
 # --- the happy path -----------------------------------------------------------------
 
 
+class ShortDirectory(Directory):
+    """Reads its pages whole but knows the list held fewer rows than it
+    should (03 §2.8's organiser count)."""
+
+    async def collect(self, session, budget: Budget) -> list[Observation]:
+        found = await super().collect(session, budget)
+        self.incomplete.append("katalog:short:3/10")
+        return found
+
+
+async def test_a_collector_that_names_what_it_could_not_read_ends_partial(
+    session, directories, clock, tmp_path
+):
+    report = await run(
+        ShortDirectory, fetcher_for(directory_site(clock)), clock, tmp_path
+    )
+    assert report.status == "partial"
+    [row] = await runs(session)
+    assert (row.status, row.error) == ("partial", None)
+    assert row.meta["incomplete"] == ["katalog:short:3/10"]
+    # What it read is stored all the same.
+    assert row.new_observations == 4
+
+
 async def test_a_run_writes_the_three_tables_and_a_heartbeat(
     session, directories, clock, tmp_path
 ):

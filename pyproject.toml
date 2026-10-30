@@ -129,6 +129,9 @@ files = [
     "clientscrapper/services/retention.py",
     "clientscrapper/services/purge.py",
     "clientscrapper/tools/purge.py",
+    # T-32
+    "clientscrapper/collectors/exhibitors.py",
+    "clientscrapper/collectors/brands.py",
 ]
 
 # APScheduler 3 ships no type information.

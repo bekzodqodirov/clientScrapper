@@ -1462,6 +1462,69 @@ def test_every_regex_of_the_module_is_covered() -> None:
     assert patterns == set(CASES)
 
 
+# --- the names the exhibitor lists print (tests/fixtures/exhibitors README 12) ---
+
+
+@pytest.mark.parametrize(
+    ("name", "want"),
+    [
+        ("MARTRADE DENIZCILIK TASIMACILIK A.S.", "DENIZCILIK"),
+        ("Namuna Taşımacılık A.Ş.", "Taşımacılık"),
+        ("NAMUNA LOJİSTİK", "LOJİSTİK"),
+        ("Namuna Nakliyat", "Nakliyat"),
+        ("NAMUNA FREIGHT, LLC", "FREIGHT"),
+        ("Namuna Forwarding", "Forwarding"),
+    ],
+)
+def test_a_carrier_s_name_in_turkish_or_english_is_a_competitor(name, want):
+    match = kw.COMPETITOR_NAME_RE.search(name)
+    assert match is not None and match.group(0) == want
+
+
+@pytest.mark.parametrize(
+    "name", ["MARMARA TEXTILE A.S.", "TASHKENT TRADE", "NAMUNA ISTANBUL MEBEL"]
+)
+def test_a_turkish_firm_that_carries_nothing_is_no_competitor(name):
+    assert kw.COMPETITOR_NAME_RE.search(name) is None
+
+
+@pytest.mark.parametrize(
+    ("name", "want"),
+    [
+        (
+            "SAMARKAND STATE ARCHITECTURE AND CONSTRUCTION INSTITUTE",
+            "STATE ARCHITECTURE AND CONSTRUCTION INSTITUTE",
+        ),
+        (
+            "AGENCY FOR THE DEVELOPMENT OF LIGHT INDUSTRY UNDER THE CABINET OF "
+            "MINISTERS OF THE REPUBLIC OF UZBEK",
+            "CABINET OF MINISTERS",
+        ),
+        ("Ministry of Energy of the Republic of Uzbekistan", "Ministry"),
+        ("TASHKENT STATE TECHNICAL UNIVERSITY", "STATE TECHNICAL UNIVERSITY"),
+        ("State Committee for Industrial Safety", "State Committee"),
+    ],
+)
+def test_an_english_state_body_name_is_a_state_body(name, want):
+    match = kw.STATE_BODY_NAME_RE.search(name)
+    assert match is not None and match.group(0) == want
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "REAL STATE AGENCY",
+        "UNITED STATES TRADING",
+        "ESTATE GROUP",
+        "STATEMENT MEBEL",
+        "INTERSTATE TRADE LLC",
+        "STATE OF THE ART LIGHTING",
+    ],
+)
+def test_a_private_firm_with_state_in_its_name_is_no_state_body(name):
+    assert kw.STATE_BODY_NAME_RE.search(name) is None
+
+
 # --- 03's named cases --------------------------------------------------------
 
 
