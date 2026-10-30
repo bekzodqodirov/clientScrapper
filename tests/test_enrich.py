@@ -363,6 +363,28 @@ async def test_s4_without_a_username_holds(session, tmp_path):
     assert "no_phone" not in cand.score_breakdown["gates"]
 
 
+async def test_s4_a_contact_with_no_telegram_username_is_no_handoff(session, tmp_path):
+    """The phone-less card goes to a manager who writes on Telegram: a
+    contact with only an Instagram handle (or an anonymised one with a
+    username) is not enough."""
+    company = await firm(session)
+    await signal(session, company)
+    await signal(session, company, "cn_origin")
+    await contact(session, company, instagram="namuna.ig")
+    await contact(
+        session,
+        company,
+        telegram_username="namuna_gone",
+        anonymised_at=NOW - timedelta(days=1),
+    )
+    cand = await enriching(session, company, attempts=2, score=70)
+    await session.commit()
+    async with world(tmp_path) as w:
+        await w.run()
+    cand = await reload(session, cand)
+    assert (cand.state, cand.hold_until) == ("hold", None)
+
+
 async def test_s4_a_phone_but_under_60_after_the_third_holds(session, tmp_path):
     company = await firm(session)
     await signal(session, company)
@@ -696,6 +718,54 @@ async def test_the_day_s_pages_gone_defers_the_attempt(session, tmp_path):
     assert [u for u in w.urls() if not u.endswith("/robots.txt")] == []
 
 
+async def test_e2_reads_two_pages_a_company_at_most(session, tmp_path):
+    """04 §3 E2: 2 pages/company — the site's landing and one hub here; the
+    second hub waits for the next attempt."""
+    company = await firm(session, website_domain="namuna-mebel.example.uz")
+    await signal(session, company)
+    for n, hub in enumerate(
+        ("https://taplink.cc/namuna_a", "https://linktr.ee/namuna_b")
+    ):
+        await resolved(
+            session,
+            company,
+            Seen(
+                source="olx_business",
+                source_ref=f"hub:{n}",
+                url=f"https://www.olx.uz/d/namuna-{n}",
+                fetched_at=NOW,
+                raw_sha256="",
+                kind="company",
+                company_name_raw="Namuna",
+                website=hub,
+            ),
+        )
+    cand = await enriching(session, company)
+    await session.commit()
+    mebel = "https://namuna-mebel.example.uz"
+    # A hub with no phone, so S1 cannot end the walk before the third page.
+    hub = httpx.Response(
+        200,
+        text='<html><body><a href="https://instagram.com/namuna.hub">ig</a></body></html>',
+    )
+    routes = {
+        f"{mebel}/robots.txt": ALLOW_ALL,
+        f"{mebel}/": httpx.Response(
+            200, text="<html><body>" + "Namuna " * 30 + "</body></html>"
+        ),
+        "https://taplink.cc/robots.txt": ALLOW_ALL,
+        "https://taplink.cc/namuna_a": hub,
+        "https://linktr.ee/robots.txt": ALLOW_ALL,
+        "https://linktr.ee/namuna_b": hub,
+    }
+    async with world(tmp_path, routes) as w:
+        await w.run()
+    cand = await reload(session, cand)
+    e2 = [r for st, r in steps(cand) if st == "E2"]
+    assert e2[-1] == "skipped:pages" and len(e2) == 3
+    assert "https://linktr.ee/namuna_b" not in w.urls()
+
+
 async def test_a_js_only_site_is_evidence_and_no_observation(session, tmp_path):
     company = await firm(session, website_domain="namuna-tekstil.example.uz")
     await signal(session, company)
@@ -936,6 +1006,32 @@ async def test_e3_a_304_on_a_stored_channel_page_is_unchanged_not_queued(
     assert ("E3", "unchanged") in steps(cand)
     flag = await session.get(RuntimeFlag, chats.PENDING_FLAG, populate_existing=True)
     assert flag is None or "namuna_optom" not in (flag.value.get("names") or {})
+
+
+async def test_e3_a_channel_page_fetched_within_30_days_is_not_fetched_again(
+    session, tmp_path
+):
+    company = await firm(session, telegram_channel="namuna_optom")
+    await signal(session, company)
+    session.add(
+        Evidence(
+            source_key=chats.SOURCE_KEY,  # the reader's weekly about counts too
+            url="https://t.me/s/namuna_optom",
+            fetched_at=NOW - timedelta(days=12),
+            sha256=f"{seq():064x}",
+            bytes=0,
+            excerpt="",
+            expires_at=NOW + timedelta(days=150),
+        )
+    )
+    cand = await enriching(session, company)
+    await session.commit()
+    async with world(
+        tmp_path, {"https://t.me/s/namuna_optom": site_page("tme_channel")}
+    ) as w:
+        await w.run()
+    assert ("E3", "fresh") in steps(await reload(session, cand))
+    assert w.urls("t.me") == []
 
 
 async def test_e3_never_fetches_a_person_s_username(session, tmp_path):
@@ -1250,6 +1346,91 @@ async def test_e4_is_cached_90_days_by_its_card(session, tmp_path):
         # Past 90 days the card itself is read again, with no search.
         assert await again(NOW + timedelta(days=91)) == ["hit", "cached", "hit"]
         assert pages() == [f"{SEARCH}?q=310514454", CARD, CARD]
+
+
+async def test_e4_s_cache_is_a_company_page_never_another_registry_page(
+    session, tmp_path
+):
+    """Only a company page (``registry.is_card_url``) resolved into the
+    lineage is the 90-day cache; a search page that happens to be evidence
+    with an observation is not."""
+    await set_source(session, enrich.REGISTRY_SOURCE, enabled=True)
+    company = await firm(session, "Namuna Orginfo", stir="310514454")
+    await signal(session, company)
+    await resolved(
+        session,
+        company,
+        Seen(
+            source="registry_lookup",
+            source_ref="orginfo:search",
+            url=f"{SEARCH}?q=310514454",
+            fetched_at=NOW,
+            raw_sha256="",
+            kind="company",
+            company_name_raw="Namuna Orginfo",
+        ),
+    )
+    cand = await enriching(session, company)
+    await session.commit()
+    async with world(tmp_path, ORGINFO_ROUTES) as w:
+        await w.run()
+    assert ("E4", "hit") in steps(await reload(session, cand))
+    assert CARD in w.urls()
+
+
+async def test_e4_with_the_day_s_lookups_gone_defers_the_attempt(session, tmp_path):
+    """04 §3 E4: ≤ 60 lookups a day across hosts — the 61st waits for
+    tomorrow 07:00 and the attempt is not counted."""
+    await set_source(session, enrich.REGISTRY_SOURCE, enabled=True)
+    session.add(
+        CollectorRun(
+            source_key="registry_lookup",
+            started_at=NOW - timedelta(hours=1),
+            finished_at=NOW - timedelta(hours=1),
+            status="ok",
+            meta={"note": "enrich", "lookups": registry.LOOKUPS_PER_DAY - 1},
+        )
+    )
+    first = await firm(session, "Namuna Orginfo", stir="310514454")
+    second = await firm(session, "Namuna Ikkinchi", stir="300000045")
+    for company in (first, second):
+        await signal(session, company)
+    one = await enriching(session, first)
+    two = await enriching(session, second, due=NOW + timedelta(seconds=1))
+    await session.commit()
+    async with world(tmp_path, ORGINFO_ROUTES) as w:
+        await w.run(NOW + timedelta(seconds=1))
+    assert ("E4", "hit") in steps(await reload(session, one))
+    two = await reload(session, two)
+    assert ("E4", "budget:lookups") in steps(two)
+    assert (two.enrich_attempts, two.next_enrich_at) == (
+        0,
+        enrich.tomorrow_morning(NOW),
+    )
+    assert "q=300000045" not in " ".join(w.urls())
+
+
+async def test_nothing_is_fetched_while_collectors_are_switched_off(
+    session, tmp_path, monkeypatch
+):
+    """COLLECTORS_ENABLED=false (03 §1.2) stops enrichment's fetches too."""
+    monkeypatch.setattr(settings, "collectors_enabled", False)
+    await set_source(session, enrich.REGISTRY_SOURCE, enabled=True)
+    company = await firm(
+        session,
+        "Namuna Orginfo",
+        stir="310514454",
+        website_domain="namuna-tekstil.example.uz",
+        telegram_channel="namuna_optom",
+    )
+    await signal(session, company)
+    cand = await enriching(session, company)
+    await session.commit()
+    async with world(tmp_path, ORGINFO_ROUTES) as w:
+        await w.run()
+    found = dict(steps(await reload(session, cand)))
+    assert {found[k] for k in ("E2", "E3", "E4")} == {"skipped:collectors_disabled"}
+    assert w.urls() == []
 
 
 async def test_e4_a_captcha_rests_the_host_a_day_and_is_retried_next_attempt(
@@ -1588,6 +1769,26 @@ async def handoff_hold(session, *, hold_until: datetime, answer: str | None = No
     return cand
 
 
+async def test_a_re_ask_needs_still_no_phone_and_still_60(session, tmp_path):
+    """The handoff card is asked again only as what it was: no usable phone
+    (one found meanwhile makes it an ordinary card, which score_job routes)
+    and a score still ≥ 60."""
+    found_phone = await handoff_hold(session, hold_until=NOW - timedelta(minutes=1))
+    await contact(session, await session.get(Company, found_phone.company_id), phone(46))
+    cooled = await handoff_hold(session, hold_until=NOW - timedelta(minutes=1))
+    await session.execute(
+        sa.delete(Signal).where(
+            Signal.company_id == cooled.company_id, Signal.key == "cn_origin"
+        )
+    )
+    await session.commit()
+    async with world(tmp_path) as w:
+        report = await w.run()
+    assert report.reasked == 0
+    for held in (found_phone, cooled):
+        assert (await reload(session, held)).state == "hold"
+
+
 async def test_an_expired_handoff_card_is_asked_again_when_its_hold_runs_out(
     session, tmp_path
 ):
@@ -1601,7 +1802,7 @@ async def test_an_expired_handoff_card_is_asked_again_when_its_hold_runs_out(
         report = await w.run()
     assert report.reasked == 1
     due = await reload(session, due)
-    assert (due.state, due.tier) == ("review", "warm")
+    assert (due.state, due.tier) == ("review", "warm")  # it was held «hot»
     assert due.score_breakdown["gates"]["no_phone"] is True
     assert steps(due) == [("reask", "review")]
     assert (await reload(session, waiting)).state == "hold"
@@ -1667,6 +1868,18 @@ async def test_e0_fills_sectors_and_rule_4_then_fires_on_the_older_bio(session, 
             result={"speaker_role": "buyer", "goods_category": "textile"},
         )
     )
+    # A tout's classification names goods it does not buy: never a sector.
+    session.add(
+        ModelJob(
+            kind="classify",
+            lane="instant",
+            status="applied",
+            company_id=company.id,
+            model="test",
+            custom_id=f"cs-{seq()}",
+            result={"speaker_role": "tout", "goods_category": "toys"},
+        )
+    )
     cand = await enriching(session, company)
     await session.commit()
     async with world(tmp_path) as w:
@@ -1700,6 +1913,35 @@ def test_tomorrow_morning_is_seven_tashkent_the_next_day():
     )
     assert enrich.next_attempt_at(1, NOW) == NOW + timedelta(hours=24)
     assert enrich.next_attempt_at(2, NOW) == NOW + timedelta(days=7)
+
+
+async def test_a_run_stops_at_nine_minutes(session, tmp_path):
+    """The slot runs every 10 minutes (max_instances=1): a run past nine
+    minutes of wall clock takes no further step."""
+    company = await firm(session, website_domain="namuna-tekstil.example.uz")
+    await signal(session, company)
+    cand = await enriching(session, company)
+    await session.commit()
+    async with world(tmp_path, {f"{SITE}/": site_page("site_landing")}) as w:
+        report = await enrich.enrich_batch(
+            w.tools, now=NOW, clock=lambda: NOW + timedelta(minutes=10)
+        )
+    assert report.stopped == "deadline" and w.urls() == []
+    cand = await reload(session, cand)
+    assert (cand.next_enrich_at, cand.score_breakdown) == (NOW, None)
+
+
+async def test_a_claimed_candidate_is_leased_and_not_taken_twice(session):
+    company = await firm(session)
+    cand = await enriching(session, company)
+    await session.commit()
+    assert await enrich._claim(SessionLocal, cand.id, now=NOW, state="enriching") == (
+        company.id,
+        0,
+    )
+    leased = await reload(session, cand)
+    assert leased.next_enrich_at == NOW + enrich.LEASE
+    assert await enrich._claim(SessionLocal, cand.id, now=NOW, state="enriching") is None
 
 
 async def test_the_global_pause_stops_the_run(session, tmp_path):
