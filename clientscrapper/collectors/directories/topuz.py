@@ -140,6 +140,9 @@ def organisation(
             name, legal_name if legal_name != name else None, description, *sections
         ),
         attrs=attrs,
+        # The entry's own date (03 §2.6 as built: every site alike). Most of
+        # the recorded rows carry one 2024-10 stamp — the site's bulk import.
+        published_at=common.stamp(org.get("updated_at"), fetched_at=fetched_at),
         lang="ru",
     )
     own = common.joined([description, *sections]) or ""

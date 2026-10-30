@@ -5,6 +5,8 @@ past the last, the company card."""
 from __future__ import annotations
 
 import re
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from clientscrapper.collectors.base import Observation
 from clientscrapper.collectors.directories import nuxt, stop_reason
@@ -117,6 +119,8 @@ def test_the_section_page_gives_its_twenty_rows_from_the_payload():
             "card_url": "https://top.uz/company/birjaservistexno-ooo",
             "bulky": ["building", "furniture"],
         },
+        # The payload's naive updated_at, read as Tashkent time.
+        published_at=datetime(2024, 10, 15, 6, 54, 41, tzinfo=ZoneInfo("Asia/Tashkent")),
         lang="ru",
     )
     assert tz.parse_section(p.body, url=p.final_url, fetched_at=p.fetched_at) == [

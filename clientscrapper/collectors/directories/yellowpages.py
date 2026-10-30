@@ -141,9 +141,6 @@ def organisation(
     shop = common.company_name(brand)
     if shop and shop != name:
         attrs["brand_name"] = shop
-    updated = org.get("updated_at")
-    if isinstance(updated, str):
-        attrs["updated_at"] = updated
     target = card_url(org.get("slug"))
     if target is not None:
         attrs["card_url"] = target
@@ -167,6 +164,8 @@ def organisation(
         excerpt=common.excerpt(name, china, description, *rubrics, *tags),
         external_ids={SITE: str(ident)},
         attrs=attrs,
+        # The entry's own date (03 §2.6 as built: every site alike).
+        published_at=common.stamp(org.get("updated_at"), fetched_at=fetched_at),
         lang="ru",
     )
     own = common.joined([description, *rubrics, *tags]) or ""

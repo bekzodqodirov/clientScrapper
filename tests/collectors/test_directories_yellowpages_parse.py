@@ -8,6 +8,8 @@ tests assert the field and its position, never a value as a real STIR.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 from clientscrapper.collectors.base import Observation
 from clientscrapper.collectors.directories import nuxt
 from clientscrapper.collectors.directories import yellowpages as yp
@@ -223,10 +225,11 @@ def test_the_rubrika_page_gives_every_row_from_the_payload():
             "site": "yellowpages",
             "rubrics": ALTA_RUBRICS,
             "tags": ["bumaga", "kanctovary"],
-            "updated_at": "2021-02-03T11:51:59.000000Z",
             "card_url": "https://www.yellowpages.uz/kompaniya/alta-trade-ooo",
             "hold": "category",
         },
+        # The payload's updated_at, the entry's own date (03 §2.6 as built).
+        published_at=datetime(2021, 2, 3, 11, 51, 59, tzinfo=UTC),
         lang="ru",
     )
     assert yp.parse_rubrika(p.body, url=p.final_url, fetched_at=p.fetched_at) == [

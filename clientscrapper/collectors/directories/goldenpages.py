@@ -46,7 +46,6 @@ from collections.abc import Mapping
 from datetime import datetime
 from typing import Any, Final
 from urllib.parse import parse_qs, urlsplit
-from zoneinfo import ZoneInfo
 
 from clientscrapper.collectors.base import Observation
 from clientscrapper.collectors.directories import common
@@ -66,7 +65,7 @@ PHONE_QUESTION: Final = "Номер телефона"
 UPDATED: Final = re.compile(r"(\d{2})\.(\d{2})\.(\d{4})")
 # 03 §2.6: «updated date (drop < 2024)».
 OLDEST_YEAR: Final = 2024
-TASHKENT: Final = ZoneInfo("Asia/Tashkent")
+TASHKENT: Final = common.TASHKENT
 # 03 §2.6's seeds (manbalar.json [v 34]). 1424 and 106080 are recorded; the
 # others are the same page kind, not fetched (README «STILL UNVERIFIED»).
 # /street/?Id=41003 (Abu-Sahiy) is another page kind with no recording: owed.

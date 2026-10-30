@@ -38,6 +38,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Final, Protocol
+from zoneinfo import ZoneInfo
 
 from clientscrapper.collectors.base import Observation
 from clientscrapper.collectors.directories.markup import parse as parse_markup
@@ -57,6 +58,8 @@ EXCERPT_MAX: Final = evidence_store.EXCERPT_MAX
 # 03 §2.6 glotr: «seller with ≥ 20 SKUs … → marketplace_velocity».
 SKU_VELOCITY: Final = 20
 HELD: Final = "category"
+# The directories' own clock, for a stamp printed without a zone.
+TASHKENT: Final = ZoneInfo("Asia/Tashkent")
 # A phone's identity for de-duplication: its last nine digits.
 _TAIL: Final = 9
 SEPARATOR: Final = " · "
@@ -276,6 +279,25 @@ def entity_stir(value: object, *, person: bool) -> str | None:
     if person or _ENTITY_STIR.fullmatch(text) is None:
         return None
     return text
+
+
+def stamp(value: object, *, fetched_at: datetime) -> datetime | None:
+    """The date a site prints for a company's own entry — the payload's
+    ``updated_at`` (``2025-01-22T08:59:23.000000Z``; top.uz writes it naive,
+    ``2024-10-15 06:54:36``, read as Tashkent time: UNVERIFIED which clock the
+    site keeps, a few hours that do not move a recency bucket) — as
+    ``published_at``: never later than the fetch, None when nothing readable
+    is printed. One rule for every site (03 §2.6 as built): the entry is dated
+    by its site, not by the night it was crawled."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        when = datetime.fromisoformat(value.strip())
+    except ValueError:
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=TASHKENT)
+    return min(when, fetched_at)
 
 
 def excerpt(*parts: str | None) -> str:

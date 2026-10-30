@@ -13,10 +13,12 @@ import pytest
 
 from clientscrapper.collectors import directories as d
 from clientscrapper.collectors.base import Observation
-from clientscrapper.collectors.directories import common, nuxt
+from clientscrapper.collectors.directories import common, glotr, nuxt, topuz, yellowpages
 from clientscrapper.collectors.directories import goldenpages as gp
 from clientscrapper.collectors.directories.markup import parse
 from clientscrapper.collectors.keywords import INDIVIDUAL_FORM_RE, WHOLESALE_RUBRIC_RE
+from clientscrapper.services.normalise import to_observation_json
+from tests.collectors.directories_pages import page
 
 TASHKENT = ZoneInfo("Asia/Tashkent")
 THURSDAY = datetime(2026, 10, 29, 23, 0, tzinfo=TASHKENT)
@@ -319,3 +321,57 @@ def test_the_paginator_stops_on_an_empty_page_and_past_the_last():
     assert (
         d.stop_reason(fine, spec=spec, asked="a", final="a", firsts={"x:1"}) == "repeat"
     )
+
+
+# --- recency: one rule for every site (03 §2.6 as built, the T-22 review) ----------
+
+
+def test_every_site_dates_an_entry_by_the_date_it_prints():
+    """``published_at`` (hence ``observed_at`` and every signal's age) is the
+    date the site prints for the company's own entry: goldenpages'
+    «Обновлено», the payload's ``updated_at`` on yellowpages and top.uz (a
+    naive top.uz stamp read as Tashkent time); glotr prints none, so its
+    entries are dated by the crawl. Read off the recorded pages."""
+
+    def first(module, name: str) -> Observation:
+        p = page(name)
+        listed = module.parse_list(p.body, url=p.final_url, fetched_at=p.fetched_at)
+        obs = listed.entries[0].observation
+        assert obs is not None
+        return obs
+
+    yp_row = first(yellowpages, "yellowpages_rubrika_kanctovary_tashkent_p1")
+    assert yp_row.published_at == datetime(2021, 2, 3, 11, 51, 59, tzinfo=ZoneInfo("UTC"))
+    tz_row = first(topuz, "topuz_stroymaterialy_optom_p1")
+    assert tz_row.published_at == datetime(2024, 10, 15, 6, 54, 41, tzinfo=TASHKENT)
+    p = page("yellowpages_kompaniya_alta_trade_ooo")
+    [card] = yellowpages.parse_kompaniya(p.body, url=p.final_url, fetched_at=p.fetched_at)
+    assert card.published_at == yp_row.published_at
+    p = page("topuz_company_uzbek_chinese_trading_house")
+    [house] = topuz.parse_company(p.body, url=p.final_url, fetched_at=p.fetched_at)
+    assert house.published_at == datetime(2024, 10, 15, 6, 55, 31, tzinfo=TASHKENT)
+    p = page("glotr_showcase_jack")
+    [jack] = glotr.parse_showcase(p.body, url=p.final_url, fetched_at=p.fetched_at)
+    assert jack.published_at is None
+    # observed_at follows: the scorer's recency reads the site's own date.
+    assert to_observation_json(tz_row)["observed_at"] == tz_row.published_at.isoformat()
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        (
+            "2025-01-22T08:59:23.000000Z",
+            datetime(2025, 1, 22, 8, 59, 23, tzinfo=ZoneInfo("UTC")),
+        ),
+        ("2024-10-15 06:54:36", datetime(2024, 10, 15, 6, 54, 36, tzinfo=TASHKENT)),
+        # A stamp after the fetch is no later than the fetch.
+        ("2027-01-01T00:00:00Z", THURSDAY),
+        ("", None),
+        ("not a date", None),
+        (None, None),
+        (20241015, None),
+    ],
+)
+def test_a_printed_stamp_is_read_and_never_later_than_the_fetch(raw, expected):
+    assert common.stamp(raw, fetched_at=THURSDAY) == expected
