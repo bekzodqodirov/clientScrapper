@@ -661,9 +661,9 @@ async def test_e5_keeps_only_the_cards_whose_name_agrees(session, tmp_path):
                 content_type="text/plain",
                 fetched_at=NOW,
                 observations=(
-                    card("Namuna Mebel Savdo", "+998901110001", "Toshkent"),
-                    card("Boshqa Mebel", "+998901110002", "Toshkent"),
-                    card("Namuna Mebel Savdo", "+998901110003", "Buxoro"),
+                    card("Namuna Mebel Savdo", "+998900000047", "Toshkent"),
+                    card("Boshqa Mebel", "+998900000048", "Toshkent"),
+                    card("Namuna Mebel Savdo", "+998900000049", "Buxoro"),
                 ),
                 source_key="serp_layer",
             )
@@ -676,7 +676,7 @@ async def test_e5_keeps_only_the_cards_whose_name_agrees(session, tmp_path):
             sa.select(Contact.phone).where(Contact.company_id == company.id)
         )
     )
-    assert phones == {"+998901110001"}
+    assert phones == {"+998900000047"}
     assert ("E5", "ok") in steps(await reload(session, cand))
 
 
