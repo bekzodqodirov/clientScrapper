@@ -41,6 +41,7 @@ ROWS = (
     "directories_yellowpages",
     "directories_glotr",
     "directories_prom",
+    "directories_topuz",
 )
 KEPT = ("enabled", "paused_until", "paused_reason", "daily_page_budget", "last_run_at")
 TRADING_HOUSE = (
@@ -233,7 +234,7 @@ async def test_the_weekly_diff_runs_every_switched_on_site_and_names_the_others(
     assert len(by_source["directories_goldenpages"]) == 28
     assert len(by_source["directories_yellowpages"]) == 16
     assert [o["source_ref"] for o in by_source["directories_glotr"]] == ["glotr:jack"]
-    topuz = by_source["directories"]
+    topuz = by_source["directories_topuz"]
     assert all(o["source_ref"].startswith("topuz:") for o in topuz)
     # The two sections share four companies: each is handled once.
     assert len({o["source_ref"] for o in topuz}) == len(topuz) == 36
@@ -440,7 +441,7 @@ async def test_a_page_budget_stop_keeps_the_rows_of_the_cards_not_reached(
     rows_kept = by_source["directories_goldenpages"]
     assert len(rows_kept) == 20
     assert all(o["phones"] == [] for o in rows_kept)
-    assert "directories" not in by_source  # top.uz was never reached
+    assert "directories_topuz" not in by_source  # top.uz was never reached
     run_row = await session.get(CollectorRun, report.run_id)
     assert run_row is not None and run_row.pages == 4
 
@@ -541,7 +542,7 @@ async def test_a_card_that_never_answers_costs_that_card_not_the_night(
     gold_rows = {o["source_ref"] for o in by_source["directories_goldenpages"]}
     assert "goldenpages:85641" in gold_rows and len(gold_rows) == 28
     # The crawl went on past the dead card: top.uz and glotr ran too.
-    assert by_source["directories"] and by_source["directories_glotr"]
+    assert by_source["directories_topuz"] and by_source["directories_glotr"]
 
 
 async def test_a_list_page_that_never_answers_costs_that_seed(session, rows, tmp_path):
@@ -580,7 +581,7 @@ async def test_a_host_that_stops_answering_stops_its_own_site_only(
     assert len(cards) == 5 * 3  # five cards, the Fetcher's three attempts each
     by_source = await observations(session)
     assert len(by_source["directories_goldenpages"]) == 20  # rubric 1424's rows
-    assert by_source["directories"] and by_source["directories_glotr"]
+    assert by_source["directories_topuz"] and by_source["directories_glotr"]
 
 
 async def test_a_page_the_parser_cannot_read_costs_that_page(session, rows, tmp_path):
@@ -661,3 +662,31 @@ async def test_a_kept_list_row_cites_its_own_evidence_with_its_own_excerpt(
     # A card is still cited at the card's own URL.
     card = next(e for o, e in kept if o.parsed["source_ref"] == "goldenpages:85641")
     assert card.url == "https://www.goldenpages.uz/company/?Id=85641"
+
+
+async def test_top_uz_has_its_own_row_and_its_own_pause(session, rows, tmp_path):
+    """06 Open question 23 (a): the precision job pauses the row a lead is
+    credited to. top.uz is credited to its own row (``directories_topuz``,
+    0004), so a week's pause of a weak top.uz stops top.uz alone — the parent
+    row, which schedules every site, is never the one paused."""
+    clock = FakeClock(THURSDAY)
+    await switch(
+        "directories_topuz",
+        paused_until=THURSDAY + timedelta(days=7),
+        paused_reason="low_precision",
+    )
+    web = Web(clock)
+    report = await run(web, clock, tmp_path)
+    assert report.status == "ok", report
+    assert report.meta["subsources"]["topuz"] == {"skipped": "paused"}
+    assert web.urls("top.uz") == []
+    assert web.urls("www.goldenpages.uz") and web.urls("glotr.uz")
+    await switch("directories_topuz", paused_until=None, paused_reason=None)
+    again = await run(Web(clock), clock, tmp_path)
+    assert again.meta["subsources"]["topuz"]["seeds"] == 2
+    by_source = await observations(session)
+    assert by_source["directories_topuz"]
+    assert all(
+        o["source_ref"].startswith("topuz:") for o in by_source["directories_topuz"]
+    )
+    assert "directories" not in by_source  # nothing is credited to the parent

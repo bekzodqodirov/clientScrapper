@@ -1,4 +1,7 @@
-"""The 23 seeded ``sources`` rows against the spec (02 §2.1, 03 §1.3, 03 §3).
+"""The seeded ``sources`` rows against the spec (02 §2.1, 03 §1.3, 03 §3):
+0001's 23 and the data migrations that added a source since (02 §5 «new
+source = a data migration inserting the ``sources`` row»): 0004's
+``directories_topuz`` (T-22).
 
 03 §3 says the schedule table's cron, rps, pages and ``$/day`` columns are
 seeded into the ``sources`` row of each collector, so the table is written out
@@ -13,6 +16,7 @@ from __future__ import annotations
 import importlib.util
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
 import pytest
 import sqlalchemy as sa
@@ -52,6 +56,7 @@ ATTRIBUTION = (
     "directories_yellowpages",
     "directories_glotr",
     "directories_prom",
+    "directories_topuz",
     "maps_2gis",
     "maps_google",
     "search_brave",
@@ -65,17 +70,58 @@ EXPECTED = {
 COLLECTOR_CAP_USD = Decimal("5")  # 03 §1.3
 
 
-def _migration_sources() -> dict[str, tuple[str | None, str, int, str]]:
+def _module(name: str) -> Any:
     spec = importlib.util.spec_from_file_location(
-        "migration_0001_sources", ROOT / "alembic" / "versions" / "0001_initial.py"
+        f"migration_{name}", ROOT / "alembic" / "versions" / f"{name}.py"
     )
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    return {
+    return module
+
+
+# The data migrations after 0001 that add a source: (file, key) — the row's
+# values are the module's own frozen copy, read through its upgrade().
+ADDED = (("0004_directories_topuz", "directories_topuz"),)
+
+
+def _added_rows() -> dict[str, tuple[str | None, str, int, str]]:
+    rows: dict[str, tuple[str | None, str, int, str]] = {}
+    for name, key in ADDED:
+        module = _module(name)
+        captured: list[dict[str, Any]] = []
+
+        class Fake:
+            @staticmethod
+            def bulk_insert(_table: Any, rows: list[dict[str, Any]], *, into=captured):
+                into.extend(rows)
+
+        fake = Fake
+        real = module.op
+        module.op = fake
+        try:
+            module.upgrade()
+        finally:
+            module.op = real
+        [row] = captured
+        assert row["key"] == key and row["family"] == "directory"
+        assert row["enabled"] is False
+        rows[key] = (
+            row["cron"],
+            str(row["rps"]),
+            int(row["daily_page_budget"]),
+            str(row["daily_cost_cap_usd"]),
+        )
+    return rows
+
+
+def _migration_sources() -> dict[str, tuple[str | None, str, int, str]]:
+    module = _module("0001_initial")
+    seeded = {
         key: (cron, rps, pages, usd)
         for key, _family, _title, _enabled, cron, rps, pages, usd in module._SOURCES
     }
+    return {**seeded, **_added_rows()}
 
 
 def _normal(row: tuple[str | None, str, int, str]) -> tuple[object, ...]:
@@ -84,7 +130,7 @@ def _normal(row: tuple[str | None, str, int, str]) -> tuple[object, ...]:
 
 
 def test_the_migration_seeds_the_spec_schedule():
-    assert len(EXPECTED) == 23
+    assert len(EXPECTED) == 24
     seeded = {k: _normal(v) for k, v in _migration_sources().items()}
     assert seeded == {k: _normal(v) for k, v in EXPECTED.items()}
 
@@ -97,7 +143,7 @@ def test_the_collector_caps_stay_inside_the_daily_budget():
 
 
 def test_tenders_is_not_a_source_yet():
-    # 03 §3 schedules `tenders` as phase 2 but 02 §2.1 seeds 23 rows without
+    # 03 §3 schedules `tenders` as phase 2 but 02 §2.1 seeds 24 rows without
     # it: until a data migration adds the row, nothing may be filed under it.
     assert "tenders" not in _migration_sources()
 

@@ -233,7 +233,7 @@ def test_the_registry_builds_four_sites_and_owes_four():
     assert built == {
         "goldenpages": "directories_goldenpages",
         "yellowpages": "directories_yellowpages",
-        "topuz": "directories",
+        "topuz": "directories_topuz",
         "glotr": "directories_glotr",
     }
     owed = {s.site: s.source_key for s in d.SUBSOURCES if s.spec is None}
@@ -249,15 +249,20 @@ def test_the_registry_builds_four_sites_and_owes_four():
 def test_a_sub_source_runs_only_when_built_switched_on_and_not_paused():
     by_site = {s.site: s for s in d.SUBSOURCES}
     on = d.RowState(enabled=True, paused_until=None)
-    gold, top, prom = by_site["goldenpages"], by_site["topuz"], by_site["prom"]
+    gold, uzts, prom = by_site["goldenpages"], by_site["uzts"], by_site["prom"]
     assert d.skip_reason(gold, on, THURSDAY) is None
     assert d.skip_reason(gold, d.RowState(False, None), THURSDAY) == "disabled"
     later = THURSDAY + timedelta(days=7)
     assert d.skip_reason(gold, d.RowState(True, later), THURSDAY) == "paused"
     assert d.skip_reason(gold, d.RowState(True, THURSDAY), THURSDAY) is None
     assert d.skip_reason(gold, None, THURSDAY) == "no_sources_row"
-    # top.uz has no row: the parent's switch, which the runner read, decides.
-    assert d.skip_reason(top, None, THURSDAY) is None
+    # top.uz has its row (0004): with none it is not run.
+    top = by_site["topuz"]
+    assert d.skip_reason(top, None, THURSDAY) == "no_sources_row"
+    assert d.skip_reason(top, d.RowState(True, later), THURSDAY) == "paused"
+    # A site with no row of its own (uzts, owed) would run under the parent's
+    # switch, which the runner already read — once it is built.
+    assert d.skip_reason(uzts, None, THURSDAY) == "not_built"
     assert d.skip_reason(prom, on, THURSDAY) == "not_built"
 
 

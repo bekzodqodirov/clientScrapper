@@ -7,8 +7,9 @@ with one parser module each — **only where a recording exists**:
 
 * ``goldenpages`` (``directories_goldenpages``), ``yellowpages``
   (``directories_yellowpages``), ``glotr`` (``directories_glotr``) and
-  ``topuz`` (top.uz has no row of its own: it attributes to ``directories``,
-  the site named in ``source_ref``) — built, each pinned by its fixtures;
+  ``topuz`` (``directories_topuz``, 0004: credited to the parent at first, so a
+  weak top.uz's precision pause stopped every site — the T-22 review) —
+  built, each pinned by its fixtures;
 * ``prom`` (``directories_prom``: Cloudflare refused the recording),
   ``uzts``, ``openinfo`` and ``uzpharm`` (not reachable from the recording
   sandbox) — **registered and never run** (``spec`` None, the reason in

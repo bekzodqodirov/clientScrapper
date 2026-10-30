@@ -268,16 +268,18 @@ def test_upgrade_creates_the_02_counts(scratch):
     )
     assert set(map(str, functions)) == FUNCTIONS
     assert _scalars(engine, "SELECT extname FROM pg_extension WHERE extname = 'pg_trgm'")
-    assert _scalars(engine, "SELECT count(*) FROM sources") == [23]
+    # 0001's 23 rows and 0004's directories_topuz (T-22).
+    assert _scalars(engine, "SELECT count(*) FROM sources") == [24]
     assert _scalars(engine, "SELECT count(*) FROM scoring_weights") == [26]
-    # 0003_review_flow (T-21) is head, on 0002_erp_contract (T-10, 02 §5):
-    # columns and indexes on top of 0001's 25 tables, no new table.
+    # 0004_directories_topuz (T-22, a data migration) is head, on
+    # 0003_review_flow (T-21) and 0002_erp_contract (T-10, 02 §5): columns,
+    # indexes and one sources row on top of 0001's 25 tables, no new table.
     assert _scalars(engine, "SELECT version_num FROM alembic_version") == [
-        "0003_review_flow"
+        "0004_directories_topuz"
     ]
 
 
-def test_the_23_sources_are_the_schedulable_units_and_the_sub_sources(scratch):
+def test_the_24_sources_are_the_schedulable_units_and_the_sub_sources(scratch):
     engine, _ = scratch
     with engine.connect() as conn:
         rows = {
@@ -307,6 +309,7 @@ def test_the_23_sources_are_the_schedulable_units_and_the_sub_sources(scratch):
         "directories_yellowpages",
         "directories_glotr",
         "directories_prom",
+        "directories_topuz",
         "maps_2gis",
         "maps_google",
         "search_brave",
@@ -398,7 +401,7 @@ def test_offline_sql_builds_the_same_schema_and_seeds(scratch):
         assert entries, part
         assert differences(offline[part], entries) == {}, part
     assert offline_seeds == live_seeds
-    assert len(live_seeds["sources"]) == 23 and len(live_seeds["weights"]) == 26
+    assert len(live_seeds["sources"]) == 24 and len(live_seeds["weights"]) == 26
 
 
 def test_no_check_spans_a_set_null_foreign_key_column(scratch):
@@ -469,6 +472,52 @@ def test_the_triggers_of_02_section_2_16(scratch):
     assert found == expected
 
 
+def test_0004_downgrade_files_top_uz_back_under_the_parent(scratch):
+    """0004's downgrade loses nothing a run wrote: every row credited to
+    ``directories_topuz`` (and the copy in ``observations.parsed``) returns to
+    ``directories`` before the row goes; the upgrade brings the row back."""
+    engine, cfg = scratch
+    with engine.begin() as conn:
+        evidence_id = conn.execute(
+            sa.text(
+                "INSERT INTO evidence (source_key, url, fetched_at, sha256, bytes, "
+                "excerpt, expires_at) VALUES ('directories_topuz', "
+                "'https://top.uz/section/optovaya-torgovlya#topuz:1', now(), :sha, 1, "
+                "'Namuna', now()) RETURNING id"
+            ),
+            {"sha": "c" * 64},
+        ).scalar_one()
+        conn.execute(
+            sa.text(
+                "INSERT INTO observations (evidence_id, ordinal, source_key, status, "
+                "parsed) VALUES (:e, 0, 'directories_topuz', 'new', "
+                '\'{"source_key": "directories_topuz", "source_ref": '
+                '"topuz:1"}\'::jsonb)'
+            ),
+            {"e": evidence_id},
+        )
+    command.downgrade(cfg, "0003_review_flow")
+    assert _scalars(
+        engine, "SELECT count(*) FROM sources WHERE key = 'directories_topuz'"
+    ) == [0]
+    assert _scalars(
+        engine, f"SELECT source_key FROM evidence WHERE id = {evidence_id}"
+    ) == ["directories"]
+    assert _scalars(
+        engine,
+        "SELECT source_key || ' ' || (parsed->>'source_key') FROM observations "
+        f"WHERE evidence_id = {evidence_id}",
+    ) == ["directories directories"]
+    command.upgrade(cfg, "head")
+    assert _scalars(
+        engine,
+        "SELECT family || ' ' || enabled::text || ' ' || coalesce(cron, '-') "
+        "FROM sources WHERE key = 'directories_topuz'",
+    ) == ["directory false -"]
+    with engine.begin() as conn:
+        conn.execute(sa.text(f"DELETE FROM evidence WHERE id = {evidence_id}"))
+
+
 def test_downgrade_base_leaves_nothing_and_upgrade_head_comes_back(scratch):
     engine, cfg = scratch
     command.downgrade(cfg, "base")
@@ -483,5 +532,5 @@ def test_downgrade_base_leaves_nothing_and_upgrade_head_comes_back(scratch):
     ) == [0]
     command.upgrade(cfg, "head")
     assert len(_public_tables(engine)) == 25
-    assert _scalars(engine, "SELECT count(*) FROM sources") == [23]
+    assert _scalars(engine, "SELECT count(*) FROM sources") == [24]
     assert _scalars(engine, "SELECT count(*) FROM scoring_weights") == [26]

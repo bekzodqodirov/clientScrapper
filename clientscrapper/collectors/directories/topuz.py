@@ -25,9 +25,11 @@ sections[{name_ru, slug}]``. VERIFIED (tests/fixtures/directories/README.md
   section slugs and names), which keeps ``stroymaterialy-optom`` and the
   ``optovaya-torgovlya`` seed itself (815 organisations, the section the
   spec names first) and leaves out the general directory's other sections.
-* top.uz has no ``sources`` row of its own: observations attribute to the
-  parent ``directories`` (03 §2.6), the site named in ``source_ref``
-  (``topuz:<id>``). No id type exists for it in ``company_ids`` (02 §2.4).
+* top.uz's attribution row is ``directories_topuz`` (0004, the T-22 review —
+  it first credited the parent ``directories``, so the precision job's pause
+  of a weak top.uz stopped every directory site, and top.uz had no switch of
+  its own); the site is named in ``source_ref`` (``topuz:<id>``). No id type
+  exists for it in ``company_ids`` (02 §2.4).
 """
 
 from __future__ import annotations
@@ -46,7 +48,7 @@ from clientscrapper.services.normalise import telegram_key
 SITE: Final = "topuz"
 HOST: Final = "top.uz"
 BASE: Final = f"https://{HOST}"
-SOURCE_KEY: Final = "directories"
+SOURCE_KEY: Final = "directories_topuz"
 _SLUG = r"([a-z0-9][a-z0-9-]{0,199})"
 SLUG: Final = re.compile(rf"\A{_SLUG}\Z")
 CARD_PATH: Final = re.compile(rf"\A/company/{_SLUG}/?\Z")

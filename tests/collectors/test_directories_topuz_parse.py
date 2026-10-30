@@ -81,7 +81,7 @@ def test_the_section_page_gives_its_twenty_rows_from_the_payload():
     assert all(e.observation and e.observation.phones for e in listed.entries)
     first = listed.entries[0].observation
     assert first == Observation(
-        source="directories",
+        source="directories_topuz",
         source_ref="topuz:8359",
         url="https://top.uz/section/stroymaterialy-optom",
         fetched_at=p.fetched_at,
@@ -195,7 +195,7 @@ def test_the_card_is_the_payload_organisation_with_its_legal_name():
     p = page("topuz_company_uzbek_chinese_trading_house")
     [obs] = tz.parse_company(p.body, url=p.final_url, fetched_at=p.fetched_at)
     assert (obs.source, obs.source_ref, obs.url) == (
-        "directories",
+        "directories_topuz",
         "topuz:6010",
         TRADING_HOUSE,
     )
