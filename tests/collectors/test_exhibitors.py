@@ -412,10 +412,12 @@ async def test_a_show_in_its_window_stores_its_uzbek_rows_only(
 
     assert report.status == "ok"
     row = await last_run(session)
+    # Each kept row is its own evidence (the integration): forty rows, forty
+    # evidence rows, each with its own excerpt to quote.
     assert (row.status, row.pages, row.new_evidence, row.new_observations) == (
         "ok",
         2,
-        1,
+        40,
         40,
     )
     assert row.meta["lists"] == [
@@ -439,11 +441,18 @@ async def test_a_show_in_its_window_stores_its_uzbek_rows_only(
     assert {p["kind"] for p in parsed} == {"exhibitor"}
     assert {p["hints"]["collector"]["attrs"]["country"] for p in parsed} == {"Uzbekistan"}
     assert "GOLDEN PAGES" not in {p["company"]["name_raw"] for p in parsed}
-    [evidence] = list(await session.scalars(sa.select(Evidence)))
-    assert evidence.url == (
-        "https://caitme.uz/ERAForms/companies_list.php?l=en&exhibition=480"
-        "&draw=1&start=0&length=500"
+    evidence = list(await session.scalars(sa.select(Evidence).order_by(Evidence.id)))
+    by_ref = {e.source_ref: e for e in evidence}
+    assert len(by_ref) == 40
+    # Filed under the show's list page — the page a reader opens — with the
+    # row in the fragment, never under the JSON endpoint the rows came from.
+    assert all(
+        e.url == f"https://caitme.uz/en/exhibitors-list#{e.source_ref}" for e in evidence
     )
+    assert all(e.excerpt.startswith("CAITME 2026 · ") for e in evidence)
+    # The show's last day dates each row, not the crawl.
+    assert {e.published_at for e in evidence} == {datetime(2026, 9, 10, tzinfo=TASHKENT)}
+    assert "GOLDEN PAGES" not in {e.excerpt.split(" · ")[1] for e in evidence}
     # 1 request per 3 s per host at most (03 §2.8): robots.txt, index, list.
     at = [s.at for s in site.seen if s.request.url.host == "caitme.uz"]
     assert len(at) == 3 and all(b - a >= 3.0 for a, b in pairwise(at))
@@ -811,12 +820,14 @@ async def test_a_stored_row_resolves_to_a_company_gate_3_reads_the_country_of(
     assert not result.marks["not_supplier"].startswith("fail")
 
 
-async def test_a_page_the_site_answers_304_is_read_from_the_stored_copy(
+async def test_a_catalogue_read_again_a_week_on_writes_nothing_new(
     session, exhibitors_row, tmp_path
 ):
-    """The Fetcher's conditional GET (03 §1.1): the catalogue sends
-    ``last-modified``; a week on, a 304 is the page as stored, read again and
-    counted, with nothing new written."""
+    """A week on, the same catalogue writes nothing new: each kept row is its
+    own evidence (the integration), and the same row hashes the same. The
+    page itself is no evidence row, so no conditional GET is sent — a 304
+    answers only a page a run stored (``served`` still reads one as the
+    stored copy, 03 §1.1)."""
     await exhibitors_row([ENTRY["automechanika2026"]])
     stamp = "Mon, 09 Nov 2026 04:00:00 GMT"
 
@@ -852,9 +863,10 @@ async def test_a_page_the_site_answers_304_is_read_from_the_stored_copy(
         for s in again.seen
         if s.url == CATALOGUE and "if-modified-since" in s.request.headers
     ]
-    assert len(conditional_asks) == 1
+    assert conditional_asks == []
     assert second.meta["lists"][0]["rows"] == 48
-    assert (second.new_observations, second.meta["unchanged"]) == (0, 1)
+    assert (second.new_observations, second.new_evidence) == (0, 0)
+    assert second.meta["unchanged_observations"] == 4
 
 
 async def test_an_era_index_that_fails_its_weekly_read_is_said(

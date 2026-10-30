@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import replace
 from datetime import date, datetime
 from pathlib import Path
 
@@ -20,6 +21,7 @@ import pytest
 
 from clientscrapper.collectors.base import Observation
 from clientscrapper.collectors.exhibitors import (
+    DEFAULT_CALENDAR,
     Edition,
     Exhibitors,
     Row,
@@ -39,6 +41,9 @@ AT = datetime(2026, 10, 29, 19, 45, tzinfo=TASHKENT)
 CATALOGUE = "https://catalog.automechanika.uz/en/expositions/exposition/7012"
 PAGES = f"{CATALOGUE}-automechanika-tashkent-comtrux-tashkent-bautrux-tashkent-2026.html"
 AM_2026 = Edition("7012", 2026, None, "Exhibitors Catalogue 2026", CATALOGUE)
+# The show's name its rows' excerpts carry (the calendar's, as the crawl
+# passes it: ``show_title``).
+TITLES = {e.show: e.title for e in DEFAULT_CALENDAR}
 # show → (host, the 2026 edition id) — README «Files».
 ERA = {
     "uzbuild": ("uzbuild.uz", "461"),
@@ -71,6 +76,8 @@ def era_rows(show: str, name: str | None = None, **kw):  # type: ignore[no-untyp
     host, edition = ERA[show]
     [end] = [e for i, _, e in EDITIONS[show] if i == edition]
     fixture = name or f"{show}_2026_companies_all.json"
+    kw.setdefault("title", TITLES[show])
+    kw.setdefault("list_url", f"https://{host}/en/exhibitors-list")
     return Exhibitors.parse_era_rows(
         raw(fixture),
         url=endpoint(show),
@@ -82,6 +89,10 @@ def era_rows(show: str, name: str | None = None, **kw):  # type: ignore[no-untyp
 
 
 def expodat(name: str, url: str = CATALOGUE, **kw):  # type: ignore[no-untyped-def]
+    """A catalogue page, read as the crawl reads it: every page's rows filed
+    under the catalogue's first page, named by the calendar's show name."""
+    kw.setdefault("title", TITLES["automechanika"])
+    kw.setdefault("list_url", CATALOGUE)
     return Exhibitors.parse_expodat_page(
         raw(name), url=url, fetched_at=AT, show="automechanika", edition=AM_2026, **kw
     )
@@ -197,7 +208,14 @@ def test_each_show_keeps_its_uzbek_rows_and_counts_the_foreign_ones(show):
     assert not offices & {o.company_name_raw for o in page.kept}
     assert all(o.attrs["country"] == "Uzbekistan" for o in page.kept)
     assert all(o.kind == "exhibitor" and o.source == "exhibitors" for o in page.kept)
-    assert all(o.raw_sha256 == sha(f"{show}_2026_companies_all.json") for o in page.kept)
+    # Each kept row is its own evidence at the show's list page (the
+    # integration: a page's one excerpt would cite another firm's words).
+    host, _ = ERA[show]
+    assert all(o.raw_sha256 == "" for o in page.kept)
+    assert all(
+        o.url == f"https://{host}/en/exhibitors-list#{o.source_ref}" for o in page.kept
+    )
+    assert all(o.excerpt.startswith(f"{TITLES[show]} 2026 · ") for o in page.kept)
 
 
 def test_an_uzbek_era_row_with_its_exact_fields():
@@ -205,14 +223,14 @@ def test_an_uzbek_era_row_with_its_exact_fields():
     assert first == Observation(
         source="exhibitors",
         source_ref="uzbuild:2026:4d-opalubka",
-        url="https://uzbuild.uz/en/exhibitor-info-461-1155",
+        url="https://uzbuild.uz/en/exhibitors-list#uzbuild:2026:4d-opalubka",
         fetched_at=AT,
-        raw_sha256=sha("uzbuild_2026_companies_all.json"),
+        raw_sha256="",
         kind="exhibitor",
         company_name_raw="4D OPALUBKA",
         legal_form=None,
         signal_types=["exhibitor"],
-        excerpt="4D OPALUBKA · Uzbekistan · C 106 · Uzexpocentre NEC",
+        excerpt="UzBuild 2026 · 4D OPALUBKA · Uzbekistan · C 106 · Uzexpocentre NEC",
         external_ids={"exhibitor_slug": "era:1155"},
         attrs={
             "show": "uzbuild",
@@ -222,6 +240,8 @@ def test_an_uzbek_era_row_with_its_exact_fields():
             "pavilion": None,
             "country": "Uzbekistan",
             "venue": "Uzexpocentre NEC",
+            "card_url": "https://uzbuild.uz/en/exhibitor-info-461-1155",
+            "listing": "UzBuild 2026 · 4D OPALUBKA · Uzbekistan · C 106",
         },
         # The show's last day, as its index prints it (10 - 12 February 2026).
         published_at=datetime(2026, 2, 12, tzinfo=TASHKENT),
@@ -262,7 +282,7 @@ def test_a_row_with_no_location_is_read():
     assert power.seen == 218
     golden = [o for o in era_rows("caitme").kept if o.company_name_raw == "GOLDEN PAGES"]
     assert len(golden) == 1 and "venue" not in golden[0].attrs
-    assert golden[0].excerpt == "GOLDEN PAGES · Uzbekistan · F 30"
+    assert golden[0].excerpt == "CAITME 2026 · GOLDEN PAGES · Uzbekistan · F 30"
 
 
 def test_the_names_the_calendar_excludes_are_skipped():
@@ -367,11 +387,11 @@ def observe(row: Row, *, edition: Edition = AM_2026, held: date | None = None): 
     return _observation(
         row,
         show="automechanika",
+        title="Automechanika Tashkent",
         edition=edition,
         platform="expodat",
-        url=CATALOGUE,
+        list_url=CATALOGUE,
         fetched_at=AT,
-        sha="0" * 64,
         cells=(row.name, row.stand, row.country, row.description),
         held=held,
     )
@@ -384,6 +404,22 @@ def rule_signals(obs: Observation) -> dict[str, signals.SignalDraft]:
     return {
         d.key: d for d in signals.from_rules(evidence, parsed, signals.CompanyFacts())
     }
+
+
+def test_the_exhibitor_signal_quotes_the_row_named_by_its_show():
+    """04 §5.3 rule 6 with Open question 22's answer (the wave-5 integration):
+    ``vol_exhibitor`` quotes ``attrs.listing`` — the show and the year, then
+    the row's name, country and stand as printed — a fragment of the row's
+    own excerpt, so a company known only from an exhibitor list can be
+    carded and pushed (``crm_push.cited``)."""
+    obs = era_rows("uzbuild").kept[0]
+    found = rule_signals(obs)
+    quote = found["vol_exhibitor"].quote
+    assert quote == "UzBuild 2026 · 4D OPALUBKA · Uzbekistan · C 106"
+    assert quote is not None and quote in obs.excerpt
+    # A listing that is no fragment of the excerpt is never quoted.
+    forged = replace(obs, attrs={**obs.attrs, "listing": "UzBuild 2026 · NAMUNA"})
+    assert rule_signals(forged)["vol_exhibitor"].quote is None
 
 
 def test_a_brand_s_own_office_on_the_list_is_the_supply_side_not_a_dealer():
@@ -639,14 +675,15 @@ def test_an_uzbek_catalogue_row_with_its_exact_fields():
     assert autozip == Observation(
         source="exhibitors",
         source_ref="automechanika:2026:autozip",
-        url="https://catalog.automechanika.uz/en/companies/company/150498-autozip.html",
+        url=f"{CATALOGUE}#automechanika:2026:autozip",
         fetched_at=AT,
-        raw_sha256=sha("automechanika_catalog_2026_p1.html"),
+        raw_sha256="",
         kind="exhibitor",
         company_name_raw="AutoZIP",
         signal_types=["exhibitor"],
         excerpt=(
-            "AutoZIP · AM272 · Uzbekistan · AUTOZIP is one of the leading "
+            "Automechanika Tashkent 2026 · AutoZIP · AM272 · Uzbekistan · AUTOZIP "
+            "is one of the leading "
             "distributors of automotive spare parts in Uzbekistan, supplying products "
             "from trusted international manufacturers. The company offers a wide "
             "range of components for passenger and commercial vehicles, ensuring "
@@ -663,6 +700,10 @@ def test_an_uzbek_catalogue_row_with_its_exact_fields():
             "stand": "AM272",
             "pavilion": None,
             "country": "Uzbekistan",
+            "card_url": (
+                "https://catalog.automechanika.uz/en/companies/company/150498-autozip.html"
+            ),
+            "listing": "Automechanika Tashkent 2026 · AutoZIP · AM272 · Uzbekistan",
         },
         # The calendar's last day of Automechanika 2026 (21–23 October).
         published_at=datetime(2026, 10, 23, tzinfo=TASHKENT),
@@ -677,9 +718,18 @@ def test_a_row_without_a_stand_and_the_organiser_without_exclude():
     }
     autoport = by_name["Autoport"]
     assert autoport.attrs["stand"] is None
-    assert autoport.url.endswith("/en/companies/company/150621-bizol.html")
-    assert autoport.excerpt.startswith("Autoport · Uzbekistan · - AVTOPORT — это")
-    assert by_name["BMCA"].excerpt == "BMCA · Uzbekistan · World Brands Beyond Borders"
+    assert autoport.attrs["card_url"].endswith("/en/companies/company/150621-bizol.html")
+    assert autoport.excerpt.startswith(
+        "Automechanika Tashkent 2026 · Autoport · Uzbekistan · - AVTOPORT — это"
+    )
+    assert by_name["BMCA"].excerpt == (
+        "Automechanika Tashkent 2026 · BMCA · Uzbekistan · World Brands Beyond Borders"
+    )
+    # No stand: the quote is the label, the name and the country — never the
+    # firm's own description.
+    assert (
+        autoport.attrs["listing"] == "Automechanika Tashkent 2026 · Autoport · Uzbekistan"
+    )
 
 
 def test_page_2_continues_page_1_with_no_overlap():
@@ -687,9 +737,11 @@ def test_page_2_continues_page_1_with_no_overlap():
     second = expodat("automechanika_catalog_2026_p2.html", url=f"{PAGES}?start=48")
     assert second.seen == 48 and not set(first.refs) & set(second.refs)
     assert [o.company_name_raw for o in second.kept] == ["DAC", "EXZAP"]
-    assert second.kept[1].url == (
+    assert second.kept[1].attrs["card_url"] == (
         "https://catalog.automechanika.uz/en/companies/company/150345-exzap.html"
     )
+    # Page 2's rows are filed under the catalogue's first page, like page 1's.
+    assert second.kept[1].url == f"{CATALOGUE}#automechanika:2026:exzap"
 
 
 def test_the_last_page_unescapes_the_names():
@@ -754,4 +806,6 @@ def test_no_catalogue_row_is_cut_mid_word_and_none_is_over_600():
     for name in pages:
         for obs in expodat(f"automechanika_catalog_2026_{name}.html").kept:
             assert len(obs.excerpt) <= 600
-            assert obs.excerpt.startswith(f"{obs.company_name_raw} · ")
+            assert obs.excerpt.startswith(
+                f"Automechanika Tashkent 2026 · {obs.company_name_raw} · "
+            )

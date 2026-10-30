@@ -85,18 +85,22 @@ lookups open a short session of their own.
 
 from __future__ import annotations
 
-import dataclasses
 import logging
 from collections import Counter
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any, Final, Literal
-from urllib.parse import quote, urldefrag
 
 import sqlalchemy as sa
 
-from clientscrapper.collectors.base import Budget, Collector, Observation
+from clientscrapper.collectors.base import (
+    Budget,
+    Collector,
+    Observation,
+    own_evidence,
+    row_url,
+)
 from clientscrapper.collectors.directories import glotr, goldenpages, topuz, yellowpages
 from clientscrapper.collectors.directories.common import Entry, ListPage, SiteSpec
 from clientscrapper.config import settings
@@ -568,22 +572,6 @@ class Directories(Collector):
         stats["rows"] += 1
         if entry.observation.attrs.get("hold"):
             stats["held_rows"] += 1
-
-
-def row_url(url: str, ref: str) -> str:
-    """The list page's URL with the row named in the fragment (never sent to
-    the site): the address a kept list row's own evidence is filed under."""
-    return f"{urldefrag(url).url}#{quote(ref, safe=':')}"
-
-
-def own_evidence(obs: Observation) -> Observation:
-    """A kept list row as its own evidence (the runner's canonical body,
-    ``raw_sha256=""``), at ``row_url``. A list page is one body for twenty
-    companies and an evidence row has one excerpt — its first member's — so a
-    lead card's quote, which must be found in ``evidence.excerpt`` (02 §2.6),
-    would cite another firm's words; and a page filed under its own URL would
-    be the stored copy a conditional GET of that page validates against."""
-    return dataclasses.replace(obs, url=row_url(obs.url, obs.source_ref), raw_sha256="")
 
 
 __all__ = [

@@ -66,9 +66,19 @@ that fragment of the excerpt); a cargo firm's name (``COMPETITOR_NAME_RE``)
 or self-description (``COMPETITOR_SELF_RE``) → ``competitor``. A name that
 is a brand's own office (``brands.own_office``: «DAHUA TECHNOLOGY», «HUAWEI
 DIGITAL POWER») is the supply side, like a foreign row: not stored, counted
-``skipped``. The excerpt is the row's own cells joined by « · », each as
-printed; ``published_at`` is the show's last day (``held_on``), so a row of
-a past edition ages from the show, not from the crawl.
+``skipped``. **Each kept row is its own evidence** (``base.own_evidence``,
+the wave-5 integration): an exhibitor list is one body for hundreds of firms
+and an evidence row has one excerpt, so a card's quote would cite another
+firm's row. It is filed at the list a reader opens — an ERA show's
+``/en/exhibitors-list``, an expodat catalogue's first page — with the row in
+the fragment. The excerpt names the list — the calendar's show name and the
+edition's year («UzBuild 2026») — then the row's own cells joined by « · »,
+each as printed; ``attrs.listing`` (that label, the name, the country and
+the stand) is the ``exhibitor`` signal's quote, and ``attrs.card_url`` the
+company's page on the organiser's site (not fetched: owed). ``published_at``
+is the show's last day (``held_on``), so a row of a past edition ages from
+the show, not from the crawl. The list page itself is no evidence row, so it
+is never asked conditionally.
 
 **Counts against the organiser.** A list walked to its end with fewer than
 half the organiser's figure (``expected``), or an in-window list the site no
@@ -88,7 +98,6 @@ Rate: every request goes through the Fetcher — robots.txt, 1 request per
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import re
@@ -102,7 +111,13 @@ from urllib.parse import parse_qs, urljoin, urlsplit
 
 import sqlalchemy as sa
 
-from clientscrapper.collectors.base import Budget, Collector, Observation, Placed
+from clientscrapper.collectors.base import (
+    Budget,
+    Collector,
+    Observation,
+    Placed,
+    own_evidence,
+)
 from clientscrapper.collectors.brands import BrandHit, brand_hits, own_office
 from clientscrapper.collectors.keywords import (
     COMPETITOR_NAME_RE,
@@ -802,14 +817,20 @@ def _observation(
     row: Row,
     *,
     show: str,
+    title: str,
     edition: Edition,
     platform: Platform,
-    url: str,
+    list_url: str,
     fetched_at: datetime,
-    sha: str,
     cells: Sequence[str | None],
     held: date | None = None,
 ) -> Observation:
+    """One kept row, as its own evidence (``base.own_evidence``) at the list's
+    address: the excerpt names the list — the calendar's show name and the
+    edition's year — and then the row's cells as printed, and ``attrs.listing``
+    is that label with the row's first three cells (the name, its country and
+    its stand), the ``exhibitor`` signal's quote (04 §5.3 rule 6, Open
+    question 22's «the collectors carry the fragment in the excerpt»)."""
     attrs: dict[str, Any] = {
         "show": show,
         "year": edition.year,
@@ -820,8 +841,15 @@ def _observation(
     }
     if row.venue:
         attrs["venue"] = row.venue
+    if row.card_url:
+        # The company's own page on the organiser's site (not fetched: the
+        # cards are owed, 07 T-32), kept for the pass that reads them.
+        attrs["card_url"] = row.card_url
     signals = ["exhibitor"]
-    excerpt = _excerpt(cells)
+    label = f"{title} {edition.year}"
+    excerpt = _excerpt((label, *cells))
+    listing = _excerpt((label, *cells[:3]))
+    attrs["listing"] = listing if excerpt.startswith(listing) else None
     hits = _brands(row)
     if hits:
         # ``attrs.brand`` is the brand as the row spells it, so the signal
@@ -841,22 +869,26 @@ def _observation(
         signals.append("competitor")
     form = LEGAL_FORM_RE.search(row.name)
     ref = slug(row.name) or f"id{row.company_id}"
-    return Observation(
-        source=SOURCE,
-        source_ref=f"{show}:{edition.year}:{ref}",
-        url=row.card_url or url,
-        fetched_at=fetched_at,
-        raw_sha256=sha,
-        kind="exhibitor",
-        company_name_raw=row.name,
-        legal_form=form.group(1) if form else None,
-        signal_types=signals,
-        excerpt=excerpt,
-        external_ids=(
-            {"exhibitor_slug": f"{platform}:{row.company_id}"} if row.company_id else {}
-        ),
-        attrs=attrs,
-        published_at=held_on(edition, fetched_at, held),
+    return own_evidence(
+        Observation(
+            source=SOURCE,
+            source_ref=f"{show}:{edition.year}:{ref}",
+            url=list_url,
+            fetched_at=fetched_at,
+            raw_sha256="",
+            kind="exhibitor",
+            company_name_raw=row.name,
+            legal_form=form.group(1) if form else None,
+            signal_types=signals,
+            excerpt=excerpt,
+            external_ids=(
+                {"exhibitor_slug": f"{platform}:{row.company_id}"}
+                if row.company_id
+                else {}
+            ),
+            attrs=attrs,
+            published_at=held_on(edition, fetched_at, held),
+        )
     )
 
 
@@ -866,10 +898,10 @@ def _sort_rows(
     show: str,
     edition: Edition,
     platform: Platform,
-    url: str,
+    list_url: str,
     fetched_at: datetime,
-    sha: str,
     exclude: Iterable[str],
+    title: str,
     held: date | None = None,
 ) -> tuple[list[Observation], int, int, int, list[str]]:
     excluded = {_key(name) for name in exclude}
@@ -889,11 +921,11 @@ def _sort_rows(
             _observation(
                 row,
                 show=show,
+                title=title,
                 edition=edition,
                 platform=platform,
-                url=url,
+                list_url=list_url,
                 fetched_at=fetched_at,
-                sha=sha,
                 cells=cells,
                 held=held,
             )
@@ -926,6 +958,15 @@ def _on_exposition(url: str, edition: str) -> bool:
 def _start_of(href: str) -> int | None:
     values = parse_qs(urlsplit(href).query).get("start")
     return _int(values[0]) if values else None
+
+
+def show_title(visit: Visit, target: Target) -> str:
+    """The show's name a row's excerpt and quote carry: its calendar entry's
+    (``ShowEntry.title``); an archive edition no entry names takes the
+    show's other entries' name."""
+    if target.entry is not None:
+        return target.entry.title
+    return next((e.title for e in visit.entries), visit.show)
 
 
 class Exhibitors(Collector):
@@ -979,6 +1020,8 @@ class Exhibitors(Collector):
         edition: Edition,
         exclude: Iterable[str] = (),
         held: date | None = None,
+        title: str | None = None,
+        list_url: str | None = None,
     ) -> ListPage:
         """One answer of ``ERAForms/companies_list.php``: ``{draw,
         recordsTotal, recordsFiltered, data: [[company_html, country, stand,
@@ -987,7 +1030,11 @@ class Exhibitors(Collector):
         (``/en/exhibitor-info-<edition>-<company id>``). Raises ``ValueError``
         on anything else (the bare endpoint answers HTTP 500, empty body).
         ``held``: the show's last day when the calendar knows it
-        (``held_on``)."""
+        (``held_on``). ``title`` names the show in each row's excerpt (the
+        calendar's name, else ``show``); ``list_url`` is the page a reader
+        opens — the show's list page, whose rows this endpoint serves — and
+        each kept row's own evidence is filed there (``base.own_evidence``;
+        default ``url``)."""
         answer = json.loads(body.decode("utf-8-sig"))
         if not isinstance(answer, dict) or not isinstance(answer.get("data"), list):
             raise ValueError("not a DataTables answer")
@@ -1019,10 +1066,10 @@ class Exhibitors(Collector):
             show=show,
             edition=edition,
             platform="era",
-            url=url,
+            list_url=list_url or url,
             fetched_at=fetched_at,
-            sha=hashlib.sha256(body).hexdigest(),
             exclude=exclude,
+            title=title or show,
             held=held,
         )
         return ListPage(
@@ -1069,6 +1116,8 @@ class Exhibitors(Collector):
         edition: Edition,
         exclude: Iterable[str] = (),
         held: date | None = None,
+        title: str | None = None,
+        list_url: str | None = None,
     ) -> ListPage:
         """One page of an expodat catalogue (``url`` = the address the page
         was served from). Row = ``#scroll_list a[href*="/companies/company/"]``:
@@ -1078,7 +1127,9 @@ class Exhibitors(Collector):
         the end says «no results found» (0 rows); a page with no
         ``#scroll_list`` at all is ``no_list``, and ``removed`` when ``url``
         is no longer the edition's exposition (README: «final URL ≠ the
-        exposition, no ``#scroll_list``»)."""
+        exposition, no ``#scroll_list``»). ``title`` and ``list_url`` as for
+        ERA: the crawl files every page's rows under the catalogue's first
+        page, so a row that moves to another page keeps its evidence."""
         tree = _tree(body)
         scroll = tree.find(id="scroll_list")
         if scroll is None:
@@ -1090,8 +1141,10 @@ class Exhibitors(Collector):
             company = _EXPODAT_COMPANY_RE.search(href)
             if company is None:
                 continue
-            title = anchor.find(cls="exh_name")
-            name = clean(anchor.attrs.get("title")) or (title.text() if title else None)
+            heading = anchor.find(cls="exh_name")
+            name = clean(anchor.attrs.get("title")) or (
+                heading.text() if heading else None
+            )
             if not name:
                 unreadable += 1
                 continue
@@ -1116,10 +1169,10 @@ class Exhibitors(Collector):
             show=show,
             edition=edition,
             platform="expodat",
-            url=url,
+            list_url=list_url or url,
             fetched_at=fetched_at,
-            sha=hashlib.sha256(body).hexdigest(),
             exclude=exclude,
+            title=title or show,
             held=held,
         )
         base: str | None = None
@@ -1331,6 +1384,8 @@ class Exhibitors(Collector):
                 edition=target.edition,
                 exclude=exclude,
                 held=held,
+                title=show_title(visit, target),
+                list_url=visit.index_url,
             )
             result.total = page.total
             if page.seen == 0 or (page.refs and set(page.refs) <= seen):
@@ -1356,6 +1411,7 @@ class Exhibitors(Collector):
         held: date | None,
     ) -> None:
         url = target.edition.url or rows_url(visit.rows_pattern, target.edition.id)
+        first_page = url
         params: dict[str, int] | None = None
         start = 0
         end_start: int | None = None
@@ -1375,6 +1431,8 @@ class Exhibitors(Collector):
                 edition=target.edition,
                 exclude=exclude,
                 held=held,
+                title=show_title(visit, target),
+                list_url=first_page,
             )
             if page.no_list:
                 # Only the catalogue's own first page can say it is gone; a

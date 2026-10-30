@@ -20,6 +20,7 @@ through ``after_write`` (``Placed``), inside the run's transaction.
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -27,6 +28,7 @@ from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Final, Literal
+from urllib.parse import quote, urldefrag
 
 from clientscrapper.services.health import collector_component
 from clientscrapper.services.http import BudgetExhausted, Fetcher
@@ -101,6 +103,24 @@ class Observation:
     attrs: dict[str, Any] = field(default_factory=dict)
     published_at: datetime | None = None
     lang: Lang | None = None
+
+
+def row_url(url: str, ref: str) -> str:
+    """The list page's URL with the row named in the fragment (never sent to
+    the site): the address a kept list row's own evidence is filed under."""
+    return f"{urldefrag(url).url}#{quote(ref, safe=':')}"
+
+
+def own_evidence(obs: Observation) -> Observation:
+    """A kept list row as its own evidence (the runner's canonical body,
+    ``raw_sha256=""``), at ``row_url``. A list page is one body for twenty
+    companies — an exhibitor list for hundreds — and an evidence row has one
+    excerpt, its first member's, so a lead card's quote, which must be found
+    in ``evidence.excerpt`` (02 §2.6), would cite another firm's words; and a
+    page filed under its own URL would be the stored copy a conditional GET
+    of that page validates against. Shared by the directories (T-22) and the
+    exhibitor lists (the wave-5 integration)."""
+    return dataclasses.replace(obs, url=row_url(obs.url, obs.source_ref), raw_sha256="")
 
 
 @dataclass(slots=True)

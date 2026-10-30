@@ -575,6 +575,13 @@ def _collector_types(
             # The STIR or the legal form as the page wrote it (T-24 review: a
             # site's footer block is quoted, never an empty quote).
             quote = _first(STIR_RE, own) or _first(LEGAL_FORM_RE, own)
+        elif key == "vol_exhibitor":
+            # The row as the organiser's list prints it, named by its show and
+            # year (collectors/exhibitors ``attrs.listing``, a fragment of the
+            # excerpt — ``add`` drops it otherwise): what the card and the ERP
+            # note cite (04 Open question 22, the wave-5 integration).
+            listing = attrs.get("listing")
+            quote = listing if isinstance(listing, str) else None
         elif key in finders:
             quote = _first(finders[key], own)
         drafts.add(key, value=value, quote=quote)
