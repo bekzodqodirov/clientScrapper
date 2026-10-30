@@ -200,16 +200,55 @@ def test_phones_as_written_split_a_field_and_keep_one_number_once():
 # --- the cadences and the fan-out ------------------------------------------------
 
 
-def test_the_weekly_diff_is_a_full_crawl_on_the_1st_to_7th():
-    assert d.crawl_mode(None, THURSDAY) == "diff"
-    assert d.crawl_mode("full", THURSDAY) == "full"
-    first_thursday = datetime(2026, 11, 5, 23, 0, tzinfo=TASHKENT)
-    assert d.crawl_mode(None, first_thursday) == "full"
+def modes(variant: str | None, now: datetime, *, diff_due: bool) -> dict[str, str]:
+    return {s.site: m for s, m in d.plan(variant, now, diff_due=diff_due)}
+
+
+BUILT = ("goldenpages", "yellowpages", "topuz", "glotr")
+
+
+def test_an_ordinary_thursday_is_every_site_s_diff():
+    assert modes(None, THURSDAY, diff_due=True) == dict.fromkeys(
+        (s.site for s in d.SUBSOURCES), "diff"
+    )
     with pytest.raises(ValueError):
-        d.crawl_mode("night", THURSDAY)
+        d.plan("night", THURSDAY, diff_due=True)
+
+
+def test_a_full_night_alone_is_tonight_s_site_in_full():
+    nov1 = datetime(2026, 11, 1, 23, 0, tzinfo=TASHKENT)  # a Sunday
+    assert modes("full", nov1, diff_due=False) == {"goldenpages": "full"}
     # The day is Tashkent's: 19:00 UTC on the 31st is 00:00 on the 1st here.
     utc_eve = datetime(2026, 10, 31, 19, 0, tzinfo=ZoneInfo("UTC"))
-    assert d.crawl_mode(None, utc_eve) == "full"
+    assert modes("full", utc_eve, diff_due=False) == {"goldenpages": "full"}
+    # No full night: the full variant has nothing to do.
+    assert (
+        modes("full", datetime(2026, 11, 9, 23, 0, tzinfo=TASHKENT), diff_due=False) == {}
+    )
+
+
+def test_a_thursday_of_the_1st_to_7th_crawls_tonight_in_full_and_the_rest_by_diff():
+    """The diff and the full variant fire the same minute and one is refused
+    ``already_running``: whichever claims the run does both — tonight's site
+    in full, every other site by its weekly diff, so no site loses its week."""
+    oct1 = datetime(2026, 10, 1, 23, 0, tzinfo=TASHKENT)  # Thursday, night 1
+    both = modes(None, oct1, diff_due=True)
+    assert both["goldenpages"] == "full"
+    assert all(both[site] == "diff" for site in BUILT if site != "goldenpages")
+    assert modes("full", oct1, diff_due=True) == both
+    # Night 5 is prom's (not built): the four built sites still get their diff.
+    nov5 = datetime(2026, 11, 5, 23, 0, tzinfo=TASHKENT)
+    night5 = modes(None, nov5, diff_due=True)
+    assert night5["prom"] == "full"
+    assert all(night5[site] == "diff" for site in BUILT)
+
+
+def test_the_diff_is_due_on_the_day_its_cron_fires():
+    assert d.diff_due("0 23 * * 4", THURSDAY)
+    assert not d.diff_due("0 23 * * 4", THURSDAY + timedelta(days=3))
+    assert d.diff_due("0 23 * * 4", THURSDAY.replace(hour=0, minute=5))
+    assert not d.diff_due(None, THURSDAY)
+    assert not d.diff_due("not a cron", THURSDAY)
 
 
 def test_one_site_a_night_and_the_unbuilt_ones_have_their_nights():

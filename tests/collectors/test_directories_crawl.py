@@ -391,14 +391,38 @@ async def test_the_top_uz_full_crawl_takes_pagen_as_printed_until_the_empty_page
     assert report.meta["subsources"]["topuz"]["stops"] == {"empty": 2}
 
 
-async def test_the_thursday_of_the_1st_to_7th_runs_that_night_s_full_crawl(
+@pytest.mark.parametrize("variant", [None, "full"])
+async def test_the_thursday_of_the_1st_to_7th_runs_tonight_in_full_and_the_rest_by_diff(
+    session, rows, tmp_path, variant
+):
+    """5 November is a Thursday and night 5 (prom, not built): the four built
+    sites still get their weekly diff, whichever of the two jobs that fire at
+    23:00 claims the run."""
+    clock = FakeClock(datetime(2026, 11, 5, 23, 0, tzinfo=TASHKENT))
+    report = await run(Web(clock), clock, tmp_path, variant=variant)
+    assert report.status == "ok", report
+    assert report.meta["full_night"] == ["prom"]
+    subs = report.meta["subsources"]
+    assert subs["prom"] == {"skipped": "not_built"}
+    for site in ("goldenpages", "yellowpages", "topuz", "glotr"):
+        assert subs[site]["mode"] == "diff" and subs[site]["seeds"], site
+    assert report.counters["requests"] > 0
+
+
+async def test_a_first_thursday_that_is_a_built_site_s_night_crawls_it_in_full(
     session, rows, tmp_path
 ):
-    clock = FakeClock(datetime(2026, 11, 5, 23, 0, tzinfo=TASHKENT))
-    report = await run(Web(clock), clock, tmp_path)
-    assert (report.meta["mode"], report.meta["full_night"]) == ("full", ["prom"])
-    assert report.meta["subsources"] == {"prom": {"skipped": "not_built"}}
-    assert report.status == "ok" and report.counters["requests"] == 0
+    """1 October 2026 is a Thursday and night 1: goldenpages in full (every
+    page its pager links), the other sites by their diff (page 1 alone)."""
+    clock = FakeClock(datetime(2026, 10, 1, 23, 0, tzinfo=TASHKENT))
+    web = Web(clock)
+    report = await run(web, clock, tmp_path)
+    subs = report.meta["subsources"]
+    assert (subs["goldenpages"]["mode"], subs["topuz"]["mode"]) == ("full", "diff")
+    assert "https://www.goldenpages.uz/rubrics/?Id=1424&Page=2" in web.urls(
+        "www.goldenpages.uz"
+    )
+    assert not [u for u in web.urls("top.uz") if "PAGEN_1" in u]
 
 
 async def test_a_second_diff_asks_no_card_for_a_company_already_observed(

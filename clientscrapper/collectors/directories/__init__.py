@@ -35,9 +35,16 @@ heartbeat's detail («detail names the sub-source», 03 §3).
   ``&Page=N``, top.uz ``?PAGEN_1=N``; yellowpages and glotr page 1 only — the
   one unverified, the other refused by robots.txt), and a card for every
   company not observed in the last ``CARD_FRESH`` days, so a site larger than
-  one night's budget is walked whole over two months. The diff fires on one
-  Thursday of the 1st–7th each month; that night it runs the full crawl
-  instead (``crawl_mode``), so the month's night is not lost to the diff.
+  one night's budget is walked whole over two months.
+
+**The night both fire** (``plan``; the T-22 review). On the Thursday of the
+1st–7th the two jobs start the same minute and the second is refused
+``already_running``; whichever claims the run does both: tonight's site in
+full, every other site by its diff — the diff is due when the parent row's
+own cron fires that Tashkent day (``diff_due``), so a cron the owner moves
+moves the rule with it. The first version ran tonight's full crawl alone, so
+three sites lost their week, and nothing at all was crawled on the nights
+that belong to unbuilt sites.
 
 **A list page → cards.** ``SiteSpec.parse_list`` gives the companies of a
 page (``common.Entry``), the next page as printed, and the organiser's
@@ -96,6 +103,7 @@ from clientscrapper.config import settings
 from clientscrapper.db.models import Observation as ObservationRow
 from clientscrapper.db.models import Source
 from clientscrapper.db.session import SessionLocal
+from clientscrapper.services import crontab
 from clientscrapper.services.http import (
     TRANSPORT_FAILURES,
     BudgetExhausted,
@@ -165,20 +173,47 @@ SUBSOURCES: Final[tuple[SubSource, ...]] = (
 )
 
 
-def crawl_mode(variant: str | None, now: datetime) -> Mode:
-    """The run's cadence: ``full`` for the monthly variant, and for the
-    weekly diff when it fires on a full-crawl night."""
-    if variant not in VARIANTS:
-        raise ValueError(f"directories has no variant {variant!r}")
-    if variant == FULL or now.astimezone(settings.tz).day in FULL_NIGHTS:
-        return "full"
-    return "diff"
-
-
 def tonight(now: datetime) -> tuple[SubSource, ...]:
     """The sites whose full crawl is tonight (Tashkent day of the month)."""
     day = now.astimezone(settings.tz).day
     return tuple(sub for sub in SUBSOURCES if sub.full_night == day)
+
+
+def diff_due(cron: str | None, now: datetime) -> bool:
+    """The weekly diff fires on ``now``'s Tashkent day: the parent row's own
+    cron (``sources.directories.cron``), read as the scheduler reads it."""
+    if not cron:
+        return False
+    local = now.astimezone(settings.tz)
+    start = local.replace(hour=0, minute=0, second=0, microsecond=0)
+    try:
+        fired = crontab.fires(
+            cron,
+            after=start - timedelta(seconds=1),
+            until=start + timedelta(days=1),
+            tz=settings.tz,
+            limit=1,
+        )
+        return next(fired, None) is not None
+    except crontab.CrontabError:
+        return False
+
+
+def plan(
+    variant: str | None, now: datetime, *, diff_due: bool
+) -> tuple[tuple[SubSource, Mode], ...]:
+    """The run's sites and the cadence of each (the module docstring's «the
+    night both fire»): tonight's site in full on a full night — the ``full``
+    variant's, and the diff's when it fires on the 1st–7th — and every other
+    site by its diff when the diff fired (variant None) or is due tonight."""
+    if variant not in VARIANTS:
+        raise ValueError(f"directories has no variant {variant!r}")
+    full_night = variant == FULL or now.astimezone(settings.tz).day in FULL_NIGHTS
+    full = tonight(now) if full_night else ()
+    chosen: list[tuple[SubSource, Mode]] = [(sub, "full") for sub in full]
+    if variant is None or diff_due:
+        chosen += [(sub, "diff") for sub in SUBSOURCES if sub not in full]
+    return tuple(chosen)
 
 
 @dataclass(frozen=True, slots=True)
@@ -271,15 +306,28 @@ async def known_refs(
         return set(await own.scalars(stmt.distinct()))
 
 
-async def sub_rows() -> tuple[dict[str, RowState], Mapping[str, Any]]:
-    """The sub-sources' own rows and the parent's ``config``."""
+@dataclass(frozen=True, slots=True)
+class Rows:
+    """What the fan-out reads of ``sources``: each sub-source's own row, and
+    the parent's ``config`` and ``cron``."""
+
+    states: dict[str, RowState]
+    config: Mapping[str, Any]
+    cron: str | None
+
+
+async def sub_rows() -> Rows:
     keys = {sub.source_key for sub in SUBSOURCES} | {PARENT}
     async with SessionLocal() as own:
         rows = (await own.scalars(sa.select(Source).where(Source.key.in_(keys)))).all()
     states = {r.key: RowState(bool(r.enabled), r.paused_until) for r in rows}
     parent = next((r for r in rows if r.key == PARENT), None)
     given = parent.config if parent is not None else None
-    return states, given if isinstance(given, dict) else {}
+    return Rows(
+        states,
+        given if isinstance(given, dict) else {},
+        parent.cron if parent is not None else None,
+    )
 
 
 def _report() -> dict[str, Any]:
@@ -320,27 +368,27 @@ class Directories(Collector):
 
     async def collect(self, session: AsyncSession, budget: Budget) -> list[Observation]:
         now = self.started_at or datetime.now(settings.tz)
-        mode = crawl_mode(self.variant, now)
+        rows = await sub_rows()
+        due = plan(self.variant, now, diff_due=diff_due(rows.cron, now))
+        modes = sorted({mode for _, mode in due}, reverse=True)
         report: dict[str, dict[str, Any]] = {}
-        self.run_meta["mode"] = mode
+        self.run_meta["mode"] = "+".join(modes) or "none"
         self.run_meta["subsources"] = report
-        rows, config = await sub_rows()
-        due = SUBSOURCES if mode == "diff" else tonight(now)
-        if mode == "full":
-            self.run_meta["full_night"] = [sub.site for sub in due]
+        if "full" in modes:
+            self.run_meta["full_night"] = [sub.site for sub, m in due if m == "full"]
         seen: set[str] = set()
-        for sub in due:
-            reason = skip_reason(sub, rows.get(sub.source_key), now)
+        for sub, mode in due:
+            reason = skip_reason(sub, rows.states.get(sub.source_key), now)
             if reason is not None:
                 report[sub.site] = {"skipped": reason}
                 self._ran[sub.site] = reason
                 continue
             assert sub.spec is not None
-            stats = report[sub.site] = _report()
+            stats = report[sub.site] = {"mode": mode, **_report()}
             self._ran[sub.site] = "ran"
             self._streak = 0
             try:
-                for seed in seeds_for(sub, config):
+                for seed in seeds_for(sub, rows.config):
                     stats["seeds"] += 1
                     await self._seed(
                         sub.spec, seed, budget, mode=mode, now=now, stats=stats, seen=seen
@@ -547,10 +595,11 @@ __all__ = [
     "TRANSPORT_STREAK",
     "Directories",
     "SubSource",
-    "crawl_mode",
+    "diff_due",
     "known_refs",
     "needs_card",
     "own_evidence",
+    "plan",
     "row_url",
     "seeds_for",
     "skip_reason",

@@ -333,7 +333,7 @@ def job_table() -> tuple[JobSlot, ...]:
             collector_job(Directories),
             source_key=Directories.key,
             primary=True,
-            note="weekly diff; on a 1st–7th night it runs that night's full crawl",
+            note="weekly diff; on a 1st–7th night that night's site in full too",
         ),
         JobSlot(
             "directories_full",
@@ -342,7 +342,7 @@ def job_table() -> tuple[JobSlot, ...]:
             collector_job(Directories, "full"),
             source_key=Directories.key,
             variant="full",
-            note="one site a night (SubSource.full_night)",
+            note="one site a night (SubSource.full_night), the diff too on its day",
         ),
         _collector("hh_vacancies", "20 */4 * * *", "T-23", "hh_vacancies", primary=True),
         _collector("exhibitors", "0 9 * * 1", "T-32", "exhibitors", primary=True),
