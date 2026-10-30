@@ -21,6 +21,7 @@ from apscheduler.events import JobExecutionEvent
 
 from clientscrapper.collectors import erp_sync
 from clientscrapper.collectors.base import Collector, Observation
+from clientscrapper.collectors.directories import Directories
 from clientscrapper.collectors.runner import run_collector
 from clientscrapper.collectors.telegram_monitor import TelegramMonitor
 from clientscrapper.config import settings
@@ -120,6 +121,9 @@ BUILT = {
     "retention",
     # T-36: the weekly precision job (05 §B.2).
     "source_precision",
+    # T-22: the directories' weekly diff and monthly full crawl.
+    "directories",
+    "directories_full",
 }
 # The ERP slots and the ErpSync variant each runs (03 §3, 05 §B.2).
 ERP_VARIANTS = {
@@ -209,6 +213,31 @@ async def test_the_telegram_slot_runs_the_telegram_collector(monkeypatch):
         await worker.shared_fetcher().aclose()
         worker._shared.fetcher = None
     assert ran == [(TelegramMonitor, None)]
+
+
+async def test_the_directories_slots_run_the_directories_collector(monkeypatch):
+    """T-22 fills the two slots T-08 left (03 §2.6, §3): the weekly diff is
+    primary on sources.directories.cron and runs without a variant; the
+    monthly full crawl is the ``full`` variant."""
+    ran: list[tuple[type, str | None]] = []
+
+    async def record(cls, *, fetcher, now, variant=None, **kw):
+        ran.append((cls, variant))
+
+    monkeypatch.setattr(worker, "run_collector", record)
+    table = {s.id: s for s in worker.job_table()}
+    diff, full = table["directories"], table["directories_full"]
+    assert (diff.source_key, diff.variant, diff.primary) == ("directories", None, True)
+    assert (full.source_key, full.variant, full.primary) == ("directories", "full", False)
+    assert diff.job is not None and full.job is not None
+    try:
+        await diff.job()
+        await full.job()
+    finally:
+        await worker.shared_fetcher().aclose()
+        worker._shared.fetcher = None
+    assert ran == [(Directories, None), (Directories, "full")]
+    assert Directories.default_cron == diff.triggers[0]
 
 
 def test_the_resolver_is_the_resolve_slot_s_job():

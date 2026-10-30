@@ -106,8 +106,9 @@ def test_the_next_number_is_one_past_the_highest(tmp_path):
     for name in ("0001_initial.py", "0003_later.py", "cae10a182ef9_probe.py", "env.py"):
         (tmp_path / name).write_text("", encoding="utf-8")
     assert rid.revision_id("add x", tmp_path) == "0004_add_x"
-    # This tree: 0001_initial, 0002_erp_contract, 0003_review_flow (T-21).
-    assert rid.next_number() == 4
+    # This tree: 0001_initial, 0002_erp_contract, 0003_review_flow (T-21),
+    # 0004_directories_topuz (T-22).
+    assert rid.next_number() == 5
 
 
 def test_alembic_names_the_file_after_the_id_alone(tmp_path):
@@ -121,10 +122,10 @@ def test_alembic_names_the_file_after_the_id_alone(tmp_path):
     cfg.set_section_option("post_write_hooks", "hooks", "")
     rev = rid.revision_id("probe slug", scripts / "versions")
     command.revision(cfg, message="probe slug", rev_id=rev)
-    assert rev == "0004_probe_slug"
-    assert (scripts / "versions" / "0004_probe_slug.py").is_file()
+    assert rev == "0005_probe_slug"
+    assert (scripts / "versions" / "0005_probe_slug.py").is_file()
     script = ScriptDirectory.from_config(cfg).get_revision(rev)
-    assert script is not None and script.down_revision == "0003_review_flow"
+    assert script is not None and script.down_revision == "0004_directories_topuz"
 
 
 # --- the backup recipes (06 §3.3, §4.4) ----------------------------------------------

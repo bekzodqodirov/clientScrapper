@@ -95,6 +95,8 @@ files = [
     "clientscrapper/tools/push_test.py",
     # T-14
     "clientscrapper/collectors/telegram_monitor.py",
+    # T-22: the directories collector and its site parsers
+    "clientscrapper/collectors/directories",
     # T-15
     "clientscrapper/services/pseudonyms.py",
     "clientscrapper/services/schemas.py",

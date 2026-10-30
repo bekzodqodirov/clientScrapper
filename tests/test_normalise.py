@@ -9,10 +9,12 @@ predicate follow. Pure: no database, no clock. Synthetic data only — phones
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import get_args
 
 import pytest
 
+from clientscrapper.collectors.base import Observation
 from clientscrapper.db.enums import LEGAL_FORMS
 from clientscrapper.services import keys
 from clientscrapper.services.keys import (
@@ -50,6 +52,7 @@ from clientscrapper.services.normalise import (
     person_names,
     telegram_handles,
     telegram_key,
+    to_observation_json,
     trade_word,
     website_key,
 )
@@ -369,6 +372,9 @@ ADDED_LEGAL_FORMS = (
     "individualniy predprinimatel",
     "aktsiyadorlik jamiyati",
     "aktsionernoe obshestvo",
+    # The directories' own abbreviations of ИП (03 §2.6, the T-22 review).
+    "indp",
+    "inp",
 )
 ALL_LEGAL_FORMS = SPEC_LEGAL_FORMS + ADDED_LEGAL_FORMS
 
@@ -384,6 +390,18 @@ def test_every_legal_form_is_stripped_as_a_whole_token(form: str) -> None:
     # glued to a letter it is part of a word of the name, not a form
     assert name_key(f"Namuna {form}x") == f"namuna {form}x"
     assert name_key(f"Namuna x{form}") == f"namuna x{form}"
+
+
+def test_a_directory_s_individual_form_is_a_legal_form() -> None:
+    """«ИндП» and «ИнП», the directories' own spellings of ИП (03 §2.6, the
+    T-22 review): stripped like ИП, so an individual entrepreneur's «surname
+    given-name patronymic ИндП» keys as three tokens and reads as a person."""
+    key = name_key("Намунов Намуна Намунович ИндП")
+    assert key == "namunov namuna namunovich"
+    assert is_person_shaped(key)
+    assert name_key("Namuna Savdo ИнП") == "namuna savdo"
+    assert legal_form_code("ИндП") == legal_form_code("ИнП") == "IP"
+    assert legal_form_in_name("Namuna Savdo ИндП") == "IP"
 
 
 def test_short_forms_cost_what_the_spec_says() -> None:
@@ -959,3 +977,58 @@ def test_the_people_a_text_names(text, names) -> None:
 )
 def test_a_trade_word(word, trade) -> None:
     assert trade_word(word) is trade
+
+
+def _company(name: str, legal_form: str | None = None) -> dict[str, object]:
+    obs = Observation(
+        "directories_goldenpages",
+        "goldenpages:1",
+        "https://www.goldenpages.uz/company/?Id=1",
+        datetime(2026, 10, 29, tzinfo=UTC),
+        "",
+        "company",
+        company_name_raw=name,
+        legal_form=legal_form,
+    )
+    parsed = to_observation_json(obs)
+    company = parsed["company"]
+    assert isinstance(company, dict)
+    return {"name": company["name_raw"], "key": parsed["name_key"]}
+
+
+@pytest.mark.parametrize(
+    ("raw", "form"),
+    [
+        ('"AKMAL KONSULT" ООО', None),
+        ("Sardor Konsult MChJ", None),
+        ("Akmal Konsult", "ООО"),
+        ("Akmal ИП ООО", None),  # a foreign enterprise with limited liability
+        ("Mas'uliyati cheklangan jamiyati «Akmal Konsult»", None),
+    ],
+)
+def test_a_company_legal_form_keeps_a_person_shaped_key_a_company(
+    raw: str, form: str | None
+) -> None:
+    """04 §1.6 as built (T-22 review): a person-shaped key whose name — or the
+    collector's ``legal_form`` — carries a company's legal form stays the
+    company's name. An individual entrepreneur's form does not keep it."""
+    assert is_person_shaped(name_key(raw))
+    kept = _company(raw, form)
+    assert kept["name"] == raw and kept["key"] == name_key(raw)
+
+
+@pytest.mark.parametrize(
+    ("raw", "form"),
+    [
+        ("Akmal Karimov ИП", None),
+        ("Namunov Namuna Namunovich ИндП", None),
+        ("YaTT Karimov", "YaTT"),
+        ("Sardor", None),
+        ("Aziz aka", None),
+    ],
+)
+def test_a_person_or_an_individual_entrepreneur_is_still_moved(
+    raw: str, form: str | None
+) -> None:
+    moved = _company(raw, form)
+    assert moved == {"name": None, "key": None}

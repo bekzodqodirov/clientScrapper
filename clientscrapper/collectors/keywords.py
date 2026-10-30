@@ -26,6 +26,11 @@ forced a change — each is named in a comment beside it:
 * PINFL_RE (a 14-digit run) is new: the normaliser, the pseudonymiser and
   the output hygiene ask the one pattern;
 * LEGAL_FORM_RE gained МЧЖ, ХЧК and СП, the Cyrillic forms of MChJ, XChK, SP;
+* INDIVIDUAL_FORM_RE (an individual entrepreneur's form, the directories'
+  «ИндП» included, never «ИП ООО») and WHOLESALE_RUBRIC_RE (a directory's
+  wholesale rubric, «Оптовая торговля» / ``stroymaterialy-optom``, and
+  04 §5.1's «склад» and «закупочные базы») are new: the directory parsers'
+  two shapes (03 §2.6, T-22);
 * QUESTION_RE is new, and so are ``buyer_question`` and ``cargo_offer``: the
   tout filter's text rule (03 §2.3) reads a message for the cargo core only
   when it is not a buyer's ask — «kim kargo qiladi?» is a buyer (04 §6);
@@ -907,6 +912,31 @@ STIR_RE = re.compile(r"(?<!\w)(?:STIR|СТИР|ИНН|INN|TIN)\s*[:№#]?\s*(\d{
 LEGAL_FORM_RE = re.compile(
     r"(?<!\w)(MChJ|MCHJ|МЧЖ|OOO|ООО|LLC|XK|ХК|QK|ҚК|AJ|АЖ|AO|АО|ЧП|XChK|ХЧК|YaTT|ЯТТ|ИП|SP|СП|"
     rf"ТОО|JV|QO{_A}?SHMA)(?!\w)",
+    re.I,
+)
+# An individual entrepreneur's legal form (03 §2.6, T-22): the name before it is
+# a person's and the taxpayer number beside it a natural person's — the
+# directory parsers keep neither as company data. LEGAL_FORM_RE's ИП, YaTT and
+# ЯТТ, plus the directories' own abbreviations «ИндП» and «ИнП»
+# (tests/fixtures/directories/README.md «Scrubbing» item 4) and the Latin «IP»
+# only as a whole word in capitals («Ip» is a syllable). «ИП ООО» / «IP OOO»
+# is a foreign enterprise (иностранное предприятие) with limited liability,
+# no person: an ИП followed by a company form is not this one.
+_COMPANY_AFTER = r"(?!\s+(?:ООО|OOO|MChJ|МЧЖ|АО|AO|AJ|АЖ|ЗАО|ХК|XK|QK|ҚК)(?!\w))"
+INDIVIDUAL_FORM_RE = re.compile(
+    rf"(?<!\w)(?:(?i:ИП|ИндП|ИнП|YaTT|ЯТТ)|IP)(?!\w){_COMPANY_AFTER}"
+)
+# A directory's wholesale rubric or section (03 §2.6 ``directory_wholesale``):
+# «Оптовая торговля», «Оптово-розничная торговля», «Стройматериалы оптом»,
+# «Ulgurji savdo» and the slugs «stroymaterialy-optom», «optovaya-torgovlya».
+# B2B_RE is the wrong reader here: its «опт» is whole-word only and «оптовая» is
+# none of its terms. «опт» alone still needs a word end («оптика» is no rubric).
+# 04 §5.1's «склад» (the T-22 review), never «складн-» (folding: «Складные
+# стулья»), and «закупочные базы» (03 §2.6's seed rubric 1029 «Торгово-
+# закупочные базы»; «оптовая база» is «оптов…» already).
+WHOLESALE_RUBRIC_RE = re.compile(
+    r"(?<!\w)(?:оптов\w*|оптом\w*|опт(?!\w)|optom\w*|optov\w*|ulgurji\w*|улгуржи\w*"
+    r"|склад(?!н)\w*|sklad(?!n)\w*|закупочн\w*\s+баз\w*|zakupochn\w*-baz\w*)",
     re.I,
 )
 # A Chinese-side supplier's name (04 §6 gate 3: «Co\.?,?\s*Ltd|有限公司|Trading

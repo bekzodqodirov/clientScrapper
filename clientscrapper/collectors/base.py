@@ -220,6 +220,13 @@ class Collector(ABC):
         """A reason this collector cannot run now (None = it can)."""
         return None
 
+    def beat_detail(self) -> dict[str, Any]:
+        """Keys the run's end heartbeat carries besides the runner's own (a
+        key the runner writes itself wins) — a fan-out collector names the
+        sub-sources it ran or skipped (03 §3: «collector:directories (detail
+        names the sub-source)»). Read after ``collect``, whatever it raised."""
+        return {}
+
     @abstractmethod
     async def collect(self, session: AsyncSession, budget: Budget) -> list[Observation]:
         """Fetch, parse, return every observation of this run."""

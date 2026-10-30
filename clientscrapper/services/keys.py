@@ -395,6 +395,11 @@ LEGAL_FORMS = (
     "chp",
     "xchk",
     "ip",
+    # The directories' own abbreviations of ИП, «ИндП» and «ИнП» (03 §2.6):
+    # an individual entrepreneur's «surname given-name patronymic ИндП» must
+    # key as the three words of a person's name (04 §1.6's person guard).
+    "indp",
+    "inp",
     "yatt",
     "sp",
     "too",

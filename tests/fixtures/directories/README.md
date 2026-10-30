@@ -25,6 +25,17 @@ no cookies, no reveal/XHR call was made anywhere.
   2-digit area/operator code as served (not a number; it does not match the synthetic
   payload number of the same row); top.uz's `+998...` carries no digit.
 - **robots.txt as the recorder read it:** kept in `robots/` (section «robots.txt»).
+- **Not for a resolver end-to-end** (the T-22 review): the scrubber numbers its synthetic
+  phones afresh in every file (`+998 90 000 00 01` …), so unrelated firms on different pages
+  share numbers (counted over every row and card the parsers read: 37 of 47 distinct numbers
+  are held by more than one differently named firm; `+998900000001` by eight rows on all four
+  sites), and one top.uz firm has another number on each page. The parsers' and the crawl's tests read numbers per
+  row only; a test that resolves these observations into companies merges unrelated firms by
+  phone and must give each `source_ref` a number of its own first.
+- **No rubrika of target goods for yellowpages:** the one recorded rubrika (stationery
+  wholesale, Tashkent) is held by the category filter by design (9 of its 15 rows). 03 §2.6
+  picks the rubrika slugs from the rubric index (`optov|wholesale` + target goods), which was
+  not recorded — owed on day 1, with the other unrecorded seeds below.
 
 ## Files
 
@@ -296,8 +307,10 @@ primary seed, tags a supplement only.
   the visible phone is masked «+998 (показать номер)», so JSON-LD is the source
   (`glotr_showcase_jack.html`). «Проверено — Информация о данном продавце была проверена через
   систему Soliq.uz» is printed in the page → `entity_solid` is readable. 27 product cards on the
-  showcase (no page-2 links); «≥ 20 SKUs» holds for this seller on page 1 alone; a total SKU count
-  is not printed (STILL UNVERIFIED for sellers with more products).
+  showcase (no page-2 links); a total SKU count is not printed (STILL UNVERIFIED for sellers with
+  more products). **Correction (T-22, measured):** the 27 cards are 19 distinct products (8 are
+  repeated, same `-p-<id>/` link), so «≥ 20 SKUs» does NOT hold for this seller on page 1 — the
+  parser counts distinct product ids (`test_skus_are_products_not_cards`).
 - **Negative — VERIFIED:** an unknown showcase is a soft 404 — 200 at `/showcases/`
   («Наши партнеры», 48 showcase links) (`glotr_showcase_missing_negative.html`; the redirect and
   the 200 are in `glotr_showcase_missing_negative.headers.json`: `final_url`

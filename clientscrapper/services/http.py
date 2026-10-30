@@ -91,6 +91,12 @@ HOST_RPS: Final[Mapping[str, float]] = {
     "html.duckduckgo.com": 0.1,
     "graph.facebook.com": 1.0,
     "api.apify.com": 1.0,
+    # 03 §2.6: the directories at «0.5 rps max» — the recorded pace, whatever
+    # COLLECTOR_RPS_DEFAULT is raised to for other hosts (the T-22 review).
+    "www.goldenpages.uz": 0.3,
+    "www.yellowpages.uz": 0.3,
+    "top.uz": 0.3,
+    "glotr.uz": 0.3,
 }
 # Documented JSON APIs with a key: the only hosts a request may skip robots.txt
 # for (``obey_robots=False``, and every ``post_json``). The call sites are
@@ -187,6 +193,14 @@ class RobotsOptOutRefused(ValueError):
 
 class ProxyUnavailable(FetchError):
     """``proxy=True`` with PROXY_URL blank."""
+
+
+# What a request can still raise once the retries are spent when the network
+# itself failed — a timeout, a dropped connection, a protocol error, too many
+# redirects, an undecodable body — and not a refusal of this layer's own
+# (``FetchError``). A caller that must outlive one bad request catches it by
+# this name: a collector may not import httpx (07 §1.2).
+TRANSPORT_FAILURES: Final = (httpx.HTTPError,)
 
 
 # --- the shapes the layer exchanges ------------------------------------------------

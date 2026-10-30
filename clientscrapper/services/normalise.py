@@ -65,6 +65,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "GENERIC_TOKENS",
+    "INDIVIDUAL_LEGAL_FORMS",
     "LINK_HUB_HOSTS",
     "NOT_OBSERVATIONS",
     "PARSED_VERSION",
@@ -76,6 +77,7 @@ __all__ = [
     "ParsedKind",
     "Phone",
     "canonical_city",
+    "carries_company_form",
     "display_name",
     "find_legal_form",
     "find_stir",
@@ -402,6 +404,8 @@ _LEGAL_FORM_BY_KEY: Final[dict[str, LegalForm]] = {
     "yatt": "YaTT",
     "yakka tartibdagi tadbirkor": "YaTT",
     "ip": "IP",
+    "indp": "IP",
+    "inp": "IP",
     "individualnyy predprinimatel": "IP",
     "individualniy predprinimatel": "IP",
     "chp": "ChP",
@@ -433,6 +437,26 @@ def find_legal_form(text: str) -> LegalForm | None:
     """The first ``LEGAL_FORM_RE`` hit in free text, as the enum value."""
     match = LEGAL_FORM_RE.search(text)
     return legal_form_code(match.group(1)) if match else None
+
+
+# The forms of a natural person trading in their own name: the words before
+# them are a person's, so they never keep a person-shaped name a company's.
+INDIVIDUAL_LEGAL_FORMS: Final = frozenset({"IP", "YaTT"})
+
+
+def carries_company_form(name: str, legal_form: str | None = None) -> bool:
+    """A company's legal form — anything but an individual entrepreneur's
+    (``INDIVIDUAL_LEGAL_FORMS``) — among the name's form tokens, either script
+    and spelled out alike, or as the collector's ``legal_form``: «"AKMAL
+    KONSULT" ООО» is a company whatever its key looks like; «Akmal ИП ООО» is
+    a foreign enterprise with limited liability, «Akmal Karimov ИП» a person."""
+    forms = [
+        legal_form_code(m.group(0))
+        for m in LEGAL_FORM_TOKENS_RE.finditer(_form_key(name))
+    ]
+    if legal_form:
+        forms.append(legal_form_code(legal_form))
+    return any(f is not None and f not in INDIVIDUAL_LEGAL_FORMS for f in forms)
 
 
 def legal_form_in_name(name: str) -> LegalForm | None:
@@ -920,8 +944,15 @@ def to_observation_json(
     legal_form = legal_form_code(obs.legal_form) or (
         legal_form_in_name(name_raw) if name_raw else None
     )
-    if key is not None and name_raw is not None and is_person_shaped(key):
-        # Person-shaped names never become a company name (04 §1.6). The label
+    if (
+        key is not None
+        and name_raw is not None
+        and is_person_shaped(key)
+        and not carries_company_form(name_raw, obs.legal_form)
+    ):
+        # Person-shaped names never become a company name (04 §1.6) — unless
+        # the name carries a company's legal form (as built, the T-22 review:
+        # «"AKMAL KONSULT" ООО» is a firm named after a given name). The label
         # carries no name_key on purpose: two labels would fuzzy-match each
         # other and merge two sellers; the external id resolves them exactly.
         if person_name is None:
