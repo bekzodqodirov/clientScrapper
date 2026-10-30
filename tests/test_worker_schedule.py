@@ -271,6 +271,29 @@ async def test_the_exhibitors_slot_runs_the_exhibitors_collector(monkeypatch):
     assert ran == [(Exhibitors, None)]
 
 
+def test_the_wave_5_slots_are_judged_by_their_own_cadence():
+    """The integration of wave 5: the directories and the exhibitors are
+    collectors (their health is collector_silent / job_failing (b), never a
+    skip count); the enrichment slot is a 10-minute cadence inside its hours
+    (04 §0), so a run that never ends is counted by its skips (06 §4.2
+    job_failing (a)) and a raise is judged against ten minutes, or the
+    overnight gap at the end of the day."""
+    assert worker.skip_interval("directories") is None
+    assert worker.skip_interval("directories_full") is None
+    assert worker.skip_interval("exhibitors") is None
+    assert worker.skip_interval("enrich") == 600
+    noon = datetime(2026, 10, 29, 12, 3, tzinfo=TZ)
+    assert worker.job_period("enrich", now=noon) == 600
+    evening = datetime(2026, 10, 29, 21, 45, tzinfo=TZ)
+    # 21:50 then 07:00 the next morning.
+    assert worker.job_period("enrich", now=evening) == 9 * 3600 + 10 * 60
+    # Only a «*/n hours * * *» cron is a cadence.
+    assert worker._cron_step("*/10 7-21 * * *") == 600
+    assert worker._cron_step("*/30 * * * *") is None  # longer than 15 min
+    assert worker._cron_step("0 23 * * 4") is None
+    assert worker._cron_step("*/10 7-21 1-7 * *") is None
+
+
 def test_the_resolver_is_the_resolve_slot_s_job():
     [slot] = [s for s in worker.job_table() if s.id == "resolve"]
     assert slot.job is companies.resolve_job

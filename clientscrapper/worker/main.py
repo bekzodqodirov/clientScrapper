@@ -789,7 +789,10 @@ SKIP_JUDGED_MAX: Final = timedelta(minutes=15)
 def skip_interval(job_id: str, slots: tuple[JobSlot, ...] | None = None) -> int | None:
     """The interval in seconds of an in-process ``every <n>m|s`` job whose
     skipped runs count (``SKIP_JUDGED_MAX`` at most, no collector), else
-    None."""
+    None. A cron that fires every ``n`` minutes inside its hours —
+    ``*/<n> <hours> * * *``, the ``enrich`` slot's ``*/10 7-21 * * *`` (04 §0:
+    «every 10 min 07:00–22:00», the wave-5 integration) — is such a cadence
+    too: its skips are a run that never ended."""
     for slot in slots if slots is not None else job_table():
         if slot.id != job_id:
             continue
@@ -797,13 +800,26 @@ def skip_interval(job_id: str, slots: tuple[JobSlot, ...] | None = None) -> int 
             return None
         spec = slot.triggers[0]
         if not spec.startswith("every "):
-            return None
+            return _cron_step(spec)
         amount, unit = spec[len("every ") : -1], spec[-1]
         if not amount.isdigit() or unit not in {"m", "s"}:
             return None
         seconds = int(amount) * (60 if unit == "m" else 1)
         return seconds if seconds <= SKIP_JUDGED_MAX.total_seconds() else None
     return None
+
+
+def _cron_step(spec: str) -> int | None:
+    """``*/<n> <hours> * * *`` → ``n`` minutes in seconds, when that is a
+    short cadence (``SKIP_JUDGED_MAX``); any other cron → None."""
+    fields = spec.split()
+    if len(fields) != 5 or fields[2:] != ["*", "*", "*"]:
+        return None
+    minute = fields[0]
+    if not minute.startswith("*/") or not minute[2:].isdigit():
+        return None
+    seconds = int(minute[2:]) * 60
+    return seconds if 0 < seconds <= SKIP_JUDGED_MAX.total_seconds() else None
 
 
 def on_job_skipped(
