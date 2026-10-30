@@ -1041,7 +1041,7 @@ async def foreign_stir_holder(
     found a card that belongs elsewhere (04 §2.1: the STIR outranks every
     other key)."""
     lineage = await company_lineage(session, company.id)
-    return await session.scalar(
+    holder: Company | None = await session.scalar(
         sa.select(Company)
         .where(
             Company.stir == stir,
@@ -1051,6 +1051,7 @@ async def foreign_stir_holder(
         .order_by(Company.created_at, Company.id)
         .limit(1)
     )
+    return holder
 
 
 async def suggest_duplicate(

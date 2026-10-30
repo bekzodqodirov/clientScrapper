@@ -66,9 +66,11 @@ The steps:
   ≤ ``registry.LOOKUPS_PER_DAY`` a day, cached 90 days by the card page the
   evidence holds; a hit writes ``ent_legal_confirmed`` — the only writer of
   it — and the registry's columns;
-* **E5** — directory/maps finders (T-25's ``SerpClient``, T-33's Places):
-  each call through ``costs.ask`` with the company named; none is configured
-  until those tasks build one (``not_configured``);
+* **E5** — directory/maps finders (T-25's ``SerpClient``, T-33's Places),
+  each under its own source row's budget and switches, every paid request it
+  makes through ``costs.ask`` named for the company by the Fetcher view's
+  cost gate (``CompanyGate``, S3 per request); none is configured until those
+  tasks build one (``not_configured``);
 * **E6** — the Instagram Business Discovery reader (T-26), free; none
   configured yet.
 
@@ -92,11 +94,10 @@ from __future__ import annotations
 import hashlib
 import logging
 import uuid
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from decimal import Decimal
-from functools import partial
 from pathlib import Path
 from typing import Any, Final, Protocol
 
@@ -142,6 +143,7 @@ from clientscrapper.services.http import (
     HostPaused,
     PageBudget,
     RobotsDisallowed,
+    UnmeteredCall,
 )
 from clientscrapper.services.keys import domain_key
 from clientscrapper.services.normalise import canonical_city, to_observation_json
@@ -211,19 +213,27 @@ class Page:
 
 class PaidFinder(Protocol):
     """E5 — a directory/maps lookup by name and city (04 §3: ``serp_brave``
-    2 queries, Places text + details). T-25 and T-33 build them; each call
-    goes through ``costs.ask`` with the company named (S3)."""
+    2 queries, Places text + details). T-25 and T-33 build them.
+
+    A finder fetches the way every metered collector does: through the
+    ``fetcher`` it is handed, each paid request declaring its ``PaidCall``.
+    That view's cost gate (``CompanyGate``) runs every such request through
+    ``costs.ask`` with the company named and refuses it once the company's
+    paid spend would pass ``COMPANY_CAP`` (S3) — one claim per request, never
+    an outer one around the whole find. ``budget`` is its own ``source_key``
+    row's (pages and dollars of that row today, 02 Open question 9: SERP
+    under ``serp_layer``, Places under ``maps``); a switched-off or resting
+    row is not asked. ``estimate`` is what one ``find`` may cost, read
+    before it is asked (S3's skip)."""
 
     key: str
-    operation: Operation
+    source_key: str
 
     def estimate(self, query: CompanyQuery) -> Decimal: ...
 
     async def find(
         self, query: CompanyQuery, *, fetcher: Fetcher, budget: PageBudget
     ) -> list[Page]: ...
-
-    def price(self, pages: list[Page]) -> Priced: ...
 
 
 class ProfileReader(Protocol):
@@ -247,6 +257,62 @@ class Tools:
     finders: Sequence[PaidFinder] = ()
     profiles: ProfileReader | None = None
     evidence_root: Path | None = None
+
+
+# --- the company's cost gate (S3) ----------------------------------------------------
+
+# The refusal ``CompanyGate`` raises when a request would take the company's
+# paid spend past ``COMPANY_CAP``; the Fetcher reports it as a refused budget
+# (``BudgetExhausted('refused', COMPANY_CAP_CODE)``) and E5 as ``company_cap``.
+COMPANY_CAP_CODE: Final = "company_cap"
+
+
+def over_company_cap(spent: Decimal, est: Decimal) -> bool:
+    """S3 (04 §3): a company whose paid spend has reached ``COMPANY_CAP``, or
+    would pass it with this estimate, gets no more paid calls."""
+    return spent >= COMPANY_CAP or spent + est > COMPANY_CAP
+
+
+@dataclass(slots=True)
+class CompanyGate:
+    """The cost gate of the finders' Fetcher views (``http.CostGate``): every
+    ``PaidCall`` a finder makes goes through ``costs.ask`` named for the
+    company being enriched (``usage_log.company_id``, what S3 sums) and the
+    sub-source the request was made for, after the S3 check — in a short
+    transaction of its own, as ``costs.ask`` claims before the call. A paid
+    request with no company set is a programming error (a finder called
+    outside E5): refused before anything is sent."""
+
+    session_factory: SessionFactory
+    company_id: uuid.UUID | None = None
+
+    async def __call__(
+        self,
+        *,
+        operation: Operation,
+        est_usd: Decimal,
+        call: Callable[[], Awaitable[FetchResult]],
+        price: Callable[[FetchResult], Priced],
+        source_key: str,
+        now: datetime,
+    ) -> FetchResult:
+        company_id = self.company_id
+        if company_id is None:
+            raise UnmeteredCall("a paid enrichment call names its company")
+        async with self.session_factory() as session, session.begin():
+            spent = await costs.spend(session, since=SPEND_SINCE, company_id=company_id)
+            if over_company_cap(spent.usd, est_usd):
+                raise costs.CostCapReached(COMPANY_CAP_CODE, operation)
+            return await costs.ask(
+                session,
+                operation=operation,
+                est_usd=est_usd,
+                call=call,
+                price=price,
+                now=now,
+                source_key=source_key,
+                company_id=company_id,
+            )
 
 
 # --- the trail ------------------------------------------------------------------------
@@ -804,6 +870,10 @@ class Context:
     now: datetime
     deadline: datetime
     clock: Callable[[], datetime]
+    gate: CompanyGate | None = None
+    ledger: RunLedger | None = None
+    # The finders' own source rows (E5), opened when a finder is first asked.
+    paid: dict[str, SourceRun] = field(default_factory=dict)
 
 
 def _clock_check(ctx: Context) -> None:
@@ -1238,8 +1308,32 @@ def _agrees(seen: Seen, facts: Facts) -> bool:
     )
 
 
+async def _paid_run(ctx: Context, key: str) -> SourceRun:
+    """A finder's own source row for this run: its budget, and a Fetcher
+    view bound with the company's cost gate (``CompanyGate``)."""
+    held = ctx.paid.get(key)
+    if held is None:
+        async with ctx.session_factory() as session:
+            held = await _source_run(
+                session,
+                key,
+                now=ctx.now,
+                fetcher=ctx.tools.fetcher,
+                hooks=ctx.ledger,
+                cost_gate=ctx.gate,
+            )
+        ctx.paid[key] = held
+    return held
+
+
+async def _company_spend(ctx: Context, company_id: uuid.UUID) -> Decimal:
+    async with ctx.session_factory() as session:
+        return (await costs.spend(session, since=SPEND_SINCE, company_id=company_id)).usd
+
+
 async def step_e5(ctx: Context, run: Attempt, facts: Facts) -> list[dict[str, Any]]:
-    """E5: each configured finder, every call through ``costs.ask``."""
+    """E5: each configured finder, every paid request of it through
+    ``costs.ask`` named for the company (``CompanyGate``)."""
     if not ctx.tools.finders:
         return [entry("E5", "not_configured", now=ctx.now, attempt=run.attempt)]
     if not companies.usable_name(facts.name_key):
@@ -1254,12 +1348,21 @@ async def step_e5(ctx: Context, run: Attempt, facts: Facts) -> list[dict[str, An
     out: list[dict[str, Any]] = []
     for finder in ctx.tools.finders:
         _clock_check(ctx)
+        where = await _paid_run(ctx, finder.source_key)
+        if not where.usable:
+            out.append(
+                entry(
+                    "E5",
+                    f"skipped:{where.why_not}",
+                    now=ctx.now,
+                    attempt=run.attempt,
+                    found={"finder": finder.key},
+                )
+            )
+            continue
         estimate = finder.estimate(query)
-        async with ctx.session_factory() as session:
-            spent = (
-                await costs.spend(session, since=SPEND_SINCE, company_id=facts.company_id)
-            ).usd
-        if spent + estimate > COMPANY_CAP:
+        spent = await _company_spend(ctx, facts.company_id)
+        if over_company_cap(spent, estimate):
             out.append(
                 entry(
                     "E5",
@@ -1270,42 +1373,36 @@ async def step_e5(ctx: Context, run: Attempt, facts: Facts) -> list[dict[str, An
                 )
             )
             continue
+        assert ctx.gate is not None
+        ctx.gate.company_id = facts.company_id
         try:
-            async with ctx.session_factory() as session, session.begin():
-                pages = await costs.ask(
-                    session,
-                    operation=finder.operation,
-                    est_usd=estimate,
-                    call=partial(
-                        finder.find,
-                        query,
-                        fetcher=ctx.site.fetcher,
-                        budget=ctx.site.budget,
-                    ),
-                    price=finder.price,
-                    now=ctx.now,
-                    company_id=facts.company_id,
-                )
-        except costs.CostCapReached as refused:
-            run.deferred = run.deferred or costs.is_cap(refused.code)
+            pages = await finder.find(query, fetcher=where.fetcher, budget=where.budget)
+        except BudgetExhausted as exc:
+            if exc.reason == "deadline":
+                raise _Stop("deadline") from exc
+            if exc.detail == COMPANY_CAP_CODE:
+                result = "company_cap"
+            else:
+                # A cap or the day's pages/dollars: tomorrow 07:00 (04 §8). A
+                # refusal that is no cap (an op window, an unpriced call) is
+                # not a deferral.
+                run.deferred = run.deferred or exc.reason != "refused"
+                result = f"budget:{exc.detail or exc.reason}"
+            cost = await _company_spend(ctx, facts.company_id) - spent
             out.append(
                 entry(
                     "E5",
-                    f"budget:{refused.code}",
+                    result,
                     now=ctx.now,
                     attempt=run.attempt,
+                    cost_usd=cost,
                     found={"finder": finder.key},
                 )
             )
             continue
-        except BudgetExhausted as exc:
-            if exc.reason == "deadline":
-                raise _Stop("deadline") from exc
-            run.deferred = True
-            out.append(
-                entry("E5", f"budget:{exc.reason}", now=ctx.now, attempt=run.attempt)
-            )
-            continue
+        finally:
+            ctx.gate.company_id = None
+        cost = await _company_spend(ctx, facts.company_id) - spent
         found: dict[str, Any] = {"finder": finder.key, "pages": len(pages)}
         for page in pages:
             kept = tuple(s for s in page.observations if _agrees(s, facts))
@@ -1330,7 +1427,7 @@ async def step_e5(ctx: Context, run: Attempt, facts: Facts) -> list[dict[str, An
                 "ok",
                 now=ctx.now,
                 attempt=run.attempt,
-                cost_usd=estimate,
+                cost_usd=cost,
                 found=found,
             )
         )
@@ -1763,10 +1860,16 @@ async def _due(
 
 
 async def _source_run(
-    session: AsyncSession, key: str, *, now: datetime, fetcher: Fetcher, hooks: Any
+    session: AsyncSession,
+    key: str,
+    *,
+    now: datetime,
+    fetcher: Fetcher,
+    hooks: Any,
+    cost_gate: CompanyGate | None = None,
 ) -> SourceRun:
     source = await session.get(Source, key)
-    view = fetcher.bind(hooks=hooks)
+    view = fetcher.bind(hooks=hooks, cost_gate=cost_gate)
     if source is None:
         empty = Budget(pages=0, usd=Decimal("0"), deadline=now)
         return SourceRun(key, empty, view, usable=False, why_not="no_source")
@@ -1871,6 +1974,8 @@ async def enrich_batch(
         now=now,
         deadline=now + RUN_DEADLINE,
         clock=lambda: max(clock_of(), now),
+        gate=CompanyGate(session_factory),
+        ledger=ledger,
     )
     budget_left = limit
     report.reasked = await reask_handoffs(session_factory, now=now, limit=budget_left)
@@ -1940,6 +2045,8 @@ async def enrich_batch(
         ended = ctx.clock()
         await _record_run(session_factory, site, started=now, ended=ended)
         await _record_run(session_factory, reg, started=now, ended=ended)
+        for paid in ctx.paid.values():
+            await _record_run(session_factory, paid, started=now, ended=ended)
     return report
 
 

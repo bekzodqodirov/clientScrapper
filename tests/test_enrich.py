@@ -49,7 +49,7 @@ from clientscrapper.db.models import (
 )
 from clientscrapper.db.session import SessionLocal
 from clientscrapper.services import candidates, chats, costs, enrich, owner, registry
-from clientscrapper.services.http import Fetcher, PageBudget
+from clientscrapper.services.http import Fetcher, PageBudget, PaidCall, UnmeteredCall
 from clientscrapper.services.normalise import to_observation_json
 from clientscrapper.services.usage import Priced
 from tests.ast_tools import PACKAGE, imported_modules, tree_of
@@ -83,8 +83,9 @@ def registry_page(name: str) -> httpx.Response:
 
 @pytest.fixture(autouse=True)
 async def kept_sources() -> AsyncIterator[None]:
-    """The two rows enrichment reads, snapshotted and restored (07 §1.0)."""
-    keys = (enrich.SITE_SOURCE, enrich.REGISTRY_SOURCE)
+    """The rows enrichment reads (its two and the fake finder's
+    ``serp_layer``), snapshotted and restored (07 §1.0)."""
+    keys = (enrich.SITE_SOURCE, enrich.REGISTRY_SOURCE, "serp_layer")
     costs.clear_refusals()
     saved: dict[str, dict[str, Any]] = {}
     with contextlib.suppress(Exception):
@@ -414,15 +415,23 @@ async def test_s2_a_chinese_site_title_is_gate_3_s_supplier(session, tmp_path):
 # --- S3: the company cap, and the budget ----------------------------------------------
 
 
+BRAVE = "https://api.search.brave.com/res/v1/web/search"
+
+
 @dataclass
 class FakeFinder:
-    """An E5 finder (T-25/T-33 build the real ones): costs ``est`` a call,
-    finds nothing, and records whether its call was claimed first."""
+    """An E5 finder (T-25/T-33 build the real ones), written the way every
+    metered collector is: one Brave request declaring its ``PaidCall`` on
+    the Fetcher it is handed, under ``serp_layer``'s budget. Finds nothing
+    unless given ``pages``."""
 
     est: Decimal
     key: str = "fake_serp"
-    operation: Any = "serp_brave"
-    calls: list[bool] = field(default_factory=list)
+    source_key: str = "serp_layer"
+    calls: int = 0
+    pages: list[enrich.Page] = field(default_factory=list)
+    # The Fetcher it was handed is gated for the company it was asked about.
+    gated: list[bool] = field(default_factory=list)
 
     def estimate(self, query: enrich.CompanyQuery) -> Decimal:
         return self.est
@@ -430,21 +439,28 @@ class FakeFinder:
     async def find(
         self, query: enrich.CompanyQuery, *, fetcher: Fetcher, budget: PageBudget
     ) -> list[enrich.Page]:
-        async with SessionLocal() as s:
-            claimed = await s.scalar(
-                sa.select(sa.func.count())
-                .select_from(UsageLog)
-                .where(
-                    UsageLog.company_id == query.company_id,
-                    UsageLog.model.is_(None),
-                    UsageLog.cost_usd == self.est,
-                )
-            )
-        self.calls.append(bool(claimed))
-        return []
+        self.calls += 1
+        gate = fetcher._cost_gate
+        self.gated.append(
+            isinstance(gate, enrich.CompanyGate) and gate.company_id == query.company_id
+        )
+        await fetcher.get(
+            BRAVE,
+            params={"q": query.name},
+            source="search_brave",
+            budget=budget,
+            obey_robots=False,
+            paid=PaidCall(
+                operation="serp_brave",
+                est_usd=self.est,
+                price=lambda result: Priced(cost_usd=self.est, units=Decimal(1)),
+            ),
+        )
+        return list(self.pages)
 
-    def price(self, pages: list[enrich.Page]) -> Priced:
-        return Priced(cost_usd=self.est, units=Decimal(1))
+
+def brave_ok() -> dict[str, httpx.Response]:
+    return {BRAVE: httpx.Response(200, json={"web": {"results": []}})}
 
 
 @dataclass
@@ -465,40 +481,197 @@ class FakeReader:
 async def test_s3_paid_steps_stop_at_ten_cents_and_the_free_ones_run_on(
     session, tmp_path
 ):
+    await set_source(session, "serp_layer", enabled=True)
     company = await firm(session, "Namuna Mebel Savdo", instagram="namuna.mebel")
     await signal(session, company)
     cand = await enriching(session, company)
     await session.commit()
     finders = [FakeFinder(Decimal("0.04")) for _ in range(3)]
     reader = FakeReader()
-    async with world(tmp_path, finders=finders, profiles=reader) as w:
+    async with world(tmp_path, brave_ok(), finders=finders, profiles=reader) as w:
         await w.run()
     cand = await reload(session, cand)
     e5 = [e for e in cand.score_breakdown["enrichment"] if e["step"] == "E5"]
     assert [e["result"] for e in e5] == ["ok", "ok", "company_cap"]
     assert [e["cost_usd"] for e in e5] == [0.04, 0.04, 0.0]
-    # Every paid call went through costs.ask: claimed before it ran, and the
-    # ledger names the company (04 §3 S3's SUM by company_id).
-    assert [f.calls for f in finders] == [[True], [True], []]
+    # Every paid request went through costs.ask (the Fetcher's PaidCall
+    # through the company's gate), and the ledger names the company and the
+    # sub-source (04 §3 S3's SUM by company_id).
+    assert [f.calls for f in finders] == [1, 1, 0]
+    assert [f.gated for f in finders] == [[True], [True], []]
+    assert len(w.urls("api.search.brave.com")) == 2
+    rows = (
+        await session.execute(
+            sa.select(UsageLog.operation, UsageLog.source_key, UsageLog.cost_usd).where(
+                UsageLog.company_id == company.id
+            )
+        )
+    ).all()
+    assert sorted(rows) == [("serp_brave", "search_brave", Decimal("0.04"))] * 2
     spent = await costs.spend(session, since=enrich.SPEND_SINCE, company_id=company.id)
     assert spent.usd == Decimal("0.08")
     assert reader.handles == ["namuna.mebel"]  # E6, free, still asked
     assert cand.enrich_attempts == 1  # the cap is no deferral
+    # The finder's pages and dollars are serp_layer's: its run row says so.
+    run = await session.scalar(
+        sa.select(CollectorRun).where(CollectorRun.source_key == "serp_layer")
+    )
+    assert run is not None and (run.pages, run.cost_usd) == (2, Decimal("0.08"))
+
+
+async def test_e5_a_finder_whose_source_is_off_or_resting_is_not_asked(
+    session, tmp_path
+):
+    """A finder spends its own row's budget (``serp_layer``): the owner's
+    /manba off, or the row resting, keeps it from spending at all."""
+    company = await firm(session, "Namuna Mebel Savdo")
+    await signal(session, company)
+    cand = await enriching(session, company)
+    await session.commit()
+    finder = FakeFinder(Decimal("0.01"))
+    async with world(tmp_path, brave_ok(), finders=[finder]) as w:
+        await w.run()  # serp_layer is seeded off
+        await set_source(
+            session,
+            "serp_layer",
+            enabled=True,
+            paused_until=NOW + timedelta(days=2),
+        )
+        cand = await reload(session, cand)
+        await w.run(cand.next_enrich_at)
+    cand = await reload(session, cand)
+    e5 = [r for step, r in steps(cand) if step == "E5"]
+    assert e5 == ["skipped:source_disabled", "skipped:paused"]
+    assert finder.calls == 0 and w.urls("api.search.brave.com") == []
+
+
+async def test_s3_a_company_at_ten_cents_gets_no_paid_call_whatever_the_estimate(
+    session, tmp_path
+):
+    """S3 is checked per request, by the company's own gate: an estimate of
+    $0 does not let a call past a company already at $0.10, and a request
+    that would cross it is refused before it is sent."""
+    await set_source(session, "serp_layer", enabled=True)
+    at_cap = await firm(session, "Namuna Mebel Savdo")
+    near = await firm(session, "Namuna Mebel Bozor")
+    for company, spent in ((at_cap, "0.10"), (near, "0.08")):
+        await signal(session, company)
+        session.add(
+            UsageLog(
+                provider="brave",
+                operation="serp_brave",
+                cost_usd=Decimal(spent),
+                company_id=company.id,
+                units=Decimal(1),
+            )
+        )
+    first = await enriching(session, at_cap)
+    second = await enriching(session, near, due=NOW + timedelta(seconds=1))
+    await session.commit()
+
+    @dataclass
+    class Understated(FakeFinder):
+        def estimate(self, query: enrich.CompanyQuery) -> Decimal:
+            return Decimal("0")
+
+    finder = Understated(Decimal("0.05"))
+    async with world(tmp_path, brave_ok(), finders=[finder]) as w:
+        await w.run(NOW + timedelta(seconds=1))
+    assert [r for st, r in steps(await reload(session, first)) if st == "E5"] == [
+        "company_cap"
+    ]
+    assert [r for st, r in steps(await reload(session, second)) if st == "E5"] == [
+        "company_cap"
+    ]
+    assert finder.calls == 1  # asked for the second, refused at its request
+    assert w.urls("api.search.brave.com") == []
+    for company, spent in ((at_cap, "0.10"), (near, "0.08")):
+        total = await costs.spend(session, since=enrich.SPEND_SINCE, company_id=company.id)
+        assert total.usd == Decimal(spent)
+
+
+async def test_the_company_gate_refuses_a_paid_call_that_names_no_company():
+    gate = enrich.CompanyGate(SessionLocal)
+
+    async def never() -> Any:
+        raise AssertionError("sent")
+
+    with pytest.raises(UnmeteredCall):
+        await gate(
+            operation="serp_brave",
+            est_usd=Decimal("0.01"),
+            call=never,
+            price=lambda result: Priced(cost_usd=Decimal("0.01"), units=Decimal(1)),
+            source_key="search_brave",
+            now=NOW,
+        )
+
+
+async def test_e5_keeps_only_the_cards_whose_name_agrees(session, tmp_path):
+    """A directory answer lists several firms: only the one whose name (and
+    city, when both say one) is the company's is resolved into it."""
+    await set_source(session, "serp_layer", enabled=True)
+    company = await firm(session, "Namuna Mebel Savdo", city="Toshkent")
+    await signal(session, company)
+    cand = await enriching(session, company)
+    await session.commit()
+    url = "https://catalog.example.uz/q?namuna"
+
+    def card(name: str, number: str, city: str | None) -> Seen:
+        return Seen(
+            source="serp_layer",
+            source_ref=f"fake:{number}",
+            url=url,
+            fetched_at=NOW,
+            raw_sha256="",
+            kind="company",
+            company_name_raw=name,
+            phones=[number],
+            city=city,
+        )
+
+    finder = FakeFinder(
+        Decimal("0.01"),
+        pages=[
+            enrich.Page(
+                url=url,
+                body=b"namuna",
+                content_type="text/plain",
+                fetched_at=NOW,
+                observations=(
+                    card("Namuna Mebel Savdo", "+998901110001", "Toshkent"),
+                    card("Boshqa Mebel", "+998901110002", "Toshkent"),
+                    card("Namuna Mebel Savdo", "+998901110003", "Buxoro"),
+                ),
+                source_key="serp_layer",
+            )
+        ],
+    )
+    async with world(tmp_path, brave_ok(), finders=[finder]) as w:
+        await w.run()
+    phones = set(
+        await session.scalars(
+            sa.select(Contact.phone).where(Contact.company_id == company.id)
+        )
+    )
+    assert phones == {"+998901110001"}
+    assert ("E5", "ok") in steps(await reload(session, cand))
 
 
 async def test_a_refused_paid_call_retries_tomorrow_at_seven_and_is_not_counted(
     session, tmp_path, monkeypatch
 ):
     monkeypatch.setattr(settings, "daily_cost_cap_usd", Decimal("0.01"))
+    await set_source(session, "serp_layer", enabled=True)
     company = await firm(session, "Namuna Mebel Savdo")
     await signal(session, company)
     cand = await enriching(session, company)
     await session.commit()
     finder = FakeFinder(Decimal("0.04"))
-    async with world(tmp_path, finders=[finder]) as w:
+    async with world(tmp_path, brave_ok(), finders=[finder]) as w:
         report = await w.run()
     cand = await reload(session, cand)
-    assert finder.calls == []
+    assert w.urls("api.search.brave.com") == []  # refused before it was sent
     assert ("E5", "budget:cost_cap_daily") in steps(cand)
     assert (cand.state, cand.enrich_attempts) == ("enriching", 0)
     assert cand.next_enrich_at == datetime(2026, 10, 28, 7, 0, tzinfo=NOW.tzinfo)
