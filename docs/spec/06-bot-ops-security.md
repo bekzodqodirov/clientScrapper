@@ -924,6 +924,7 @@ weights, 02 AC 1); nothing here waits for a `0002`. The table says where 06 read
 11. Week 1 settings: `REVIEW_DAILY_CAP=20`, `PUSH_DAILY_CAP=10`, one manager in `MANAGER_TELEGRAM_IDS`; raise after the first weekly review.
 12. Smoke cron installed: `(crontab -l; make -s smoke-cron) | crontab -` (`docs/SMOKE.md`; the lines fire in Tashkent time whatever the host's zone); `make smoke` run once by hand and its line seen in the next digest.
 13. `QUOTE_STAGE_NAMES` set to the ERP's «price given» stage name fragment(s) (Open question 21); `AUTO_APPROVE=false` until the owner's go (Open question 22).
+14. Wave 5 (the wave-5 integration): `directories` with each site's own row (`directories_goldenpages`, `_yellowpages`, `_glotr`, `_topuz` — the fan-out reads a site only while its row is on; `directories_prom` stays off, no parser), `exhibitors` and `registry_lookup` are seeded off: switch each on in `/manbalar` only after `make smoke` (the directories and exhibitors live tests) and 07 §5.3's «Registry hosts» check passed from the VPS, one a day; `docs/OPS.md` §2 step 12 is the operator's list.
 
 ### 7.2 Haftalik koʻrik (egasi uchun, dushanba 10:00, 20 daqiqa)
 
@@ -966,6 +967,7 @@ Raised by the wave-4 build (2026-10-29) — each an owner decision the build too
 21. **`QUOTE_STAGE_NAMES`** (T-36). The default fragment «narx» was not checked against the ERP's stage names. ⭐ (a) on day 1 read the funnel's stage names in the ERP and set the fragment(s); (b) keep «narx».
 22. **Who turns `AUTO_APPROVE` on, and when** (T-36/T-39, with Open question 2). ⭐ (a) off for the pilot; on by the owner's word once T-39 lands and a source has held ≥ 15 pushes at ≥ 60 % for two weekly runs; (b) on as soon as a source earns it.
 23. **A low-precision pause on a sub-source** (T-36). The weekly job pauses the source a lead is attributed to, which can be an attribution-only row (`search_brave`, `maps_google`, `directories_*`) the runner never reads. ⭐ (a) pause that sub-source alone — the fan-out collectors skip it (T-22, T-25, T-33); (b) pause the parent row.
+24. **A registry card's founders** (the wave-5 integration; T-24's deferred suspected 1, for T-29 and `docs/huquqiy-memo.md`). An orginfo.uz company page names the founders, their shares and an e-mail beside the director — people beyond the one decision maker CLAUDE.md allows. As built the registry's pages are stored as their evidence row alone (URL, sha256, size, the name-free excerpt; `evidence.store(keep_file=False)`, `meta.file='not_kept'`), never as a file; E4 keeps the director (`legal_basis='public_registry'`) and the company's columns. ⭐ (a) keep it so; (b) keep the file with the founders' block cut out (a redacted copy, its sha256 then not the page's); (c) keep the whole page 180 days like every other page (R1).
 
 ## Acceptance criteria
 

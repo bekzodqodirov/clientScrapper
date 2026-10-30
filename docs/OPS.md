@@ -70,6 +70,19 @@ Telegram accounts, 10:00–17:00 Tashkent (`docs/sotuv-playbook.md`).
     «📞 Bogʻlandim» or move the stage after the first message — decision 6a).
 11. Week-1 settings: `REVIEW_DAILY_CAP=20`, `PUSH_DAILY_CAP=10`, one manager in
     `MANAGER_TELEGRAM_IDS`; raise after the first weekly review.
+12. The directories, the exhibitor lists and the registry (wave 5) — every one of these rows is
+    seeded **off**, and none runs until it is switched on. First, from the VPS: `make smoke`
+    (`tests/live/test_directories_live.py`, `tests/live/test_exhibitors_live.py`) and the
+    «Registry hosts» check of 07 §5.3; record the seeds the fixture READMEs list as owed. Then
+    on `/manbalar`, one a day while `/holat` stays quiet: `directories` (the schedulable parent)
+    **and** each site's own row — `directories_goldenpages`, `directories_yellowpages`,
+    `directories_glotr`, `directories_topuz` (the fan-out reads a site only while its row is on
+    and not paused; with the parent alone on, nothing is crawled); `directories_prom` stays off
+    (no parser: Cloudflare answers 403). `exhibitors` (the calendar is the code's
+    `DEFAULT_CALENDAR` until `sources.exhibitors.config.calendar` is written; correct the
+    organiser figures when the new ones are published). `registry_lookup` (enrichment's E4/E4′
+    on orginfo.uz; while it is off E4 says `skipped`, and an owner's `/stir` waits for it).
+    `enrich_site` (company sites and `t.me/s/` pages) is seeded on.
 
 ## 3. Incidents (06 §4.6)
 
