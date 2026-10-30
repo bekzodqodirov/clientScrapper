@@ -320,3 +320,21 @@ def test_a_firm_named_after_a_given_name_keeps_its_name_by_its_legal_form():
         "akmal konsult",
     )
     assert parsed["company"]["legal_form"] == "OOO"
+
+
+@pytest.mark.parametrize(
+    ("href", "url"),
+    [
+        (
+            "/rubrics/?Id=1424&Page=2",
+            "https://www.goldenpages.uz/rubrics/?Id=1424&Page=2",
+        ),
+        ("/rubrics/?Id=1424&page=2", None),  # the site's own is capital P
+        ("/rubrics/?Id=1424&Page=2&s=1", None),  # robots.txt refuses *&s=*
+        ("/gp/rubrics/?Id=1424&Page=2", None),  # the bot trap
+        ("https://evil.example.uz/rubrics/?Id=1424&Page=2", None),
+        (None, None),
+    ],
+)
+def test_only_the_pager_s_own_shape_is_followed(href, url):
+    assert gp.page_url(href) == url

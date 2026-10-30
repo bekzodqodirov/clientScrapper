@@ -260,3 +260,44 @@ def test_a_shop_name_beside_a_person_s_legal_name_names_the_company():
     named = _org(PERSON, legal="Namuna Qurilish ООО")
     assert named is not None and named.company_name_raw == "Namuna Qurilish ООО"
     assert "Намунов" not in named.excerpt
+
+
+def test_the_channel_is_the_firm_s_telegram_and_a_contact_handle_is_not():
+    """``tg_channel`` is the firm's own channel; ``tg_contact`` is, by its
+    name, a contact person's account — person-tier, never filed as the
+    company's channel (the T-22 review). No recorded row carries either."""
+    p = page("topuz_stroymaterialy_optom_p1")
+    org = nuxt.list_block(nuxt.payload(parse(p.body)))["data"][0]
+
+    def with_(**changes: object) -> Observation:
+        obs = tz.organisation(
+            {**org, **changes}, url=p.final_url, fetched_at=p.fetched_at, sha=p.sha256
+        )
+        assert obs is not None
+        return obs
+
+    assert with_(tg_channel="https://t.me/namuna_06").telegram == "namuna_06"
+    assert with_(tg_contact="namuna_07").telegram is None
+    both = with_(tg_channel="namuna_06", tg_contact="namuna_07")
+    assert both.telegram == "namuna_06" and "namuna_07" not in repr(both)
+
+
+def test_the_next_link_is_the_next_page_of_the_same_section_only():
+    """A pager whose links come in another order — the previous page first, a
+    link to another section's page 3 before ours — still gives page 3 of this
+    section (a hand-edited copy of recorded page 2)."""
+    p = page("topuz_stroymaterialy_optom_p2")
+    edited = p.body.replace(
+        b'<ul class="articles-pagination" data-v-fe36f899 data-v-a1f05fe5>',
+        b'<ul class="articles-pagination" data-v-fe36f899 data-v-a1f05fe5>'
+        b'<li><a href="/section/stroymaterialy-optom?PAGEN_1=1">1</a></li>'
+        b'<li><a href="/section/optovaya-torgovlya?PAGEN_1=3">3</a></li>'
+        b'<li><a href="/section/stroymaterialy-optom?PAGEN_1=4">4</a></li>',
+        1,
+    )
+    assert edited != p.body
+    listed = tz.parse_list(edited, url=p.final_url, fetched_at=p.fetched_at)
+    assert listed.next_url == "https://top.uz/section/stroymaterialy-optom?PAGEN_1=3"
+    # Without our page 3 in the pager, there is no next page.
+    gone = edited.replace(b"stroymaterialy-optom?PAGEN_1=3", b"stroymaterialy-optom?x=3")
+    assert tz.parse_list(gone, url=p.final_url, fetched_at=p.fetched_at).next_url is None

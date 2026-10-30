@@ -404,3 +404,39 @@ def test_only_a_legal_entity_s_stir_is_kept():
     for inn in ("413064467", "513064467", "613064467", "913064467"):
         obs = _row(name="Namuna Savdo ООО", brand_name="Namuna Savdo ООО", inn=inn)
         assert obs is not None and obs.stir is None, inn
+
+
+def _teg(**changes: object) -> Observation | None:
+    p = page("yellowpages_teg_tovary_iz_kitaya")
+    org = nuxt.list_block(nuxt.payload(parse(p.body)))["data"][0]
+    return yp.organisation(
+        {**org, **changes}, url=p.final_url, fetched_at=p.fetched_at, sha=p.sha256
+    )
+
+
+def test_the_furniture_from_china_tag_gives_china_origin_too():
+    """03 §2.6 names both tags: ``mebel-iz-kitaya`` as well as
+    ``tovary-iz-kitaya`` (the recorded row with its tags replaced)."""
+    obs = _teg(
+        name="Namuna Mebel ООО",
+        brand_name="Namuna Mebel ООО",
+        rubrics=[{"id": 1, "slug": "mebel-optom", "name": "Мебель оптом"}],
+        tags=[{"id": 2, "slug": "mebel-iz-kitaya", "name": "мебель из китая"}],
+    )
+    assert obs is not None
+    assert (obs.signal_types, obs.origin_text) == (
+        ["china_origin", "directory_wholesale"],
+        "мебель из китая",
+    )
+
+
+def test_the_contacts_telegram_is_the_firm_s_channel():
+    """No recorded row carries one (README): a payload row given one."""
+    obs = _teg(
+        name="Namuna Mebel ООО",
+        contacts={
+            "phone": ["+998 90 000 00 40"],
+            "telegram": [None, "https://t.me/namuna_05"],
+        },
+    )
+    assert obs is not None and obs.telegram == "namuna_05"

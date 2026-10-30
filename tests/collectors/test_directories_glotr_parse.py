@@ -194,3 +194,15 @@ def test_an_individual_entrepreneur_s_name_is_no_company_name():
     assert (obs.company_name_raw, obs.legal_form) == (None, "ИП")
     assert "Намунов" not in obs.excerpt
     assert obs.phones == ["+998 90 000 00 01"]
+
+
+def test_checked_without_the_soliq_check_is_not_solid():
+    """03 §2.6: «Soliq tasdiqlagan» — the check must name Soliq.uz; a bare
+    «Проверено» (a check by somebody else) is no ``entity_solid``."""
+    p = page("glotr_showcase_jack")
+    at = p.body.index(b"seller-info__checked")
+    soliq = p.body.index(b"Soliq.uz", at)
+    other = p.body[:soliq] + b"Namuna.uz" + p.body[soliq + len(b"Soliq.uz") :]
+    [obs] = glotr.parse_showcase(other, url=p.final_url, fetched_at=p.fetched_at)
+    assert "Проверено".encode() in other[at : at + 600]
+    assert "entity_solid" not in obs.signal_types and "checked" not in obs.attrs

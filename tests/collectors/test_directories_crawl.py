@@ -714,3 +714,124 @@ async def test_top_uz_has_its_own_row_and_its_own_pause(session, rows, tmp_path)
         o["source_ref"].startswith("topuz:") for o in by_source["directories_topuz"]
     )
     assert "directories" not in by_source  # nothing is credited to the parent
+
+
+# A challenge interstitial's own script (services/http MARKUP_MARKERS «cf-chl»).
+CHALLENGE = b'<script src="/cdn-cgi/challenge-platform/h/b/cf-chl/v1"></script>'
+
+
+async def test_a_challenge_page_is_never_read_as_data(session, rows, tmp_path):
+    """03 §1.1: never around a CAPTCHA. A list page or a card answered with a
+    challenge — even one that carries the page's own markup — is no page:
+    counted, never parsed; the card's list row is kept instead."""
+    for key in ("directories_yellowpages", "directories_glotr", "directories_topuz"):
+        await switch(key, enabled=False)
+    clock = FakeClock(THURSDAY)
+    web = Web(clock)
+    card = page("goldenpages_company_85641").body.replace(
+        b"</head>", CHALLENGE + b"</head>", 1
+    )
+    china = page("goldenpages_rubric_106080_p1").body.replace(
+        b"</head>", CHALLENGE + b"</head>", 1
+    )
+
+    def company(request: httpx.Request) -> httpx.Response:
+        if Web.query(request) == {"Id": "85641"}:
+            return httpx.Response(200, headers=HTML, content=card)
+        return web.company(request)
+
+    def rubrics(request: httpx.Request) -> httpx.Response:
+        if Web.query(request) == {"Id": "106080"}:
+            return httpx.Response(200, headers=HTML, content=china)
+        return web.rubrics(request)
+
+    web.site.add("https://www.goldenpages.uz/company/", company)
+    web.site.add("https://www.goldenpages.uz/rubrics/", rubrics)
+    report = await run(web, clock, tmp_path)
+    gold = report.meta["subsources"]["goldenpages"]
+    assert gold["list_status"]["captcha"] == 1 and "empty" not in gold["stops"]
+    assert gold["cards"] == 0 and gold["pages"] == 1
+    by_source = await observations(session)
+    rows_kept = {o["source_ref"]: o for o in by_source["directories_goldenpages"]}
+    # The card's row is the list row: no phone, none of the card's own fields.
+    assert len(rows_kept) == 20 and rows_kept["goldenpages:85641"]["phones"] == []
+
+
+async def test_the_diff_never_asks_again_for_a_company_observed_long_ago(
+    session, rows, tmp_path
+):
+    """The weekly diff asks a card only for a company the source has never
+    observed — not «not in the last 45 days», which is the full crawl's rule."""
+    for key in ("directories_yellowpages", "directories_glotr", "directories_topuz"):
+        await switch(key, enabled=False)
+    clock = FakeClock(THURSDAY)
+    web = Web(clock)
+    await run(web, clock, tmp_path)
+    asked = Counter(s.path for s in web.site.seen)
+    later = FakeClock(THURSDAY + timedelta(days=7 * 8))  # eight weeks: > CARD_FRESH
+    web.site.clock = later
+    second = await run(web, later, tmp_path)
+    assert second.meta["mode"] == "diff"
+    gold = second.meta["subsources"]["goldenpages"]
+    assert (gold["known"], gold["cards"], gold["card_missing"]) == (28, 0, 0)
+    assert (Counter(s.path for s in web.site.seen) - asked)["/company/"] == 0
+
+
+async def test_a_card_robots_txt_refuses_keeps_its_list_row(session, rows, tmp_path):
+    for key in ("directories_yellowpages", "directories_glotr", "directories_topuz"):
+        await switch(key, enabled=False)
+    clock = FakeClock(THURSDAY)
+    web = Web(clock)
+    refused = robots("www.goldenpages.uz") + "\nUser-agent: *\nDisallow: /company/\n"
+    web.site.add(
+        "https://www.goldenpages.uz/robots.txt", httpx.Response(200, text=refused)
+    )
+    report = await run(web, clock, tmp_path)
+    gold = report.meta["subsources"]["goldenpages"]
+    assert gold["robots"] == 28 and gold["rows"] == 28
+    assert not [s for s in web.site.seen if s.path == "/company/"]
+    by_source = await observations(session)
+    assert len(by_source["directories_goldenpages"]) == 28
+
+
+async def test_a_seed_reads_at_most_max_list_pages(session, rows, tmp_path, monkeypatch):
+    monkeypatch.setattr(directories, "MAX_LIST_PAGES", 2)
+    clock = FakeClock(datetime(2026, 11, 1, 23, 0, tzinfo=TASHKENT))
+    web = Web(clock)
+    report = await run(web, clock, tmp_path, variant="full")
+    gold = report.meta["subsources"]["goldenpages"]
+    assert gold["stops"]["page_cap"] == 1
+    assert [u for u in web.urls("www.goldenpages.uz") if "Id=1424" in u] == [
+        "https://www.goldenpages.uz/rubrics/?Id=1424",
+        "https://www.goldenpages.uz/rubrics/?Id=1424&Page=2",
+    ]
+
+
+async def test_the_directories_are_paced_under_03_s_half_a_request_a_second(
+    session, rows, tmp_path
+):
+    """03 §2.6: «Rate 0.5 rps max». The directory hosts have their own pace
+    (HOST_RPS), so a COLLECTOR_RPS_DEFAULT raised for other hosts does not
+    raise theirs."""
+    from clientscrapper.services import http
+
+    for host in ("www.goldenpages.uz", "www.yellowpages.uz", "top.uz", "glotr.uz"):
+        assert http.HOST_RPS[host] <= 0.5, host
+    for key in (
+        "directories_yellowpages",
+        "directories_glotr",
+        "directories_goldenpages",
+    ):
+        await switch(key, enabled=False)
+    clock = FakeClock(THURSDAY)
+    web = Web(clock)
+    report = await run_collector(
+        Directories,
+        fetcher=fetcher_for(web.site, rps_default=2.0),
+        now=clock.now(),
+        evidence_root=tmp_path,
+        clock=clock.now,
+    )
+    assert report.status == "ok"
+    times = [s.at for s in web.site.seen if s.request.url.host == "top.uz"]
+    assert len(times) > 5 and all(b - a >= 2.0 for a, b in pairwise(times))

@@ -109,7 +109,10 @@ def organisation(
     sections = _sections(org, "name_ru")
     slugs = _sections(org, "slug")
     description = common.plain(org.get("description_ru"))
-    handle = _text(org, "tg_channel") or _text(org, "tg_contact")
+    # ``tg_channel`` is the firm's own; ``tg_contact`` is by its name a contact
+    # person's account — person-tier, never filed as the company's channel
+    # (the T-22 review; no recorded row carries either).
+    handle = _text(org, "tg_channel")
     insta = _text(org, "instagram")
     attrs: dict[str, Any] = {"site": SITE, "sections": slugs}
     if legal_name and legal_name != name:

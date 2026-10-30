@@ -28,8 +28,9 @@ forced a change — each is named in a comment beside it:
 * LEGAL_FORM_RE gained МЧЖ, ХЧК and СП, the Cyrillic forms of MChJ, XChK, SP;
 * INDIVIDUAL_FORM_RE (an individual entrepreneur's form, the directories'
   «ИндП» included, never «ИП ООО») and WHOLESALE_RUBRIC_RE (a directory's
-  wholesale rubric, «Оптовая торговля» / ``stroymaterialy-optom``) are new:
-  the directory parsers' two shapes (03 §2.6, T-22);
+  wholesale rubric, «Оптовая торговля» / ``stroymaterialy-optom``, and
+  04 §5.1's «склад» and «закупочные базы») are new: the directory parsers'
+  two shapes (03 §2.6, T-22);
 * QUESTION_RE is new, and so are ``buyer_question`` and ``cargo_offer``: the
   tout filter's text rule (03 §2.3) reads a message for the cargo core only
   when it is not a buyer's ask — «kim kargo qiladi?» is a buyer (04 §6);
@@ -930,8 +931,12 @@ INDIVIDUAL_FORM_RE = re.compile(
 # «Ulgurji savdo» and the slugs «stroymaterialy-optom», «optovaya-torgovlya».
 # B2B_RE is the wrong reader here: its «опт» is whole-word only and «оптовая» is
 # none of its terms. «опт» alone still needs a word end («оптика» is no rubric).
+# 04 §5.1's «склад» (the T-22 review), never «складн-» (folding: «Складные
+# стулья»), and «закупочные базы» (03 §2.6's seed rubric 1029 «Торгово-
+# закупочные базы»; «оптовая база» is «оптов…» already).
 WHOLESALE_RUBRIC_RE = re.compile(
-    r"(?<!\w)(?:оптов\w*|оптом\w*|опт(?!\w)|optom\w*|optov\w*|ulgurji\w*|улгуржи\w*)",
+    r"(?<!\w)(?:оптов\w*|оптом\w*|опт(?!\w)|optom\w*|optov\w*|ulgurji\w*|улгуржи\w*"
+    r"|склад(?!н)\w*|sklad(?!n)\w*|закупочн\w*\s+баз\w*|zakupochn\w*-baz\w*)",
     re.I,
 )
 # A Chinese-side supplier's name (04 §6 gate 3: «Co\.?,?\s*Ltd|有限公司|Trading

@@ -91,6 +91,12 @@ HOST_RPS: Final[Mapping[str, float]] = {
     "html.duckduckgo.com": 0.1,
     "graph.facebook.com": 1.0,
     "api.apify.com": 1.0,
+    # 03 §2.6: the directories at «0.5 rps max» — the recorded pace, whatever
+    # COLLECTOR_RPS_DEFAULT is raised to for other hosts (the T-22 review).
+    "www.goldenpages.uz": 0.3,
+    "www.yellowpages.uz": 0.3,
+    "top.uz": 0.3,
+    "glotr.uz": 0.3,
 }
 # Documented JSON APIs with a key: the only hosts a request may skip robots.txt
 # for (``obey_robots=False``, and every ``post_json``). The call sites are

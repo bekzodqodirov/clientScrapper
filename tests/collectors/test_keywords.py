@@ -1188,8 +1188,11 @@ CASES: dict[str, tuple[re.Pattern[str], Extract, Cases]] = {
                     ("Ulgurji savdo", "Ulgurji"),
                     ("Qurilish mollari optom", "optom"),
                     ("stroymaterialy-optom", "optom"),
+                    # 04 §5.1's «склад»: a warehouse rubric or slug.
+                    ("skladskie-uslugi", "skladskie"),
+                    ("Qurilish mollari skladi", "skladi"),
                 ],
-                ["Chakana savdo", "Optika salon", "Optimal narx"],
+                ["Chakana savdo", "Optika salon", "Optimal narx", "skladnye-stulya"],
             ),
             "uz-Cyrl": (
                 [
@@ -1204,8 +1207,18 @@ CASES: dict[str, tuple[re.Pattern[str], Extract, Cases]] = {
                     ("Оптовая торговля", "Оптовая"),
                     ("Оптово-розничная торговля", "Оптово"),
                     ("мелкий опт", "опт"),
+                    # 04 §5.1: «оптом|оптовая база|склад|ulgurji»; 03 §2.6's
+                    # seed rubric 1029 «Торгово-закупочные базы».
+                    ("Склады, складские услуги", "Склады"),
+                    ("Торгово-закупочные базы", "закупочные базы"),
                 ],
-                ["Оптика", "Розничная торговля", "оптический прицел"],
+                [
+                    "Оптика",
+                    "Розничная торговля",
+                    "оптический прицел",
+                    "Складные стулья",  # folding, no warehouse
+                    "Базы отдыха",
+                ],
             ),
         },
     ),
