@@ -177,6 +177,16 @@ STEPS: Final = ("E0", "E1", "E2", "E3", "E4", "E5", "E6")
 SELF_KINDS: Final = signals.SELF_DESCRIPTION_KINDS
 # E4′ found a card whose STIR another known company holds.
 FOREIGN_STIR: Final = "foreign_stir"
+# ``evidence.meta`` key naming the company a page was fetched for: a search
+# page by its name or STIR, or a card that turned out another firm's, is no
+# observation of it, and ``purge`` still takes it with the company.
+FOR_COMPANY: Final = evidence_store.FOR_COMPANY
+# Sources whose pages are kept as their row alone, never their bytes: a
+# registry card names the founders, their shares and an e-mail — people
+# beyond the one decision maker the registry step keeps (CLAUDE.md, 06 §5.1;
+# the integration of wave 5) — and the card's excerpt and observation hold
+# what E4 uses.
+NO_FILE_SOURCES: Final = frozenset({REGISTRY_SOURCE})
 CHANNEL_SOURCES: Final = (SITE_SOURCE, chats.SOURCE_KEY)
 
 SessionFactory = Callable[[], AsyncSession]
@@ -682,8 +692,9 @@ async def apply_page(
             excerpt=(first.excerpt or None) if first is not None else None,
             lang=first.lang if first is not None else None,
             published_at=first.published_at if first is not None else None,
-            meta=dict(meta or {}),
+            meta={**(meta or {}), FOR_COMPANY: str(company_id)},
             root=root,
+            keep_file=source_key not in NO_FILE_SOURCES,
         )
         out.evidence_id = row.id
         out.new = known is None
@@ -1166,7 +1177,7 @@ async def step_e3(ctx: Context, run: Attempt, facts: Facts) -> dict[str, Any]:
                 username,
                 priority=chats.PRIORITY_RESOLVED,
                 now=ctx.now,
-                by=f"enrich:{run.candidate_id}",
+                by=f"{chats.BY_ENRICH}{run.candidate_id}",
             )
         why = got if isinstance(got, str) else f"http_{got.status}"
         result = "queued" if queued else "not_channel"

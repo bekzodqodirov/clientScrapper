@@ -20,7 +20,10 @@ Telegram ids sent or that the observations came from; ``signals`` (a quote
 is a slice of the page); ``model_jobs.request``/``pseudonyms`` and the result
 (an unsent or in-flight job ends ``failed`` with ``error='purged'``); the
 evidence rows only the subject's rows cite, their files unlinked last when
-no other row holds them; ``company_aliases``, ``company_ids``; the
+no other row holds them — with the pages enrichment fetched for the subject
+that no observation cites (a registry search by its name or STIR, a card
+that was another firm's: ``evidence.FOR_COMPANY``) and the owner's ``/stir``
+mark; ``company_aliases``, ``company_ids``; the
 candidates and their review cards (a ⏭ card's ``remind_at`` with them, so
 nothing is asked again) — **except a candidate with ``push_log`` rows**,
 which ``push_log.candidate_id`` RESTRICT keeps on purpose: an open one ends
@@ -29,9 +32,12 @@ for any other reason, ``excluded(owner)``; a terminal one stays as it is;
 either loses its opener (``score_breakdown.opener``/``opener_meta``, the one
 free text there — ``push_note`` holds only the gate's coded refusal words).
 ``sheet_rows`` are tombstoned and a monitored chat of the company's
-channel is no longer read. A message of the subject's person that resolved to
-another firm is the person's and goes with its observation and signals; that
-firm is not purged, its candidate is scored again (``signals.mark_stale``).
+channel is no longer read; a name of the subject still waiting in the
+reader's line (``chats.PENDING_FLAG`` — E3 queues a firm's channel there) is
+taken out of it, so it is never resolved or joined. A message of the
+subject's person that resolved to another firm is the person's and goes with
+its observation and signals; that firm is not purged, its candidate is scored
+again (``signals.mark_stale``).
 
 **What is anonymised**: ``push_log.payload := NULL``; every lineage company
 becomes ``state='purged'`` with ``display_name='[oʻchirilgan]'`` and a name
@@ -100,6 +106,7 @@ from clientscrapper.db.models import (
 )
 from clientscrapper.db.models import Evidence as EvidenceRow
 from clientscrapper.services import candidates, companies, evidence, normalise, push_gate
+from clientscrapper.services import chats as chats_service
 from clientscrapper.services import keys as keys_service
 from clientscrapper.services import signals as signal_service
 from clientscrapper.services import suppression as suppression_service
@@ -138,6 +145,8 @@ SHEET_TOMBSTONE: Final = "tombstone"
 # ``CARDS_WINDOW`` after the plan, then the pointers are dropped.
 PURGED_CARD_UZ: Final = "🗑 Bu lid maʼlumotlari oʻchirildi."
 CARDS_KEY: Final = "cards"
+# Who takes a purged firm's names out of the reader's line.
+PENDING_UPDATED_BY: Final = "worker:purge"
 CARDS_WINDOW: Final = timedelta(days=14)
 CARDS_LIMIT: Final = 50
 
@@ -255,6 +264,11 @@ class Scope:
     pushes: tuple[int, ...] = ()
     sheet_rows: int = 0
     chats: tuple[int, ...] = ()
+    # Names waiting in the reader's line (``chats.PENDING_FLAG``) that are the
+    # subject's, and what finds them again under the line's lock.
+    pending: tuple[str, ...] = ()
+    usernames: tuple[str, ...] = ()
+    makers: tuple[str, ...] = ()
     keys: tuple[Key, ...] = ()
     # Leads the ERP received (a sent or unknown push): what the agent sent
     # stays there — the owner is told to erase it in the ERP (seam review
@@ -281,7 +295,7 @@ class Scope:
             "reviews": self.reviews,
             "push_payloads": len(self.payloads),
             "sheet_rows": self.sheet_rows,
-            "chats": len(self.chats),
+            "chats": len(self.chats) + len(self.pending),
             "suppression": len(self.keys),
             "erp_leads": self.erp_leads,
         }
@@ -434,6 +448,27 @@ async def collect(
     )
     cited = {s.evidence_id for s in signal_rows}
     cited |= {m.evidence_id for m in messages if m.evidence_id is not None}
+    # The pages enrichment fetched for the subject that no observation of it
+    # cites — a registry search by its name or STIR, a card that was another
+    # firm's (``evidence.FOR_COMPANY``, the wave-5 integration) — and the
+    # owner's /stir mark: they name the subject by their address or exist
+    # only because of it.
+    if members:
+        cited |= set(
+            await _ids(
+                session,
+                sa.select(EvidenceRow.id).where(
+                    sa.or_(
+                        EvidenceRow.meta[evidence.FOR_COMPANY].astext.in_(
+                            [str(m) for m in members]
+                        ),
+                        EvidenceRow.url.in_(
+                            [f"{evidence.OWNER_STIR}:{m}" for m in members]
+                        ),
+                    )
+                ),
+            )
+        )
     cited |= set(
         await _ids(
             session,
@@ -522,6 +557,11 @@ async def collect(
         )
     ).all()
     every = [c.id for c in cands]
+    # The subject's channels and handles waiting in the reader's line — E3
+    # queues a firm's channel there (``enrich:<candidate>``, 04 §3): a purged
+    # firm's channel is never resolved, joined or read.
+    makers = [f"{chats_service.BY_ENRICH}{c}" for c in every]
+    pending = await chats_service.pending_names(session, usernames=usernames, by=makers)
     kept = [c.id for c in cands if c.pushed]
     ended = [
         c.id for c in cands if c.pushed and c.state not in candidates.TERMINAL_STATES
@@ -612,6 +652,9 @@ async def collect(
                 .order_by(ChatMonitor.id),
             )
         ),
+        pending=tuple(pending),
+        usernames=tuple(sorted(usernames)),
+        makers=tuple(makers),
         keys=tuple(sorted(k for k in keys if _key_fits(k))),
         bystanders=tuple(sorted(touched - set(members))),
     )
@@ -1118,6 +1161,12 @@ async def _stop(
         sa.update(ChatMonitor)
         .where(ChatMonitor.id.in_(scope.chats))
         .values(monitor_enabled=False, decided_by="owner"),
+    )
+    chats += await chats_service.forget_pending_of(
+        session,
+        usernames=scope.usernames,
+        by=scope.makers,
+        updated_by=PENDING_UPDATED_BY,
     )
     sheet = await _gone(
         session,

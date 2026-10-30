@@ -48,6 +48,7 @@ from clientscrapper.db.models import (
     UsageLog,
 )
 from clientscrapper.services import candidates, companies, costs, erp_feeds, keys, smoke
+from clientscrapper.services.evidence import OWNER_STIR
 
 PAUSE_FLAG: Final = costs.PAUSE_FLAG
 REASON_MAX: Final = 200
@@ -57,7 +58,7 @@ AUTO_PUSH_FORBIDDEN: Final = erp_feeds.AUTO_PUSH_FORBIDDEN
 INFO_RUNS: Final = 5
 # 04 §3 E4: the owner's STIR is a registry fact the agent did not fetch.
 STIR_SOURCE: Final = "registry_lookup"
-STIR_EXCERPT: Final = "owner:/stir"
+STIR_EXCERPT: Final = OWNER_STIR
 STIR_EVIDENCE_DAYS: Final = 180
 
 

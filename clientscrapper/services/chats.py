@@ -124,6 +124,9 @@ BACKFILL_MAX_ATTEMPTS: Final = 3
 BACKFILL_AFTER: Final = timedelta(hours=24)
 
 PENDING_FLAG: Final = "tg_pending"
+# ``by`` of a name enrichment's E3 queued for a candidate (04 §3): what a purge
+# of that candidate's company finds its queued names by.
+BY_ENRICH: Final = "enrich:"
 # How to find a linked discussion group with no public username again (see
 # remember_linked): {"<tg_chat_id>": {"access_hash", "parent", "at"}}.
 LINKED_FLAG: Final = "tg_linked"
@@ -857,6 +860,54 @@ async def forget_pending(
     flag.value = {"names": names, "unresolvable": gone}
     flag.updated_by = UPDATED_BY
     await session.flush()
+
+
+def pending_of(value: Any, *, usernames: Iterable[str], by: Iterable[str]) -> list[str]:
+    """The waiting names (``PENDING_FLAG``'s ``names``) that are one of
+    ``usernames`` or were queued ``by`` one of these (``enrich:<candidate>``),
+    pure: what a purge takes out of the line (06 §5.4 — a purged firm's
+    channel is never resolved, joined or read)."""
+    names, _ = _pending_state(value)
+    wanted = {key for key in (username_key(u) for u in usernames) if key}
+    makers = set(by)
+    return sorted(
+        name
+        for name, item in names.items()
+        if name in wanted or (isinstance(item, Mapping) and item.get("by") in makers)
+    )
+
+
+async def pending_names(
+    session: AsyncSession, *, usernames: Iterable[str], by: Iterable[str]
+) -> list[str]:
+    """``pending_of`` over the stored line, read without a lock (a plan)."""
+    value = await session.scalar(
+        sa.select(RuntimeFlag.value).where(RuntimeFlag.key == PENDING_FLAG)
+    )
+    return pending_of(value, usernames=usernames, by=by)
+
+
+async def forget_pending_of(
+    session: AsyncSession,
+    *,
+    usernames: Iterable[str],
+    by: Iterable[str],
+    updated_by: str,
+) -> int:
+    """Take ``pending_of``'s names out of the line under its lock; how many
+    went. Nothing is remembered as unresolvable: the name is no chat to try
+    or to refuse, it is the purged firm's."""
+    flag = await _locked_flag(session, PENDING_FLAG)
+    drop = pending_of(flag.value, usernames=usernames, by=by)
+    if not drop:
+        return 0
+    names, gone = _pending_state(flag.value)
+    for name in drop:
+        names.pop(name, None)
+    flag.value = {"names": names, "unresolvable": gone}
+    flag.updated_by = updated_by
+    await session.flush()
+    return len(drop)
 
 
 async def known_bios(

@@ -54,6 +54,16 @@ from clientscrapper.services.text import storable
 RAW_CAP: Final = 2 * 1024 * 1024
 URL_MAX: Final = 2048
 EXCERPT_MAX: Final = 600
+# ``evidence.meta.file`` of a row stored without its bytes (``store(keep_file=
+# False)``): what R1 has no file to take and a 304 has no copy to answer with.
+FILE_NOT_KEPT: Final = "not_kept"
+# ``evidence.meta`` key naming the company a page was fetched for (enrichment:
+# a registry search by its name or STIR, a card that was another firm's) —
+# no observation of the company cites such a page, and ``purge`` still takes
+# it with the company. And the owner's ``/stir`` mark, filed at
+# ``f"{OWNER_STIR}:<company_id>"`` (``owner.set_stir``).
+FOR_COMPANY: Final = "for_company"
+OWNER_STIR: Final = "owner:/stir"
 TITLE_MAX: Final = 300
 GZIP_LEVEL: Final = 6
 # Raw files are the app user's alone (06 §5.6).
@@ -257,17 +267,24 @@ async def store(
     collector_run_id: int | None = None,
     meta: dict[str, Any] | None = None,
     root: Path | None = None,
+    keep_file: bool = True,
 ) -> Evidence:
     """The evidence row for these bytes at this URL — the existing one when the
     same bytes were stored before (nothing is rewritten: evidence is
     immutable), else a new row and, under 2 MB, its file, written when the
-    transaction commits (see the module docstring)."""
+    transaction commits (see the module docstring). ``keep_file=False``
+    stores the row alone — its URL, sha256, size and excerpt, never the
+    bytes: a page that names people beyond the one decision maker CLAUDE.md
+    allows (a registry card's founders and their shares, 06 §5.1) is kept as
+    the row a card cites and the cache reads, ``meta.file='not_kept'``."""
     if len(url) > URL_MAX:
         raise ValueError("evidence url longer than 2048 characters")
     sha = hashlib.sha256(body).hexdigest()
     facts = dict(meta or {})
-    stored_raw = len(body) <= RAW_CAP
-    if not stored_raw or facts.get("truncated"):
+    stored_raw = keep_file and len(body) <= RAW_CAP
+    if not keep_file:
+        facts["file"] = FILE_NOT_KEPT
+    elif not stored_raw or facts.get("truncated"):
         facts["truncated"] = True
     raw_path = raw_path_for(sha, fetched_at) if stored_raw else None
     kind = (content_type or "text/html").split(";")[0].strip().lower() or "text/html"
