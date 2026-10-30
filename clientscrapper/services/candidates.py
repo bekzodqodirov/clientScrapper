@@ -642,8 +642,11 @@ classify.register_after_classify(after_classify)
 
 
 # What other writers keep in score_breakdown beside the gates and the
-# enrichment trail: the opener (05 §B.1's NIMA DEYISH, 06 §1.7's «Taklif»).
-CARRIED_KEYS: Final = ("opener", "opener_meta")
+# enrichment trail: the opener (05 §B.1's NIMA DEYISH, 06 §1.7's «Taklif»),
+# and when the owner's /stir was last answered by the registry (T-24,
+# ``services/enrich``: a re-run stays due until then).
+STIR_ANSWERED: Final = "stir_answered"
+CARRIED_KEYS: Final = ("opener", "opener_meta", STIR_ANSWERED)
 
 
 def _carried(

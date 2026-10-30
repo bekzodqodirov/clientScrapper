@@ -1384,6 +1384,36 @@ async def _writable_username(session: AsyncSession, company_id: uuid.UUID) -> bo
     return bool(found)
 
 
+# E4 results after which the registry has not said its word yet: the step is
+# tried again (a /stir stays pending, ``e4_answered``).
+E4_RETRIED: Final = frozenset(
+    {
+        registry.UNAVAILABLE,
+        "skipped:source_disabled",
+        "skipped:collectors_disabled",
+        "skipped:paused",
+        "skipped:no_source",
+    }
+)
+
+
+def e4_answered(entries: Sequence[Mapping[str, Any]]) -> bool:
+    """Whether the walk's E4 ran to an answer: a hit, none, ambiguous,
+    mismatch, the cached card, or nothing to ask — not a budget refusal, a
+    switched-off or resting source, every host down (``E4_RETRIED``)."""
+    for item in reversed(entries):
+        if item.get("step") == "E4":
+            result = str(item.get("result"))
+            return not (result.startswith("budget:") or result in E4_RETRIED)
+    return False
+
+
+def _mark_stir_answered(candidate: LeadCandidate, *, now: datetime) -> None:
+    breakdown = dict(candidate.score_breakdown or {})
+    breakdown[STIR_ANSWERED] = now.isoformat()
+    candidate.score_breakdown = breakdown
+
+
 async def finish(
     session_factory: SessionFactory, run: Attempt, *, now: datetime
 ) -> tuple[str, ...]:
@@ -1399,6 +1429,11 @@ async def finish(
         )
         if company is None or candidate is None:
             return ()
+        answered = e4_answered(run.entries)
+        if answered:
+            # The registry said its word on the STIR the owner gave (04 §3):
+            # his /stir is answered, whichever queue ran the E4.
+            _mark_stir_answered(candidate, now=now)
         if candidate.state != run.planned_state:
             # Another writer moved it meanwhile (score_job routed it on the
             # signals this attempt wrote): the trail is kept, nothing else.
@@ -1410,8 +1445,11 @@ async def finish(
             return ()
         if run.mode == "stir":
             # The registry's signals marked the candidate stale: score_job
-            # re-scores and routes it (its state is not enrichment's).
-            candidate.next_enrich_at = None
+            # re-scores and routes it (its state is not enrichment's). An E4
+            # that could not ask — the day's lookups or pages gone, every
+            # host down — leaves the /stir unanswered and due tomorrow 07:00
+            # (04 §8), so the owner's word is never dropped.
+            candidate.next_enrich_at = None if answered else tomorrow_morning(now)
             _trail(candidate, run.entries)
             return ()
         result = await candidates.rescore(session, candidate, now=now)
@@ -1605,21 +1643,31 @@ async def _claim(
 
 
 # Where /stir leaves its mark (services/owner.set_stir): an evidence row at
-# ``owner:/stir:<company_id>`` fetched at the very moment it set
-# ``next_enrich_at`` — so a clock an earlier enrichment left on a candidate
-# that has since moved on (02 §2.9 keeps it across a hold) is not a re-run.
+# ``owner:/stir:<company_id>``, fetched when it set ``next_enrich_at``. The
+# re-run is due while that mark is newer than the run whose E4 answered it
+# (``score_breakdown.stir_answered``, written by ``finish``) — so a clock an
+# earlier enrichment left on a candidate that has since moved on (02 §2.9
+# keeps it across a hold) is no re-run, and a re-run that could not ask (the
+# registry switched off, its lookups or pages gone, every host down, the run
+# out of time, a failure) stays due until one does.
 STIR_MARK: Final = f"{owner.STIR_EXCERPT}:"
 STIR_STATES: Final = ("found", "scored", "review", "hold")
+STIR_ANSWERED: Final = candidates.STIR_ANSWERED
 
 
 def _stir_asked() -> sa.ColumnElement[bool]:
+    answered = LeadCandidate.score_breakdown[STIR_ANSWERED].astext
     return (
         sa.select(Evidence.id)
         .where(
             Evidence.source_key == REGISTRY_SOURCE,
             Evidence.url
             == sa.func.concat(STIR_MARK, sa.cast(LeadCandidate.company_id, sa.Text)),
-            Evidence.fetched_at == LeadCandidate.next_enrich_at,
+            Evidence.fetched_at <= LeadCandidate.next_enrich_at,
+            sa.or_(
+                answered.is_(None),
+                Evidence.fetched_at > sa.cast(answered, sa.DateTime(timezone=True)),
+            ),
         )
         .exists()
     )
@@ -1766,6 +1814,12 @@ async def enrich_batch(
         for attempts in (False, True):
             if budget_left <= 0:
                 break
+            if not attempts and (not reg.usable or reg.lookups_left <= 0):
+                # A /stir re-run is E4 alone: with the registry switched off,
+                # resting or out of lookups it could ask nothing, so it is not
+                # taken — it stays due (``_stir_asked``) for the first run that
+                # can (a day-1 /stir waits for the owner's /manba).
+                continue
             for candidate_id, state in await _due(
                 session_factory, now=now, limit=budget_left, attempts=attempts
             ):
@@ -1803,8 +1857,8 @@ async def enrich_batch(
                         },
                     )
                     report.failed += 1
-                    await _release(
-                        session_factory, candidate_id, now=now, after=SCHEDULE[0]
+                    await failed(
+                        session_factory, run, error=type(exc).__name__, now=now
                     )
                     continue
                 walked = await finish(session_factory, run, now=now)
@@ -1822,6 +1876,74 @@ async def enrich_batch(
         await _record_run(session_factory, site, started=now, ended=ended)
         await _record_run(session_factory, reg, started=now, ended=ended)
     return report
+
+
+async def failed(
+    session_factory: SessionFactory, run: Attempt, *, error: str, now: datetime
+) -> None:
+    """A walk that raised: what it did is kept in the trail with the failure,
+    and the failure counts — an attempt is spent (the next one by
+    ``SCHEDULE``, S4 after the third), a ``/stir`` re-run waits an hour and
+    after ``MAX_ATTEMPTS`` failures since it was asked is answered with the
+    failure — so a candidate that fails the same way every time is not
+    retried every hour for ever."""
+    item = entry("failed", f"error:{error}", now=now, attempt=run.attempt)
+    async with session_factory() as session, session.begin():
+        company = await _locked_company(session, run.company_id)
+        candidate = await session.scalar(
+            sa.select(LeadCandidate)
+            .where(LeadCandidate.id == run.candidate_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        if company is None or candidate is None:
+            return
+        if candidate.state != run.planned_state:
+            if (
+                candidate.state in candidates.RESCORE_STATES
+                or candidate.state == "approved"
+            ):
+                _trail(candidate, [*run.entries, item])
+            return
+        if run.mode == "stir":
+            failures = _stir_failures(candidate.score_breakdown) + 1
+            _trail(candidate, [*run.entries, item])
+            if failures >= MAX_ATTEMPTS:
+                _mark_stir_answered(candidate, now=now)
+                candidate.next_enrich_at = None
+            else:
+                candidate.next_enrich_at = now + SCHEDULE[0]
+            return
+        candidate.enrich_attempts = min(candidate.enrich_attempts + 1, MAX_ATTEMPTS)
+        candidate.next_enrich_at = next_attempt_at(candidate.enrich_attempts, now)
+        _trail(candidate, [*run.entries, item])
+
+
+def _stir_failures(breakdown: Mapping[str, Any] | None) -> int:
+    """The failed ``/stir`` re-runs since the last answered one (the
+    trail's ``failed`` entries with no attempt number)."""
+    held = (breakdown or {}).get("enrichment")
+    since = _when((breakdown or {}).get(STIR_ANSWERED))
+    count = 0
+    for item in held if isinstance(held, list) else []:
+        if not (
+            isinstance(item, Mapping)
+            and item.get("step") == "failed"
+            and item.get("attempt") is None
+        ):
+            continue
+        at = _when(item.get("at"))
+        if since is None or (at is not None and at > since):
+            count += 1
+    return count
+
+
+def _when(value: Any) -> datetime | None:
+    try:
+        found = datetime.fromisoformat(value) if isinstance(value, str) else None
+    except ValueError:
+        return None
+    return found if found is not None and found.tzinfo is not None else None
 
 
 async def _release(

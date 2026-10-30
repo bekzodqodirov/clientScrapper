@@ -877,7 +877,7 @@ async def test_stir_makes_e4_run_on_a_review_candidate_and_nothing_else(
     cand = await enriching(session, company, state="review", score=65, due=None)
     # A clock an earlier enrichment left on a candidate that moved on is no
     # re-run, even on a firm the owner once gave a STIR (its /stir ran a month
-    # ago): only /stir's own mark at that very clock is.
+    # ago and was answered): only a /stir the registry has not answered is.
     stale_company = await firm(session, "Namuna Eski")
     stale = await enriching(session, stale_company, state="review", score=65, due=None)
     await session.commit()
@@ -885,10 +885,11 @@ async def test_stir_makes_e4_run_on_a_review_candidate_and_nothing_else(
     assert (
         await owner.set_stir(session, stale.id, "300000044", now=month_ago)
     ).outcome == ("written")
+    answered = {"stir_answered": (month_ago + timedelta(minutes=10)).isoformat()}
     await session.execute(
         sa.update(LeadCandidate)
         .where(LeadCandidate.id == stale.id)
-        .values(next_enrich_at=NOW - timedelta(days=2))
+        .values(next_enrich_at=NOW - timedelta(days=2), score_breakdown=answered)
     )
     await session.commit()
     result = await owner.set_stir(session, cand.id, "310514454", now=NOW)
@@ -905,9 +906,213 @@ async def test_stir_makes_e4_run_on_a_review_candidate_and_nothing_else(
     )
     assert steps(cand) == [("E4", "hit")]
     assert cand.score_breakdown["enrichment"][0]["attempt"] is None
+    assert cand.score_breakdown["stir_answered"] == (
+        NOW + timedelta(minutes=10)
+    ).isoformat()
     stale = await reload(session, stale)
-    assert stale.score_breakdown is None
+    assert stale.score_breakdown == answered
     assert "q=300000044" not in " ".join(w.urls())
+
+
+async def stir_review(session, name: str = "Namuna Orginfo") -> LeadCandidate:
+    """A review candidate the owner just gave a STIR (06 §1.2 ``/stir``)."""
+    company = await firm(session, name)
+    await signal(session, company)
+    await contact(session, company, phone(43))
+    cand = await enriching(session, company, state="review", score=65, due=None)
+    await session.commit()
+    assert (await owner.set_stir(session, cand.id, "310514454", now=NOW)).outcome == (
+        "written"
+    )
+    await session.commit()
+    return cand
+
+
+async def test_a_stir_waits_while_the_registry_is_off_and_runs_once_it_is_on(
+    session, tmp_path
+):
+    """Day 1: ``registry_lookup`` is seeded off. The owner's /stir is not
+    consumed by a run that could not ask — it stays due and runs at the
+    first run after the owner turns the source on."""
+    cand = await stir_review(session)
+    async with world(tmp_path, ORGINFO_ROUTES) as w:
+        off = await w.run(NOW + timedelta(minutes=10))
+        held = await reload(session, cand)
+        assert (off.reruns, held.score_breakdown, held.next_enrich_at) == (0, None, NOW)
+        await set_source(session, enrich.REGISTRY_SOURCE, enabled=True)
+        on = await w.run(NOW + timedelta(days=1))
+    cand = await reload(session, cand)
+    assert on.reruns == 1 and steps(cand) == [("E4", "hit")]
+    assert cand.next_enrich_at is None
+    assert f"{SEARCH}?q=310514454" in w.urls("orginfo.uz")
+
+
+async def test_a_stir_with_the_day_s_lookups_gone_runs_tomorrow(session, tmp_path):
+    await set_source(session, enrich.REGISTRY_SOURCE, enabled=True)
+    session.add(
+        CollectorRun(
+            source_key="registry_lookup",
+            started_at=NOW - timedelta(hours=1),
+            finished_at=NOW - timedelta(hours=1),
+            status="ok",
+            meta={"note": "enrich", "lookups": registry.LOOKUPS_PER_DAY},
+        )
+    )
+    await session.commit()
+    cand = await stir_review(session)
+    async with world(tmp_path, ORGINFO_ROUTES) as w:
+        today = await w.run(NOW + timedelta(minutes=10))
+        assert today.reruns == 0 and w.urls("orginfo.uz") == []
+        assert (await reload(session, cand)).next_enrich_at == NOW
+        tomorrow = await w.run(enrich.tomorrow_morning(NOW))
+    assert tomorrow.reruns == 1
+    assert steps(await reload(session, cand)) == [("E4", "hit")]
+
+
+async def test_a_stir_the_run_s_deadline_stopped_runs_at_the_next_run(session, tmp_path):
+    await set_source(session, enrich.REGISTRY_SOURCE, enabled=True)
+    cand = await stir_review(session)
+    at = NOW + timedelta(minutes=10)
+    async with world(tmp_path, ORGINFO_ROUTES) as w:
+        stopped = await enrich.enrich_batch(
+            w.tools, now=at, clock=lambda: at + enrich.RUN_DEADLINE
+        )
+        assert stopped.stopped == "deadline" and w.urls("orginfo.uz") == []
+        assert (await reload(session, cand)).next_enrich_at == at
+        again = await w.run(at + timedelta(minutes=10))
+    assert again.reruns == 1
+    assert steps(await reload(session, cand)) == [("E4", "hit")]
+
+
+def _no_answer(request: httpx.Request) -> httpx.Response:
+    raise httpx.ConnectTimeout("no answer", request=request)
+
+
+async def test_a_stir_no_registry_host_answered_is_asked_again_tomorrow(
+    session, tmp_path
+):
+    """Every host down (a timeout here): ``registry_unavailable`` — no
+    exception, no failure — and the /stir stays pending for tomorrow 07:00."""
+    await set_source(session, enrich.REGISTRY_SOURCE, enabled=True)
+    cand = await stir_review(session)
+    at = NOW + timedelta(minutes=10)
+    async with world(tmp_path, {SEARCH: _no_answer}) as w:
+        down = await w.run(at)
+    held = await reload(session, cand)
+    assert (down.failed, down.reruns) == (0, 1)
+    assert steps(held) == [("E4", registry.UNAVAILABLE)]
+    assert held.score_breakdown["enrichment"][0]["found"]["tried"] == [
+        "orginfo:unreachable"
+    ]
+    assert held.next_enrich_at == enrich.tomorrow_morning(at)
+    async with world(tmp_path, ORGINFO_ROUTES) as w:
+        up = await w.run(enrich.tomorrow_morning(at))
+    cand = await reload(session, cand)
+    assert up.reruns == 1 and steps(cand)[-1] == ("E4", "hit")
+    assert cand.next_enrich_at is None
+
+
+async def test_an_attempt_s_e4_answers_the_stir_too(session, tmp_path):
+    """A /stir on a candidate that is enriching is answered by the attempt's
+    own E4: once it has left for review, no re-run of it is due."""
+    await set_source(session, enrich.REGISTRY_SOURCE, enabled=True)
+    company = await firm(session, "Namuna Orginfo")
+    await signal(session, company)  # 50 + the mobile's 6: under 60, E4 runs
+    await contact(session, company, phone(43))
+    cand = await enriching(session, company, due=None)
+    await session.commit()
+    assert (await owner.set_stir(session, cand.id, "310514454", now=NOW)).outcome == (
+        "written"
+    )
+    await session.commit()
+    async with world(tmp_path, ORGINFO_ROUTES) as w:
+        first = await w.run(NOW + timedelta(minutes=10))
+        cand = await reload(session, cand)
+        assert first.attempts == 1 and ("E4", "hit") in steps(cand)
+        assert cand.score_breakdown["stir_answered"] == (
+            NOW + timedelta(minutes=10)
+        ).isoformat()
+        await session.execute(
+            sa.update(LeadCandidate)
+            .where(LeadCandidate.id == cand.id)
+            .values(state="review", next_enrich_at=NOW)
+        )
+        await session.commit()
+        later = await w.run(NOW + timedelta(hours=2))
+    assert later.reruns == 0
+
+
+class Broken(registry.Orginfo):
+    """A host whose lookup raises — a bug, not an unanswered host."""
+
+    async def by_stir(self, stir, *, fetcher, budget):
+        raise RuntimeError("boom")
+
+    async def by_name(self, name, *, city, fetcher, budget):
+        raise RuntimeError("boom")
+
+
+async def test_a_stir_that_fails_every_time_is_given_up_after_three(session, tmp_path):
+    await set_source(session, enrich.REGISTRY_SOURCE, enabled=True)
+    cand = await stir_review(session)
+    at = NOW + timedelta(minutes=10)
+    async with world(tmp_path, hosts=[Broken()]) as w:
+        for n in range(1, 4):
+            report = await w.run(at)
+            held = await reload(session, cand)
+            assert report.failed == 1
+            assert [s for s in steps(held) if s[0] == "failed"] == [
+                ("failed", "error:RuntimeError")
+            ] * n
+            at = held.next_enrich_at or at
+            if n < 3:
+                assert held.next_enrich_at is not None
+        last = await w.run(at + timedelta(days=1))
+    held = await reload(session, cand)
+    assert held.next_enrich_at is None and "stir_answered" in held.score_breakdown
+    assert last.failed == 0 and last.reruns == 0
+
+
+async def test_an_attempt_that_raises_keeps_its_trail_and_spends_the_attempt(
+    session, tmp_path
+):
+    """A walk that raises (a bug in a host) is a failed attempt, scheduled by
+    the 1 h / 24 h / 7 d clock — never the same failure every hour for
+    ever — and what it did before keeps its place in the trail."""
+    await set_source(session, enrich.REGISTRY_SOURCE, enabled=True)
+    company = await firm(session, "Namuna Orginfo", stir="310514454")
+    await signal(session, company)
+    cand = await enriching(session, company)
+    await session.commit()
+    async with world(tmp_path, hosts=[Broken()]) as w:
+        report = await w.run()
+    cand = await reload(session, cand)
+    assert report.failed == 1 and report.attempts == 0
+    assert (cand.state, cand.enrich_attempts) == ("enriching", 1)
+    assert cand.next_enrich_at == NOW + enrich.SCHEDULE[1]
+    assert steps(cand) == [
+        ("E0", "ok"),
+        ("E1", "ok"),
+        ("E2", "skipped:no_site"),
+        ("E3", "skipped:no_channel"),
+        ("failed", "error:RuntimeError"),
+    ]
+
+
+async def test_an_attempt_no_registry_host_answered_is_counted_not_failed(
+    session, tmp_path
+):
+    await set_source(session, enrich.REGISTRY_SOURCE, enabled=True)
+    company = await firm(session, "Namuna Orginfo", stir="310514454")
+    await signal(session, company)
+    cand = await enriching(session, company)
+    await session.commit()
+    async with world(tmp_path, {SEARCH: _no_answer}) as w:
+        report = await w.run()
+    cand = await reload(session, cand)
+    assert (report.failed, report.attempts, report.deferred) == (0, 1, 0)
+    assert ("E4", registry.UNAVAILABLE) in steps(cand)
+    assert (cand.enrich_attempts, cand.next_enrich_at) == (1, NOW + enrich.SCHEDULE[1])
 
 
 # --- the warm re-ask (T-21 carried) ---------------------------------------------------
