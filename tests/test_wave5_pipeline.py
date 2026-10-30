@@ -288,8 +288,15 @@ async def test_a_masked_directory_firm_is_enriched_registered_and_carded(
     # the director's phone is a usable phone and the score passes 60: S1.
     cand = await candidate_of(session, asm)
     steps = trail(cand)
-    assert [s for s, _ in steps][:5] == ["E0", "E1", "E2", "E3", "E4"]
-    assert ("E4", "hit") in steps
+    # No website, no channel; E5 and E6 never run: S1 ended the walk.
+    assert steps == [
+        ("E0", "ok"),
+        ("E1", "ok"),
+        ("E2", "skipped:no_site"),
+        ("E3", "skipped:no_channel"),
+        ("E4", "hit"),
+    ]
+    assert (cand.state, cand.score) == ("review", 70)
     asm = await company_named(session, ASM)
     assert asm.stir == SUBSTITUTED_STIR
     assert asm.registry_status == "active"
