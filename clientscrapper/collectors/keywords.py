@@ -1036,7 +1036,24 @@ def terms_re(terms: Iterable[str], *, inflect: bool = True) -> re.Pattern[str]:
 
 
 B2B_RE = terms_re(chain.from_iterable(B2B_MARKERS.values()))
-CHINA_RE = terms_re(CHINA_WORDS)
+# The Russian adjective of «Китай» in every case, number and case of letters
+# («китайский», «китайских», «КИТАЙСКИЙ», «Узбекско-китайский торговый дом»:
+# the directory cards, the T-22 review): the inflection rule grows a noun's
+# endings («Китая», «в Китае»), never an adjective's, so its stem is spelled
+# out. «Китабский» (the Kitab district) is no China word, nor a bare «Кита».
+# The Uzbek forms the recordings print («Xitoydagi», «Хитойда», «xitoylik»)
+# are «Xitoy»/«Хитой» with their suffix chain already. The language is no
+# origin: «китайский язык», «со знанием китайского», «по-китайски» (a course
+# of Chinese or a vacancy's skill says nothing of where goods come from; 04
+# §9.3 quotes the vacancy's «в Китае», not its «китайского»).
+CHINA_ADJECTIVE_RU = (
+    r"(?<!знанием\s)(?<!знание\s)(?<!знания\s)(?<!знаниями\s)"
+    r"(?<!владением\s)(?<!владение\s)(?<!по-)"
+    r"китайск\w*(?!\w)(?!\s+язык)"
+)
+CHINA_RE = re.compile(
+    rf"{terms_re(CHINA_WORDS).pattern}|(?<!\w){CHINA_ADJECTIVE_RU}", re.I
+)
 NON_CN_COUNTRY_RE = terms_re(NON_CN_ORIGIN_WORDS)
 # 04 §5.1 «named as origin»: a country is an origin only in an origin form —
 # the Uzbek ablative («Turkiyadan», «Кореядан»), «X ishlab chiqarish / X

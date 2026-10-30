@@ -977,6 +977,9 @@ CASES: dict[str, tuple[re.Pattern[str], Extract, Cases]] = {
                     ("Xitoydan olib kelamiz", "Xitoydan"),
                     ("Yiwudan tovar", "Yiwudan"),
                     ("1688 dan buyurtma", "1688"),
+                    # integration (wave 5): the Uzbek forms the recordings print
+                    ("Xitoydagi zavodlardan toʻgʻridan-toʻgʻri", "Xitoydagi"),
+                    ("xitoylik hamkorlarimiz bilan", "xitoylik"),
                 ],
                 ["Turkiyadan olib kelamiz", "Mahalliy ishlab chiqarish", "Chinni bozor"],
             ),
@@ -986,6 +989,7 @@ CASES: dict[str, tuple[re.Pattern[str], Extract, Cases]] = {
                     ("Хитой товарлари", "Хитой"),
                     ("Гуанчжоу шаҳридан", "Гуанчжоу"),
                     ("Иу бозоридан", "Иу"),
+                    ("Хитойда ишлаб чиқарилган", "Хитойда"),
                 ],
                 ["Туркиядан", "Маҳаллий ишлаб чиқариш", "Россиядан"],
             ),
@@ -995,8 +999,24 @@ CASES: dict[str, tuple[re.Pattern[str], Extract, Cases]] = {
                     ("товары из Китая", "из Китая"),
                     ("доставка из КНР", "КНР"),
                     ("Кашгар — Ташкент", "Кашгар"),
+                    # The adjective (the T-22 review: directory cards)
+                    ("УЗБЕКСКО-КИТАЙСКИЙ ТОРГОВЫЙ ДОМ", "КИТАЙСКИЙ"),
+                    ("поставки китайских станков оптом", "китайских"),
+                    ("Китайская спецтехника со склада", "Китайская"),
+                    ("запчасти для китайского грузовика", "китайского"),
                 ],
-                ["из Турции", "местное производство", "Казахстан"],
+                [
+                    "из Турции",
+                    "местное производство",
+                    "Казахстан",
+                    # The Kitab district and a cut word are no China
+                    "Китабский район, Кашкадарьинская область",
+                    "кит в океане",
+                    # The language is no origin (04 §9.3 quotes «в Китае»)
+                    "курсы китайского языка для детей",
+                    "Менеджер со знанием китайского",
+                    "говорим по-китайски",
+                ],
             ),
         },
     ),
