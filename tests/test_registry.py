@@ -654,3 +654,165 @@ def test_hosts_on_and_paused_hosts_read_the_source_config():
     earlier = (NOW - timedelta(hours=1)).isoformat()
     config = {"paused_hosts": {"orginfo": later, "stat": earlier, "x": "garbage"}}
     assert registry.paused_hosts(config, now=NOW) == frozenset({"orginfo"})
+
+
+# --- the guards that keep a wrong or a disallowed page out (T-24 review) -------------
+
+
+def _card_page(*edits: tuple[str, str]) -> bytes:
+    """The recorded card with string edits (a dressed copy, never a new
+    shape: every edit names the recorded text it replaces)."""
+    text = page("orginfo_organization_cf68f132a2f4").decode()
+    for old, new in edits:
+        assert old in text, old
+        text = text.replace(old, new)
+    return text.encode()
+
+
+def test_card_ref_takes_orginfo_s_company_page_shape_only():
+    assert registry.card_ref(CARD) == "cf68f132a2f4"
+    assert registry.card_ref("https://www.orginfo.uz/uz/organization/cf68f132a2f4/") == (
+        "cf68f132a2f4"
+    )
+    for url in (
+        "https://orginfo.example.uz/ru/organization/cf68f132a2f4/",  # another host
+        "https://orginfo.uz/ru/organization/founders/",  # a person tab, no id
+        "https://orginfo.uz/ru/organization/CF68F132A2F4/",
+        "https://orginfo.uz/ru/organization/cf68f132a2f/",  # 11 hex digits
+        "https://orginfo.uz/ru/organization/cf68f132a2f4/pdf/",
+        f"{CARD}?tab=founders",
+    ):
+        assert registry.card_ref(url) is None, url
+
+
+async def test_a_refresh_of_a_url_that_is_no_company_page_fetches_nothing():
+    site = orginfo_site(FakeClock(NOW))
+    async with fetcher_for(site) as fetcher:
+        got = await registry.Orginfo().refresh(
+            "https://orginfo.uz/ru/organization/cf68f132a2f4/pdf/",
+            fetcher=fetcher,
+            budget=budget(pages=10, deadline=NOW + timedelta(hours=1)),
+        )
+    assert (got.result, got.pages, site.seen) == ("none", [], [])
+
+
+async def test_e4_a_card_page_with_another_stir_is_a_mismatch():
+    site = orginfo_site(
+        FakeClock(NOW),
+        **{CARD: httpx.Response(200, content=_card_page(("310514454", "310514455")))},
+    )
+    async with fetcher_for(site) as fetcher:
+        found = await registry.lookup(
+            registry.hosts_on({}),
+            stir="310514454",
+            name=None,
+            city=None,
+            fetcher=fetcher,
+            budget=budget(pages=10, deadline=NOW + timedelta(hours=1)),
+        )
+    assert (found.result, found.record) == ("mismatch", None)
+
+
+async def test_e4_prime_a_card_page_naming_another_firm_is_a_mismatch():
+    """The search card agreed («XITOY TOSHKENT», Toshkent); the page it leads
+    to names another firm: not the one the rule agreed to."""
+    site = orginfo_site(
+        FakeClock(NOW),
+        **{
+            SEARCH: html("orginfo_search_name_xitoy_newest_p1"),
+            "https://orginfo.uz/ru/organization/e9beed368894/": httpx.Response(
+                200,
+                content=_card_page(
+                    ("310514454", "313378012"),
+                    (FERGANA_ENTITY, "Toshkent sh."),
+                    (FERGANA, "Toshkent sh."),
+                ),
+            ),
+        },
+    )
+    async with fetcher_for(site) as fetcher:
+        found = await registry.lookup(
+            registry.hosts_on({}),
+            stir=None,
+            name="Xitoy Toshkent MChJ",
+            city="Toshkent",
+            fetcher=fetcher,
+            budget=budget(pages=10, deadline=NOW + timedelta(hours=1)),
+        )
+    assert (found.result, found.record) == ("mismatch", None)
+
+
+def test_the_page_s_json_ld_answers_when_the_labelled_rows_are_missing():
+    """The ``Organization`` JSON-LD is the fallback for the registration date,
+    the phone and the director (``foundingDate``, ``telephone``,
+    ``employee``)."""
+    body = _card_page(
+        ('<time datetime="2023-05-27">', "<time>"),
+        ("<span>27.05.2023</span>", "<span></span>"),
+        ('href="tel:900000001"', 'href="#"'),
+        ("<span>Руководитель</span>", "<span>Учредители</span>"),
+    )
+    record = registry.parse_orginfo_company(body, url=CARD)
+    assert record is not None
+    assert record.registered_on == date(2023, 5, 27)
+    assert record.phones == ("900000001",)
+    assert (record.director_name, record.director_role) == ("Seller 04", "Руководитель")
+
+
+def test_an_oked_that_is_not_five_digits_is_not_kept():
+    body = _card_page(("<span>63110 -", "<span>6311 -"))
+    record = registry.parse_orginfo_company(body, url=CARD)
+    assert record is not None and record.oked is None
+
+
+def test_ent_age_2y_active_starts_on_the_730th_day():
+    ref = EvidenceRef(id=1, source_key="registry_lookup", fetched_at=NOW)
+    edge = (NOW - timedelta(days=registry.AGE_ACTIVE_DAYS)).date()
+    keys = {d.key for d in registry.hit_drafts(_record(registered_on=edge), ref, now=NOW)}
+    assert keys == {registry.LEGAL_CONFIRMED, registry.AGE_ACTIVE}
+    young = _record(registered_on=edge + timedelta(days=1))
+    assert {d.key for d in registry.hit_drafts(young, ref, now=NOW)} == {
+        registry.LEGAL_CONFIRMED
+    }
+
+
+def test_an_unknown_status_never_overwrites_the_company_s():
+    held = registry.CompanyNow("active", None, None, None, None, None)
+    assert "registry_status" not in registry.company_values(
+        _record(status="unknown"), held
+    )
+
+
+def test_a_name_agrees_in_its_loose_form():
+    """«Xitoy» and «Hitoy», «Toshkent» and «Toschkent» are one name key's
+    loose form (keys.loose_key): x → h, doubled letters collapsed."""
+    assert registry.name_agrees(
+        '"HITOY TOSHKENT" MChJ', "Xitoy Toshkent", card_city=None, city=None
+    )
+    assert not registry.name_agrees(
+        '"XITOY SAVDO" MChJ', "Xitoy Toshkent", card_city=None, city=None
+    )
+
+
+def test_a_host_is_on_only_when_the_config_says_true():
+    assert [h.key for h in registry.hosts_on({"hosts": {"stat": "yes", "myorg": 1}})] == [
+        "orginfo"
+    ]
+
+
+def test_the_stir_comes_from_the_inn_row_when_the_json_ld_has_none():
+    body = _card_page(('"taxID": "310514454"', '"taxID": ""'))
+    record = registry.parse_orginfo_company(body, url=CARD)
+    assert record is not None and record.stir == "310514454"
+
+
+def test_only_a_liquidation_badge_marks_a_card_liquidated():
+    """A red badge saying something else (a suspension) is no liquidation:
+    the card stays a candidate for E4′."""
+    text = page("orginfo_search_name_xitoy_newest_p1").decode()
+    marker = "Ликвидирована"
+    assert text.count(marker) == 3
+    cards = registry.parse_orginfo_search(
+        text.replace(marker, "Приостановлена", 1).encode(), url=SEARCH
+    )
+    assert sum(c.liquidated for c in cards) == 2
