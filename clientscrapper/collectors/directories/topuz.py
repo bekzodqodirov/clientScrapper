@@ -120,6 +120,14 @@ def organisation(
     source = _text(org, "inside_source")
     if source:
         attrs["inside_source"] = source
+    # A row imported from prom.uz names its prom id (10 of 40 recorded rows).
+    # Kept, not yet an external id: prom.uz was never recorded (Cloudflare
+    # refused it), so whether this is the id a prom.uz card is keyed by is
+    # UNVERIFIED — the prom parser (owed, T-22) promotes it to
+    # ``external_ids["prom"]`` once it is, and an exact id never guesses.
+    prom = org.get("prom_id")
+    if isinstance(prom, int) and not isinstance(prom, bool):
+        attrs["prom_id"] = str(prom)
     target = card_url(org.get("slug"))
     if target is not None:
         attrs["card_url"] = target

@@ -116,6 +116,7 @@ def test_the_section_page_gives_its_twenty_rows_from_the_payload():
                 "stroymaterialy-optom",
             ],
             "inside_source": "prom.uz",
+            "prom_id": "17729",
             "card_url": "https://top.uz/company/birjaservistexno-ooo",
             "bulky": ["building", "furniture"],
         },

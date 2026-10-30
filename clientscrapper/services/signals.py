@@ -504,11 +504,14 @@ def _hints(
 
 
 def _brand(drafts: _Drafts, attrs: Mapping[str, Any], excerpt: str) -> None:
-    """04 §5.1's ``brand_distributor`` decision."""
+    """04 §5.1's ``brand_distributor`` decision. ``cn_origin`` stands on the
+    Chinese brand named: a brandless one — a directory's «Импортер» badge
+    (03 §2.6), which says neither what nor from where — is no China origin
+    (the T-22 review)."""
     brand = attrs.get("brand")
-    quote = None
-    if isinstance(brand, str) and brand.strip():
-        quote = _first(re.compile(re.escape(brand.strip()), re.I), excerpt)
+    if not (isinstance(brand, str) and brand.strip()):
+        return
+    quote = _first(re.compile(re.escape(brand.strip()), re.I), excerpt)
     group = attrs.get("brand_group")
     if group in BULKY_BRAND_GROUPS:
         key = "vol_container" if attrs.get("official") is True else "vol_wholesale_bulky"

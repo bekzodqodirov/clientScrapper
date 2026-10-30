@@ -533,6 +533,20 @@ def test_rule_6_brand_distributor_is_decided_here(attrs, expected):
     assert found["cn_origin"].quote == attrs["brand"]
 
 
+def test_a_brandless_importer_badge_is_no_china_origin():
+    """A directory's «Импортер» badge is ``brand_distributor(official=False)``
+    with no brand (03 §2.6): importer of what, from where, it does not say.
+    ``cn_origin`` stands on a Chinese brand (04 §5.1), so none is drafted —
+    the T-22 review found the badge worth a China origin by itself."""
+    found = rules(
+        '"Namuna Savdo" ООО · Импортер · Оборудование',
+        "directory_entry",
+        attrs={"official": False},
+        signal_types=["brand_distributor"],
+    )
+    assert "cn_origin" not in keys(found)
+
+
 # --- a vacancy's duties are not volume (04 §9.3) --------------------------------------
 
 VACANCY_93 = (
