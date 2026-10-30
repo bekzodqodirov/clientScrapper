@@ -785,6 +785,153 @@ async def test_e4_a_second_person_never_joins_the_decision_maker(session, tmp_pa
     ]
 
 
+async def test_e4_never_lets_the_registry_s_director_erase_the_telegram_poster(
+    session, tmp_path
+):
+    """The poster whose intent made the lead (a person-tier row with a
+    Telegram account) is whom a manager writes to: a registry hit's director
+    — rank 3, reached by nobody on Telegram — does not anonymise him; the
+    director's number stays as the firm's, without the name."""
+    await set_source(session, enrich.REGISTRY_SOURCE, enabled=True)
+    company = await firm(session, "Namuna Orginfo", stir="310514454")
+    await signal(session, company)
+    await signal(session, company, "cn_origin")
+    poster = await contact(
+        session,
+        company,
+        tier="person",
+        full_name="Bobur",
+        telegram_username="namuna_poster",
+        telegram_id=777000111,
+        legal_basis="public_source",
+        source_url="https://t.me/namuna_chat/1",
+        collected_at=NOW - timedelta(days=1),
+    )
+    cand = await enriching(session, company, attempts=2, score=70)
+    await session.commit()
+    async with world(tmp_path, ORGINFO_ROUTES) as w:
+        await w.run()
+    poster = await reload(session, poster)
+    assert (poster.full_name, poster.telegram_username, poster.anonymised_at) == (
+        "Bobur",
+        "namuna_poster",
+        None,
+    )
+    people = (
+        await session.execute(
+            sa.select(Contact.full_name, Contact.tier, Contact.phone)
+            .where(Contact.company_id == company.id, Contact.anonymised_at.is_(None))
+            .order_by(Contact.tier)
+        )
+    ).all()
+    assert people == [
+        (None, "company", "+998900000001"),
+        ("Bobur", "person", None),
+    ]
+    assert ("E4", "hit") in steps(await reload(session, cand))
+
+
+async def test_e4_prime_spends_no_lookup_on_a_company_with_no_city(session, tmp_path):
+    """04 §3 «name + city must agree, else none»: with no city a same-named
+    firm anywhere in the country would give ours its STIR and its director."""
+    await set_source(session, enrich.REGISTRY_SOURCE, enabled=True)
+    company = await firm(session, "Orginfo", city=None)
+    await signal(session, company)
+    cand = await enriching(session, company)
+    await session.commit()
+    async with world(tmp_path, ORGINFO_ROUTES) as w:
+        await w.run()
+    cand = await reload(session, cand)
+    company = await reload(session, company)
+    assert ("E4", "skipped:no_city") in steps(cand)
+    assert w.urls("orginfo.uz") == [] and company.stir is None
+    run = await session.scalar(
+        sa.select(CollectorRun).where(CollectorRun.source_key == "registry_lookup")
+    )
+    assert run is None  # no lookup counted
+
+
+async def test_e4_prime_a_card_another_known_firm_holds_is_none_of_ours(
+    session, tmp_path
+):
+    """E4′'s card carries a STIR another company holds: the STIR outranks
+    the name (04 §2.1) — the page is evidence, but no registry fact, column
+    or director is written on ours; ours is marked ``dup_of`` the holder for
+    the owner's 🔀."""
+    await set_source(session, enrich.REGISTRY_SOURCE, enabled=True)
+    other = await firm(session, "Orginfo", stir="310514454", city="Fargʻona")
+    ours = await firm(session, "Orginfo", city="Fargʻona")
+    await signal(session, ours)
+    cand = await enriching(session, ours)
+    await session.commit()
+    routes = {
+        SEARCH: registry_page("orginfo_search_stir_310514454"),
+        CARD: registry_page("orginfo_organization_cf68f132a2f4"),
+    }
+    async with world(tmp_path, routes) as w:
+        await w.run()
+    cand = await reload(session, cand)
+    ours = await reload(session, ours)
+    assert ("E4", "foreign_stir") in steps(cand)
+    assert (ours.stir, ours.registry_status, ours.oked, ours.dup_of) == (
+        None,
+        "unknown",
+        None,
+        other.id,
+    )
+    keys = set(
+        await session.scalars(
+            sa.select(Signal.key).where(
+                Signal.company_id == ours.id, Signal.source_key == "registry_lookup"
+            )
+        )
+    )
+    assert keys == set()
+    assert (
+        await session.scalar(
+            sa.select(sa.func.count())
+            .select_from(Contact)
+            .where(Contact.company_id == ours.id)
+        )
+    ) == 0
+    assert (
+        await session.scalar(
+            sa.select(sa.func.count())
+            .select_from(Evidence)
+            .where(Evidence.url == CARD, Evidence.source_key == "registry_lookup")
+        )
+    ) == 1
+
+
+async def test_e4_prime_never_follows_a_card_the_search_marks_liquidated(
+    session, tmp_path
+):
+    """A same-named, same-city firm the search list marks «Ликвидирована» is
+    an older firm, not ours: following it would exclude ours as liquidated."""
+    await set_source(session, enrich.REGISTRY_SOURCE, enabled=True)
+    company = await firm(session, "Orginfo", city="Fargʻona")
+    await signal(session, company)
+    cand = await enriching(session, company)
+    await session.commit()
+    search = (
+        (REGISTRIES / "orginfo_search_stir_310514454.html")
+        .read_text(encoding="utf-8")
+        .replace(
+            '<span class="text-body-tertiary ms-1 text-nowrap">',
+            '<span class="bg-danger bg-opacity-25 px-2 py-1 rounded-5 text-danger">'
+            "Ликвидирована</span>"
+            '<span class="text-body-tertiary ms-1 text-nowrap">',
+            1,
+        )
+    )
+    assert registry.parse_orginfo_search(search.encode(), url=SEARCH)[0].liquidated
+    async with world(tmp_path, {SEARCH: httpx.Response(200, text=search)}) as w:
+        await w.run()
+    cand = await reload(session, cand)
+    assert ("E4", "none") in steps(cand) and cand.state == "enriching"
+    assert CARD not in w.urls()
+
+
 async def test_e4_is_cached_90_days_by_its_card(session, tmp_path):
     await set_source(session, enrich.REGISTRY_SOURCE, enabled=True)
     company = await firm(session, "Namuna Orginfo", stir="310514454")

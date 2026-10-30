@@ -173,6 +173,8 @@ E0_OBSERVATIONS: Final = 200
 SPEND_SINCE: Final = datetime(2000, 1, 1, tzinfo=settings.tz)
 STEPS: Final = ("E0", "E1", "E2", "E3", "E4", "E5", "E6")
 SELF_KINDS: Final = signals.SELF_DESCRIPTION_KINDS
+# E4′ found a card whose STIR another known company holds.
+FOREIGN_STIR: Final = "foreign_stir"
 CHANNEL_SOURCES: Final = (SITE_SOURCE, chats.SOURCE_KEY)
 
 SessionFactory = Callable[[], AsyncSession]
@@ -611,6 +613,22 @@ async def apply_page(
         out.new = known is None
         if source is not None and out.new:
             source.new_evidence += 1
+        if registry_record is not None:
+            holder = await companies.foreign_stir_holder(
+                session, registry_record.stir, company
+            )
+            if holder is not None:
+                # The card is another known firm's (its STIR outranks the name
+                # E4′ matched on, 04 §2.1): the page stays evidence, nothing of
+                # it is ours — no STIR, no legal confirmation, no registry
+                # column, no director — and the pair goes to the owner's 🔀.
+                out.rejected = FOREIGN_STIR
+                out.found["held_by"] = str(holder.id)
+                if await companies.suggest_duplicate(
+                    session, company, holder, how="stir"
+                ):
+                    out.found["dup_of"] = str(holder.id)
+                return out
         held = set(
             await session.scalars(
                 sa.select(Observation.ordinal).where(Observation.evidence_id == row.id)
@@ -1089,6 +1107,10 @@ async def step_e4(ctx: Context, run: Attempt, facts: Facts) -> dict[str, Any]:
     name_ok = companies.usable_name(facts.name_key)
     if facts.stir is None and not name_ok:
         return entry("E4", "skipped:no_key", now=ctx.now, attempt=run.attempt)
+    if facts.stir is None and facts.city is None:
+        # E4′ needs the city to agree (04 §3, ``registry.pick_by_name``): no
+        # lookup is spent on a question with no answer.
+        return entry("E4", "skipped:no_city", now=ctx.now, attempt=run.attempt)
     async with ctx.session_factory() as session:
         cached = await registry_card(session, facts.lineage)
     refresh: str | None = None
@@ -1126,6 +1148,7 @@ async def step_e4(ctx: Context, run: Attempt, facts: Facts) -> dict[str, Any]:
     await _rest_hosts(ctx, answer.rest)
     found: dict[str, Any] = {"host": answer.host} if answer.host else {}
     card = answer.record.url if answer.record is not None else None
+    result = answer.result
     for page in answer.pages:
         hit = answer.record if page.final_url == card or page.url == card else None
         seen = (
@@ -1153,7 +1176,8 @@ async def step_e4(ctx: Context, run: Attempt, facts: Facts) -> dict[str, Any]:
             source=ctx.registry,
         )
         found.update(applied.found)
-    result = answer.result
+        if hit is not None and applied.rejected == FOREIGN_STIR:
+            result = FOREIGN_STIR
     if result == registry.UNAVAILABLE:
         found["tried"] = [f"{k}:{r}" for k, r in answer.tried]
     return entry("E4", result, now=ctx.now, attempt=run.attempt, found=found)

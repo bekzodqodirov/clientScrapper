@@ -39,7 +39,13 @@ most one decision maker per company, with ``legal_basis='public_registry'``,
 director's own mobile, so when the page names a director the phone goes on
 the director's person-tier row (``owner='person'``; 04 §3 calls myorg's phone
 company-tier — orginfo's is STILL UNVERIFIED either way, so the stricter
-tier holds it); with no director it is company-tier.
+tier holds it); with no director it is company-tier. When the company keeps
+its own person instead (``companies.upsert_contact``: one who ranks as high,
+or one the company's own words put there with a Telegram account — the
+poster a manager writes to), the director is not stored and 04 §2.4 keeps
+the number as the firm's without the name, as the page prints it in the
+organisation's contact block (whether that is right for orginfo's number is
+the legal call recorded in 04 §3's as-built note).
 
 **What a hit writes** (04 §3, §5.3): ``ent_legal_confirmed`` (only a registry
 hit writes it), ``ent_age_2y_active`` when registered ≥ 730 days ago and
