@@ -25,6 +25,17 @@ no cookies, no reveal/XHR call was made anywhere.
   2-digit area/operator code as served (not a number; it does not match the synthetic
   payload number of the same row); top.uz's `+998...` carries no digit.
 - **robots.txt as the recorder read it:** kept in `robots/` (section «robots.txt»).
+- **Not for a resolver end-to-end** (the T-22 review): the scrubber numbers its synthetic
+  phones afresh in every file (`+998 90 000 00 01` …), so unrelated firms on different pages
+  share numbers (37 of 47 distinct numbers are held by more than one differently named firm:
+  `+998900000001` is glotr:jack's, goldenpages:85641's and three top.uz rows'), and one top.uz
+  firm has another number on each page. The parsers' and the crawl's tests read numbers per
+  row only; a test that resolves these observations into companies merges unrelated firms by
+  phone and must give each `source_ref` a number of its own first.
+- **No rubrika of target goods for yellowpages:** the one recorded rubrika (stationery
+  wholesale, Tashkent) is held by the category filter by design (9 of its 15 rows). 03 §2.6
+  picks the rubrika slugs from the rubric index (`optov|wholesale` + target goods), which was
+  not recorded — owed on day 1, with the other unrecorded seeds below.
 
 ## Files
 
