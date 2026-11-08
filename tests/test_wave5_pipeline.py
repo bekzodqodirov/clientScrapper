@@ -324,9 +324,23 @@ async def test_a_masked_directory_firm_is_enriched_registered_and_carded(
     assert early.attempts == 0
 
     due = NOW + enrich.SCHEDULE[0]
+    # Every warm directory firm is due at its hour: ASM and EMA, the CHINT
+    # dealer (its brand and its two numbers) and the Uzbek-Chinese trading
+    # house (top.uz's numbers met goldenpages' China rubric under its legal
+    # name, the wave-5 seam review).
+    walked = list(
+        await session.scalars(
+            sa.select(Company)
+            .join(LeadCandidate, LeadCandidate.company_id == Company.id)
+            .where(LeadCandidate.state == "enriching")
+            .execution_options(populate_existing=True)
+        )
+    )
+    assert {asm.id, ema.id, (await company_named(session, CHINT)).id} <= {
+        f.id for f in walked
+    }
     report = await enrich_at(tmp_path, due, registry_routes(ASM))
-    # ASM, EMA and the CHINT dealer (warm on its brand and its two numbers).
-    assert report.attempts == 3
+    assert report.attempts == len(walked)
 
     # E0 → E4 in the chain's order; E4′ (no STIR, a name and a city) hits;
     # the director's phone is a usable phone and the score passes 60: S1.
@@ -355,7 +369,6 @@ async def test_a_masked_directory_firm_is_enriched_registered_and_carded(
 
     # The registry pages are kept as their rows alone (founders, 06 §5.1),
     # each naming the company it was fetched for — one of the three walked.
-    walked = [asm, ema, await company_named(session, CHINT)]
     pages = list(
         await session.scalars(
             sa.select(Evidence).where(Evidence.source_key == enrich.REGISTRY_SOURCE)
