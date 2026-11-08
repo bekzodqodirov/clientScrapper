@@ -428,6 +428,18 @@ def test_the_furniture_from_china_tag_gives_china_origin_too():
         ["china_origin", "directory_wholesale"],
         "мебель из китая",
     )
+    # cn_origin quotes the tag: it must be a fragment of the row's own excerpt
+    # (02 §2.7), however long the description before the tags (the wave-5
+    # seam review: the excerpt is cut at EXCERPT_MAX, the tag goes first).
+    long = _teg(
+        name="Namuna Mebel ООО",
+        brand_name="Namuna Mebel ООО",
+        description="Мягкая и корпусная мебель для дома и офиса. " * 30,
+        rubrics=[{"id": 1, "slug": "mebel-optom", "name": "Мебель оптом"}],
+        tags=[{"id": 2, "slug": "mebel-iz-kitaya", "name": "мебель из китая"}],
+    )
+    assert long is not None and long.origin_text == "мебель из китая"
+    assert long.excerpt.startswith("Namuna Mebel ООО · мебель из китая · ")
 
 
 def test_the_contacts_telegram_is_the_firm_s_channel():

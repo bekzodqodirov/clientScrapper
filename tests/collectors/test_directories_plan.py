@@ -16,7 +16,12 @@ from clientscrapper.collectors.base import Observation
 from clientscrapper.collectors.directories import common, glotr, nuxt, topuz, yellowpages
 from clientscrapper.collectors.directories import goldenpages as gp
 from clientscrapper.collectors.directories.markup import parse
-from clientscrapper.collectors.keywords import INDIVIDUAL_FORM_RE, WHOLESALE_RUBRIC_RE
+from clientscrapper.collectors.keywords import (
+    COMPETITOR_NAME_RE,
+    COMPETITOR_SELF_RE,
+    INDIVIDUAL_FORM_RE,
+    WHOLESALE_RUBRIC_RE,
+)
 from clientscrapper.services.normalise import to_observation_json
 from tests.collectors.directories_pages import page
 
@@ -103,6 +108,16 @@ def test_an_importer_that_delivers_is_no_forwarder():
     )
     assert verdict.signal_types == ("china_origin", "directory_wholesale")
     assert not verdict.competitor
+    # «логистика» about its own delivery is a word COMPETITOR_NAME_RE takes in a
+    # name; the card's own text is read with the cargo core alone (the wave-5
+    # seam review: nothing pinned which pattern reads it).
+    own = "Оптовая торговля мебелью · логистика и доставка по Узбекистану"
+    assert COMPETITOR_NAME_RE.search(own) and not COMPETITOR_SELF_RE.search(own)
+    importer = common.judge(
+        name="Namuna Mebel ООО", own=own, goods="мебель", wholesale=True, china="из Китая"
+    )
+    assert importer.signal_types == ("china_origin", "directory_wholesale")
+    assert not importer.competitor
 
 
 @pytest.mark.parametrize(

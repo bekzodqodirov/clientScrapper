@@ -55,7 +55,8 @@ from clientscrapper.services.normalise import to_observation_json
 from clientscrapper.services.usage import Priced
 from tests.ast_tools import PACKAGE, imported_modules, tree_of
 from tests.fakes import ALLOW_ALL, FakeClock, Site, fetcher_for
-from tests.gate_fixtures import NOW, candidate, contact, firm, phone, seq, signal
+from tests.gate_fixtures import NOW, candidate, contact, firm, phone, seq, signal, tail
+from tests.gate_fixtures import row as suppression_row
 
 FIXTURES = Path(__file__).parent / "fixtures"
 SITES = FIXTURES / "company_sites"
@@ -2047,3 +2048,97 @@ async def test_two_runs_at_once_spend_the_day_s_lookups_once(session, tmp_path):
     # The lock is given back: the next run runs.
     async with world(tmp_path, ORGINFO_ROUTES) as w:
         assert (await w.run(NOW + timedelta(minutes=10))).stopped is None
+
+
+# --- the stop rules, each by its behaviour (the wave-5 seam review: three
+# of them could be removed with every test above green) ---------------------
+
+
+async def test_s1_after_e3_spends_no_registry_lookup(session, tmp_path):
+    """The channel's phone makes the candidate hot at E3: S1 there, no E4."""
+    company = await firm(
+        session,
+        "Namuna Optom Uy-roʻzgʻor",
+        telegram_channel="namuna_optom",
+        stir="300000099",
+        city="Toshkent",
+    )
+    await signal(session, company)
+    await signal(session, company, "cn_origin")
+    cand = await enriching(session, company, score=70)
+    await set_source(session, enrich.REGISTRY_SOURCE, enabled=True)
+    await session.commit()
+    routes = {"https://t.me/s/namuna_optom": site_page("tme_channel")}
+    async with world(tmp_path, routes) as w:
+        await w.run()
+    cand = await reload(session, cand)
+    assert cand.state == "review"
+    assert not w.urls("orginfo.uz")
+    assert "E4" not in [step for step, _ in steps(cand)]
+
+
+async def test_s1_after_e1_fetches_nothing(session, tmp_path):
+    """A candidate already hot with a usable phone stops at E1."""
+    company = await firm(
+        session, "Namuna Tekstil Savdo", website_domain="namuna-tekstil.example.uz"
+    )
+    await signal(session, company)
+    await signal(session, company, "cn_origin")
+    await contact(session, company, phone(41))
+    cand = await enriching(session, company, score=70)
+    await session.commit()
+    routes = {
+        f"{SITE}/": site_page("site_landing"),
+        f"{SITE}/kontakty": site_page("site_contacts"),
+    }
+    async with world(tmp_path, routes) as w:
+        await w.run()
+    cand = await reload(session, cand)
+    assert steps(cand) == [("E0", "ok"), ("E1", "ok")]
+    assert w.urls() == []
+
+
+async def test_s2_a_suppressed_site_phone_stops_the_walk(session, tmp_path):
+    """A phone the site shows is on the DNC list: S2 after E2, no E3."""
+    company = await firm(
+        session,
+        "Namuna Tekstil Savdo",
+        website_domain="namuna-tekstil.example.uz",
+        telegram_channel="namuna_optom",
+    )
+    await signal(session, company)
+    cand = await enriching(session, company, score=50)
+    await suppression_row(session, "dnc", "phone_tail", tail(31))
+    await session.commit()
+    routes = {
+        f"{SITE}/": site_page("site_landing"),
+        f"{SITE}/kontakty": site_page("site_contacts"),
+        "https://t.me/s/namuna_optom": site_page("tme_channel"),
+    }
+    async with world(tmp_path, routes) as w:
+        await w.run()
+    cand = await reload(session, cand)
+    assert cand.state == "suppressed"
+    assert not [u for u in w.urls() if "t.me/s/" in u]
+
+
+async def test_s4_at_exactly_60_with_a_username_is_the_handoff_card(session, tmp_path):
+    """04 §3 S4 «score ≥ 60»: 60 itself is the warm handoff review, not hold."""
+    company = await firm(session)
+    await signal(session, company)
+    await signal(session, company, "ent_legal_confirmed", source="registry_lookup")
+    await contact(
+        session,
+        company,
+        telegram_username="namuna_boss",
+        tier="person",
+        role="director",
+    )
+    cand = await enriching(session, company, attempts=2)
+    await session.commit()
+    async with world(tmp_path) as w:
+        await w.run()
+    cand = await reload(session, cand)
+    assert cand.score == 60
+    assert (cand.state, cand.tier) == ("review", "warm")
+    assert cand.score_breakdown["gates"]["no_phone"] is True
