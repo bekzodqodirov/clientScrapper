@@ -15,8 +15,8 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from clientscrapper.collectors.base import Observation
+from clientscrapper.collectors.directories import common, stop_reason
 from clientscrapper.collectors.directories import goldenpages as gp
-from clientscrapper.collectors.directories import stop_reason
 from clientscrapper.services.normalise import to_observation_json
 from tests.collectors.directories_pages import GOLDENPAGES, page
 
@@ -134,7 +134,14 @@ def test_a_card_updated_before_2024_is_dropped():
         "Обновлено: 11.12.2025".encode(), "Обновлено: 11.12.2023".encode()
     )
     assert stale != p.body
-    assert gp.parse_company(stale, url=p.final_url, fetched_at=p.fetched_at) == []
+    # Read and dropped — a verdict the crawl tells from «no card» (it keeps no
+    # list row in its place, the wave-5 seam review).
+    with pytest.raises(common.CardDropped):
+        gp.parse_company(stale, url=p.final_url, fetched_at=p.fetched_at)
+    kept = p.body.replace(
+        "Обновлено: 11.12.2025".encode(), "Обновлено: 02.01.2024".encode()
+    )
+    assert gp.parse_company(kept, url=p.final_url, fetched_at=p.fetched_at)
 
 
 def test_the_rubric_page_lists_its_companies_without_phones():

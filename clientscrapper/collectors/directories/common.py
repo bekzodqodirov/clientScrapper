@@ -93,6 +93,12 @@ class ListPage:
     last_page: int | None = None
 
 
+class CardDropped(Exception):
+    """A card was read and is not kept (goldenpages: updated before 2024, 03
+    §2.6): the crawl keeps no list row in its place, unlike a card the site
+    did not answer."""
+
+
 class ListParser(Protocol):
     def __call__(self, body: bytes, *, url: str, fetched_at: datetime) -> ListPage: ...
 

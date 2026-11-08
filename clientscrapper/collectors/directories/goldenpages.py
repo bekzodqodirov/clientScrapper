@@ -268,8 +268,9 @@ def _updated(root: Node) -> datetime | None:
 
 
 def parse_company(body: bytes, *, url: str, fetched_at: datetime) -> list[Observation]:
-    """A company card → one observation; [] for a page that is no card or a
-    card updated before 2024."""
+    """A company card → one observation; [] for a page that is no card.
+    ``common.CardDropped`` for a card updated before 2024 (03 §2.6 «drop
+    < 2024»): read, and not kept — nor its list row in its place."""
     ident = company_id(url)
     if ident is None:
         return []
@@ -282,7 +283,7 @@ def parse_company(body: bytes, *, url: str, fetched_at: datetime) -> list[Observ
         return []
     updated = _updated(root)
     if updated is not None and updated.year < OLDEST_YEAR:
-        return []
+        raise common.CardDropped(f"updated {updated.date().isoformat()}")
     named = business.get("name")
     raw = common.squash(named) if isinstance(named, str) else None
     if raw is None:

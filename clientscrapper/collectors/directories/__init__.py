@@ -33,9 +33,15 @@ heartbeat's detail («detail names the sub-source», 03 §3).
   site per night (``SubSource.full_night``), every list page the site's
   verified pagination reaches (``SiteSpec.paginated``: goldenpages
   ``&Page=N``, top.uz ``?PAGEN_1=N``; yellowpages and glotr page 1 only — the
-  one unverified, the other refused by robots.txt), and a card for every
-  company not observed in the last ``CARD_FRESH`` days, so a site larger than
-  one night's budget is walked whole over two months.
+  one unverified, the other refused by robots.txt) first, then a card for
+  every company whose card was not asked and answered in the last
+  ``CARD_FRESH`` days — the ones never carded first, in page order, then the
+  ones carded longest ago (``carded_at``: the refs each run names in
+  ``meta.carded``, never an observation's age: a list row kept when the
+  budget ran out is no card, and an identical card re-read writes no new
+  observation — the wave-5 seam review). So a site larger than one night's
+  budget is walked whole over as many full nights as it takes, and none is
+  carded twice before every one is carded once.
 
 **The night both fire** (``plan``; the T-22 review). On the Thursday of the
 1st–7th the two jobs start the same minute and the second is refused
@@ -68,12 +74,20 @@ rows of the cards not reached included.
 **One bad request costs that request** (the T-22 review): a list page or a
 card that fails in transport once the Fetcher's retries are spent
 (``TRANSPORT_FAILURES``), or that the Fetcher refuses for a reason of its own
-(``FetchError``), costs that seed or that card — a card's list row is kept —
-and is counted (``list_status.transport``, ``card_errors``); a page its
-parser cannot read likewise (``parse_errors``, logged by type). Only
-``TRANSPORT_STREAK`` transport failures in a row on one site end that site's
-night (``stops.transport``, its rows kept): the host stopped answering, and the
-other sites still run.
+(``FetchError``), or that the server answers with a 5xx (the Fetcher retried
+it already), costs that seed or that card — a card's list row is kept — and
+is counted (``list_status.transport``/``list_status.<status>``,
+``card_errors``); a page its parser cannot read likewise (``parse_errors``,
+logged by type). ``TRANSPORT_STREAK`` such failures in a row on one site —
+any other answer resets the count — end that site's night
+(``stops.transport`` or ``stops.http``, its rows kept, the run ``partial``
+with the reason in ``meta.incomplete``): the host stopped answering, and the
+other sites still run (the wave-5 seam review: a host answering 502 to every
+card was crawled the whole night, three attempts a card, and the run read
+``ok``). A goldenpages card updated before 2024 is read and dropped
+(``common.CardDropped``, ``dropped``): its list row is not kept in its place.
+Logs name a request by ``url_id``, never the URL (a card's path can name a
+person, 03 §1.1).
 
 Requests go through the run's ``Fetcher`` alone (robots.txt per host, the
 per-host pace — 0.3 req/s for these hosts, under 03 §2.6's 0.5 rps; glotr's
@@ -89,7 +103,7 @@ import logging
 from collections import Counter
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Final, Literal
 
 import sqlalchemy as sa
@@ -102,10 +116,15 @@ from clientscrapper.collectors.base import (
     row_url,
 )
 from clientscrapper.collectors.directories import glotr, goldenpages, topuz, yellowpages
-from clientscrapper.collectors.directories.common import Entry, ListPage, SiteSpec
+from clientscrapper.collectors.directories.common import (
+    CardDropped,
+    Entry,
+    ListPage,
+    SiteSpec,
+)
 from clientscrapper.config import settings
+from clientscrapper.db.models import CollectorRun, Source
 from clientscrapper.db.models import Observation as ObservationRow
-from clientscrapper.db.models import Source
 from clientscrapper.db.session import SessionLocal
 from clientscrapper.services import crontab
 from clientscrapper.services.http import (
@@ -131,8 +150,12 @@ VARIANTS: Final = (None, FULL)
 FULL_NIGHTS: Final = range(1, 8)
 # A seed's list pages in one full crawl (top.uz's 815-company section is 41).
 MAX_LIST_PAGES: Final = 60
-# A full crawl leaves alone a company observed this recently.
+# A full crawl leaves alone a company whose card was asked and answered this
+# recently; how far back ``carded_at`` reads the runs' ``meta.carded``.
 CARD_FRESH: Final = timedelta(days=45)
+CARDED_HORIZON: Final = timedelta(days=400)
+# The oldest possible «carded at», for ordering the never-carded first.
+_NEVER: Final = datetime.min.replace(tzinfo=UTC)
 # Transport failures in a row that end one site's night: its host stopped
 # answering (the other sites still run).
 TRANSPORT_STREAK: Final = 5
@@ -280,6 +303,11 @@ def usable(result: FetchResult) -> bool:
     return (result.status == 200 or result.not_modified) and not result.captcha
 
 
+def server_error(result: FetchResult) -> bool:
+    """A 5xx the Fetcher's retries did not cure: the server is failing."""
+    return result.status >= 500
+
+
 def answer_of(result: FetchResult) -> str:
     return "captcha" if result.captcha else str(result.status)
 
@@ -309,6 +337,35 @@ async def known_refs(
         stmt = stmt.where(ObservationRow.created_at >= since)
     async with SessionLocal() as own:
         return set(await own.scalars(stmt.distinct()))
+
+
+async def carded_at(
+    site: str, refs: Iterable[str], *, since: datetime
+) -> dict[str, datetime]:
+    """When each of ``refs`` last had its card asked and answered on ``site``:
+    the start of the newest directories run since ``since`` whose
+    ``meta.carded.<site>`` names it. A short session of its own."""
+    wanted = set(refs)
+    if not wanted:
+        return {}
+    named = CollectorRun.meta["carded"][site]
+    stmt = sa.select(CollectorRun.started_at, named).where(
+        CollectorRun.source_key == PARENT,
+        CollectorRun.started_at >= since,
+        named.is_not(None),
+    )
+    found: dict[str, datetime] = {}
+    async with SessionLocal() as own:
+        for started, listed in (await own.execute(stmt)).all():
+            for ref in listed if isinstance(listed, list) else []:
+                if ref in wanted and (ref not in found or found[ref] < started):
+                    found[ref] = started
+    return found
+
+
+def card_order(entries: Iterable[Entry], carded: Mapping[str, datetime]) -> list[Entry]:
+    """The never-carded first, in page order, then the carded longest ago."""
+    return sorted(entries, key=lambda e: carded.get(e.ref, _NEVER))
 
 
 @dataclass(frozen=True, slots=True)
@@ -345,6 +402,7 @@ def _report() -> dict[str, Any]:
         "known": 0,
         "card_missing": 0,
         "card_errors": 0,
+        "dropped": 0,
         "parse_errors": 0,
         "robots": 0,
         "stops": Counter[str](),
@@ -353,7 +411,12 @@ def _report() -> dict[str, Any]:
 
 
 class _SiteDown(Exception):
-    """``TRANSPORT_STREAK`` transport failures in a row on one site."""
+    """``TRANSPORT_STREAK`` failures in a row on one site; ``kind`` the last:
+    ``transport`` or ``http`` (a 5xx answer)."""
+
+    def __init__(self, site: str, kind: str) -> None:
+        super().__init__(site)
+        self.kind = kind
 
 
 class Directories(Collector):
@@ -392,15 +455,41 @@ class Directories(Collector):
             stats = report[sub.site] = {"mode": mode, **_report()}
             self._ran[sub.site] = "ran"
             self._streak = 0
+            # The full crawl's companies, carded once every list page is read.
+            queued: list[Entry] = []
             try:
-                for seed in seeds_for(sub, rows.config):
-                    stats["seeds"] += 1
-                    await self._seed(
-                        sub.spec, seed, budget, mode=mode, now=now, stats=stats, seen=seen
-                    )
-            except _SiteDown:
-                stats["stops"]["transport"] += 1
+                try:
+                    for seed in seeds_for(sub, rows.config):
+                        stats["seeds"] += 1
+                        await self._seed(
+                            sub.spec,
+                            seed,
+                            budget,
+                            mode=mode,
+                            now=now,
+                            stats=stats,
+                            seen=seen,
+                            queued=queued,
+                        )
+                except (BudgetExhausted, HostPaused, _SiteDown):
+                    # Nothing parsed is lost: the rows of the cards not asked.
+                    for entry in queued:
+                        self._keep_row(entry, stats)
+                    raise
+                if queued:
+                    await self._card_queue(sub.spec, queued, budget, now=now, stats=stats)
+            except _SiteDown as down:
+                stats["stops"][down.kind] += 1
+                self.incomplete.append(
+                    f"{sub.site}: {TRANSPORT_STREAK} failed requests in a row "
+                    f"({down.kind}), the rest of its night not read"
+                )
         return self.found
+
+    def _carded(self, spec: SiteSpec, ref: str) -> None:
+        """``ref``'s card was asked and answered (``meta.carded``)."""
+        carded = self.run_meta.setdefault("carded", {})
+        carded.setdefault(spec.site, []).append(ref)
 
     def _failed(self, spec: SiteSpec, url: str, exc: Exception) -> None:
         """One request failed in transport: counted toward the site's streak."""
@@ -411,9 +500,23 @@ class Directories(Collector):
             extra={"source": spec.source_key, "url_id": url_id(url)},
         )
         if isinstance(exc, TRANSPORT_FAILURES):
-            self._streak += 1
-            if self._streak >= TRANSPORT_STREAK:
-                raise _SiteDown(spec.site)
+            self._strike(spec, "transport")
+
+    def _refused(self, spec: SiteSpec, url: str, status: int) -> None:
+        """The server answered a 5xx (the Fetcher's retries spent): counted
+        toward the site's streak like a transport failure."""
+        log.warning(
+            "directories: %s answered %s",
+            spec.site,
+            status,
+            extra={"source": spec.source_key, "url_id": url_id(url)},
+        )
+        self._strike(spec, "http")
+
+    def _strike(self, spec: SiteSpec, kind: str) -> None:
+        self._streak += 1
+        if self._streak >= TRANSPORT_STREAK:
+            raise _SiteDown(spec.site, kind)
 
     @staticmethod
     def _unreadable(
@@ -437,9 +540,11 @@ class Directories(Collector):
         now: datetime,
         stats: dict[str, Any],
         seen: set[str],
+        queued: list[Entry],
     ) -> None:
         """One seed's list pages: page 1, and in the full crawl the pages the
-        site's pagination reaches."""
+        site's pagination reaches. The diff cards a page's companies as it
+        reads them; the full crawl queues them (``queued``)."""
         url: str | None = seed
         firsts: set[str] = set()
         pages = 0
@@ -456,6 +561,10 @@ class Directories(Collector):
             except REQUEST_FAILURES as exc:
                 stats["list_status"]["transport"] += 1
                 self._failed(spec, url, exc)
+                return
+            if server_error(result):
+                stats["list_status"][answer_of(result)] += 1
+                self._refused(spec, url, result.status)
                 return
             self._streak = 0
             if not usable(result):
@@ -481,9 +590,10 @@ class Directories(Collector):
             if not spec.paginated and page.last_page and at < page.last_page:
                 # Pages the plan cannot reach (yellowpages: pagination unverified).
                 stats["pages_owed"] = stats.get("pages_owed", 0) + page.last_page - at
-            await self._entries(
-                spec, page, budget, mode=mode, now=now, stats=stats, seen=seen
-            )
+            if mode == "full":
+                queued.extend(self._new(page, seen))
+            else:
+                await self._entries(spec, page, budget, stats=stats, seen=seen)
             if mode != "full" or not spec.paginated:
                 return
             if pages >= MAX_LIST_PAGES:
@@ -492,31 +602,53 @@ class Directories(Collector):
             url = page.next_url
         stats["stops"]["last"] += 1
 
+    @staticmethod
+    def _new(page: ListPage, seen: set[str]) -> list[Entry]:
+        """The page's companies this run has not handled yet (each once)."""
+        found: list[Entry] = []
+        for entry in page.entries:
+            if entry.ref not in seen:
+                seen.add(entry.ref)
+                found.append(entry)
+        return found
+
     async def _entries(
         self,
         spec: SiteSpec,
         page: ListPage,
         budget: Budget,
         *,
-        mode: Mode,
-        now: datetime,
         stats: dict[str, Any],
         seen: set[str],
     ) -> None:
-        fresh = await known_refs(
-            spec.source_key,
-            (e.ref for e in page.entries if e.ref not in seen),
-            since=None if mode == "diff" else now - CARD_FRESH,
+        """The diff: a card for each company the source has never observed."""
+        entries = self._new(page, seen)
+        known = await known_refs(spec.source_key, (e.ref for e in entries), since=None)
+        stats["known"] += sum(1 for e in entries if e.ref in known)
+        await self._each(spec, [e for e in entries if e.ref not in known], budget, stats)
+
+    async def _card_queue(
+        self,
+        spec: SiteSpec,
+        queued: list[Entry],
+        budget: Budget,
+        *,
+        now: datetime,
+        stats: dict[str, Any],
+    ) -> None:
+        """The full crawl: every queued company whose card was not asked and
+        answered in ``CARD_FRESH``, the never-carded first (``card_order``)."""
+        carded = await carded_at(
+            spec.site, (e.ref for e in queued), since=now - CARDED_HORIZON
         )
-        todo: list[Entry] = []
-        for entry in page.entries:
-            if entry.ref in seen:
-                continue
-            seen.add(entry.ref)
-            if entry.ref in fresh:
-                stats["known"] += 1
-                continue
-            todo.append(entry)
+        fresh = {ref for ref, at in carded.items() if at >= now - CARD_FRESH}
+        todo = [e for e in queued if e.ref not in fresh]
+        stats["known"] += len(queued) - len(todo)
+        await self._each(spec, card_order(todo, carded), budget, stats)
+
+    async def _each(
+        self, spec: SiteSpec, todo: list[Entry], budget: Budget, stats: dict[str, Any]
+    ) -> None:
         for index, entry in enumerate(todo):
             try:
                 await self._entry(spec, entry, budget, stats)
@@ -550,13 +682,23 @@ class Directories(Collector):
             self._keep_row(entry, stats)
             self._failed(spec, entry.card_url, exc)
             return
+        if server_error(card):
+            stats["card_errors"] += 1
+            self._keep_row(entry, stats)
+            self._refused(spec, entry.card_url, card.status)
+            return
         self._streak = 0
+        self._carded(spec, entry.ref)
         found: list[Observation] = []
         if usable(card):
             try:
                 found = spec.parse_card(
                     card.body, url=card.final_url, fetched_at=card.fetched_at
                 )
+            except CardDropped:
+                # Read, and too old to keep: its list row is not kept either.
+                stats["dropped"] += 1
+                return
             except Exception as exc:
                 self._unreadable(spec, entry.card_url, exc, stats)
         if found:
@@ -576,6 +718,7 @@ class Directories(Collector):
 
 
 __all__ = [
+    "CARDED_HORIZON",
     "CARD_FRESH",
     "FULL_NIGHTS",
     "MAX_LIST_PAGES",
@@ -584,6 +727,8 @@ __all__ = [
     "TRANSPORT_STREAK",
     "Directories",
     "SubSource",
+    "card_order",
+    "carded_at",
     "diff_due",
     "known_refs",
     "needs_card",

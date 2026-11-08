@@ -595,12 +595,18 @@ async def test_a_host_that_stops_answering_stops_its_own_site_only(
     session, rows, tmp_path
 ):
     """Five transport failures in a row on one site end that site's crawl
-    (its list rows kept); the other sites still run."""
+    (its list rows kept); the other sites still run. The run says so: it
+    is ``partial``, the reason in ``meta.incomplete`` (the wave-5 seam
+    review — a site's night not read is not an ``ok`` night)."""
     clock = FakeClock(THURSDAY)
     web = Web(clock)
     web.site.add("https://www.goldenpages.uz/company/", timeout)
     report = await run(web, clock, tmp_path)
-    assert report.status == "ok", report
+    assert report.status == "partial", report
+    assert report.meta["incomplete"] == [
+        "goldenpages: 5 failed requests in a row (transport), the rest of its "
+        "night not read"
+    ]
     gold = report.meta["subsources"]["goldenpages"]
     assert gold["card_errors"] == 5 and gold["stops"]["transport"] == 1
     cards = [s for s in web.site.seen if s.path == "/company/"]
@@ -837,3 +843,174 @@ async def test_the_directories_are_paced_under_03_s_half_a_request_a_second(
     assert report.status == "ok"
     times = [s.at for s in web.site.seen if s.request.url.host == "top.uz"]
     assert len(times) > 5 and all(b - a >= 2.0 for a, b in pairwise(times))
+
+
+async def only_goldenpages() -> None:
+    for key in ("directories_yellowpages", "directories_glotr", "directories_topuz"):
+        await switch(key, enabled=False)
+
+
+async def test_a_host_failing_with_5xx_ends_its_night_like_a_dead_one(
+    session, rows, tmp_path
+):
+    """A server answering 502 to every card is as down as one that does not
+    answer: five such cards in a row end the site's night (``stops.http``),
+    not the 28 cards × the Fetcher's three attempts (the wave-5 seam
+    review); the rows are kept and the run is ``partial``."""
+    await only_goldenpages()
+    clock = FakeClock(THURSDAY)
+    web = Web(clock)
+    web.site.add(
+        "https://www.goldenpages.uz/company/",
+        lambda request: httpx.Response(502, headers=HTML, text="bad gateway"),
+    )
+    report = await run(web, clock, tmp_path)
+    assert report.status == "partial", report
+    assert report.meta["incomplete"] == [
+        "goldenpages: 5 failed requests in a row (http), the rest of its night not read"
+    ]
+    gold = report.meta["subsources"]["goldenpages"]
+    assert (gold["card_errors"], gold["stops"]["http"]) == (5, 1)
+    cards = [s for s in web.site.seen if s.path == "/company/"]
+    assert len(cards) == 5 * 3
+    # No card answered: none is named carded.
+    assert "carded" not in report.meta
+    by_source = await observations(session)
+    assert len(by_source["directories_goldenpages"]) == 20
+
+
+async def test_failures_between_answered_cards_are_not_in_a_row(session, rows, tmp_path):
+    """TRANSPORT_STREAK counts failures in a row: a card that answers (a 404
+    here) resets it, so timeouts and 502s on every other card never end the
+    night."""
+    await only_goldenpages()
+    clock = FakeClock(THURSDAY)
+    web = Web(clock)
+
+    def company(request: httpx.Request) -> httpx.Response:
+        ident = int(Web.query(request).get("Id", "0"))
+        if ident % 4 == 1:
+            return timeout(request)
+        if ident % 4 == 3:
+            return httpx.Response(503, headers=HTML, text="busy")
+        return web.company(request)
+
+    web.site.add("https://www.goldenpages.uz/company/", company)
+    report = await run(web, clock, tmp_path)
+    assert report.status == "ok", report
+    gold = report.meta["subsources"]["goldenpages"]
+    assert gold["stops"] == {}
+    assert gold["card_errors"] >= TRANSPORT_STREAK_PLUS
+    assert gold["card_errors"] + gold["card_missing"] + gold["cards"] == 28
+
+
+TRANSPORT_STREAK_PLUS = directories.TRANSPORT_STREAK + 1
+
+
+async def test_a_card_dropped_as_stale_keeps_no_list_row_in_its_place(
+    session, rows, tmp_path
+):
+    """03 §2.6 «drop < 2024» in the crawl, not only in the parser: the card is
+    read and dropped (``dropped``), and its list row — dated by the night —
+    is not kept instead (the wave-5 seam review)."""
+    await only_goldenpages()
+    clock = FakeClock(THURSDAY)
+    web = Web(clock)
+    stale = page("goldenpages_company_85641").body.replace(
+        "Обновлено: 11.12.2025".encode(), "Обновлено: 11.12.2023".encode()
+    )
+
+    def company(request: httpx.Request) -> httpx.Response:
+        if Web.query(request) == {"Id": "85641"}:
+            return httpx.Response(200, headers=HTML, content=stale)
+        return web.company(request)
+
+    web.site.add("https://www.goldenpages.uz/company/", company)
+    report = await run(web, clock, tmp_path)
+    assert report.status == "ok", report
+    gold = report.meta["subsources"]["goldenpages"]
+    assert (gold["dropped"], gold["cards"]) == (1, 0)
+    by_source = await observations(session)
+    refs = {o["source_ref"] for o in by_source["directories_goldenpages"]}
+    assert "goldenpages:85641" not in refs and len(refs) == 27
+    # It was answered: the full crawl does not ask it again next month.
+    assert "goldenpages:85641" in report.meta["carded"]["goldenpages"]
+
+
+FULL_NIGHTS_AHEAD = tuple(
+    datetime(year, month, 1, 23, 0, tzinfo=TASHKENT)
+    for year, month in ((2026, 11), (2026, 12), (2027, 1), (2027, 2), (2027, 3))
+)
+
+
+async def test_the_full_crawl_cards_every_company_before_any_twice(
+    session, rows, tmp_path
+):
+    """A site bigger than a night's budget: each full night reads the list
+    pages, then cards the companies never carded first, then the ones carded
+    longest ago — never the head of page 1 again while the tail waits (the
+    wave-5 seam review: a list row kept when the budget ran out, and a card
+    re-read with the same bytes, used to read as «observed»). Twenty pages
+    a night, ten of them list pages, against 48 listed companies: the first
+    48 cards asked are the 48 companies, and the 49th is the first night's
+    first again."""
+    await only_goldenpages()
+    await switch("directories", daily_page_budget=20)
+    listed: set[str] = set()
+    for name in (
+        "goldenpages_rubric_1424_p1",
+        "goldenpages_rubric_1424_p2",
+        "goldenpages_rubric_106080_p1",
+    ):
+        p = page(name)
+        found = gp.parse_list(p.body, url=p.final_url, fetched_at=p.fetched_at)
+        listed |= {e.ref for e in found.entries}
+    assert len(listed) == 48
+    asked: list[list[str]] = []
+    for night in FULL_NIGHTS_AHEAD:
+        clock = FakeClock(night)
+        web = Web(clock)
+        report = await run(web, clock, tmp_path, variant="full")
+        assert report.meta["exhausted"] == "pages", report
+        asked.append(
+            [
+                f"goldenpages:{Web.query(s.request)['Id']}"
+                for s in web.site.seen
+                if s.path == "/company/"
+            ]
+        )
+        # Every night's cards: the list pages first, then the cards.
+        paths = [s.path for s in web.site.seen if s.path != "/robots.txt"]
+        assert paths.index("/company/") > max(
+            i for i, p in enumerate(paths) if p == "/rubrics/"
+        )
+    flat = [ref for night in asked for ref in night]
+    assert len(flat) > len(listed)
+    assert set(flat[: len(listed)]) == listed
+    assert flat[len(listed)] == asked[0][0]
+    # Carded a month ago: not asked on the next night.
+    assert not set(asked[0]) & set(asked[1])
+
+
+async def test_a_card_answered_within_card_fresh_is_not_asked_again(
+    session, rows, tmp_path
+):
+    """The freshness is the card's, asked and answered (``meta.carded``): a
+    month after a full night that carded every company, none is asked again
+    — though the 404 cards wrote no observation at all — and two months
+    after, every one is (the same bytes re-read, which writes nothing new)."""
+    await only_goldenpages()
+
+    async def night(month: int) -> tuple[list[str], dict]:
+        clock = FakeClock(datetime(2027, month, 1, 23, 0, tzinfo=TASHKENT))
+        web = Web(clock)
+        report = await run(web, clock, tmp_path, variant="full")
+        cards = [s.url for s in web.site.seen if s.path == "/company/"]
+        return cards, report.meta["subsources"]["goldenpages"]
+
+    first, _ = await night(1)
+    assert len(first) == 48
+    second, stats = await night(2)
+    assert second == [] and stats["known"] == 48
+    third, stats = await night(3)
+    assert sorted(third) == sorted(first) and stats["known"] == 0
