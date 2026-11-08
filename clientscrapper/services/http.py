@@ -100,6 +100,16 @@ HOST_RPS: Final[Mapping[str, float]] = {
     "www.yellowpages.uz": 0.3,
     "top.uz": 0.3,
     "glotr.uz": 0.3,
+    # 03 §2.8: the exhibitor lists at «1 req/3 s», whatever the default is
+    # raised to (the wave-5 seam review; ``sources.exhibitors.rps`` is read by
+    # nothing — the pace is this table's).
+    "automechanika.uz": 0.33,
+    "catalog.automechanika.uz": 0.33,
+    "uzbuild.uz": 0.33,
+    "power-uzbekistan.uz": 0.33,
+    "caitme.uz": 0.33,
+    "mebelexpo.uz": 0.33,
+    "textileexpo.uz": 0.33,
 }
 # Documented JSON APIs with a key: the only hosts a request may skip robots.txt
 # for (``obey_robots=False``, and every ``post_json``). The call sites are

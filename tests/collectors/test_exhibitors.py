@@ -15,11 +15,13 @@ from datetime import date, datetime, timedelta
 from itertools import pairwise
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 import pytest
 import sqlalchemy as sa
 
+from clientscrapper.collectors import exhibitors
 from clientscrapper.collectors.exhibitors import (
     DEFAULT_CALENDAR,
     SHORT_PROBLEM,
@@ -1181,3 +1183,77 @@ async def test_a_line_is_its_calendar_entry_s_not_its_year_s(session):
     await note_short_lists(session, [whole], now=now)
     await session.commit()
     assert await problem(session, now) is None
+
+
+async def test_the_exhibitor_hosts_are_paced_at_one_request_in_three_seconds(
+    session, exhibitors_row, tmp_path
+):
+    """03 §2.8: «Rate 1 req/3 s». The seven hosts have their own pace
+    (``HOST_RPS``), so a COLLECTOR_RPS_DEFAULT raised for other hosts does not
+    raise theirs (the wave-5 seam review)."""
+    from clientscrapper.services import http
+
+    hosts = {
+        urlsplit(pattern).hostname
+        for entry in DEFAULT_CALENDAR
+        for pattern in entry.url_patterns
+    }
+    assert len(hosts) == 7
+    for host in hosts:
+        assert host is not None and 1 / http.HOST_RPS[host] >= 3.0, host
+    await exhibitors_row([ENTRY["caitme2026"]])
+    clock = FakeClock(TODAY)
+    await swept(session, "caitme", at=TODAY - timedelta(days=30))
+    site = caitme_site(clock)
+    report = await run_collector(
+        Exhibitors,
+        fetcher=fetcher_for(site, rps_default=2.0),
+        now=clock.now(),
+        clock=clock.now,
+        evidence_root=tmp_path,
+    )
+    assert report.status == "ok"
+    times = [s.at for s in site.seen if s.request.url.host == "caitme.uz"]
+    assert len(times) >= 3 and all(b - a >= 3.0 for a, b in pairwise(times))
+
+
+async def test_an_archive_that_keeps_failing_does_not_make_the_sweep_weekly(
+    session, exhibitors_row, tmp_path
+):
+    """03 §2.8: «every archive once (yearly)». One edition answering 500 keeps
+    its show's sweep due, but the editions already read are not read again,
+    and after ARCHIVE_RETRIES failed Mondays the dead one counts as swept for
+    the year (the wave-5 seam review: every archive was re-read every
+    Monday, three attempts per 500)."""
+    await exhibitors_row([ENTRY["uzbuild2027"]])
+    whole = raw("uzbuild_2026_companies_all.json")
+    foreign = raw("power_2027_companies_foreign_only.json")
+    lists = "https://uzbuild.uz/ERAForms/companies_list.php"
+
+    async def asked_run(week: int) -> tuple[list[str], dict[str, Any]]:
+        clock = FakeClock(TODAY + timedelta(days=7 * week))
+        site = Site(
+            clock,
+            {
+                "https://uzbuild.uz/en/exhibitors-list": ok(raw("uzbuild_list_en.html")),
+                lists: era_answer({"401": foreign, "430": foreign, "490": whole}),
+            },
+        )
+        await run(site, clock, tmp_path)
+        editions = [
+            s.request.url.params["exhibition"]
+            for s in site.seen
+            if str(s.request.url).startswith(lists)
+        ]
+        return editions, (await last_run(session)).meta
+
+    first, meta = await asked_run(0)
+    assert first == ["401", "430", "461", "461", "461"]
+    assert "archived" not in meta or meta["archived"] == []
+    assert meta["archive_read"] == ["uzbuild:401", "uzbuild:430"]
+    for week in range(1, exhibitors.ARCHIVE_RETRIES):
+        again, meta = await asked_run(week)
+        assert again == ["461", "461", "461"], week
+    assert meta["archived"] == ["uzbuild"]
+    after, meta = await asked_run(exhibitors.ARCHIVE_RETRIES)
+    assert after == []

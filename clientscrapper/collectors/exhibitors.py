@@ -28,7 +28,13 @@ no dates: its index is read only for a calendar entry in its window or the
 archive sweep. **The archive** — every edition the index lists whose window
 is over — is swept once a year per show (``ARCHIVE_EVERY``): a run that read
 every archive of a show names it in ``meta.archived``, and the next sweep of
-that show waits 365 days from that run. A run reads every index first, then
+that show waits 365 days from that run. Each archive edition is tracked on
+its own (``meta.archive_read``: read whole or removed; ``meta.archive_failed``:
+failed or cut): while a show's sweep is due because one edition keeps
+failing, the editions already read are not read again, and an edition that
+failed ``ARCHIVE_RETRIES`` weekly sweeps counts as swept for the year (the
+wave-5 seam review: one dead archive made the yearly sweep weekly, every
+archive of the show read again each Monday). A run reads every index first, then
 every list in its window, then the archives, so a budget that runs out stops
 an archive, never a show in its window. An ERA index whose select lists no
 edition is a page the parser no longer reads (``index_empty``), never a
@@ -92,8 +98,10 @@ or challenge page is no page at all (``served``: ``failed``, error
 ``captcha``).
 
 Rate: every request goes through the Fetcher — robots.txt, 1 request per
-3.3 s per host (``COLLECTOR_RPS_DEFAULT``), ≤ 100 pages a day (the row's
-``daily_page_budget``); none of the seven hosts sets a ``Crawl-delay``.
+3 s per host (``http.HOST_RPS`` names the seven hosts at 0.33, so a
+``COLLECTOR_RPS_DEFAULT`` raised for other hosts does not raise theirs — the
+wave-5 seam review), ≤ 100 pages a day (the row's ``daily_page_budget``);
+none of the seven hosts sets a ``Crawl-delay``.
 """
 
 from __future__ import annotations
@@ -102,6 +110,7 @@ import json
 import logging
 import re
 import unicodedata
+from collections import Counter
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
@@ -147,6 +156,9 @@ WINDOW_OPENS: Final = timedelta(days=10)
 WINDOW_CLOSES: Final = timedelta(days=60)
 # 03 §2.8: «every archive once (yearly)».
 ARCHIVE_EVERY: Final = timedelta(days=365)
+# Weekly sweeps an archive edition may fail before it counts as swept for the
+# year (its show's other editions are not read again meanwhile).
+ARCHIVE_RETRIES: Final = 4
 # How far a printed edition date may lie from a calendar entry's end_date and
 # still be that entry (TextileExpo 2027: the spec said May, the site 27–29
 # April).
@@ -1214,6 +1226,11 @@ class Exhibitors(Collector):
         self.run_meta["lists"] = []
         self.run_meta["archived"] = archived
         swept = await archived_shows(session, now=now)
+        read, failures = await archive_editions(session, now=now)
+        archive_read: list[str] = []
+        archive_failed: list[str] = []
+        self.run_meta["archive_read"] = archive_read
+        self.run_meta["archive_failed"] = archive_failed
         # Every index first, then this week's lists of every show, then the
         # archives: a budget that runs out stops an archive, never a show in
         # its window — whichever show the archive belongs to.
@@ -1231,12 +1248,20 @@ class Exhibitors(Collector):
             for target in targets:
                 if target.why != "archive":
                     continue
+                key = edition_key(target)
+                if key in read or failures[key] >= ARCHIVE_RETRIES:
+                    # Read this year already, or given up on for the year.
+                    continue
                 result = await self._read(visit, target, budget)
                 self._record(result)
                 # A removed archive is as read as it will ever be; a failed
-                # or cut one is asked again next week.
-                if result.status not in ("complete", "removed"):
-                    done = False
+                # or cut one is asked again next week, up to ARCHIVE_RETRIES.
+                if result.status in ("complete", "removed"):
+                    archive_read.append(key)
+                else:
+                    archive_failed.append(key)
+                    if failures[key] + 1 < ARCHIVE_RETRIES:
+                        done = False
             if visit.archive and done:
                 archived.append(visit.show)
         return self.found
@@ -1595,6 +1620,34 @@ async def archived_shows(session: AsyncSession, *, now: datetime) -> frozenset[s
         if isinstance(value, list):
             found.update(v for v in value if isinstance(v, str))
     return frozenset(found)
+
+
+def edition_key(target: Target) -> str:
+    """An archive edition's name in ``meta.archive_read``/``archive_failed``."""
+    return f"{target.show}:{target.edition.id}"
+
+
+async def archive_editions(
+    session: AsyncSession, *, now: datetime
+) -> tuple[frozenset[str], Counter[str]]:
+    """The archive editions read whole (or removed) in the last
+    ``ARCHIVE_EVERY``, and how many weekly sweeps failed each since — the
+    ``ok``/``partial`` runs, as ``archived_shows`` reads them."""
+    rows = await session.execute(
+        sa.select(
+            CollectorRun.meta["archive_read"], CollectorRun.meta["archive_failed"]
+        ).where(
+            CollectorRun.source_key == SOURCE,
+            CollectorRun.status.in_(["ok", "partial"]),
+            CollectorRun.started_at > now - ARCHIVE_EVERY,
+        )
+    )
+    read: set[str] = set()
+    failures: Counter[str] = Counter()
+    for done, failed in rows.all():
+        read.update(v for v in done or [] if isinstance(v, str))
+        failures.update(v for v in failed or [] if isinstance(v, str))
+    return frozenset(read), failures
 
 
 def _until(entry: ShowEntry) -> str:
