@@ -23,6 +23,15 @@ and the organiser's figures where the page prints them.
   observation is kept (a directory is the strongest phone source) but carries
   no ``directory_wholesale``, ``brand_distributor`` or ``marketplace_velocity``,
   so the scorer leaves it cold, i.e. in ``hold``;
+* a Chinese brand the card names (``collectors/brands.py``: its name, then
+  its own text, each read on its own) is a China cue: ``brand_distributor``
+  with ``attrs.brand`` (the brand as the card spells it, the signal rule's
+  quote), ``brand_group`` and ``official`` (the card calls itself the
+  brand's official dealer within 200 characters, ``brands.official_near``) —
+  04 §5.1's «brand dealership of a Chinese brand» → ``cn_origin`` and, for a
+  bulky group, the volume key; a brand's own office (``brands.own_office``)
+  is the supply side and none (the wave-5 seam review: CHINT and JACK
+  dealers were read as anonymous wholesalers);
 * ``directory_wholesale`` only for a wholesale rubric or section
   (``WHOLESALE_RUBRIC_RE``); ``brand_distributor`` (``official`` False) for a
   goldenpages «Импортер» badge; ``marketplace_velocity`` for a glotr seller
@@ -40,6 +49,7 @@ from datetime import datetime
 from typing import Any, Final, Protocol
 from zoneinfo import ZoneInfo
 
+from clientscrapper.collectors import brands as brand_list
 from clientscrapper.collectors.base import Observation
 from clientscrapper.collectors.directories.markup import parse as parse_markup
 from clientscrapper.collectors.keywords import (
@@ -132,12 +142,52 @@ class SiteSpec:
 
 
 @dataclass(frozen=True, slots=True)
+class BrandFound:
+    """A Chinese brand a card names: as the card spells it, its group, and
+    whether the card calls itself the brand's official dealer."""
+
+    written: str
+    group: str
+    official: bool
+    names: tuple[str, ...]
+
+
+def brand_of(name: str | None, *texts: str | None) -> BrandFound | None:
+    """The first Chinese brand the card's name, then its own texts, name —
+    None for none, or for a brand's own office (the supply side)."""
+    if name and brand_list.own_office(name) is not None:
+        return None
+    hits: list[tuple[str, brand_list.BrandHit]] = []
+    for text in (name, *texts):
+        for hit in brand_list.brand_hits(text or ""):
+            if all(h.brand != hit.brand for _, h in hits):
+                hits.append((text or "", hit))
+    if not hits:
+        return None
+    first = hits[0][1]
+    # Official where any of the card's texts says so beside this brand.
+    official = any(
+        brand_list.official_near(text or "", hit)
+        for text in (name, *texts)
+        for hit in brand_list.brand_hits(text or "")
+        if hit.brand == first.brand
+    )
+    return BrandFound(
+        written=first.written,
+        group=first.brand.group,
+        official=official,
+        names=tuple(h.brand.name for _, h in hits),
+    )
+
+
+@dataclass(frozen=True, slots=True)
 class Verdict:
     signal_types: tuple[str, ...]
     held: bool = False
     competitor: bool = False
     origin_text: str | None = None
     bulky: tuple[str, ...] = field(default_factory=tuple)
+    brand: BrandFound | None = None
 
 
 def judge(
@@ -150,6 +200,7 @@ def judge(
     importer: bool = False,
     solid: bool = False,
     skus: int | None = None,
+    brand: BrandFound | None = None,
 ) -> Verdict:
     """The module docstring's rule for one card or row. ``own`` is the card's
     own text (description, rubrics, tags), ``goods`` what it sells, ``china``
@@ -157,20 +208,21 @@ def judge(
     if (name and COMPETITOR_NAME_RE.search(name)) or COMPETITOR_SELF_RE.search(own):
         return Verdict(("competitor",), competitor=True)
     bulky = tuple(sorted(bulky_categories(goods) & BULKY))
-    held = china is None and not bulky
+    # A Chinese brand is a China cue of its own (04 §5.1).
+    held = china is None and brand is None and not bulky
     types: list[str] = []
     if china is not None:
         types.append("china_origin")
     if not held:
         if wholesale:
             types.append("directory_wholesale")
-        if importer:
+        if importer or brand is not None:
             types.append("brand_distributor")
         if skus is not None and skus >= SKU_VELOCITY:
             types.append("marketplace_velocity")
     if solid:
         types.append("entity_solid")
-    return Verdict(tuple(types), held=held, origin_text=china, bulky=bulky)
+    return Verdict(tuple(types), held=held, origin_text=china, bulky=bulky, brand=brand)
 
 
 def apply(obs: Observation, verdict: Verdict) -> Observation:
@@ -184,6 +236,13 @@ def apply(obs: Observation, verdict: Verdict) -> Observation:
         obs.attrs["hold"] = HELD
     if "brand_distributor" in verdict.signal_types:
         obs.attrs["official"] = False
+        if verdict.brand is not None:
+            obs.attrs.update(
+                brand=verdict.brand.written,
+                brand_group=verdict.brand.group,
+                official=verdict.brand.official,
+                brands=list(verdict.brand.names),
+            )
     return obs
 
 

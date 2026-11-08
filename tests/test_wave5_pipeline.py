@@ -69,10 +69,12 @@ from clientscrapper.db.models import (
 from clientscrapper.db.session import SessionLocal
 from clientscrapper.services import (
     candidates,
+    cards,
     chats,
     companies,
     crm_push,
     enrich,
+    gates,
     owner,
     purge,
     registry,
@@ -166,8 +168,46 @@ async def wave5_sources(session) -> AsyncIterator[None]:  # type: ignore[no-unty
         await s.commit()
 
 
+def own_number(index: int) -> tuple[str, str]:
+    """A visibly synthetic number of its own (07 §1.0's ``… 20000 NN`` shape
+    under codes 93–99), and its raw form."""
+    code, nn = 93 + index // 100, index % 100
+    digits = f"{code}20000{nn:02d}"
+    return f"+998{digits}", f"+998 {digits[:2]} {digits[2:5]} {digits[5:7]} {digits[7:]}"
+
+
+async def renumber_directory_phones(session) -> None:  # type: ignore[no-untyped-def]
+    """tests/fixtures/directories/README.md «Not for a resolver end-to-end»:
+    the scrubber numbered each file's synthetic phones afresh, so unrelated
+    firms on different pages share numbers. Before anything is resolved,
+    each (source_ref, number) gets a number of its own — one firm keeps one
+    number however many pages print it, two firms never share one (the
+    wave-5 seam review: the E2E ran in a world where they did)."""
+    given: dict[tuple[str, str], tuple[str, str]] = {}
+    rows = await session.scalars(
+        sa.select(Observation).where(Observation.source_key.like("directories%"))
+    )
+    for row in rows:
+        parsed = dict(row.parsed)
+        phones = parsed.get("phones") or []
+        if not phones:
+            continue
+        ref = parsed["source_ref"]
+        fresh = []
+        for phone in phones:
+            mark = (ref, phone["e164"])
+            if mark not in given:
+                given[mark] = own_number(len(given))
+            e164, raw = given[mark]
+            fresh.append({**phone, "e164": e164, "raw": raw})
+        parsed["phones"] = fresh
+        row.parsed = parsed
+    await session.commit()
+
+
 async def collect(session, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
-    """The two collectors over their recordings, through the runner."""
+    """The two collectors over their recordings, through the runner, then
+    each directory firm's numbers made its own (``renumber_directory_phones``)."""
     clock = FakeClock(THURSDAY)
     report = await run_collector(
         Directories,
@@ -197,6 +237,7 @@ async def collect(session, tmp_path: Path) -> None:  # type: ignore[no-untyped-d
         clock=clock.now,
     )
     assert report.status == "ok", report
+    await renumber_directory_phones(session)
 
 
 async def settle(now: datetime) -> None:
@@ -257,6 +298,8 @@ async def enrich_at(
 
 ASM = '"ASM ALLIANCE" ООО'
 EMA = '"EMA LEASING" ООО'
+CHINT = '"CHINT DISTRIBUTION" ООО'
+JACK = '"JACK" (ООО "SEWING MACHINES TRADING")'
 
 
 async def test_a_masked_directory_firm_is_enriched_registered_and_carded(
@@ -282,7 +325,8 @@ async def test_a_masked_directory_firm_is_enriched_registered_and_carded(
 
     due = NOW + enrich.SCHEDULE[0]
     report = await enrich_at(tmp_path, due, registry_routes(ASM))
-    assert report.attempts == 2
+    # ASM, EMA and the CHINT dealer (warm on its brand and its two numbers).
+    assert report.attempts == 3
 
     # E0 → E4 in the chain's order; E4′ (no STIR, a name and a city) hits;
     # the director's phone is a usable phone and the score passes 60: S1.
@@ -310,7 +354,8 @@ async def test_a_masked_directory_firm_is_enriched_registered_and_carded(
     assert director.is_decision_maker and director.source_url == NAME_CARD
 
     # The registry pages are kept as their rows alone (founders, 06 §5.1),
-    # each naming the company it was fetched for.
+    # each naming the company it was fetched for — one of the three walked.
+    walked = [asm, ema, await company_named(session, CHINT)]
     pages = list(
         await session.scalars(
             sa.select(Evidence).where(Evidence.source_key == enrich.REGISTRY_SOURCE)
@@ -320,7 +365,7 @@ async def test_a_masked_directory_firm_is_enriched_registered_and_carded(
     for page in pages:
         assert page.raw_path is None
         assert page.meta["file"] == evidence_store.FILE_NOT_KEPT
-        assert page.meta[evidence_store.FOR_COMPANY] in {str(asm.id), str(ema.id)}
+        assert page.meta[evidence_store.FOR_COMPANY] in {str(f.id) for f in walked}
 
     await settle(due)
     cand = await candidate_of(session, asm)
@@ -581,3 +626,48 @@ async def test_a_purged_wave5_firm_is_not_made_again_by_the_next_run(
     seen = {(t, v) for handles in refused for t, v in (handles or {}).items()}
     assert ("exhibitor_slug", "era:25848") in seen
     assert any(t == "goldenpages" and (t, v) in pairs for t, v in seen)
+
+
+async def test_a_phone_bearing_directory_firm_reaches_the_card_and_the_payload(
+    session, wave5_sources, tmp_path
+):
+    """The other half of the wave (the wave-5 seam review): a directory firm
+    with a phone of its own, in a world where each firm's numbers are its own
+    (``renumber_directory_phones``), goes found → scored → review on its own
+    signals — JACK, the official distributor of a Chinese brand on glotr —
+    and its owner card and ERP payload carry its phone, its card's URL, the
+    page's date and a verbatim quote of the card."""
+    await collect(session, tmp_path)
+    await settle(NOW)
+    jack = await company_named(session, JACK)
+    cand = await candidate_of(session, jack)
+    assert (cand.state, cand.tier) == ("review", "hot")
+    [phone] = await usable_phones(session, jack)
+    # A number ``renumber_directory_phones`` gave (``… 20000 NN`` under 93–99).
+    assert phone.phone is not None and phone.phone[6:11] == "20000"
+    keys = set(
+        await session.scalars(sa.select(Signal.key).where(Signal.company_id == jack.id))
+    )
+    assert {"cn_origin", "vol_container", "vol_marketplace_velocity"} <= keys
+
+    view = await candidates.load_view(session, cand.id, now=NOW)
+    cited, quote = crm_push.cited(view)
+    assert cited.url == "https://glotr.uz/showcase/jack/"
+    assert cited.source_key == "directories_glotr"
+    assert quote and quote in cited.excerpt
+    payload = crm_push.build_payload(view)
+    assert payload.phone == phone.phone
+    assert payload.firma == JACK  # the form once (the name carries ООО)
+    first, url = payload.note.split("\n")[:2]
+    day = cited.published_at or cited.fetched_at
+    assert first.startswith("NEGA TOPILDI: ")
+    assert day.astimezone(TZ).strftime("%d.%m.%Y") in first
+    assert f"«{quote}»" in first
+    assert url == cited.url
+
+    gate = await gates.evaluate(session, jack.id, now=NOW, tails=[phone.phone_tail])
+    card = cards.render_review(
+        cards.ReviewView(review_id=1, candidate=view, gate=gate, phone_kind="mobile")
+    ).text
+    assert cards.esc(JACK) in card and phone.phone[-2:] in card
+    assert cited.url in card

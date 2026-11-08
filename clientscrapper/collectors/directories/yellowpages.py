@@ -178,6 +178,7 @@ def organisation(
         goods=own,
         wholesale=common.wholesale(*rubrics, *rubric_slugs, *tags),
         china=china,
+        brand=common.brand_of(name, shop, description),
     )
     return common.apply(obs, verdict)
 

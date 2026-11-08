@@ -391,6 +391,24 @@ _NAME_WORD: Final = re.compile(r"[^\W_]+(?:['ʻʼ’`][^\W_]+)*")
 _APOSTROPHES: Final = re.compile(r"['ʻʼ’`]")
 
 
+# A dealer saying it is the brand's official one (T-34's rule: «official
+# regex within 200 chars»), in the directories' Russian, English and Uzbek.
+OFFICIAL_RE: Final = re.compile(
+    r"(?<!\w)(?:официальн\w*\s+(?:дистрибьютор|дилер|представител|партн[её]р)\w*|"
+    r"official\s+(?:distributor|dealer|partner|representative)s?|"
+    r"rasmiy\s+(?:distribyutor|diler|vakil|hamkor)\w*)(?!\w)",
+    re.I,
+)
+OFFICIAL_NEAR: Final = 200
+
+
+def official_near(text: str, hit: BrandHit) -> bool:
+    """``text`` calls its writer the official dealer of the brand ``hit`` names
+    within ``OFFICIAL_NEAR`` characters of it."""
+    near = text[max(0, hit.start - OFFICIAL_NEAR) : hit.end + OFFICIAL_NEAR]
+    return OFFICIAL_RE.search(near) is not None
+
+
 def own_office(name: str) -> Brand | None:
     """The brand whose own office ``name`` is, or None: one brand, and every
     other word of the name a corporate word, a legal form or a place

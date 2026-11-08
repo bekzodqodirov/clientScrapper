@@ -140,6 +140,7 @@ def _verdict(
         wholesale=common.wholesale(*rubrics),
         china=common.first_match(CHINA_RE, rubrics),
         importer=IMPORTER in badges,
+        brand=common.brand_of(name, *own),
     )
 
 

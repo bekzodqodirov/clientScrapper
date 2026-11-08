@@ -143,3 +143,79 @@ async def test_a_shared_phone_is_never_a_usable_lead_phone(session):
         t=TAIL,
     )
     assert usable == 0
+
+
+SHARED_BC = "+998901110077"
+
+
+async def test_three_directory_firms_on_a_business_centre_s_phone_stay_three(session):
+    """A directory lists each organisation once, under its own id: three
+    goldenpages cards that each print their own mobile and the business
+    centre's number are three companies — the phone names the first only
+    because no second company exists yet — and the third makes that number
+    shared (04 §2.3; the wave-5 seam review: all three landed on the first)."""
+    firms = (
+        ('"NAMUNA TEKSTIL SAVDO" ООО', "1001", "+998900000081"),
+        ('"BOSHQA MEBEL UYI" ООО', "1002", "+998900000082"),
+        ('"UCHINCHI QURILISH BAZA" ООО', "1003", "+998900000083"),
+    )
+    made = []
+    for name, ident, own in firms:
+        result = await resolve(
+            session,
+            parsed(
+                name=name,
+                ids={"goldenpages": ident},
+                phones=((own, "company"), (SHARED_BC, "company")),
+            ),
+        )
+        made.append(result.company.id)
+    assert len(set(made)) == 3
+    assert await count(session, "companies") == 3
+    shared = await session.scalars(
+        sa.select(Contact.shared_phone)
+        .where(Contact.phone_tail == "901110077")
+        .execution_options(populate_existing=True)
+    )
+    assert list(shared) == [True, True, True]
+    # Each card's own number is its own company's.
+    for (_, _, own), company_id in zip(firms, made, strict=True):
+        holders = await session.scalars(
+            sa.select(Contact.company_id).where(Contact.phone_tail == own[-9:])
+        )
+        assert list(holders) == [company_id]
+
+
+async def test_the_same_card_seen_again_still_resolves_by_its_id_and_phone(session):
+    """The rule sets apart only another listing of the same directory: the
+    same card read again, or a site with no directory id, still resolves by
+    the phone."""
+    first = await resolve(
+        session,
+        parsed(
+            name='"NAMUNA TEKSTIL SAVDO" ООО',
+            ids={"goldenpages": "1001"},
+            phones=((PHONE, "company"),),
+        ),
+    )
+    again = await resolve(
+        session,
+        parsed(
+            name="Namuna Tekstil",
+            ids={"goldenpages": "1001"},
+            phones=((PHONE, "company"),),
+        ),
+    )
+    site = await resolve(
+        session,
+        parsed(kind="profile", name="Namuna Tekstil", phones=((PHONE, "company"),)),
+    )
+    yellow = await resolve(
+        session,
+        parsed(
+            name="Namuna Tekstil Savdo",
+            ids={"yellowpages": "26219"},
+            phones=((PHONE, "company"),),
+        ),
+    )
+    assert {again.company.id, site.company.id, yellow.company.id} == {first.company.id}

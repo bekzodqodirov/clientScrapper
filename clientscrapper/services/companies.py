@@ -114,6 +114,13 @@ TRGM_THRESHOLD: Final = "0.3"
 # A phone on this many unrelated companies is an accountant, a broker or a
 # business centre (04 §2.3).
 SHARED_PHONE_MIN: Final = 3
+# A directory lists each organisation once, under its own id: a phone that
+# names a company the same directory lists under another id is the phone of
+# a building or a bookkeeper both firms give, never this firm's key
+# (``_other_listings``; the wave-5 seam review: a business centre's number
+# merged nine directory firms into the first one before a second company
+# could exist for 04 §2.3's shared-phone rule to count).
+LISTING_ID_TYPES: Final = frozenset({"goldenpages", "yellowpages", "glotr", "prom"})
 UNMERGE_WINDOW: Final = timedelta(hours=24)
 # Advisory lock namespace (MIYA: hashtext('miya:person')).
 LOCK_CLASS: Final = "cs:company"
@@ -778,6 +785,38 @@ async def _exact_hits(session: AsyncSession, keys: IdentityKeys) -> list[_Hit]:
     return hits
 
 
+async def _other_listings(
+    session: AsyncSession, keys: IdentityKeys, hits: list[_Hit]
+) -> tuple[list[_Hit], list[_Hit]]:
+    """``hits`` less the phone hits on a company the observation's directory
+    lists under another id (``LISTING_ID_TYPES``), and those set apart. A
+    company the observation's own id names is never set apart."""
+    own = {(t, v) for t, v in keys.external_ids if t in LISTING_ID_TYPES}
+    if not own or not any(h.how == "phone" for h in hits):
+        return hits, []
+    types = {t for t, _ in own}
+    by_id = {h.company.id for h in hits if h.how == "external_id"}
+    kept: list[_Hit] = []
+    apart: list[_Hit] = []
+    for hit in hits:
+        if hit.how != "phone" or hit.company.id in by_id:
+            kept.append(hit)
+            continue
+        lineage = sorted(await company_lineage(session, hit.company.id))
+        held = (
+            await session.execute(
+                sa.select(CompanyId.id_type, CompanyId.id_value).where(
+                    CompanyId.company_id.in_(lineage), CompanyId.id_type.in_(types)
+                )
+            )
+        ).all()
+        if any((t, v) not in own for t, v in held):
+            apart.append(hit)
+        else:
+            kept.append(hit)
+    return kept, apart
+
+
 def _label_key(display: str) -> str:
     return (LABEL_PREFIX + name_key(display))[:160]
 
@@ -891,7 +930,9 @@ async def resolve_company(
         raise ObservationRejected("no_company")
     await _lock(session, keys)
 
-    hits = await _exact_hits(session, keys)
+    hits, listed_apart = await _other_listings(
+        session, keys, await _exact_hits(session, keys)
+    )
     winner: Company | None = None
     how: How = "new"
     score = 0.0
@@ -923,6 +964,16 @@ async def resolve_company(
 
     conflicts: list[tuple[str, uuid.UUID]] = []
     foreign: set[str] = set()
+    for hit in listed_apart:
+        # The tail stays this firm's too (not ``foreign``): a third firm on it
+        # makes it shared (04 §2.3); close names are marked for the 🔀.
+        if (
+            hit.company.id != winner.id
+            and hit.company.state != "purged"
+            and (hit.how, hit.company.id) not in conflicts
+        ):
+            conflicts.append((hit.how, hit.company.id))
+            await _note_conflict(session, winner, hit)
     for hit in hits:
         if hit.company.id == winner.id:
             continue

@@ -129,7 +129,10 @@ def test_the_showcase_gives_the_json_ld_contacts_and_the_soliq_check():
         address="Яккасарайский район, улица Кушбеги, 26",
         city="Ташкент",
         goods_text=" · ".join([ABOUT, *titles]),
-        signal_types=["entity_solid"],
+        # 03 §2.6's second glotr branch, «manufacturer = Chinese brand»: the
+        # official distributor of JACK (03 §2.10 machinery) — the wave-5 seam
+        # review found it owed on a list that was already in the tree.
+        signal_types=["brand_distributor", "marketplace_velocity", "entity_solid"],
         excerpt=f'"JACK" (ООО "SEWING MACHINES TRADING") · {ABOUT}',
         external_ids={"glotr": "jack"},
         attrs={
@@ -137,6 +140,10 @@ def test_the_showcase_gives_the_json_ld_contacts_and_the_soliq_check():
             "sku_count": 19,
             "checked": "soliq",
             "bulky": ["equipment"],
+            "official": True,
+            "brand": "JACK",
+            "brand_group": "machinery",
+            "brands": ["Jack"],
         },
         lang="ru",
     )
@@ -155,7 +162,12 @@ def test_skus_are_products_not_cards():
     assert p.body.count(b"product-card__parent") == 27
     [obs] = glotr.parse_showcase(p.body, url=p.final_url, fetched_at=p.fetched_at)
     assert obs.attrs["sku_count"] == 19
-    assert "marketplace_velocity" not in obs.signal_types
+    # Under the line by SKUs: its velocity is the Chinese brand's, which a
+    # showcase without one does not have.
+    plain = p.body.replace(b"JACK", b"NAMUNA").replace(b"Jack", b"Namuna")
+    [unbranded] = glotr.parse_showcase(plain, url=p.final_url, fetched_at=p.fetched_at)
+    assert unbranded.attrs["sku_count"] == 19
+    assert "marketplace_velocity" not in unbranded.signal_types
     # One product card fewer is one SKU fewer only when it is not a repeat.
     fewer = p.body.replace(b"product-card__parent", b"product-card__gone", 1)
     [less] = glotr.parse_showcase(fewer, url=p.final_url, fetched_at=p.fetched_at)
@@ -166,7 +178,8 @@ def test_a_showcase_without_the_soliq_check_is_not_solid():
     p = page("glotr_showcase_jack")
     unchecked = p.body.replace(b"seller-info__checked", b"seller-info__other")
     [obs] = glotr.parse_showcase(unchecked, url=p.final_url, fetched_at=p.fetched_at)
-    assert obs.signal_types == [] and "checked" not in obs.attrs
+    assert "entity_solid" not in obs.signal_types and "checked" not in obs.attrs
+    assert obs.signal_types == ["brand_distributor", "marketplace_velocity"]
 
 
 def test_the_soft_404_gives_nothing_whatever_its_status():

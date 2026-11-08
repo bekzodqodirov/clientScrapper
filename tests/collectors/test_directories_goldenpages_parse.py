@@ -101,7 +101,10 @@ def test_the_card_gives_the_json_ld_phones_and_the_card_s_own_fields():
         address="100057, Ташкент, Алмазарский район, ул. Уста Ширин, 136",
         city="Ташкент",
         goods_text=" · ".join([*rubrics, about]),
-        signal_types=["directory_wholesale"],
+        # A dealer of the Chinese brand CHINT (03 §2.10 solar_power): its name
+        # is the China cue (04 §5.1; the wave-5 seam review), not official —
+        # the card never says so.
+        signal_types=["directory_wholesale", "brand_distributor"],
         excerpt=" · ".join(['"CHINT DISTRIBUTION" ООО', *BADGES, *rubrics, about]),
         external_ids={"goldenpages": "85641"},
         attrs={
@@ -110,6 +113,10 @@ def test_the_card_gives_the_json_ld_phones_and_the_card_s_own_fields():
             "badges": BADGES,
             "updated_on": "2025-12-11",
             "bulky": ["equipment"],
+            "official": False,
+            "brand": "CHINT",
+            "brand_group": "solar_power",
+            "brands": ["Chint"],
         },
         published_at=datetime(2025, 12, 11, tzinfo=TASHKENT),
         lang="ru",

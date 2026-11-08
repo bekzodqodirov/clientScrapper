@@ -429,3 +429,47 @@ def test_every_site_dates_an_entry_by_the_date_it_prints():
 )
 def test_a_printed_stamp_is_read_and_never_later_than_the_fetch(raw, expected):
     assert common.stamp(raw, fetched_at=THURSDAY) == expected
+
+
+def test_a_chinese_brand_on_a_card_is_its_china_cue():
+    """04 §5.1: a dealership of a Chinese brand → ``brand_distributor`` (with
+    the brand as the card spells it, the signal rule's quote) and through it
+    ``cn_origin`` and the volume key; a brand's own office is the supply side
+    and no dealer; «official» only where the card says so beside the brand
+    (the wave-5 seam review: the directories read no brand)."""
+    from clientscrapper.services.normalise import to_observation_json
+    from clientscrapper.services.signals import CompanyFacts, EvidenceRef, from_rules
+
+    dealer = common.brand_of('"CHINT DISTRIBUTION" ООО', "Продукция Chint Electric")
+    assert dealer is not None
+    assert (dealer.written, dealer.group, dealer.official) == (
+        "CHINT",
+        "solar_power",
+        False,
+    )
+    assert common.brand_of("HUAWEI TECHNOLOGIES", "Representative office") is None
+    official = common.brand_of(
+        "Namuna Tikuv", "Мы являемся официальным дистрибьютором JACK — швейные машины"
+    )
+    assert official is not None and official.official
+    # A brand alone keeps the card's volume types whatever the goods.
+    verdict = common.judge(
+        name="Namuna Savdo ООО",
+        own="Оптовая торговля",
+        goods="Продукты",
+        wholesale=True,
+        china=None,
+        brand=dealer,
+    )
+    assert not verdict.held
+    assert verdict.signal_types == ("directory_wholesale", "brand_distributor")
+    page_ = page("goldenpages_company_85641")
+    [obs] = gp.parse_company(page_.body, url=page_.final_url, fetched_at=page_.fetched_at)
+    ref = EvidenceRef(
+        id=1, source_key="directories_goldenpages", fetched_at=page_.fetched_at
+    )
+    drafts = {
+        d.key: d.quote for d in from_rules(ref, to_observation_json(obs), CompanyFacts())
+    }
+    assert drafts["cn_origin"] == "CHINT"
+    assert drafts["vol_wholesale_bulky"] == "CHINT"

@@ -25,8 +25,11 @@ VERIFIED (tests/fixtures/directories/README.md «glotr.uz»):
   ``marketplace_velocity`` (page 1 alone — a total is not printed — and each
   product once: the recorded showcase prints 27 cards of 19 products, a
   second block repeating eight, so it stays under the line). The spec's
-  other branch («manufacturer = Chinese brand») needs the brand list
-  (``collectors/brands.py``, T-34): owed.
+  other branch, «manufacturer = Chinese brand»: a Chinese brand the seller's
+  name or description names (``common.brand_of``) → ``marketplace_velocity``
+  as well as ``brand_distributor`` (the recorded JACK showcase: «официальным
+  дистрибьютором JACK TECHNOLOGY CO., LTD» — official; the wave-5 seam
+  review).
 * **negative** — an unknown showcase is a soft 404: a redirect to
   ``/showcases/`` («Наши партнеры») answering 200, so the parser checks the
   final URL's path and the ``LocalBusiness``, never the status.
@@ -193,6 +196,7 @@ def parse_showcase(body: bytes, *, url: str, fetched_at: datetime) -> list[Obser
         attrs=attrs,
         lang="ru",
     )
+    brand = common.brand_of(name, description)
     verdict = common.judge(
         name=name,
         own=description or "",
@@ -200,7 +204,9 @@ def parse_showcase(body: bytes, *, url: str, fetched_at: datetime) -> list[Obser
         wholesale=False,
         china=None,
         solid=solid,
-        skus=len(products),
+        # 03 §2.6: «≥ 20 SKUs or manufacturer = Chinese brand».
+        skus=common.SKU_VELOCITY if brand is not None else len(products),
+        brand=brand,
     )
     return [common.apply(obs, verdict)]
 
