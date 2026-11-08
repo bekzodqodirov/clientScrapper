@@ -687,6 +687,17 @@ def test_firma_names_the_legal_form_once():
     assert crm_push.build_payload(view()).firma == "Namuna Tekstil Savdo MChJ"
     named = view(display_name="Namuna Savdo MChJ", legal_form="MChJ")
     assert crm_push.build_payload(named).firma == "Namuna Savdo MChJ"
+    # The directories' Cyrillic forms against the stored Latin value (the
+    # wave-5 seam review: «"ASM ALLIANCE" ООО OOO»).
+    for display, form in (
+        ('"NAMUNA ALLIANCE" ООО', "OOO"),
+        ("Namuna Savdo ЧП", "ChP"),
+        ("АО «Namuna»", "AJ"),
+        ("Namuna Qurilish МЧЖ", "MChJ"),
+    ):
+        built = crm_push.build_payload(view(display_name=display, legal_form=form))
+        assert built.firma == display, (display, form)
+        assert f"KOMPANIYA: {display} ·" in built.note
 
 
 def test_a_sector_prior_reads_ehtimol():
@@ -2806,3 +2817,22 @@ async def test_load_view_reads_what_the_note_may_say(world):
     await world.session.commit()
     view_ = await candidates.load_view(world.session, cand.id, now=NOW)
     assert view_.telegram == "namuna_kanal"
+
+
+def test_the_company_line_names_its_sectors_in_uzbek():
+    """``companies.sectors`` holds category keys (E0 writes them for every
+    directory and exhibitor firm); the owner-facing note names them in Uzbek
+    and leaves the model's «other»/«none» out (the wave-5 seam review)."""
+    from clientscrapper.collectors.keywords import BULKY_CATEGORIES
+
+    assert set(BULKY_CATEGORIES) <= set(crm_push.SECTOR_UZ)
+
+    def kompaniya(*sectors: str) -> str:
+        note = crm_push.build_payload(view(sectors=sectors)).note
+        return next(x for x in note.splitlines() if x.startswith("KOMPANIYA:"))
+
+    assert kompaniya("equipment", "building").endswith(
+        "· faol · uskunalar, qurilish mollari"
+    )
+    assert kompaniya("other").endswith("· faol")
+    assert "equipment" not in kompaniya("equipment")

@@ -459,6 +459,20 @@ def carries_company_form(name: str, legal_form: str | None = None) -> bool:
     return any(f is not None and f not in INDIVIDUAL_LEGAL_FORMS for f in forms)
 
 
+def names_its_form(name: str, legal_form: str | None) -> bool:
+    """``name`` already carries ``legal_form`` — in any script or spelled out,
+    compared as the 02 enum value: «"ASM ALLIANCE" ООО» carries ``OOO``, so a
+    card and the ERP's company field print the form once (the wave-5 seam
+    review: the stored Latin form was looked for among the Cyrillic name's
+    words and printed again). None for no form: nothing to add."""
+    code = legal_form_code(legal_form)
+    if code is None:
+        return True
+    tokens = LEGAL_FORM_TOKENS_RE.finditer(_form_key(name))
+    forms = {legal_form_code(m.group(0)) for m in tokens}
+    return code in forms or (legal_form or "").lower() in name.lower().split()
+
+
 def legal_form_in_name(name: str) -> LegalForm | None:
     """The legal form inside a company name, short or spelled out, either script
     («Mas'uliyati cheklangan jamiyati „Namuna"», «Намуна МЧЖ»). Names only: on

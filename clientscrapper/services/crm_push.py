@@ -71,7 +71,7 @@ from clientscrapper.services import (
 from clientscrapper.services.candidates import CandidateView, SignalEvidence
 from clientscrapper.services.erp_feeds import ErpClient, ErpHttpError
 from clientscrapper.services.gates import REGISTRY_UZ
-from clientscrapper.services.normalise import person_names
+from clientscrapper.services.normalise import names_its_form, person_names
 from clientscrapper.services.pseudonyms import (
     TOKEN_RE,
     TOKEN_TRACE_RE,
@@ -451,6 +451,31 @@ def nega_topildi(c: CandidateView) -> str:
 
 # What the note says of a firm only the resolver's label names (05 §B.1).
 NAMELESS_FIRM_UZ: Final = "nomi nomaʼlum"
+# ``companies.sectors`` holds the category keys (03 §1.4's bulky categories
+# and the model's goods_category); the note is the owner's language, so the
+# KOMPANIYA line names them in Uzbek (the wave-5 seam review: «· equipment»).
+# The model's «other»/«none» say nothing and are left out; a value that is
+# no category key (written by hand, the push test's «sinov») is printed as is.
+SECTOR_SAYS_NOTHING: Final = frozenset({"other", "none"})
+SECTOR_UZ: Final[Mapping[str, str]] = {
+    "textile": "toʻqimachilik",
+    "footwear": "poyabzal",
+    "apparel": "kiyim-kechak",
+    "household": "roʻzgʻor buyumlari",
+    "auto_parts": "avto ehtiyot qismlar",
+    "building": "qurilish mollari",
+    "furniture": "mebel",
+    "toys": "oʻyinchoqlar",
+    "cosmetics": "kosmetika",
+    "electronics": "elektronika",
+    "lighting": "yoritish",
+    "equipment": "uskunalar",
+    "raw": "xomashyo",
+    "packaging": "qadoqlash",
+    "stationery": "kanselyariya",
+    "bags": "sumkalar",
+    "sport": "sport mollari",
+}
 
 
 def firma_of(c: CandidateView) -> str | None:
@@ -462,7 +487,7 @@ def firma_of(c: CandidateView) -> str | None:
         return None
     name = clean(c.display_name) or ""
     form = clean(c.legal_form)
-    if form and form.lower() not in name.lower().split():
+    if form and not names_its_form(name, form):
         joined = f"{name} {form}"
         if text_len(joined) <= COMPANY_MAX:
             return joined
@@ -623,7 +648,12 @@ def render_note(c: CandidateView, *, level: int = 0) -> str:
         sections.append(f"KOMPANIYA: {firma_of(c) or NAMELESS_FIRM_UZ}")
     else:
         stir = clean(c.stir) or "—"
-        sector = ", ".join(x for x in (clean(v) for v in c.sectors[:2]) if x)
+        named = [
+            SECTOR_UZ.get(v, v)
+            for v in (clean(x) for x in c.sectors)
+            if v and v not in SECTOR_SAYS_NOTHING
+        ]
+        sector = ", ".join(named[:2])
         bits: list[str | None] = [
             firma_of(c) or NAMELESS_FIRM_UZ,
             f"STIR {stir}",

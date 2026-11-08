@@ -472,3 +472,41 @@ def test_a_converted_volume_reads_as_the_agents_estimate():
     assert cards.volume_label(v) == "taxminan 15 kub («5 tonna»)"
     stated = view(stated_m3=Decimal(2), estimated_m3=reading)
     assert cards.volume_label(stated) == "«2 kub»"
+
+
+@pytest.mark.parametrize(
+    ("display", "form"),
+    [
+        ('"NAMUNA ALLIANCE" ООО', "OOO"),
+        ("Namuna Savdo ЧП", "ChP"),
+        ("Namuna Qurilish МЧЖ", "MChJ"),
+    ],
+)
+def test_a_cyrillic_form_in_the_name_is_not_printed_again(display, form):
+    """The stored form is the Latin enum value; a directory name carries the
+    Cyrillic one — compared as the same form, it is printed once on the owner
+    card and on /qidir (the wave-5 seam review: «"ASM ALLIANCE" ООО (OOO)»)."""
+    line = cards.render_review(
+        review(candidate=view(display_name=display, legal_form=form))
+    )
+    company = next(x for x in line.text.splitlines() if x.startswith("🏢"))
+    assert company.startswith(f"🏢 {cards.esc(display)} · ")
+    found = cards.CompanyCard(
+        company_id=uuid.UUID(int=2),
+        display_name=display,
+        legal_form=form,
+        city=None,
+        stir=None,
+        registry_status="unknown",
+        website_domain=None,
+        telegram=None,
+        instagram=None,
+        state="active",
+        best_score=None,
+        candidate_state=None,
+        candidate_id=None,
+        last_push=None,
+        hit=None,
+    )
+    text = cards.render_company(found, state_words={})
+    assert text.splitlines()[0] == f"🏢 {cards.esc(display)}"

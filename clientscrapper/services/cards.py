@@ -225,7 +225,7 @@ def _company_line(view: CandidateView, *, details: bool = True) -> str:
     else:
         head = esc(name)
         form = view.legal_form
-        if details and form and form.lower() not in name.lower().split():
+        if details and form and not normalise.names_its_form(name, form):
             head += f" ({esc(form)})"
     parts = [head]
     if view.city:
@@ -1025,9 +1025,8 @@ def render_company(card: CompanyCard, *, state_words: Mapping[str, str]) -> str:
     suppression that holds it. ``state_words`` are the bot's candidate
     state words."""
     head = esc(card.display_name)
-    if (
-        card.legal_form
-        and card.legal_form.lower() not in card.display_name.lower().split()
+    if card.legal_form and not normalise.names_its_form(
+        card.display_name, card.legal_form
     ):
         head += f" ({esc(card.legal_form)})"
     facts = [head]
