@@ -86,15 +86,22 @@ the pages say is pseudonymised by whoever later asks the model about it.
 
 The run's pages are counted in a ``collector_runs`` row per source
 (``enrich_site``, ``registry_lookup``) written when the run ends, which is
-what the next run's page budget reads (``runner.build_budget``).
+what the next run's page budget reads (``runner.build_budget``). So one run
+at a time: a run holds a session-level advisory lock (``RUN_LOCK``) for its
+whole length, and a second run while it holds it does nothing
+(``stopped='already_running'``) — two overlapping runs (a leader that lost
+its lock while its run went on, and the new leader's slot) each read the
+whole day's budget and the whole registry allowance at their start, and
+spent both twice at twice the pace (the wave-5 seam review).
 """
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import logging
 import uuid
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -122,7 +129,7 @@ from clientscrapper.db.models import (
     Signal,
     Source,
 )
-from clientscrapper.db.session import SessionLocal
+from clientscrapper.db.session import SessionLocal, engine
 from clientscrapper.services import (
     candidates,
     chats,
@@ -166,6 +173,8 @@ SITE_PAGES: Final = 2
 CHANNEL_PAGES: Final = 1
 # A run's wall clock (the slot runs every 10 minutes, max_instances=1).
 RUN_DEADLINE: Final = timedelta(minutes=9)
+# The advisory lock one enrich run holds (``run_claim``), by name.
+RUN_LOCK: Final = "clientscrapper:enrich"
 # While an attempt runs its candidate is not due again (a crashed run's
 # candidate comes back after this).
 LEASE: Final = timedelta(minutes=30)
@@ -1130,6 +1139,15 @@ async def step_e2(ctx: Context, run: Attempt, facts: Facts) -> list[dict[str, An
     return out
 
 
+def answered_no_channel(got: FetchResult | str) -> bool:
+    """t.me answered about the name and the answer may be no channel preview:
+    a redirect off ``/s/`` (a person's account), a 404, or a 200 page (read
+    next) — never a refusal, a slow-down or a failure."""
+    if isinstance(got, str) or got.captcha:
+        return False
+    return got.status in (200, 404, 410) or 300 <= got.status < 400
+
+
 async def step_e3(ctx: Context, run: Attempt, facts: Facts) -> dict[str, Any]:
     """E3: the channel's public page through the Fetcher, else the reader's
     queue."""
@@ -1163,9 +1181,18 @@ async def step_e3(ctx: Context, run: Attempt, facts: Facts) -> dict[str, Any]:
         # 304 on a channel page stored before: it is a channel, and unchanged
         # — not a name to send to the reader.
         return entry("E3", "unchanged", now=ctx.now, attempt=run.attempt)
+    if not answered_no_channel(got):
+        # No answer about the name: robots, a pause, a breaker, a transport
+        # error, a 429 or a 5xx. Not queued — the account would read what the
+        # web refused or asked us to slow down on (04 §3 E3 queues an empty or
+        # 404 page only; the wave-5 seam review); the next attempt asks the
+        # web again.
+        why = got if isinstance(got, str) else f"http_{got.status}"
+        return entry("E3", why, now=ctx.now, attempt=run.attempt)
+    assert isinstance(got, FetchResult)
     page = (
         telegram_page.parse_channel_page(got.body, url=got.final_url)
-        if isinstance(got, FetchResult) and got.status == 200
+        if got.status == 200
         else None
     )
     if page is None:
@@ -1179,10 +1206,9 @@ async def step_e3(ctx: Context, run: Attempt, facts: Facts) -> dict[str, Any]:
                 now=ctx.now,
                 by=f"{chats.BY_ENRICH}{run.candidate_id}",
             )
-        why = got if isinstance(got, str) else f"http_{got.status}"
         result = "queued" if queued else "not_channel"
-        return entry("E3", result, now=ctx.now, attempt=run.attempt, found={"page": why})
-    assert isinstance(got, FetchResult)
+        found = {"page": f"http_{got.status}"}
+        return entry("E3", result, now=ctx.now, attempt=run.attempt, found=found)
     seen = telegram_page.channel_observation(
         page, url=url, fetched_at=got.fetched_at, raw_sha256=got.sha256
     )
@@ -1955,6 +1981,28 @@ async def _record_run(
         )
 
 
+@contextlib.asynccontextmanager
+async def run_claim() -> AsyncIterator[bool]:
+    """``RUN_LOCK`` for the run's length on a connection of its own (the
+    lock outlives the commit that ends its statement, so no transaction sits
+    idle meanwhile); False when another run holds it."""
+    async with engine.connect() as conn:
+        held = bool(
+            await conn.scalar(
+                sa.select(sa.func.pg_try_advisory_lock(sa.func.hashtext(RUN_LOCK)))
+            )
+        )
+        await conn.commit()
+        try:
+            yield held
+        finally:
+            if held:
+                await conn.execute(
+                    sa.select(sa.func.pg_advisory_unlock(sa.func.hashtext(RUN_LOCK)))
+                )
+                await conn.commit()
+
+
 async def enrich_batch(
     tools: Tools,
     *,
@@ -1963,7 +2011,25 @@ async def enrich_batch(
     limit: int = ENRICH_LIMIT,
     clock: Callable[[], datetime] | None = None,
 ) -> EnrichReport:
-    """One run of the three queues (module docstring)."""
+    """One run of the three queues (module docstring), one at a time."""
+    async with run_claim() as held:
+        if not held:
+            report = EnrichReport(stopped="already_running")
+            log.warning("enrich: another run holds the lock", extra={"counts": {}})
+            return report
+        return await _enrich_batch(
+            tools, now=now, session_factory=session_factory, limit=limit, clock=clock
+        )
+
+
+async def _enrich_batch(
+    tools: Tools,
+    *,
+    now: datetime,
+    session_factory: SessionFactory,
+    limit: int,
+    clock: Callable[[], datetime] | None,
+) -> EnrichReport:
     report = EnrichReport()
     clock_of = clock or (lambda: datetime.now(settings.tz))
     async with session_factory() as session:

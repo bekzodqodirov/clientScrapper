@@ -19,6 +19,7 @@ configuration: every row a test changes is put back.
 from __future__ import annotations
 
 import ast
+import asyncio
 import contextlib
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
@@ -1955,3 +1956,94 @@ async def test_the_global_pause_stops_the_run(session, tmp_path):
     assert report.stopped == "global_pause"
     assert (await reload(session, cand)).enrich_attempts == 0
     assert w.urls() == []
+
+
+def _blip(request: httpx.Request) -> httpx.Response:
+    raise httpx.ConnectTimeout("blip", request=request)
+
+
+@pytest.mark.parametrize(
+    ("routes", "result"),
+    [
+        ({"https://t.me/s/namuna_optom": _blip}, "error:ConnectTimeout"),
+        ({"https://t.me/s/namuna_optom": httpx.Response(429)}, "http_429"),
+        ({"https://t.me/s/namuna_optom": httpx.Response(503)}, "http_503"),
+        (
+            {
+                "https://t.me/robots.txt": httpx.Response(
+                    200, text="User-agent: *\nDisallow: /s/\n"
+                )
+            },
+            "robots",
+        ),
+    ],
+)
+async def test_e3_a_page_t_me_did_not_answer_is_no_name_for_the_reader(
+    session, tmp_path, routes, result
+):
+    """04 §3 E3 queues a name for the read-only account only when t.me
+    answered that it is no channel preview (a redirect to a person, a 404, an
+    empty page). A refusal, a slow-down or a failure says nothing about the
+    name: the account must not read what the web refused (the wave-5 seam
+    review); the trail says why, and the next attempt asks the web again."""
+    company = await firm(session, telegram_channel="namuna_optom")
+    await signal(session, company)
+    cand = await enriching(session, company)
+    await session.commit()
+    async with world(tmp_path, routes) as w:
+        await w.run()
+    cand = await reload(session, cand)
+    assert ("E3", result) in steps(cand)
+    flag = await session.get(RuntimeFlag, chats.PENDING_FLAG, populate_existing=True)
+    assert flag is None or "namuna_optom" not in (flag.value.get("names") or {})
+
+
+async def test_e3_a_404_is_a_name_for_the_reader(session, tmp_path):
+    company = await firm(session, telegram_channel="namuna_optom")
+    await signal(session, company)
+    cand = await enriching(session, company)
+    await session.commit()
+    routes = {"https://t.me/s/namuna_optom": httpx.Response(404)}
+    async with world(tmp_path, routes) as w:
+        await w.run()
+    cand = await reload(session, cand)
+    assert ("E3", "queued") in steps(cand)
+    flag = await session.get(RuntimeFlag, chats.PENDING_FLAG, populate_existing=True)
+    assert flag is not None and "namuna_optom" in flag.value["names"]
+
+
+async def test_two_runs_at_once_spend_the_day_s_lookups_once(session, tmp_path):
+    """One enrich run at a time (``run_claim``): a second run started while
+    the first holds the lock does nothing, so two runs cannot each read the
+    day's budget and registry allowance at their start and spend both (the
+    wave-5 seam review: 59 lookups done, two runs at once, 61 recorded)."""
+    await set_source(session, enrich.REGISTRY_SOURCE, enabled=True)
+    session.add(
+        CollectorRun(
+            source_key="registry_lookup",
+            started_at=NOW - timedelta(hours=1),
+            finished_at=NOW - timedelta(hours=1),
+            status="ok",
+            meta={"note": "enrich", "lookups": registry.LOOKUPS_PER_DAY - 1},
+        )
+    )
+    for name, stir in (("Namuna Orginfo", "310514454"), ("Namuna Ikkinchi", "300000045")):
+        company = await firm(session, name, stir=stir)
+        await signal(session, company)
+        await enriching(session, company)
+    await session.commit()
+    async with (
+        world(tmp_path, ORGINFO_ROUTES) as one,
+        world(tmp_path, ORGINFO_ROUTES) as two,
+    ):
+        reports = await asyncio.gather(one.run(), two.run())
+    assert sorted(r.stopped or "" for r in reports) == ["", "already_running"]
+    done = await session.scalar(
+        sa.select(
+            sa.func.sum(CollectorRun.meta["lookups"].astext.cast(sa.Integer))
+        ).where(CollectorRun.source_key == "registry_lookup")
+    )
+    assert done == registry.LOOKUPS_PER_DAY
+    # The lock is given back: the next run runs.
+    async with world(tmp_path, ORGINFO_ROUTES) as w:
+        assert (await w.run(NOW + timedelta(minutes=10))).stopped is None
