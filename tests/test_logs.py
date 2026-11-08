@@ -289,3 +289,47 @@ def test_the_installed_handler_carries_both_filters(install):
     handler = next(h for h in handlers if isinstance(h, logs.CsHandler))
     kinds = {type(f) for f in handler.filters}
     assert {logs.RedactBodies, logs.RedactPatterns} <= kinds
+
+
+PERSON_CARD = "https://top.uz/company/namunov-namuna-namunovich-indp"
+
+
+def test_a_directory_failure_logs_the_url_s_id_never_the_url(install):
+    """03 §1.1 Logging: «never the URL itself» — a card path can name a person
+    (a top.uz sole trader's slug, the wave-5 seam review). The line carries
+    the stored URL's id, the one the Fetcher logs, so the two meet."""
+    from clientscrapper.collectors.directories import Directories, topuz
+    from clientscrapper.services.http import url_id
+
+    stream = install()
+    Directories._unreadable(topuz.SPEC, PERSON_CARD, ValueError("x"), {"parse_errors": 0})
+    collector = Directories.__new__(Directories)
+    collector._streak = 0
+    collector._failed(topuz.SPEC, PERSON_CARD, ValueError("x"))
+    lines = _lines(stream)
+    assert len(lines) == 2
+    for line in lines:
+        assert "namunov" not in json.dumps(line, ensure_ascii=False)
+        assert line["url_id"] == url_id(PERSON_CARD)
+
+
+def test_no_log_call_in_the_package_carries_a_url_extra():
+    """The fence for the line above: no ``extra={... "url": ...}`` anywhere in
+    ``clientscrapper/`` (comments and strings are not read)."""
+    import ast
+    from pathlib import Path
+
+    root = Path(logs.__file__).parent
+    found: list[str] = []
+    for path in sorted(root.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            for kw in node.keywords:
+                if kw.arg == "extra" and isinstance(kw.value, ast.Dict):
+                    keys = kw.value.keys
+                    names = [k.value for k in keys if isinstance(k, ast.Constant)]
+                    if {"url", "final_url"} & set(names):
+                        found.append(f"{path.relative_to(root)}:{node.lineno}")
+    assert found == []

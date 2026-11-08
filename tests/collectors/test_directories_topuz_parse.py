@@ -4,6 +4,7 @@ past the last, the company card."""
 
 from __future__ import annotations
 
+import json
 import re
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -302,3 +303,51 @@ def test_the_next_link_is_the_next_page_of_the_same_section_only():
     # Without our page 3 in the pager, there is no next page.
     gone = edited.replace(b"stroymaterialy-optom?PAGEN_1=3", b"stroymaterialy-optom?x=3")
     assert tz.parse_list(gone, url=p.final_url, fetched_at=p.fetched_at).next_url is None
+
+
+PERSON_SLUG = "namunov-namuna-namunovich-indp"
+
+
+def test_an_individual_entrepreneur_s_card_is_never_asked_or_filed():
+    """The slug of a person's card is the person's name (README «Scrubbing»
+    item 2: ``<surname>-<i>-<i>-indp``): the list row names no card to ask,
+    ``attrs`` holds no card URL, and a card asked for anyway files nothing at
+    its own URL (the wave-5 seam review; 06 §5.1)."""
+    p = page("topuz_stroymaterialy_optom_p1")
+    org = dict(nuxt.list_block(nuxt.payload(parse(p.body)))["data"][0])
+    org.update(name_ru=PERSON, name_uz=PERSON, legal_name=None, slug=PERSON_SLUG)
+    obs = tz.organisation(org, url=p.final_url, fetched_at=p.fetched_at, sha=p.sha256)
+    assert obs is not None and obs.phones
+    assert "card_url" not in obs.attrs
+    assert "namunov" not in repr(obs).lower()
+    # The person's name in the legal name alone is enough.
+    org.update(name_ru="Namuna Qurilish", name_uz=None, legal_name=PERSON)
+    shop = tz.organisation(org, url=p.final_url, fetched_at=p.fetched_at, sha=p.sha256)
+    assert shop is not None and "card_url" not in shop.attrs
+
+    # The list page as served, its first row made a person's (the payload
+    # holds the name JSON-escaped).
+    body = p.body.decode("utf-8")
+    row = nuxt.list_block(nuxt.payload(parse(p.body)))["data"][0]
+    escaped = json.dumps(row["name_ru"], ensure_ascii=False)[1:-1]
+    assert escaped in body
+    served = body.replace(f'"{row["slug"]}"', f'"{PERSON_SLUG}"').replace(escaped, PERSON)
+    listed = tz.parse_list(served.encode(), url=p.final_url, fetched_at=p.fetched_at)
+    entry = next(e for e in listed.entries if e.ref == f"topuz:{row['id']}")
+    assert entry.card_url is None and entry.complete
+    others = [e for e in listed.entries if e.ref != entry.ref]
+    assert others and all(e.card_url for e in others)
+
+    card = page("topuz_company_uzbek_chinese_trading_house")
+    slug = TRADING_HOUSE.rsplit("/", 1)[1]
+    text = (
+        card.body.decode("utf-8")
+        .replace(slug, PERSON_SLUG)
+        .replace("Техноплаза савдо уйи", PERSON)
+        .replace("УЗБЕКСКО-КИТАЙСКИЙ ТОРГОВЫЙ ДОМ", PERSON)
+    )
+    url = f"{tz.BASE}/company/{PERSON_SLUG}"
+    assert tz.parse_company(text.encode(), url=url, fetched_at=card.fetched_at) == []
+    # The same card under a firm's name is filed (the control).
+    named = card.body.decode("utf-8").replace(slug, PERSON_SLUG)
+    assert tz.parse_company(named.encode(), url=url, fetched_at=card.fetched_at)

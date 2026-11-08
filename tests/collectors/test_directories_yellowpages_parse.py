@@ -440,3 +440,24 @@ def test_the_contacts_telegram_is_the_firm_s_channel():
         },
     )
     assert obs is not None and obs.telegram == "namuna_05"
+
+
+def test_an_individual_entrepreneur_s_card_is_never_asked_or_filed():
+    """Like top.uz's, a person's card slug may be the person's name: the row
+    names no card URL to ask and keep, and a card asked for anyway is not
+    filed at its own URL (the wave-5 seam review; 06 §5.1). The payload row
+    is complete, so nothing the card adds is lost."""
+    slug = "namunov-namuna-namunovich-indp"
+    obs = _row(name=PERSON, brand_name="Namuna Savdo", slug=slug)
+    assert obs is not None and "card_url" not in obs.attrs
+    assert slug not in repr(obs)
+    firm = _row(slug=slug.replace("indp", "ooo"), name="Namuna Savdo ООО")
+    assert firm is not None and firm.attrs["card_url"].endswith("-ooo")
+
+    card = page("yellowpages_kompaniya_alta_trade_ooo")
+    text = card.body.decode("utf-8").replace("alta-trade-ooo", slug)
+    url = f"{yp.BASE}/kompaniya/{slug}"
+    assert yp.parse_kompaniya(text.encode(), url=url, fetched_at=card.fetched_at)
+    person = text.replace("ALTA TRADE ООО", PERSON)
+    assert person != text
+    assert yp.parse_kompaniya(person.encode(), url=url, fetched_at=card.fetched_at) == []

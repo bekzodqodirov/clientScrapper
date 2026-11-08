@@ -208,7 +208,9 @@ async def test_the_weekly_diff_runs_every_switched_on_site_and_names_the_others(
     )
     assert gold["list_status"] == {"404": 5}
     yellow = subs["yellowpages"]
-    # 9 held stationery rows and the competitor need no card; 6 cards were asked.
+    # 9 held stationery rows and the competitor need no card, nor a sole
+    # trader's (its slug may be the person's name, the wave-5 seam review);
+    # 5 cards were asked.
     assert (
         yellow["pages"],
         yellow["rows"],
@@ -218,7 +220,7 @@ async def test_the_weekly_diff_runs_every_switched_on_site_and_names_the_others(
         2,
         16,
         9,
-        6,
+        5,
     )
     # Pagination owed: the rubrika says 2 pages, the plan reads 1.
     assert yellow["pages_owed"] == 1

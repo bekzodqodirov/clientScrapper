@@ -141,7 +141,10 @@ def organisation(
     shop = common.company_name(brand)
     if shop and shop != name:
         attrs["brand_name"] = shop
-    target = card_url(org.get("slug"))
+    # An individual entrepreneur's slug may be the person's name (top.uz's
+    # are, README «Scrubbing» item 2): the card is never asked or stored —
+    # the payload row is complete (the wave-5 seam review).
+    target = None if person else card_url(org.get("slug"))
     if target is not None:
         attrs["card_url"] = target
     obs = Observation(
@@ -194,7 +197,7 @@ def parse_list(body: bytes, *, url: str, fetched_at: datetime) -> common.ListPag
         if obs is None or any(e.ref == obs.source_ref for e in entries):
             continue
         entries.append(
-            common.Entry(obs.source_ref, card_url(org.get("slug")), obs, complete=True)
+            common.Entry(obs.source_ref, obs.attrs.get("card_url"), obs, complete=True)
         )
     meta = block["meta"]
     return common.ListPage(
@@ -225,7 +228,8 @@ def parse_kompaniya(body: bytes, *, url: str, fetched_at: datetime) -> list[Obse
     if org is None:
         return []
     obs = organisation(org, url=url, fetched_at=fetched_at, sha=common.sha256(body))
-    return [obs] if obs is not None else []
+    # A person's card (no ``card_url``) is not filed at its own URL.
+    return [obs] if obs is not None and "card_url" in obs.attrs else []
 
 
 SPEC: Final = common.SiteSpec(

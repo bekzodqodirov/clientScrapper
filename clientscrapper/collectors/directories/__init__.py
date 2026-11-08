@@ -115,6 +115,7 @@ from clientscrapper.services.http import (
     FetchResult,
     HostPaused,
     RobotsDisallowed,
+    url_id,
 )
 
 if TYPE_CHECKING:
@@ -407,7 +408,7 @@ class Directories(Collector):
             "directories: %s failed: %s",
             spec.site,
             type(exc).__name__,
-            extra={"source": spec.source_key, "url": url},
+            extra={"source": spec.source_key, "url_id": url_id(url)},
         )
         if isinstance(exc, TRANSPORT_FAILURES):
             self._streak += 1
@@ -423,7 +424,7 @@ class Directories(Collector):
             "directories: %s page unreadable: %s",
             spec.site,
             type(exc).__name__,
-            extra={"source": spec.source_key, "url": url},
+            extra={"source": spec.source_key, "url_id": url_id(url)},
         )
 
     async def _seed(

@@ -128,7 +128,12 @@ def organisation(
     prom = org.get("prom_id")
     if isinstance(prom, int) and not isinstance(prom, bool):
         attrs["prom_id"] = str(prom)
-    target = card_url(org.get("slug"))
+    # An individual entrepreneur's card is at a slug made of the person's name
+    # (README «Scrubbing» item 2: ``<surname>-<i>-<i>-indp``): never asked,
+    # never stored — the row is complete, and kept at the list page's URL
+    # with its id in the fragment (the wave-5 seam review).
+    person = common.individual(raw) or common.individual(given_legal)
+    target = None if person else card_url(org.get("slug"))
     if target is not None:
         attrs["card_url"] = target
     obs = Observation(
@@ -195,7 +200,7 @@ def parse_list(body: bytes, *, url: str, fetched_at: datetime) -> common.ListPag
         if obs is None or any(e.ref == obs.source_ref for e in entries):
             continue
         entries.append(
-            common.Entry(obs.source_ref, card_url(org.get("slug")), obs, complete=True)
+            common.Entry(obs.source_ref, obs.attrs.get("card_url"), obs, complete=True)
         )
     meta = block["meta"]
     page, last = _int(meta.get("current_page")), _int(meta.get("last_page"))
@@ -231,7 +236,9 @@ def parse_company(body: bytes, *, url: str, fetched_at: datetime) -> list[Observ
     if org is None:
         return []
     obs = organisation(org, url=url, fetched_at=fetched_at, sha=common.sha256(body))
-    return [obs] if obs is not None else []
+    # A person's card (no ``card_url``: its slug is the person's name) is not
+    # filed at its own URL even if asked for.
+    return [obs] if obs is not None and "card_url" in obs.attrs else []
 
 
 def page_number(url: str) -> int | None:

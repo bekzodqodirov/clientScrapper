@@ -26,6 +26,12 @@ one ``kind="company"`` observation:
 * the address: a line naming a place (``GEO_RE``) and a street word
   (``STREET_RE``: koʻcha, улица, ул., проспект, MFY …), or the JSON-LD
   ``PostalAddress``;
+* a sole trader (``INDIVIDUAL_FORM_RE``: YaTT, ИП …; or a STIR whose first
+  digit is 4–6, 04 §1.5) is a person: the words beside the form and the
+  taxpayer number are person data (06 §5.1) — no STIR is kept, the legal
+  sentence is neither the name nor kept in the excerpt, and the page is no
+  ``entity_solid`` (the directories' rule, ``common.entity_stir``; the
+  wave-5 seam review); the form itself is kept;
 * ``signal_types``: ``entity_solid`` for a parsed STIR or legal block (→
   ``ent_not_micro``; 04 §5.3: shape, never a registry confirmation),
   ``wholesale_bulky`` for a B2B word beside a bulky category,
@@ -57,6 +63,7 @@ from clientscrapper.collectors.keywords import (
     COMPETITOR_NAME_RE,
     COMPETITOR_SELF_RE,
     GEO_RE,
+    INDIVIDUAL_FORM_RE,
     LEGAL_FORM_RE,
     STIR_RE,
     bulky_categories,
@@ -332,6 +339,14 @@ def _excerpt(*parts: str | None, keep: Iterable[str | None] = ()) -> str:
     return " · ".join(t for t in (text, tail) if t)
 
 
+def sole_trader(stir: str | None, *texts: str | None) -> bool:
+    """The page is an individual entrepreneur's: a sole trader's form in its
+    names or legal sentence, or a STIR whose first digit is 4–6 (04 §1.5)."""
+    if stir is not None and stir[0] in "456":
+        return True
+    return any(t and INDIVIDUAL_FORM_RE.search(t) for t in texts)
+
+
 def stir_text(text: str) -> str | None:
     """The labelled STIR as the page writes it («STIR 300000031»): the first
     ``STIR_RE`` hit whose number passes ``stir_key`` (``find_stir``'s rule)."""
@@ -412,12 +427,12 @@ def parse_company_site(
     hrefs = _hrefs(root, url)
     same_as = _strings(org.get("sameAs"))
     legal = _legal_line(lines)
-    name = (
-        _title_name(title)
-        or _meta(root, "og:site_name")
-        or _str(org.get("name"))
-        or _str(org.get("legalName"))
-        or legal
+    names = (
+        _title_name(title),
+        _meta(root, "og:site_name"),
+        _str(org.get("name")),
+        _str(org.get("legalName")),
+        legal,
     )
     stir = (
         find_stir(text)
@@ -425,22 +440,32 @@ def parse_company_site(
         or stir_key(_str(org.get("vatID")))
     )
     legal_form_raw = None
-    for candidate in (legal, _str(org.get("legalName")), name):
+    for candidate in (legal, _str(org.get("legalName")), *names):
         found = LEGAL_FORM_RE.search(candidate) if candidate else None
         if found is not None:
             legal_form_raw = found.group(0)
             break
+    person = sole_trader(stir, legal, *names)
+    # The first name that is not a sole trader's (the person's own words).
+    name = next((n for n in names if n and not INDIVIDUAL_FORM_RE.search(n)), None)
+    if person:
+        stir, legal = None, None
     description = _meta(root, "description", "og:description") or _str(
         org.get("description")
     )
     heading = root.find("h1")
     paragraphs = [p.text() for p in root.find_all("p") if p.text()]
-    about = _excerpt(
-        description,
-        heading.text() if heading else None,
-        *paragraphs[:4],
-        keep=(legal, stir_text(text)),
-    )
+    parts = [description, heading.text() if heading else None, *paragraphs[:4]]
+    if person:
+        # The footer may be one of the first paragraphs: a part naming the
+        # person (beside the form) or the taxpayer number is left out.
+        taxpayer = stir_text(text)
+        parts = [
+            p
+            for p in parts
+            if p and not INDIVIDUAL_FORM_RE.search(p) and not (taxpayer and taxpayer in p)
+        ]
+    about = _excerpt(*parts, keep=(legal, None if person else stir_text(text)))
     own = "\n".join(p for p in (name, description, *lines) if p)
     types = own_markers(name, own)
     if stir is not None or legal is not None:

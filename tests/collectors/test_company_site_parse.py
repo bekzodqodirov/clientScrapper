@@ -426,3 +426,33 @@ def test_a_channel_names_no_hub_or_telegram_link_as_its_website():
     assert tp.channel_observation(page_, url=url, fetched_at=AT).website == (
         "https://namuna-kanal.example.uz/"
     )
+
+
+@pytest.mark.parametrize(
+    "footer",
+    [
+        "© 2026 YaTT Karimov Rustam Rustamovich · STIR 412345678",
+        "ИП Каримов Рустам Рустамович, ИНН 412345678",
+        "© 2026 Karimov Rustam · STIR 412345678",
+    ],
+)
+def test_a_sole_trader_s_name_and_taxpayer_number_are_kept_nowhere(footer):
+    """A sole trader is a person (06 §5.1): the words beside «YaTT» and a
+    STIR whose first digit is 4–6 (04 §1.5) are person data — not the name,
+    not the excerpt (company-tier, cited in ERP notes), not ``stir`` — and
+    the page is no ``entity_solid`` (the directories' ``entity_stir`` rule;
+    the wave-5 seam review). The form itself is kept."""
+    obs = parsed(f"{FILLER}<p>{footer}</p>", head="<title>Namuna Mebel</title>")
+    stored = repr(to_observation_json(obs))
+    assert "Karimov" not in stored and "Каримов" not in stored
+    assert "412345678" not in stored
+    assert obs.stir is None and "entity_solid" not in obs.signal_types
+    assert obs.company_name_raw == "Namuna Mebel"
+    # The same footer as the only name: no name at all, never the person's.
+    bare = parsed(f"<p>{footer}</p>{FILLER}")
+    assert bare.company_name_raw is None or "Karimov" not in bare.company_name_raw
+    assert "Karimov" not in repr(to_observation_json(bare))
+    # A firm's footer is kept and quoted, as before (the control).
+    firm = parsed(f"{FILLER}<p>© 2026 «Namuna Mebel» MChJ · STIR 300000041</p>")
+    assert (firm.stir, firm.legal_form) == ("300000041", "MChJ")
+    assert firm.excerpt.endswith("© 2026 «Namuna Mebel» MChJ · STIR 300000041")
