@@ -56,8 +56,10 @@ cell, expodat's flag title); a row is kept when that country is Uzbekistan
 the name carries an Uzbek legal form (``UZ_LEGAL_FORMS``: LLC and OOO name
 Russian firms as often, README item 12). Foreign rows are the supply side and
 are not stored at all — they are counted (``meta.lists[].foreign``). Every
-kept row stores ``attrs.country`` as the list prints it (04 §6 gate 3's
-«exhibitor country CN» reads it).
+kept row stores ``attrs.country`` as the list prints it, which 04 §6 gate 3's
+«exhibitor country CN» reads — a branch that cannot fire from these lists,
+since a kept row is an Uzbek one: a Chinese exhibitor is kept out by not
+being stored, not by the gate (the wave-5 seam review; 04 §6 as built).
 
 **Observation** ``kind="exhibitor"``, ``source_ref=f"{show}:{year}:{slug}"``,
 the name, ``attrs={show, year, edition, stand, pavilion, country}`` (+ the
