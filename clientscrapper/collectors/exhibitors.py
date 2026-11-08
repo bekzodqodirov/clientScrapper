@@ -750,7 +750,10 @@ def is_uzbek(country: str | None, name: str) -> bool:
     """03 §2.8: the country column says Uzbekistan; only where the list
     prints no country, an Uzbek legal form in the name."""
     if country:
-        return _key(country) in UZ_COUNTRIES
+        # The name or its long form («Republic of Uzbekistan», «Республика
+        # Узбекистан», «Oʻzbekiston Respublikasi»; the wave-5 seam review):
+        # Uzbekistan as one of the cell's words.
+        return bool(set(_key(country).split()) & UZ_COUNTRIES)
     return uz_form(name) is not None
 
 

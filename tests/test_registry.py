@@ -816,3 +816,23 @@ def test_only_a_liquidation_badge_marks_a_card_liquidated():
         text.replace(marker, "Приостановлена", 1).encode(), url=SEARCH
     )
     assert sum(c.liquidated for c in cards) == 2
+
+
+async def test_a_429_rests_the_host_like_a_403():
+    """04 §3 E4: «a captcha or a 403/429 rests that host» — a 429 the
+    Fetcher's retries did not cure is ``blocked``, never a plain http_error
+    asked again at the next lookup (the wave-5 seam review: nothing pinned
+    it)."""
+    clock = FakeClock(NOW)
+    site = orginfo_site(clock, **{SEARCH: httpx.Response(429, text="slow down")})
+    async with fetcher_for(site) as fetcher:
+        found = await registry.lookup(
+            [registry.Orginfo()],
+            stir="310514454",
+            name=None,
+            city=None,
+            fetcher=fetcher,
+            budget=budget(pages=10, deadline=NOW + timedelta(hours=1)),
+        )
+    assert found.rest == ["orginfo"]
+    assert found.tried == [("orginfo", "blocked")]
