@@ -23,7 +23,7 @@ evidence rows only the subject's rows cite, their files unlinked last when
 no other row holds them — with the pages enrichment fetched for the subject
 that no observation cites (a registry search by its name or STIR, a card
 that was another firm's: ``evidence.FOR_COMPANY``) and the owner's ``/stir``
-mark; ``company_aliases``, ``company_ids``; the
+mark; ``company_aliases``; the
 candidates and their review cards (a ⏭ card's ``remind_at`` with them, so
 nothing is asked again) — **except a candidate with ``push_log`` rows**,
 which ``push_log.candidate_id`` RESTRICT keeps on purpose: an open one ends
@@ -42,12 +42,16 @@ again (``signals.mark_stale``).
 **What is anonymised**: ``push_log.payload := NULL``; every lineage company
 becomes ``state='purged'`` with ``display_name='[oʻchirilgan]'`` and a name
 key no name match reaches, ``merged_into`` cleared in the same UPDATE (02
-§2.4). The root keeps its STIR, domain, channel and Instagram: the resolver
-answers an observation carrying them «purged» and never makes the firm
-again (``companies.resolve_company``); a merged source gives up a STIR or a
-domain another company holds (its root's, mostly — the two would collide
-under the unique indexes once the source is no longer ``merged``) and keeps
-one only it had, so that key answers «purged» too.
+§2.4). The root keeps its STIR, domain, channel and Instagram, and every
+lineage company keeps its ``company_ids`` (a platform's number for the
+firm — company-tier, 06 §5.1, never a ``tg_user``): the resolver answers an
+observation carrying them «purged» and never makes the firm again
+(``companies.resolve_company``). A directory or exhibitor firm has no other
+key a next run carries, so without its platform id the next run made it
+anew under its own name (the wave-5 seam review). A merged source gives up a
+STIR or a domain another company holds (its root's, mostly — the two would
+collide under the unique indexes once the source is no longer ``merged``)
+and keeps one only it had, so that key answers «purged» too.
 
 **What stays**: ``outcomes``, ``usage_log``, ``merge_log``, ``purge_log``
 (the hash, the counts) and the suppression rows. With ``legal_request`` or
@@ -91,7 +95,6 @@ from clientscrapper.db.models import (
     ChatMonitor,
     Company,
     CompanyAlias,
-    CompanyId,
     Contact,
     Interaction,
     LeadCandidate,
@@ -161,7 +164,6 @@ COUNT_KEYS: Final = (
     "files",
     "model_jobs",
     "aliases",
-    "company_ids",
     "candidates",
     "candidates_ended",
     "reviews",
@@ -183,7 +185,6 @@ LEFTOVER_KEYS: Final = (
     "files",
     "model_jobs",
     "aliases",
-    "company_ids",
     "push_payloads",
 )
 # How far ``subject_root`` follows a purged source to its old root.
@@ -255,7 +256,6 @@ class Scope:
     files: tuple[str, ...] = ()
     model_jobs: tuple[int, ...] = ()
     aliases: int = 0
-    company_ids: int = 0
     deleted: tuple[uuid.UUID, ...] = ()
     kept: tuple[uuid.UUID, ...] = ()
     ended: tuple[uuid.UUID, ...] = ()
@@ -289,7 +289,6 @@ class Scope:
             "files": len(self.files),
             "model_jobs": len(self.model_jobs),
             "aliases": self.aliases,
-            "company_ids": self.company_ids,
             "candidates": len(self.deleted),
             "candidates_ended": len(self.ended),
             "reviews": self.reviews,
@@ -626,10 +625,6 @@ async def collect(
         aliases=await _count(
             session,
             sa.select(CompanyAlias.id).where(CompanyAlias.company_id.in_(members)),
-        ),
-        company_ids=await _count(
-            session,
-            sa.select(CompanyId.id_type).where(CompanyId.company_id.in_(members)),
         ),
         deleted=tuple(c for c in every if c not in set(kept)),
         kept=tuple(kept),
@@ -1296,18 +1291,15 @@ async def _people(
 async def _identity(
     session: AsyncSession, scope: Scope
 ) -> tuple[dict[str, int], list[str]]:
-    """Group 3: aliases, platform ids, the subject's own evidence rows."""
+    """Group 3: aliases, the subject's own evidence rows. The platform ids
+    stay (the module docstring): they are what the next run carries."""
     members = list(scope.members)
     aliases = await _gone(
         session, sa.delete(CompanyAlias).where(CompanyAlias.company_id.in_(members))
     )
-    ids = await _gone(
-        session, sa.delete(CompanyId).where(CompanyId.company_id.in_(members))
-    )
     files = await evidence.drop_rows(session, scope.evidence)
     counts = {
         "aliases": aliases,
-        "company_ids": ids,
         "evidence": len(scope.evidence),
         "files": len(files),
     }
@@ -1404,13 +1396,16 @@ COUNT_LINES: Final = (
     "🏢 Kompaniya: {companies} · kontakt: {contacts}",
     "🔎 Kuzatuv: {observations} · Telegram xabar: {interactions} · signal: {signals}",
     "📄 Dalil: {evidence} ({files} fayl) · AI soʻrovi: {model_jobs}",
-    "🏷 Nom: {aliases} · platforma ID: {company_ids}",
+    "🏷 Nom: {aliases}",
     "📋 Nomzod: {candidates} oʻchadi, {candidates_ended} yopiladi · karta: {reviews}",
     "📤 Push matni: {push_payloads} · jadval qatori: {sheet_rows} · chat: {chats}",
 )
 SUPPRESSION_LINE: Final = "🔒 Abadiy bostirish kaliti: {suppression} ta"
 NO_SUPPRESSION_LINE: Final = "Bostirish kaliti yozilmaydi (sabab: {reason})"
-KEPT_LINE: Final = "Qoladi: ERP natijalari, push jurnali (matnsiz), xarajat jurnali."
+KEPT_LINE: Final = (
+    "Qoladi: ERP natijalari, push jurnali (matnsiz), xarajat jurnali, "
+    "platforma ID (firma qayta yigʻilmasin)."
+)
 ERP_LINE: Final = (
     "⚠️ ERPʼga yuborilgan lid: {erp_leads} ta — ism va telefoni ERPda qoladi: "
     "uni ERPning oʻzida oʻchiring."

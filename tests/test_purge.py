@@ -337,7 +337,6 @@ EXPECTED = {
     "files": 2,
     "model_jobs": 7,
     "aliases": 1,
-    "company_ids": 1,
     "candidates": 2,
     "candidates_ended": 1,
     "reviews": 2,
@@ -571,7 +570,14 @@ async def test_the_people_data_goes_and_the_control_firm_s_stays(session, root):
         assert r[name].id not in kept
     assert r["sig_source"].evidence_id not in kept
     assert await count(session, m.CompanyAlias) == 0
-    assert set(await session.scalars(sa.select(m.CompanyId.id_value))) == {"n49"}
+    # The platform ids stay, on the purged firm: the next observation carrying
+    # one is refused «purged» (the wave-5 seam review; 06 §5.4).
+    held = dict(
+        (
+            await session.execute(sa.select(m.CompanyId.id_value, m.CompanyId.company_id))
+        ).all()
+    )
+    assert held == {"n41": w.root.id, "n49": w.control.id}
     jobs = {k: await fresh(session, m.ModelJob, v.id) for k, v in r["jobs"].items()}
     naming = ("naming_phone", "naming_handle", "naming_id")
     for name in ("applied", "pending", "fallback", "by_evidence", *naming):

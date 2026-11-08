@@ -490,3 +490,94 @@ async def test_unut_takes_a_channel_e3_queued_out_of_the_reader_s_line(session, 
     # Another firm's waiting name is not the subject's.
     assert "namuna_boshqa" in flag.value["names"]
     assert other.id != company.id
+
+
+async def live_holders(session, pairs: list[tuple[str, str]]) -> list[str]:  # type: ignore[no-untyped-def]
+    """The live (not purged) companies holding one of the platform ids, or
+    named as either followed firm."""
+    rows = await session.scalars(
+        sa.select(Company.display_name)
+        .outerjoin(CompanyId, CompanyId.company_id == Company.id)
+        .where(
+            Company.state != "purged",
+            sa.or_(
+                sa.tuple_(CompanyId.id_type, CompanyId.id_value).in_(pairs),
+                Company.display_name.in_((ADVANTEX, EMA)),
+            ),
+        )
+        .execution_options(populate_existing=True)
+    )
+    return sorted(set(rows))
+
+
+ADVANTEX = "ADVANTEX, OOO"
+
+
+@pytest.mark.parametrize("reason", ["legal_request", "dnc", "owner"])
+async def test_a_purged_wave5_firm_is_not_made_again_by_the_next_run(
+    session, wave5_sources, tmp_path, reason
+):
+    """06 §5.4: «the same company cannot be re-created by the next
+    observation». A directory or exhibitor firm has no STIR, domain or
+    channel for the purged row to keep — its platform id is the key the next
+    run carries, so the purged root keeps its ``company_ids`` (company-tier,
+    06 §5.1) and the resolver answers «purged» (the wave-5 seam review)."""
+    await collect(session, tmp_path)
+    await settle(NOW)
+    ema = await company_named(session, EMA)
+    advantex = await company_named(session, ADVANTEX)
+    pairs = [
+        (t, v)
+        for t, v in (
+            await session.execute(
+                sa.select(CompanyId.id_type, CompanyId.id_value).where(
+                    CompanyId.company_id.in_((ema.id, advantex.id))
+                )
+            )
+        ).all()
+    ]
+    assert ("exhibitor_slug", "era:25848") in pairs
+    assert any(t == "goldenpages" for t, _ in pairs)
+    for firm_id in (ema.id, advantex.id):
+        plan = await purge.plan_company(session, firm_id, reason=reason)
+        await session.commit()
+        await purge.execute(session, plan, requested_by="owner:1", now=NOW, root=tmp_path)
+        await session.commit()
+        # The kept ids are not a purge that stopped part-way.
+        assert not await purge.unfinished(session, firm_id)
+    assert await live_holders(session, pairs) == []
+
+    # A week on, both collectors read the same rows again.
+    clock = FakeClock(THURSDAY + timedelta(days=7))
+    report = await run_collector(
+        Directories,
+        fetcher=fetcher_for(Web(clock).site),
+        now=clock.now(),
+        evidence_root=tmp_path,
+        clock=clock.now,
+    )
+    assert report.status == "ok", report
+    clock = FakeClock(EXHIBITORS_AT + timedelta(days=7))
+    report = await run_collector(
+        Exhibitors,
+        fetcher=fetcher_for(caitme_site(clock)),
+        now=clock.now(),
+        evidence_root=tmp_path,
+        clock=clock.now,
+    )
+    assert report.status == "ok", report
+    await settle(NOW + timedelta(days=8))
+
+    assert await live_holders(session, pairs) == []
+    for firm_id in (ema.id, advantex.id):
+        gone = await session.get(Company, firm_id, populate_existing=True)
+        assert gone is not None and gone.state == "purged"
+    # The rows were read again and refused, not simply absent from the run.
+    refused = await session.scalars(
+        sa.select(Observation.parsed["handles"]).where(
+            Observation.status == "rejected", Observation.reject_reason == "purged"
+        )
+    )
+    seen = {(t, v) for handles in refused for t, v in (handles or {}).items()}
+    assert ("exhibitor_slug", "era:25848") in seen
+    assert any(t == "goldenpages" and (t, v) in pairs for t, v in seen)
