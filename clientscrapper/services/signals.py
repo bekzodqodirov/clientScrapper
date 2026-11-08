@@ -617,6 +617,24 @@ def _finish(
     return drafts.result()
 
 
+# 04 §6 gate 3's supplier flag (``gates.SUPPLIER_FLAG``).
+SUPPLIER_FLAG: Final = "flag_supplier_cn"
+CN_PHONE_PREFIX: Final = "+86"
+
+
+def china_phone(parsed: Mapping[str, Any]) -> str | None:
+    """A Chinese number the firm lists as its own (``owner='company'``), as
+    written; None for none."""
+    phones = parsed.get("phones")
+    for item in phones if isinstance(phones, list) else []:
+        if not isinstance(item, Mapping) or item.get("owner") != "company":
+            continue
+        e164 = _str(item.get("e164"))
+        if e164 is not None and e164.startswith(CN_PHONE_PREFIX):
+            return _str(item.get("raw")) or e164
+    return None
+
+
 def from_rules(
     evidence: EvidenceRef, parsed: Mapping[str, Any], company: CompanyFacts
 ) -> list[SignalDraft]:
@@ -658,6 +676,12 @@ def from_rules(
         and (state := _first(STATE_BODY_RE, own)) is not None
     ):
         drafts.add("neg_state_body", quote=state)
+    if kind in SELF_DESCRIPTION_KINDS and (cn_phone := china_phone(parsed)) is not None:
+        # 04 §6 gate 3 «phone +86»: the resolver keeps Uzbek numbers only (a
+        # foreign tail would collide with an Uzbek one), so a firm's own
+        # listing of a Chinese number is said here, as the gate's flag (the
+        # wave-5 seam review: the branch read contacts nobody could write).
+        drafts.add(SUPPLIER_FLAG, quote=cn_phone)
 
     _collector_types(
         drafts,

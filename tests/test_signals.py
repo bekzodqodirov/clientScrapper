@@ -807,3 +807,30 @@ async def test_emit_takes_two_drafts_of_one_key_in_one_call(session):
         ("cn_sector_prior", None, "model-x"),
         ("vol_stated_1_3", "2 kub mato", "model-x"),
     ]
+
+
+CN_PHONE = "+86 138 0013 8000"
+UZ_PHONE = "+998 90 000 00 88"
+
+
+def test_a_firm_s_own_chinese_number_is_gate_3_s_supplier_flag():
+    """04 §6 gate 3 «phone +86»: a firm's own listing (a directory card, a
+    site) of a Chinese number is the supplier flag — the resolver keeps no
+    foreign number as a contact, so gate 3's contact branch could never fire
+    (the wave-5 seam review). The number as written is the quote when the
+    excerpt holds it. A post that names a supplier's number is not the
+    poster's own."""
+    card = rules(
+        f"Оборудование из Китая · {CN_PHONE}",
+        "directory_entry",
+        phones=[CN_PHONE, UZ_PHONE],
+    )
+    assert card["flag_supplier_cn"].quote == CN_PHONE
+    assert "flag_supplier_cn" in keys(
+        rules("Namuna Texnika", "profile", phones=[CN_PHONE])
+    )
+    assert "flag_supplier_cn" not in keys(
+        rules("Namuna Texnika", "directory_entry", phones=[UZ_PHONE])
+    )
+    post = rules(f"Zavod raqami {CN_PHONE}, 5 kub mato kerak", phones=[CN_PHONE])
+    assert "flag_supplier_cn" not in keys(post)

@@ -671,3 +671,38 @@ async def test_a_phone_bearing_directory_firm_reaches_the_card_and_the_payload(
     ).text
     assert cards.esc(JACK) in card and phone.phone[-2:] in card
     assert cited.url in card
+
+
+async def test_a_directory_card_with_a_chinese_number_is_excluded_as_a_supplier(
+    session, wave5_sources
+):
+    """04 §6 gate 3 «phone +86», through the resolver and the scorer: a
+    directory card that lists a Chinese number beside its Uzbek one ends
+    ``excluded(supplier_cn)`` instead of going to enrichment (the wave-5
+    seam review: the resolver keeps Uzbek numbers only, so the branch that
+    read contacts never fired)."""
+    from tests.companies_fixtures import observe, parsed
+
+    body = parsed(
+        name='"NAMUNA TEXNIKA" ООО',
+        ids={"goldenpages": "990001"},
+        city="Toshkent",
+        phones=(("+8613800138000", "company"), ("+998900000089", "company")),
+        url="https://www.goldenpages.uz/company/?Id=990001",
+    )
+    body["text"]["excerpt"] = '"NAMUNA TEXNIKA" ООО · Оптово-розничная торговля'
+    body["hints"]["collector"] = {
+        "signal_types": ["directory_wholesale"],
+        "attrs": {"site": "goldenpages", "bulky": ["equipment"]},
+    }
+    await observe(session, body)
+    await session.commit()
+    await settle(NOW)
+    firm = await company_named(session, '"NAMUNA TEXNIKA" ООО')
+    cand = await candidate_of(session, firm)
+    assert (cand.state, cand.exclude_reason) == ("excluded", "supplier_cn")
+    assert firm.is_supplier_cn
+    keys = set(
+        await session.scalars(sa.select(Signal.key).where(Signal.company_id == firm.id))
+    )
+    assert "flag_supplier_cn" in keys
