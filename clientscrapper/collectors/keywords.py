@@ -739,6 +739,16 @@ STATE_BODY_NAME_RE = re.compile(
     r"\d+\s*(?:-\s*|\s+(?=сон))(?:сон(?:ли)?\s+)?(?:\w+\s+){0,2}?(?:мактаб|шифохона)\w*|"
     r"школ\w*\s*№\s*\d+|shifoxonasi\w*|шифохонаси\w*|"
     r"ministr(?:y|ies)|cabinet\s+of\s+ministers|"
+    # The same bodies in the directories' Russian and in Uzbek (the wave-5
+    # seam review): «при Кабинете Министров», «Vazirlar Mahkamasi
+    # huzuridagi», the customs committee, and a «… development» committee or
+    # agency — never «agentligi» alone («Reklama agentligi» is a private firm).
+    r"кабинет\w*\s+министров|vazirlar\s+mahkama\w*|вазирлар\s+ма[ҳх]кама\w*|"
+    r"таможенн\w*\s+комитет\w*|комитет\w*\s+таможн\w*|"
+    rf"bojxona\s+qo{_A}?mita\w*|божхона\s+[қк][ўу]мита\w*|"
+    r"(?:комитет|агентств)\w*\s+по\s+развити\w*|"
+    rf"rivojlantirish\s+(?:qo{_A}?mitasi|agentligi)|"
+    r"ривожлантириш\s+(?:[қк][ўу]митаси|агентлиги)|"
     r"(?<!real\s)state\s+(?:\w+\s+){0,4}?(?:committee|inspection|inspectorate|"
     r"agency|enterprise|unitary|institute|university))(?!\w)"
     rf"{_NOT_STATE_BODY}",

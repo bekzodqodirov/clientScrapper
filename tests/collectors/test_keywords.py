@@ -1531,6 +1531,52 @@ def test_an_english_state_body_name_is_a_state_body(name, want):
 
 
 @pytest.mark.parametrize(
+    ("name", "want"),
+    [
+        (
+            "Агентство по развитию лёгкой промышленности при Кабинете Министров "
+            "Республики Узбекистан",
+            "Агентство по развитию",
+        ),
+        (
+            "O'zbekiston Respublikasi Vazirlar Mahkamasi huzuridagi Yengil "
+            "sanoatni rivojlantirish agentligi",
+            "Vazirlar Mahkamasi",
+        ),
+        (
+            "Ўзбекистон Республикаси Вазирлар Маҳкамаси ҳузуридаги Енгил саноатни "
+            "ривожлантириш агентлиги",
+            "Вазирлар Маҳкамаси",
+        ),
+        ("Комитет по развитию конкуренции", "Комитет по развитию"),
+        ("Raqobatni rivojlantirish qo'mitasi", "rivojlantirish qo'mitasi"),
+        ("Таможенный комитет", "Таможенный комитет"),
+        ("Davlat bojxona qoʻmitasi", "Davlat bojxona qoʻmitasi"),
+        ("Божхона қўмитаси", "Божхона қўмитаси"),
+    ],
+)
+def test_a_state_body_in_russian_or_uzbek_is_a_state_body_too(name, want):
+    """The English names have their Russian and Uzbek twins: the directories
+    print the agency the exhibitor lists name in English (the wave-5 seam
+    review: gate 7 excluded one script of the same body)."""
+    match = kw.STATE_BODY_NAME_RE.search(name)
+    assert match is not None and match.group(0) == want
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "Reklama agentligi Namuna",
+        "Агентство недвижимости Намуна",
+        "Namuna Development Agency",
+        "Kabinet mebel Namuna",
+    ],
+)
+def test_a_private_agency_is_no_state_body(name):
+    assert kw.STATE_BODY_NAME_RE.search(name) is None
+
+
+@pytest.mark.parametrize(
     "name",
     [
         "REAL STATE AGENCY",

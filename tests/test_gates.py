@@ -709,6 +709,11 @@ def test_a_founder_s_name_or_an_equipment_trader_is_no_state_body(name):
         "Sogʻliqni saqlash vazirligi",
         "ГУП «Намуна»",
         "Государственный налоговый комитет",
+        # One body in its three local scripts (the wave-5 seam review; the
+        # English one is the exhibitor test's).
+        "Агентство по развитию лёгкой промышленности при Кабинете Министров",
+        "Vazirlar Mahkamasi huzuridagi Yengil sanoatni rivojlantirish agentligi",
+        "Вазирлар Маҳкамаси ҳузуридаги Енгил саноатни ривожлантириш агентлиги",
     ],
 )
 def test_a_state_body_shape_in_the_name_excludes(name):
