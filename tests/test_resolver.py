@@ -1762,3 +1762,64 @@ async def test_the_job_stops_at_its_limit(session):
     await session.commit()
     assert (await c.resolve_batch(now=NOW, limit=2)).claimed == 2
     assert await count(session, "observations", "status = 'new'") == 1
+
+
+TRADE_NAME = "Техноплаза савдо уйи"
+LEGAL_NAME = "УЗБЕКСКО-КИТАЙСКИЙ ТОРГОВЫЙ ДОМ"
+
+
+def _topuz_card() -> dict[str, Any]:
+    body = parsed(
+        source_key="directories_topuz",
+        name=TRADE_NAME,
+        city="Toshkent",
+        phones=(("+998900000071", "company"),),
+    )
+    body["hints"]["collector"] = {
+        "signal_types": ["directory_wholesale"],
+        "attrs": {"site": "topuz", "legal_name": LEGAL_NAME},
+    }
+    return body
+
+
+def _goldenpages_card() -> dict[str, Any]:
+    return parsed(name=LEGAL_NAME, city="Toshkent", ids={"goldenpages": "62755"})
+
+
+@pytest.mark.parametrize("topuz_first", [True, False])
+async def test_a_firm_listed_by_its_legal_name_elsewhere_is_one_company(
+    session, topuz_first
+):
+    """top.uz prints a firm's trading name and keeps its legal name beside it
+    (``attrs.legal_name``); goldenpages lists it by the legal name. The two
+    are one company whichever is read first — the other name is matched when
+    the display name finds nobody, and kept as an alias (the wave-5 seam
+    review: the phone half and the China-cue half never met)."""
+    order = [_topuz_card(), _goldenpages_card()]
+    if not topuz_first:
+        order.reverse()
+    first = await resolve(session, order[0])
+    second = await resolve(session, order[1])
+    assert second.company.id == first.company.id
+    assert len(await companies(session)) == 1
+    aliases = set(
+        await session.scalars(
+            sa.select(CompanyAlias.alias).where(
+                CompanyAlias.company_id == first.company.id
+            )
+        )
+    )
+    assert LEGAL_NAME in aliases or first.company.display_name == LEGAL_NAME
+
+
+async def test_an_other_name_of_another_firm_is_not_attached_by_a_close_name(session):
+    """An other name attaches only as a name would: an unrelated firm with a
+    different legal name stays its own."""
+    await resolve(session, _goldenpages_card())
+    body = parsed(name="Namuna Mebel Savdo", city="Toshkent")
+    body["hints"]["collector"] = {
+        "signal_types": [],
+        "attrs": {"site": "topuz", "legal_name": "NAMUNA MEBEL ООО"},
+    }
+    other = await resolve(session, body)
+    assert other.created and len(await companies(session)) == 2

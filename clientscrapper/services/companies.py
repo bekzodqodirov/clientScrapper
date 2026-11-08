@@ -248,6 +248,10 @@ class IdentityKeys:
     person_name: str | None = None
     person_role: str | None = None
     url: str | None = None
+    # The other names the card prints for the same firm (a directory's legal
+    # name beside its trading name, a shop's brand name): matched when the
+    # display name finds nobody, and kept as aliases (``OTHER_NAME_ATTRS``).
+    other_names: tuple[str, ...] = ()
 
     @property
     def person_side_handles(self) -> bool:
@@ -295,6 +299,23 @@ def _id_value(value: Any) -> str | None:
         return None
     text = str(value).strip()
     return text if 1 <= len(text) <= _ID_VALUE_MAX else None
+
+
+# The collector attrs that name the same firm another way (top.uz's
+# ``legal_name``, yellowpages' ``brand_name``; never a person's — the parsers
+# drop an individual entrepreneur's, ``directories.common.company_name``).
+OTHER_NAME_ATTRS: Final = ("legal_name", "brand_name")
+
+
+def _other_names(parsed: Mapping[str, Any], display: str | None) -> tuple[str, ...]:
+    hints = _mapping(parsed.get("hints"))
+    attrs = _mapping(_mapping(hints.get("collector")).get("attrs"))
+    found: list[str] = []
+    for key in OTHER_NAME_ATTRS:
+        text = _text(attrs.get(key))
+        if text and len(text) >= 2 and text != display and text not in found:
+            found.append(text[:160].rstrip())
+    return tuple(found)
 
 
 def identity_keys(parsed: Mapping[str, Any]) -> IdentityKeys:
@@ -374,6 +395,7 @@ def identity_keys(parsed: Mapping[str, Any]) -> IdentityKeys:
         person_name=_text(person.get("name")),
         person_role=_text(person.get("role")),
         url=_text(parsed.get("url")),
+        other_names=_other_names(parsed, display),
     )
 
 
@@ -902,18 +924,36 @@ def _group_candidates(rows: Iterable[Sequence[Any]]) -> list[NameCandidate]:
 
 
 async def _name_match(session: AsyncSession, keys: IdentityKeys) -> NameMatch:
-    key = keys.name_key
+    return await _key_match(session, keys.name_key, city=keys.city)
+
+
+async def _key_match(
+    session: AsyncSession, key: str | None, *, city: str | None
+) -> NameMatch:
     if key is None or not usable_name(key):
         return NameMatch(company_id=None, score=0.0)
     exact = await _exact_name_candidates(session, key)
     if exact:
-        match = best_name_match(key, exact, city=keys.city)
+        match = best_name_match(key, exact, city=city)
         if match.company_id is not None:
             return match
         # Every holder of the exact name is in another city: other firms. This
         # city's close names still get their trigram look.
-    candidates = await _name_candidates(session, key, city=keys.city)
-    return best_name_match(key, candidates, city=keys.city)
+    candidates = await _name_candidates(session, key, city=city)
+    return best_name_match(key, candidates, city=city)
+
+
+async def _other_name_match(session: AsyncSession, keys: IdentityKeys) -> NameMatch:
+    """The best match of the card's other names (``IdentityKeys.other_names``)
+    — the same firm under its legal name on another site (the wave-5 seam
+    review: top.uz's «Техноплаза савдо уйи» is goldenpages' «УЗБЕКСКО-
+    КИТАЙСКИЙ ТОРГОВЫЙ ДОМ», and the two halves never met)."""
+    best = NameMatch(company_id=None, score=0.0)
+    for other in keys.other_names:
+        found = await _key_match(session, name_key(other), city=keys.city)
+        if found.company_id is not None and found.score > best.score:
+            best = found
+    return best
 
 
 async def resolve_company(
@@ -947,6 +987,10 @@ async def resolve_company(
     else:
         match = await _name_match(session, keys)
         decision = fuzzy_decision(match)
+        if decision != "attach" and keys.other_names:
+            alias_match = await _other_name_match(session, keys)
+            if fuzzy_decision(alias_match) == "attach":
+                match, decision = alias_match, "attach"
         if decision == "attach" and match.company_id is not None:
             winner = await session.get(Company, match.company_id)
             how, score = "fuzzy", match.score
@@ -1017,6 +1061,12 @@ async def resolve_company(
         source_key=source_key,
         now=now,
     )
+    if learn_name:
+        # The card's other names are the winner's too: the next card that
+        # prints only one of them finds it (``_exact_name_candidates`` reads
+        # aliases).
+        for spelling in keys.other_names:
+            await learn_alias(session, winner, spelling, source_key)
     return Resolution(
         company=winner,
         how=how,
