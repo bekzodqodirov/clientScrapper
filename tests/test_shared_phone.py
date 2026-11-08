@@ -145,7 +145,7 @@ async def test_a_shared_phone_is_never_a_usable_lead_phone(session):
     assert usable == 0
 
 
-SHARED_BC = "+998901110077"
+SHARED_BC = "+998902000077"
 
 
 async def test_three_directory_firms_on_a_business_centre_s_phone_stay_three(session):
@@ -174,7 +174,7 @@ async def test_three_directory_firms_on_a_business_centre_s_phone_stay_three(ses
     assert await count(session, "companies") == 3
     shared = await session.scalars(
         sa.select(Contact.shared_phone)
-        .where(Contact.phone_tail == "901110077")
+        .where(Contact.phone_tail == "902000077")
         .execution_options(populate_existing=True)
     )
     assert list(shared) == [True, True, True]
