@@ -528,7 +528,9 @@ _shared = _Shared()
 
 def shared_fetcher() -> http_layer.Fetcher:
     if _shared.fetcher is None:
-        _shared.fetcher = http_layer.Fetcher()
+        # The disk copy of robots.txt (03 §1.1): a restart asks no host again
+        # within the day (the wave-5 seam review).
+        _shared.fetcher = http_layer.Fetcher(robots_dir=http_layer.robots_cache_dir())
     return _shared.fetcher
 
 

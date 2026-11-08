@@ -15,6 +15,7 @@ from clientscrapper.collectors.base import Budget
 from clientscrapper.collectors.exhibitors import Edition, Exhibitors
 from clientscrapper.config import settings
 from clientscrapper.services.http import Fetcher
+from tests.live.conftest import HOSTS
 
 pytestmark = pytest.mark.live(source="exhibitors")
 
@@ -30,7 +31,7 @@ def budget() -> Budget:
 
 
 async def test_the_era_endpoint_still_answers_datatables_rows():
-    fetcher = Fetcher()
+    fetcher = Fetcher(hosts=HOSTS)
     try:
         answer = await fetcher.get(
             ERA,
@@ -52,7 +53,7 @@ async def test_the_era_endpoint_still_answers_datatables_rows():
 
 
 async def test_the_expodat_catalogue_still_prints_rows():
-    fetcher = Fetcher()
+    fetcher = Fetcher(hosts=HOSTS)
     try:
         answer = await fetcher.get(CATALOGUE, source="exhibitors", budget=budget())
     finally:

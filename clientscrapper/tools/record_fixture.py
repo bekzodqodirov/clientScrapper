@@ -54,6 +54,7 @@ from clientscrapper.services.http import (
     FetchResult,
     PaidCall,
     host_of,
+    robots_cache_dir,
 )
 from clientscrapper.services.urlsafe import scrub_url
 from clientscrapper.services.usage import CALLABLE, Operation, Priced
@@ -325,8 +326,10 @@ async def _main(args: argparse.Namespace) -> int:
     post = (
         json.loads(args.post_json.read_text(encoding="utf-8")) if args.post_json else None
     )
-    robots_dir = Path(settings.evidence_dir).parent / "http-cache" / "robots"
-    async with Fetcher(robots_dir=robots_dir) as fetcher, SessionLocal() as session:
+    async with (
+        Fetcher(robots_dir=robots_cache_dir()) as fetcher,
+        SessionLocal() as session,
+    ):
         try:
             paid = paid_call(args.paid, args.est) if args.paid else None
             bound = fetcher.bind(cost_gate=ask_gate(session)) if paid else fetcher

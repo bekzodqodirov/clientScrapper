@@ -532,3 +532,24 @@ def test_the_image_the_services_run_is_still_the_app():
     assert [line for line in stage if line.startswith("USER ")][
         -1
     ] == "USER clientscrapper"
+
+
+def test_every_live_fetcher_shares_the_smoke_run_s_host_state():
+    """One pace per host across a smoke run: a live test's Fetcher takes
+    ``tests/live/conftest.HOSTS`` (the wave-5 seam review)."""
+    import ast
+    from pathlib import Path
+
+    found: list[str] = []
+    for path in sorted((Path(__file__).parent / "live").glob("test_*_live.py")):
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "Fetcher"
+            ):
+                hosts = [k for k in node.keywords if k.arg == "hosts"]
+                ok = hosts and isinstance(hosts[0].value, ast.Name)
+                if not (ok and hosts[0].value.id == "HOSTS"):  # type: ignore[union-attr]
+                    found.append(f"{path.name}:{node.lineno}")
+    assert found == []

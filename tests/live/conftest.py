@@ -14,6 +14,15 @@ import os
 
 import pytest
 
+from clientscrapper.services.http import HostState
+
+# One smoke run is one process, as the worker is: every live test's Fetcher
+# shares these per-host buckets and robots cache, so two tests on one host
+# are paced like two requests of one run and robots.txt is read once (the
+# wave-5 seam review: a fresh HostState per test sent goldenpages two robots
+# fetches and two pages 0.06 s apart).
+HOSTS = HostState()
+
 
 def pytest_configure(config: pytest.Config) -> None:
     if os.environ.get("LIVE") != "1":

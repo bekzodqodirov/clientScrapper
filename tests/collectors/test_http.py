@@ -13,6 +13,7 @@ import hashlib
 import logging
 from datetime import datetime, timedelta
 from decimal import Decimal
+from itertools import pairwise
 from pathlib import Path
 
 import httpx
@@ -1037,3 +1038,26 @@ async def test_logs_never_carry_the_path_that_names_a_person(clock, caplog):
 )
 def test_scrub_url(url, scrubbed):
     assert http.scrub_url(url) == scrubbed
+
+
+async def test_a_host_with_and_without_www_is_one_pace(clock):
+    """One server, one bucket: E2 asks the apex and the site redirects to www
+    — the www robots.txt and page wait their turn after the apex page instead
+    of leaving at the same moment (the wave-5 seam review)."""
+    bare = "https://namuna.example.uz"
+    site = Site(
+        clock,
+        {
+            f"{bare}/robots.txt": ALLOW_ALL,
+            f"{bare}/": httpx.Response(301, headers={"location": f"{EX}/"}),
+            f"{EX}/robots.txt": ALLOW_ALL,
+            f"{EX}/": page(),
+        },
+    )
+    fetcher = fetcher_for(site, rps_default=0.5)
+    await fetcher.get(f"{bare}/", source="directories", budget=budget())
+    times = [s.at for s in site.seen]
+    assert len(times) == 4
+    assert all(b - a >= 2.0 for a, b in pairwise(times)), times
+    assert http.pace_key("www.namuna.example.uz") == "namuna.example.uz"
+    assert http.pace_key("catalog.namuna.example.uz") == "catalog.namuna.example.uz"

@@ -19,12 +19,13 @@ from clientscrapper.collectors.base import Budget
 from clientscrapper.collectors.directories import glotr, goldenpages, topuz, yellowpages
 from clientscrapper.config import settings
 from clientscrapper.services.http import Fetcher, FetchResult
+from tests.live.conftest import HOSTS
 
 pytestmark = pytest.mark.live(source="directories")
 
 
 async def fetch(url: str, *, source: str) -> FetchResult:
-    fetcher = Fetcher()
+    fetcher = Fetcher(hosts=HOSTS)
     budget = Budget(
         pages=1,
         usd=Decimal("0"),

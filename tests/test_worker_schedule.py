@@ -1525,3 +1525,23 @@ def test_the_worker_command_line_knows_one_command(monkeypatch):
     assert calls == ["backup"]
     with pytest.raises(SystemExit):
         worker.main(["restore"])
+
+
+async def test_the_shared_fetcher_keeps_robots_on_disk():
+    """03 §1.1: robots.txt «cached in memory and in
+    /data/http-cache/robots/<authority>.txt» — a restarted worker asks no
+    host again within the day (the wave-5 seam review)."""
+    from pathlib import Path
+
+    from clientscrapper.config import settings
+    from clientscrapper.services import http
+
+    try:
+        fetcher = worker.shared_fetcher()
+        assert fetcher.robots_dir == http.robots_cache_dir()
+        assert fetcher.robots_dir == (
+            Path(settings.evidence_dir).parent / "http-cache" / "robots"
+        )
+    finally:
+        await worker.shared_fetcher().aclose()
+        worker._shared.fetcher = None

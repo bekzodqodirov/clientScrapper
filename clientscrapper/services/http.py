@@ -345,8 +345,9 @@ class _Robots:
 
 class HostState:
     """Process-wide per-host state, shared by every Fetcher ``bind`` makes.
-    Pacing and the breaker are keyed by host name; robots.txt by authority
-    (host and a non-default port), since each port serves its own file."""
+    Pacing is keyed by site (``pace_key``: the host without ``www.``), the
+    breaker by host name; robots.txt by authority (host and a non-default
+    port), since each port serves its own file."""
 
     def __init__(self) -> None:
         self.last_at: dict[str, float] = {}
@@ -392,6 +393,18 @@ def authority_of(url: str) -> str:
 def url_id(url: str) -> str:
     """A log line's handle on a URL it must not print (see the module doc)."""
     return hashlib.sha256(strip_secrets(url).encode("utf-8")).hexdigest()[:12]
+
+
+def robots_cache_dir() -> Path:
+    """03 §1.1: robots.txt «cached in memory and in
+    /data/http-cache/robots/<authority>.txt» — beside the evidence directory,
+    so a restarted worker does not ask every host again."""
+    return Path(settings.evidence_dir).parent / "http-cache" / "robots"
+
+
+def pace_key(host: str) -> str:
+    """The pace bucket of ``host``: its name without a leading ``www.``."""
+    return host.removeprefix("www.")
 
 
 def same_site(a: str, b: str) -> bool:
@@ -1042,13 +1055,18 @@ class Fetcher:
     async def _pace(self, host: str, authority: str) -> None:
         # The interval is read at the next request, not fixed at the last one:
         # a Crawl-delay learnt from the robots.txt just fetched already counts.
-        async with self._hosts.pace_lock(host):
-            last = self._hosts.last_at.get(host)
+        # One bucket per site: a host with and without www is one server
+        # (``same_site``), so a redirect from the one to the other waits its
+        # turn (the wave-5 seam review: E2's apex page and the www robots.txt
+        # left together).
+        site = pace_key(host)
+        async with self._hosts.pace_lock(site):
+            last = self._hosts.last_at.get(site)
             if last is not None:
                 wait = last + self._interval(host, authority) - self._monotonic()
                 if wait > 0:
                     await self._sleep(wait)
-            self._hosts.last_at[host] = self._monotonic()
+            self._hosts.last_at[site] = self._monotonic()
 
     # -- robots.txt ------------------------------------------------------------------
 
