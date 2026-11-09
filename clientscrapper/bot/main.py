@@ -2,10 +2,10 @@
 """The owner bot process (06 §1.1): aiogram 3 long polling.
 
 It refuses to start without ``ASSISTANT_BOT_TOKEN`` and ``OWNER_TELEGRAM_ID``
-(never an unrestricted bot), reaches Telegram with ``get_me`` (×5, a
-container often starts before the network), sets the command menus (the
-owner's and each manager's, nobody else's), and then runs three things until
-stopped:
+(never an unrestricted bot), reaches Telegram with ``get_me`` (5, 10, 20, 40 s,
+then once a minute: a container often starts before the network), sets the
+command menus (the owner's and each manager's, nobody else's), and then runs
+three things until stopped:
 
 * polling with ``drop_pending_updates=False`` (MIYA: what the owner sent
   while the bot restarted is not thrown away; Telegram keeps a day);
@@ -26,6 +26,12 @@ judge health registers (``costs.set_anthropic_health``,
 ``costs.set_cap_notifier`` with the quiet hours, the suppression probe).
 ``@dp.errors()`` answers «⚠️ Xatolik yuz berdi …» so a pressed button never
 spins.
+
+A bot that cannot start — no token, no owner, a token Telegram refuses or one
+of the wrong shape — logs why once and idles until stopped, writing no beat
+(``make ps`` says unhealthy, which is true). It never exits: under ``restart:
+unless-stopped`` an exit was a restart loop (six restarts in two minutes with
+an empty token in the docker re-run), the reason scrolling away under them.
 """
 
 from __future__ import annotations
@@ -67,6 +73,9 @@ log = logging.getLogger(__name__)
 BEAT_EVERY: Final = timedelta(minutes=1)
 WATCHDOG_EVERY: Final = timedelta(minutes=5)
 GET_ME_ATTEMPTS: Final = 5
+# After the first GET_ME_ATTEMPTS misses get_me is asked this often until it
+# answers: a restart did the same, every ~95 s, as a restart loop.
+GET_ME_RETRY_SECONDS: Final = 60.0
 # «The database does not answer»: the connection-level failures only. A
 # statement a healthy database refused (an IntegrityError, a DataError) is an
 # ordinary error, never «database down».
@@ -87,6 +96,11 @@ UNWATCHED: Final = frozenset(health.PROBLEM_KEYS) - WATCHED
 
 Sleep = Callable[[float], Awaitable[None]]
 Polling = Callable[[Dispatcher, Bot], Coroutine[Any, Any, None]]
+Idle = Callable[[asyncio.Event], Awaitable[None]]
+
+
+class NotStarting(Exception):
+    """Why the bot cannot start, in the owner's words (``start.*``)."""
 
 
 # --- the dispatcher -------------------------------------------------------------------
@@ -228,26 +242,43 @@ async def watchdog_loop(notify: health.OwnerNotify, stop: asyncio.Event) -> None
 # --- start ----------------------------------------------------------------------------
 
 
-async def reach(bot: Bot, *, sleep: Sleep = asyncio.sleep) -> Any:
-    """``get_me`` with MIYA's backoff (5, 10, 20, 40 s); SystemExit after 5.
-    A token Telegram refuses (401) stops at once with its own words: retrying
-    it only delayed «could not reach Telegram», which sent the owner to check
-    the network (the first docker dry run)."""
-    for attempt in range(GET_ME_ATTEMPTS):
+async def _wait(stop: asyncio.Event, seconds: float) -> None:
+    """``seconds``, or until ``stop`` is set."""
+    with contextlib.suppress(TimeoutError):
+        await asyncio.wait_for(stop.wait(), timeout=seconds)
+
+
+async def reach(
+    bot: Bot, *, sleep: Sleep | None = None, stop: asyncio.Event | None = None
+) -> Any | None:
+    """``get_me`` with MIYA's backoff (5, 10, 20, 40 s), then once a minute
+    until it answers; None once ``stop`` is set. The fifth miss logs
+    ``start.no_telegram`` once. A token Telegram refuses (401) raises
+    ``NotStarting`` at once in its own words: retrying it only delayed «could
+    not reach Telegram», which sent the owner to check the network (the first
+    docker dry run)."""
+    stop = stop or asyncio.Event()
+    attempt = 0
+    while not stop.is_set():
         try:
             return await bot.get_me()
         except TelegramUnauthorizedError:
-            raise SystemExit(t("start.token_refused")) from None
+            raise NotStarting(t("start.token_refused")) from None
         except Exception as exc:
-            if attempt == GET_ME_ATTEMPTS - 1:
-                break
-            wait = 2**attempt * 5
+            attempt += 1
+            if attempt == GET_ME_ATTEMPTS:
+                log.error(t("start.no_telegram"), extra={"error": type(exc).__name__})
+            wait = (
+                2 ** (attempt - 1) * 5
+                if attempt < GET_ME_ATTEMPTS
+                else GET_ME_RETRY_SECONDS
+            )
             log.warning(
                 "get_me failed; retrying",
                 extra={"error": type(exc).__name__, "wait_s": wait},
             )
-            await sleep(wait)
-    raise SystemExit(t("start.no_telegram"))
+            await (sleep(wait) if sleep is not None else _wait(stop, wait))
+    return None
 
 
 async def set_commands(bot: Bot) -> None:
@@ -289,28 +320,47 @@ def refusal() -> str | None:
     return None
 
 
+async def not_starting(why: str, stop: asyncio.Event, idle: Idle | None) -> None:
+    """Say once why the bot cannot start, then wait for SIGTERM (``idle``:
+    the tests' stand-in). No beat: the container reads unhealthy; ``make
+    reload`` after fixing .env starts the bot again."""
+    log.error(why)
+    await (idle(stop) if idle is not None else stop.wait())
+
+
+def _make_bot() -> Bot:
+    try:
+        return deliver.make_bot()
+    except TokenValidationError:
+        # aiogram checks the token's shape before any request: a paste with
+        # a missing piece ended in a traceback.
+        raise NotStarting(t("start.token_refused")) from None
+
+
 async def run(
     *,
     bot: Bot | None = None,
     polling: Polling = _poll,
-    sleep: Sleep = asyncio.sleep,
+    sleep: Sleep | None = None,
     deps: Deps | None = None,
+    idle: Idle | None = None,
 ) -> None:
     setup_logging("bot")
-    why = refusal()
-    if why is not None:
-        raise SystemExit(why)
-    try:
-        bot = bot or deliver.make_bot()
-    except TokenValidationError:
-        # aiogram checks the token's shape before any request: a paste with
-        # a missing piece ended in a traceback.
-        raise SystemExit(t("start.token_refused")) from None
     stop = asyncio.Event()
     installed = install_stop_signals(stop)
     tasks: list[asyncio.Task[Any]] = []
     try:
-        me = await reach(bot, sleep=sleep)
+        try:
+            why = refusal()
+            if why is not None:
+                raise NotStarting(why)
+            bot = bot or _make_bot()
+            me = await reach(bot, sleep=sleep, stop=stop)
+        except NotStarting as refused:
+            await not_starting(str(refused), stop, idle)
+            return
+        if me is None:  # stopped while Telegram was still unreachable
+            return
         identity: dict[str, Any] = {"telegram": True, "username": me.username}
         log.info("bot ready", extra={"username": me.username})
         await set_commands(bot)
@@ -347,8 +397,9 @@ async def run(
     finally:
         remove_stop_signals(installed)
         costs.set_cap_notifier(None)
-        with contextlib.suppress(Exception):
-            await bot.session.close()
+        if bot is not None:
+            with contextlib.suppress(Exception):
+                await bot.session.close()
         await engine.dispose()
     log.info("bot stopped")
 

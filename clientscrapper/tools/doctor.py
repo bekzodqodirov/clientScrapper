@@ -26,7 +26,10 @@ full pull (04 AC 13).
 and no test reaches the network. ``main`` runs the probes.
 
 Exit code 1 when anything is an error; warnings alone exit 0. A network that
-cannot be reached is a warning — the doctor also runs on a laptop.
+cannot be reached is a warning — the doctor also runs on a laptop. A database
+that answers but refuses the password is an error, not «not up yet»: the
+database keeps the password it was created with, and the docker re-run found
+the doctor green over exactly that, with ``make up`` then dying on init.
 """
 
 from __future__ import annotations
@@ -47,6 +50,7 @@ from typing import Any, Literal, Protocol
 import httpx
 
 from clientscrapper.services import keys, usage
+from clientscrapper.tools import session_string
 
 EXPECTED_ENV_KEYS: tuple[str, ...] = (
     "POSTGRES_USER",
@@ -197,6 +201,9 @@ class DbState:
     salt_id: str | None = None
     # sources.erp_sync.enabled (None = not read): the seed ships it off.
     erp_sync_enabled: bool | None = None
+    # The server answered and refused the password (28P01): the role keeps
+    # the password the database was created with.
+    auth_failed: bool = False
 
 
 TokenVerdict = Literal["ok", "refused", "unreachable"]
@@ -276,6 +283,13 @@ def _within(current: time, start: time, end: time) -> bool:
 
 
 def _database(state: DbState) -> Finding:
+    if state.auth_failed:
+        return _error(
+            "❌ Baza parolni qabul qilmadi — baza birinchi ishga tushganda boshqa "
+            "parol bilan yaratilgan (keyin .env da oʻzgartirilgan). Yo .env dagi "
+            "POSTGRES_PASSWORD va DATABASE_URL ni eski parolga qaytar, yo bazaga "
+            "yangisini ber: make db-password-sync — keyin make doctor."
+        )
     if not state.reachable:
         return _warn(
             f"⚠️ Baza hozircha javob bermayapti ({state.error or 'ulanish yoʻq'}) — "
@@ -672,11 +686,26 @@ def check(
                 )
             )
 
-    # C7: the reader account's session, made after the first make up.
-    if _truthy(env.get("USERBOT_ENABLED", "true")) and not value("TELETHON_SESSION"):
-        found.append(
-            _warn("⚠️ TELETHON_SESSION boʻsh — make up dan keyin make userbot-login qil.")
-        )
+    # C7: the reader account's session, made after the first make up; one
+    # that does not parse (a doubled «TELETHON_SESSION=», quotes, a cut
+    # paste) is said here, not one make reload later by the reader.
+    session = value("TELETHON_SESSION")
+    reader_on = _truthy(env.get("USERBOT_ENABLED", "true"))
+    if reader_on and "TELETHON_SESSION" not in commented:
+        if not session:
+            found.append(
+                _warn(
+                    "⚠️ TELETHON_SESSION boʻsh — make up dan keyin make userbot-login qil."
+                )
+            )
+        elif not session_parses(session):
+            found.append(
+                _error(
+                    "❌ TELETHON_SESSION notoʻgʻri (ikki marta «TELETHON_SESSION=», "
+                    "qoʻshtirnoq yoki chala nusxa) — .env da butun qatorni make "
+                    "userbot-login chiqargan qator bilan almashtir."
+                )
+            )
 
     # C8: times the bot and the scheduler read; the digest goes out while
     # cards are being sent, never outside REVIEW_HOURS.
@@ -748,8 +777,14 @@ def check(
                 _warn(f"⚠️ {name} topilmadi — zaxira ishlamaydi (Docker obrazida bor).")
             )
 
-    # C12: the database.
-    if db is not None:
+    # C12: the database. A refused password while C4 already says the URL's
+    # differs is that same fact; the sync would not cure it.
+    url_matches = (
+        bool(password)
+        and password != PASSWORD_PLACEHOLDER
+        and (f":{password}@" in value("DATABASE_URL"))
+    )
+    if db is not None and not (db.auth_failed and not url_matches):
         found.append(_database(db))
 
     # C13: the configured model ids are priced; the allocations table.
@@ -772,15 +807,42 @@ def check(
     return found
 
 
-def summary(findings: list[Finding], *, in_update: bool = False) -> str:
-    """``in_update``: run by ``make update`` (CS_IN_UPDATE=1), which goes on
-    by itself, so the all-clear does not tell the owner to type make up."""
+def summary(
+    findings: list[Finding], *, in_update: bool = False, in_up: bool = False
+) -> str:
+    """``in_update``: run by ``make update`` (CS_IN_UPDATE=1), ``in_up``: run
+    as ``make up``'s first step (CS_IN_UP=1) — both go on by themselves, so the
+    all-clear does not tell the owner to type make up."""
     errors = sum(1 for f in findings if f.level == "error")
     if errors:
         return f"❌ {errors} ta muammo. Tuzatib, qaytadan: make doctor"
     if in_update:
         return "✅ Hammasi joyida — make update davom etadi, hech narsa yozmang."
+    if in_up:
+        return "✅ Hammasi joyida — make up davom etadi."
     return "✅ Hammasi joyida — endi: make up"
+
+
+def session_parses(value: str) -> bool:
+    """The reader's own rule (``userbot/session.py``); never echoes the value."""
+    try:
+        session_string.parse(value)
+    except session_string.BadSession:
+        return False
+    return True
+
+
+# libpq's words for a password the server refused; the server's own messages
+# are English (the image's lc_messages) and psycopg gives no SQLSTATE for an
+# error met while connecting.
+_AUTH_FAILED = ("password authentication failed", "28P01")
+
+
+def password_refused(exc: BaseException) -> bool:
+    """Whether a failed connect was the server refusing the password."""
+    if getattr(exc, "sqlstate", None) == "28P01":
+        return True
+    return any(word in str(exc) for word in _AUTH_FAILED)
 
 
 def exit_code(findings: list[Finding]) -> int:
@@ -811,7 +873,11 @@ def probe_database(url: str) -> DbState:
                 erp_sync_enabled=bool(erp[1]) if erp else None,
             )
     except Exception as exc:
-        return DbState(reachable=False, error=type(exc).__name__)
+        # The class only, never the message (it may carry the DSN) — but
+        # whether it says the password was refused.
+        return DbState(
+            reachable=False, error=type(exc).__name__, auth_failed=password_refused(exc)
+        )
 
 
 # --- the network probes (T-08) ------------------------------------------------
@@ -1005,7 +1071,13 @@ def main() -> int:
     )
     for finding in findings:
         print(finding.text)
-    print(summary(findings, in_update=os.environ.get("CS_IN_UPDATE") == "1"))
+    print(
+        summary(
+            findings,
+            in_update=os.environ.get("CS_IN_UPDATE") == "1",
+            in_up=os.environ.get("CS_IN_UP") == "1",
+        )
+    )
     return exit_code(findings)
 
 

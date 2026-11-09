@@ -291,15 +291,23 @@ UZ: Final[Mapping[str, str]] = MappingProxyType(
         "stir.purged": (
             "Bu STIR soʻrov boʻyicha oʻchirilgan firmaga tegishli (/unut). Yozilmadi."
         ),
-        # --- the process (bot/main.py; printed, then the process ends) ----------
-        "start.no_token": "ASSISTANT_BOT_TOKEN boʻsh — bot ishga tushmaydi.",
-        "start.no_owner": (
-            "OWNER_TELEGRAM_ID boʻsh — hech kimga cheklanmagan botni ishga tushirmayman."
+        # --- the process (bot/main.py; logged once, then the process idles). No
+        # «@handle» here: the log's redaction turns one into «@…».
+        "start.no_token": (
+            "ASSISTANT_BOT_TOKEN boʻsh — bot ishga tushmaydi. .env ga yoz, keyin "
+            "make reload."
         ),
-        "start.no_telegram": "Telegramga 5 urinishda ulanib boʻlmadi.",
+        "start.no_owner": (
+            "OWNER_TELEGRAM_ID boʻsh — hech kimga cheklanmagan botni ishga "
+            "tushirmayman. .env ga yoz, keyin make reload."
+        ),
+        "start.no_telegram": (
+            "Telegramga 5 urinishda ulanib boʻlmadi — har daqiqada qayta urinaman; "
+            "serverning internetini tekshir."
+        ),
         "start.token_refused": (
-            "ASSISTANT_BOT_TOKEN ni Telegram rad etdi — @BotFather → /mybots → "
-            "API Token; .env ga qaytadan koʻchir, keyin make reload."
+            "ASSISTANT_BOT_TOKEN ni Telegram rad etdi — Telegramda BotFather → /mybots "
+            "→ API Token; .env ga qaytadan koʻchir, keyin make reload."
         ),
     }
 )

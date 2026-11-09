@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 import re
 import uuid
 from collections.abc import AsyncIterator, Callable
@@ -226,16 +227,44 @@ async def test_an_unset_owner_locks_everyone_out(db, configured, monkeypatch):
         await w.say("/lidlar", user=user)
         assert w.fake.calls == []
     assert bot_main.refusal() == t("start.no_owner")
-    with pytest.raises(SystemExit) as stop:
-        await bot_main.run(bot=w.bot)
-    assert stop.value.code == t("start.no_owner")
+    assert await _refused(bot=w.bot) == t("start.no_owner")
+    assert w.fake.calls == []
+
+
+class _Idle:
+    """The stand-in for «wait for SIGTERM»: records that the bot idled."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def __call__(self, stop: asyncio.Event) -> None:
+        self.calls += 1
+
+
+async def _refused(**kw: object) -> str:
+    """Run a bot that cannot start; the one ERROR line it logged. It must
+    idle, never exit: under restart: unless-stopped an exit was a restart
+    loop, six restarts in two minutes with an empty token (the docker
+    re-run)."""
+    idle = _Idle()
+    logger = logging.getLogger(bot_main.__name__)
+    seen: list[logging.LogRecord] = []
+    handler = logging.Handler()
+    handler.emit = seen.append  # type: ignore[method-assign]
+    logger.addHandler(handler)
+    try:
+        await bot_main.run(idle=idle, **kw)  # type: ignore[arg-type]
+    finally:
+        logger.removeHandler(handler)
+    assert idle.calls == 1
+    errors = [r.getMessage() for r in seen if r.levelno >= logging.ERROR]
+    assert len(errors) == 1, errors
+    return errors[0]
 
 
 async def test_without_a_token_the_bot_does_not_start(configured, monkeypatch):
     monkeypatch.setattr(settings, "assistant_bot_token", "")
-    with pytest.raises(SystemExit) as stop:
-        await bot_main.run()
-    assert stop.value.code == t("start.no_token")
+    assert await _refused() == t("start.no_token")
 
 
 async def test_a_stranger_is_answered_nothing_and_logged_once_an_hour(w, caplog):
@@ -1440,16 +1469,44 @@ async def test_the_bot_reaches_telegram_sets_the_menus_and_beats(session, config
     assert beat.detail == {"telegram": True, "username": "cs_agent_bot"}
 
 
-async def test_the_bot_stops_after_five_failed_get_me(configured):
+async def test_after_five_failed_get_me_the_bot_asks_each_minute_and_starts(
+    session, configured, caplog
+):
+    """The docker re-run: after five misses the bot exited and Docker restarted
+    it every ~95 s («Restarting» in make ps). It says so once and keeps asking
+    once a minute in the same process."""
     bot, fake = fake_bot()
-    fake.fail("GetMe", OSError("network"), times=5)
+    fake.fail("GetMe", OSError("network"), times=7)
+    waits: list[float] = []
 
     async def sleep(seconds: float) -> None:
+        waits.append(seconds)
+
+    async def polling(dp: Dispatcher, b: Bot) -> None:
         return None
 
-    with pytest.raises(SystemExit) as stop:
-        await bot_main.run(bot=bot, sleep=sleep)
-    assert stop.value.code == t("start.no_telegram")
+    with caplog.at_level(logging.WARNING, logger=bot_main.__name__):
+        await bot_main.run(bot=bot, polling=polling, sleep=sleep)
+    assert waits == [5, 10, 20, 40, 60, 60, 60]
+    said = [r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR]
+    assert said == [t("start.no_telegram")]
+    assert len(fake.named("GetMe")) == 8
+    assert (await health.beats(session))["bot"].detail["telegram"] is True
+
+
+async def test_reach_gives_up_only_when_stopped(configured):
+    bot, fake = fake_bot()
+    fake.fail("GetMe", OSError("network"), times=100)
+    stop = asyncio.Event()
+    waits: list[float] = []
+
+    async def sleep(seconds: float) -> None:
+        waits.append(seconds)
+        if len(waits) == 9:
+            stop.set()
+
+    assert await bot_main.reach(bot, sleep=sleep, stop=stop) is None
+    assert waits == [5, 10, 20, 40, 60, 60, 60, 60, 60]
 
 
 async def test_a_refused_token_stops_at_once_in_its_own_words(configured):
@@ -1466,9 +1523,7 @@ async def test_a_refused_token_stops_at_once_in_its_own_words(configured):
     async def sleep(seconds: float) -> None:
         waits.append(seconds)
 
-    with pytest.raises(SystemExit) as stop:
-        await bot_main.run(bot=bot, sleep=sleep)
-    assert stop.value.code == t("start.token_refused")
+    assert await _refused(bot=bot, sleep=sleep) == t("start.token_refused")
     assert waits == [] and len(fake.named("GetMe")) <= 1
 
 
@@ -1476,9 +1531,7 @@ async def test_a_token_of_the_wrong_shape_is_said_not_a_traceback(
     configured, monkeypatch
 ):
     monkeypatch.setattr(settings, "assistant_bot_token", "123456789-no-colon")
-    with pytest.raises(SystemExit) as stop:
-        await bot_main.run()
-    assert stop.value.code == t("start.token_refused")
+    assert await _refused() == t("start.token_refused")
 
 
 async def test_the_watchdog_says_a_silent_worker_once(session, configured):

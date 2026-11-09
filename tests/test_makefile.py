@@ -281,8 +281,10 @@ def test_mvp_report_passes_the_start_only_when_given():
 
 
 # The run targets that need init — the migration itself (migrate, downgrade)
-# and the one-time reader login before `make up` — and nothing else.
-INIT_RUNS = frozenset({"migrate", "downgrade", "userbot-login"})
+# and the first install's backup-key, which creates and migrates the database
+# before the doctor (OPS §2) and refuses to run twice — and nothing else. The
+# reader login talks to Telegram alone (the docker re-run: it re-ran init).
+INIT_RUNS = frozenset({"migrate", "downgrade", "backup-key"})
 
 
 def test_a_one_off_run_never_re_runs_init():
@@ -313,31 +315,45 @@ def test_a_one_off_run_never_re_runs_init():
     assert "depends_on: { db: { condition: service_healthy } }" in smoke
 
 
+def test_reload_and_the_login_never_re_run_init():
+    """The docker re-run: `make reload` (up --force-recreate) and `make
+    userbot-login` (a run without --no-deps) both re-ran init — `chown -R`
+    and `alembic upgrade head` under the running processes."""
+    compose = "docker compose "
+    [reload] = [x for x in dry_run("reload").splitlines() if x.startswith(compose)]
+    assert "--no-deps" in reload.split() and "init" not in reload.split()
+    [login] = [x for x in dry_run("userbot-login").splitlines() if x.startswith(compose)]
+    assert "--no-deps" in login.split()
+
+
 # --- the first install (the docker dry run, 2026-11-09) -----------------------------
 
 
-def _scratch(tmp_path: Path, password: str | None) -> Path:
-    """A copy of the Makefile and .env.example; .env with ``password`` (None:
-    no .env yet)."""
+def _scratch(tmp_path: Path, password: str | None, *, url: str | None = None) -> Path:
+    """A copy of the Makefile and .env.example; .env with ``password`` in
+    POSTGRES_PASSWORD and, unless ``url`` says otherwise, in DATABASE_URL
+    (None: no .env yet)."""
     for name in ("Makefile", ".env.example"):
         (tmp_path / name).write_text((ROOT / name).read_text())
     if password is not None:
         example = (ROOT / ".env.example").read_text()
-        (tmp_path / ".env").write_text(
-            example.replace(
-                "POSTGRES_PASSWORD=CHANGE_ME", f"POSTGRES_PASSWORD={password}"
-            )
-        )
+        text = example.replace(
+            "POSTGRES_PASSWORD=CHANGE_ME", f"POSTGRES_PASSWORD={password}"
+        ).replace(":CHANGE_ME@", f":{password if url is None else url}@")
+        (tmp_path / ".env").write_text(text)
     return tmp_path
 
 
-def _make(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
+def _make(
+    cwd: Path, *args: str, compose: str = "true"
+) -> subprocess.CompletedProcess[str]:
     # COMPOSE=true: every docker call is a no-op that succeeds.
     return subprocess.run(
-        ["make", "-s", "COMPOSE=true", *args],
+        ["make", "-s", f"COMPOSE={compose}", *args],
         cwd=cwd,
         capture_output=True,
         text=True,
+        stdin=subprocess.DEVNULL,
     )
 
 
@@ -347,20 +363,110 @@ def test_make_env_writes_a_file_only_its_owner_reads(tmp_path):
     assert (cwd / ".env").stat().st_mode & 0o777 == 0o600
 
 
-@pytest.mark.parametrize("target", [["backup-key"], ["up"], ["up", "SKIP_DOCTOR=1"]])
+# Every target that can start the db container, whose first start creates
+# the database with the password .env holds: backup-key and up (the first
+# dry run), migrate, downgrade and reload (the re-run made a CHANGE_ME
+# database with migrate and with reload), and the password sync.
+STARTS_THE_DB = (
+    ["backup-key"],
+    ["up"],
+    ["up", "SKIP_DOCTOR=1"],
+    ["migrate"],
+    ["downgrade"],
+    ["reload"],
+    ["db-password-sync"],
+)
+
+
+@pytest.mark.parametrize("target", STARTS_THE_DB)
 @pytest.mark.parametrize("password", ["CHANGE_ME", '"CHANGE_ME"', ""])
 def test_the_placeholder_password_never_reaches_a_database(tmp_path, target, password):
     """`make backup-key` comes before the doctor in OPS §2 and starts the db,
     which is created with the password .env holds: the placeholder (or
     nothing) stops make before any docker call, SKIP_DOCTOR=1 included."""
     cwd = _scratch(tmp_path, password)
-    done = _make(cwd, *target)
+    calls = cwd / "calls"
+    done = _make(cwd, *target, compose=_fake_compose(cwd, calls))
     assert done.returncode != 0
     assert "POSTGRES_PASSWORD .env da hali «CHANGE_ME» yoki boʻsh" in done.stdout
     assert not (cwd / "secrets").exists()
+    assert not calls.exists()
+
+
+@pytest.mark.parametrize("target", STARTS_THE_DB)
+def test_a_url_still_carrying_the_placeholder_never_reaches_a_database(tmp_path, target):
+    """The docker re-run: the password filled in, DATABASE_URL left with
+    CHANGE_ME — init failed on «password authentication failed»."""
+    cwd = _scratch(tmp_path, "0123456789abcdef", url="CHANGE_ME")
+    calls = cwd / "calls"
+    done = _make(cwd, *target, compose=_fake_compose(cwd, calls))
+    assert done.returncode != 0
+    assert "DATABASE_URL .env da hali «CHANGE_ME» bilan" in done.stdout
+    assert not calls.exists()
 
 
 def test_a_real_password_goes_on(tmp_path):
     cwd = _scratch(tmp_path, "0123456789abcdef")
-    assert _make(cwd, "backup-key").returncode == 0
-    assert _make(cwd, "up", "SKIP_DOCTOR=1").returncode == 0
+    for target in STARTS_THE_DB:
+        assert _make(cwd, *target).returncode == 0, target
+
+
+def _fake_compose(cwd: Path, calls: Path, *, fail: str | None = None) -> str:
+    """A stand-in for `docker compose`: appends each call's arguments (and
+    what it read on stdin) to ``calls``; exits 1 when its arguments are
+    exactly ``fail``."""
+    script = cwd / "fake-compose"
+    script.write_text(
+        "#!/bin/sh\n"
+        f'printf "%s\\n" "$*" >> "{calls}"\n'
+        f'if [ ! -t 0 ]; then cat >> "{calls}"; fi\n'
+        f'[ "$*" != "{fail or ""}" ]\n'
+    )
+    script.chmod(0o755)
+    return str(script)
+
+
+def test_backup_key_stops_when_init_fails(tmp_path):
+    """The docker re-run: `up init` (attached) exited 0 over an init that
+    failed, and the key and its .env line came out over a failed migration.
+    `run --rm init` hands init's exit code to make; nothing after it runs."""
+    cwd = _scratch(tmp_path, "0123456789abcdef")
+    calls = cwd / "calls"
+    done = _make(
+        cwd, "backup-key", compose=_fake_compose(cwd, calls, fail="run --rm init")
+    )
+    assert done.returncode != 0
+    assert "Baza tayyorlanmadi (migratsiya xato bilan tugadi)" in done.stdout
+    assert calls.read_text().splitlines() == ["run --rm init"]
+    assert "BACKUP_AGE_RECIPIENT" not in done.stdout
+
+
+def test_the_password_sync_never_puts_the_password_on_a_command_line(tmp_path):
+    """`make db-password-sync`: the role takes POSTGRES_PASSWORD from the
+    recreated db container's own environment, through psql's quoting."""
+    password = "s3cr3t'pa\"ss"
+    cwd = _scratch(tmp_path, password)
+    calls = cwd / "calls"
+    done = _make(cwd, "db-password-sync", compose=_fake_compose(cwd, calls))
+    assert done.returncode == 0, done.stdout + done.stderr
+    lines = calls.read_text().splitlines()
+    assert lines[0] == "up -d --wait db"
+    assert lines[1].startswith("exec -T db sh -c psql ")
+    assert '-v pw="$POSTGRES_PASSWORD"' in lines[1]
+    assert lines[2] == "ALTER ROLE :\"u\" PASSWORD :'pw';"
+    assert "s3cr3t" not in calls.read_text() + done.stdout
+
+
+def test_restore_finds_a_bare_file_name_in_the_backups_folder():
+    """The docker re-run: the backup's log line names the file alone, and
+    `make restore FILE=<that name>` answered «no such file»."""
+    bare = dry_run("restore", "FILE=clientscrapper-20261109-071643.dump.age")
+    assert '"/data/backups/clientscrapper-20261109-071643.dump.age"' in bare
+    given = dry_run("restore", "FILE=/data/backups/x.dump.age")
+    assert '"/data/backups/x.dump.age"' in given
+
+
+def test_the_doctor_knows_when_make_up_goes_on_by_itself():
+    """The docker re-run: inside `make up` the all-clear said «endi: make up»."""
+    assert "-e CS_IN_UP=1 " in dry_run("up")
+    assert "-e CS_IN_UP= " in dry_run("doctor")

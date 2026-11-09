@@ -12,7 +12,8 @@ import asyncio
 import os
 import subprocess
 import sys
-from datetime import datetime, timedelta
+from collections.abc import Callable
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -73,18 +74,78 @@ def test_the_healthcheck_and_the_health_job_agree_on_every_age():
         assert ok is not health.judge("worker", seen, {}, now=NOW).stale, minutes
 
 
+def _started(at: datetime | None) -> Callable[[], datetime | None]:
+    """When the container's process started, as main() asks it."""
+    return lambda: at
+
+
 async def test_main_reads_the_row_and_answers_docker(session, capsys):
-    assert healthcheck.main(["worker"], now=NOW) == healthcheck.EXIT_UNHEALTHY
+    hour_ago = _started(NOW - timedelta(hours=1))
+    assert (
+        healthcheck.main(["worker"], now=NOW, started_at=hour_ago)
+        == healthcheck.EXIT_UNHEALTHY
+    )
     assert capsys.readouterr().out == "worker: no heartbeat yet\n"
     await health.beat(
         session, "worker", detail={"jobs": 4}, now=NOW - timedelta(minutes=2)
     )
     await health.beat(session, "bot", now=NOW - timedelta(minutes=12))
     await session.commit()
-    assert healthcheck.main(["worker"], now=NOW) == healthcheck.EXIT_HEALTHY
+    assert (
+        healthcheck.main(["worker"], now=NOW, started_at=hour_ago)
+        == healthcheck.EXIT_HEALTHY
+    )
     assert capsys.readouterr().out == "worker: beat 2 min ago (limit 10 min)\n"
-    assert healthcheck.main(["bot"], now=NOW) == healthcheck.EXIT_UNHEALTHY
+    assert (
+        healthcheck.main(["bot"], now=NOW, started_at=hour_ago)
+        == healthcheck.EXIT_UNHEALTHY
+    )
     assert capsys.readouterr().out == "bot: last beat 12 min ago (limit 10 min)\n"
+    # The same fresh row, but the container's process started after it: the
+    # beat is the previous container's (make reload), not this one's.
+    just_now = _started(NOW - timedelta(seconds=30))
+    assert (
+        healthcheck.main(["worker"], now=NOW, started_at=just_now)
+        == healthcheck.EXIT_UNHEALTHY
+    )
+    assert capsys.readouterr().out == (
+        "worker: no heartbeat from this process yet (the last one, 2 min ago, "
+        "is from before it started)\n"
+    )
+
+
+def test_a_beat_from_before_the_process_started_is_not_its_own():
+    """The docker re-run: after make reload the userbot read «healthy» for up
+    to five minutes on the old container's last beat while the new one hung
+    in get_me and never beat."""
+    beat = NOW - timedelta(minutes=2)
+    after = healthcheck.verdict("userbot", beat, {}, now=NOW, started_at=beat)
+    assert after == (True, "userbot: beat 2 min ago (limit 5 min)")
+    before = healthcheck.verdict(
+        "userbot", beat, {}, now=NOW, started_at=beat + timedelta(seconds=1)
+    )
+    assert before[0] is False
+    # Off on purpose is the same: the new process says it again at start.
+    off = {"enabled": False}
+    assert not healthcheck.verdict(
+        "userbot", beat, off, now=NOW, started_at=NOW - timedelta(seconds=5)
+    )[0]
+    assert healthcheck.verdict("worker", beat, {}, now=NOW, started_at=None)[0]
+
+
+def test_the_process_start_is_read_from_proc(tmp_path):
+    proc = tmp_path
+    (proc / "1").mkdir()
+    hz = os.sysconf("SC_CLK_TCK")
+    # comm may hold spaces and «)»; starttime is field 22.
+    fields = ["S"] + ["0"] * 18 + [str(250 * hz)] + ["0"] * 10
+    (proc / "1" / "stat").write_text("1 (python -m x) y) " + " ".join(fields) + "\n")
+    (proc / "stat").write_text("cpu  1 2 3\nbtime 1762650000\nprocesses 9\n")
+    started = healthcheck.process_started_at(proc)
+    assert started == datetime.fromtimestamp(1762650250, tz=UTC)
+    (proc / "stat").write_text("cpu  1 2 3\n")
+    assert healthcheck.process_started_at(proc) is None
+    assert healthcheck.process_started_at(tmp_path / "nothing") is None
 
 
 def test_bad_arguments_and_an_unreadable_database(capsys):
@@ -92,7 +153,12 @@ def test_bad_arguments_and_an_unreadable_database(capsys):
         assert healthcheck.main(argv, now=NOW) == healthcheck.EXIT_USAGE, argv
     capsys.readouterr()
     dead = "postgresql+psycopg://none:none@127.0.0.1:1/none"
-    assert healthcheck.main(["worker"], now=NOW, database_url=dead) == 1
+    assert (
+        healthcheck.main(
+            ["worker"], now=NOW, database_url=dead, started_at=_started(None)
+        )
+        == 1
+    )
     out = capsys.readouterr().out
     assert out == "worker: heartbeat unreadable (OperationalError)\n"
     assert "none:none" not in out

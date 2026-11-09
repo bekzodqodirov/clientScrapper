@@ -10,8 +10,8 @@ COMPOSE := docker compose
 # — so DRY=yes never runs a real restore and APPLY=0 never applies. A plain
 # $(if $(X),…) would read every non-empty value, «0» included, as on.
 switch = $(if $(filter-out 0 1,$(strip $($(1)))),$(error $(1)=$($(1)): use $(1)=1 (on) or $(1)=0 (off)),$(filter 1,$(strip $($(1)))))
-.PHONY: help env db-password doctor up update down reload logs ps psql migrate revision downgrade \
-        bot worker userbot userbot-login backup backup-key backup-key-show restore \
+.PHONY: help env db-password db-password-sync doctor up update down reload logs ps psql migrate \
+        revision downgrade bot worker userbot userbot-login backup backup-key backup-key-show restore \
         import-clients erp-sync push-test mvp-report purge install test lint fmt typecheck check db-test hooks smoke smoke-cron
 
 help: ## Show this help
@@ -23,21 +23,41 @@ env: ## Create .env from .env.example if it does not exist
 	@test -f .env || (umask 077 && cp .env.example .env && chmod 600 .env && echo ".env yaratildi — make up dan oldin uni toʻldir")
 
 # The database is created with the password .env holds the first time the db
-# container starts — `make backup-key` (before the doctor in OPS §2) or
-# `make up`, SKIP_DOCTOR=1 included; changing it afterwards takes an ALTER
-# ROLE by hand. So the shipped placeholder never gets that far (the first
-# docker dry run, 2026-11-09).
+# container starts — any target that can start it: backup-key (before the
+# doctor in OPS §2), up (SKIP_DOCTOR=1 included), migrate, downgrade, reload,
+# db-password-sync; changing it afterwards takes `make db-password-sync`. So
+# the shipped placeholder never gets that far, and neither does a URL still
+# carrying it (init then fails on «password authentication failed»). The
+# first docker dry run and its re-run, 2026-11-09.
 db-password: env
 	@pw="$$(sed -n 's/^POSTGRES_PASSWORD=//p' .env | tail -n 1 | tr -d "\"' \r")"; \
 	if [ -z "$$pw" ] || [ "$$pw" = CHANGE_ME ]; then \
 		echo "POSTGRES_PASSWORD .env da hali «CHANGE_ME» yoki boʻsh — avval almashtir: openssl rand -hex 24 (DATABASE_URL ichida ham shu parol). Baza birinchi ishga tushganda shu parol bilan yaratiladi."; \
 		exit 1; \
+	fi; \
+	if sed -n 's/^DATABASE_URL=//p' .env | tail -n 1 | grep -q CHANGE_ME; then \
+		echo "DATABASE_URL .env da hali «CHANGE_ME» bilan — ichidagi CHANGE_ME ni POSTGRES_PASSWORD dagi parol bilan almashtir."; \
+		exit 1; \
 	fi
 
+# A POSTGRES_PASSWORD changed after the database was created: the role still
+# has the old one, the doctor says «Baza parolni qabul qilmadi» and init
+# fails. `up -d --wait db` recreates the db container with the new value in
+# its environment (the data volume stays); the role then takes it over the
+# container's local socket, which needs no password. psql reads the statement
+# from stdin, where :'pw' is quoted by psql itself (no character of the
+# password can break it) and the password never reaches the host's ps.
+db-password-sync: db-password ## After changing POSTGRES_PASSWORD in .env: give it to the existing database
+	$(COMPOSE) up -d --wait db
+	@printf '%s\n' "ALTER ROLE :\"u\" PASSWORD :'pw';" | $(COMPOSE) exec -T db sh -c 'psql -q -v ON_ERROR_STOP=1 -U "$$POSTGRES_USER" -d "$$POSTGRES_DB" -v u="$$POSTGRES_USER" -v pw="$$POSTGRES_PASSWORD"'
+	@echo "Baza paroli .env dagi POSTGRES_PASSWORD ga oʻtkazildi — endi: make doctor, keyin make up."
+
 # --- Docker -----------------------------------------------------------------
+# CS_IN_UP: run as `make up`'s first step, which goes on by itself, so the
+# all-clear does not tell the owner to type make up (the docker re-run).
 doctor: env ## Check .env, the server and the database before make up
 	$(COMPOSE) build worker
-	$(COMPOSE) run --rm --no-deps -e CS_IN_UPDATE=$(IN_UPDATE) worker python -m clientscrapper.tools.doctor
+	$(COMPOSE) run --rm --no-deps -e CS_IN_UPDATE=$(IN_UPDATE) -e CS_IN_UP=$(if $(filter up,$(MAKECMDGOALS)),1,) worker python -m clientscrapper.tools.doctor
 
 up: env db-password $(if $(filter 1,$(strip $(SKIP_DOCTOR))),,doctor) ## Build and start everything; init migrates (SKIP_DOCTOR=1 to skip the check)
 	$(COMPOSE) up -d --build db init
@@ -57,8 +77,11 @@ update: ## Backup (must succeed), pull, rebuild, prune
 down: ## Stop everything (volumes are kept)
 	$(COMPOSE) down
 
-reload: ## After editing .env: recreate worker, userbot and bot so they read it again
-	$(COMPOSE) up -d --force-recreate worker userbot bot
+# --no-deps: without it compose also re-ran init (`chown -R` over the
+# evidence, `alembic upgrade head`) under the running processes — after a
+# `git pull` with no `make update`, a migration with no backup first.
+reload: db-password ## After editing .env: recreate worker, userbot and bot so they read it again
+	$(COMPOSE) up -d --force-recreate --no-deps worker userbot bot
 
 logs: ## Tail logs from all running services
 	$(COMPOSE) logs -f --tail=100
@@ -73,7 +96,7 @@ psql: ## Open a psql shell
 	$(COMPOSE) exec db sh -c 'exec psql -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"'
 
 # --- Database ---------------------------------------------------------------
-migrate: ## Apply all migrations
+migrate: db-password ## Apply all migrations
 	$(COMPOSE) run --rm init alembic upgrade head
 
 # 02 §5 names migrations 000N_<slug>: the id is minted here and alembic.ini's
@@ -83,7 +106,7 @@ revision: ## Autogenerate a migration 000N_<slug> on this machine (needs DATABAS
 	rev_id="$$(python scripts/revision_id.py "$(m)")" && \
 		alembic revision --autogenerate -m "$(m)" --rev-id "$$rev_id"
 
-downgrade: ## Roll back one migration
+downgrade: db-password ## Roll back one migration
 	$(COMPOSE) run --rm init alembic downgrade -1
 
 # --- Processes --------------------------------------------------------------
@@ -96,16 +119,21 @@ worker: ## Tail the scheduler logs
 userbot: ## Tail the Telegram reader logs
 	$(COMPOSE) logs -f --tail=100 userbot
 
+# --no-deps: the login talks to Telegram alone, never to the database, and
+# without it compose re-ran init under the running processes (the re-run).
 userbot-login: ## One-time Telethon login; prints TELETHON_SESSION for .env
-	$(COMPOSE) run --rm -it userbot python -m clientscrapper.tools.userbot_login
+	$(COMPOSE) run --rm --no-deps -it userbot python -m clientscrapper.tools.userbot_login
 
 # --- Backups ----------------------------------------------------------------
 # The key is written through init's ./secrets mount: the app services mount
 # it read-only (MIYA's worker mounted it writable). As the app's uid, so the
-# worker can read the 0600 file it writes; `up init` handed /secrets over.
+# worker can read the 0600 file it writes; the init run handed /secrets over.
+# `run`, not `up init`: an attached `up` exited 0 when init failed (a wrong
+# password in DATABASE_URL), and the key and its .env line came out over a
+# failed migration (the docker re-run). `run` returns init's exit code.
 backup-key: db-password ## Create the backup key and print the .env line
 	@test ! -e secrets/backup-key.txt || { echo "secrets/backup-key.txt allaqachon bor — yangisi yaratilmaydi (eski zaxiralar faqat eski kalit bilan ochiladi)."; exit 1; }
-	$(COMPOSE) up init
+	@$(COMPOSE) run --rm init || { echo "Baza tayyorlanmadi (migratsiya xato bilan tugadi) — yuqoridagi xatoni oʻqi; koʻpincha sabab: DATABASE_URL dagi parol POSTGRES_PASSWORD bilan bir xil emas. Tuzatib: make doctor, keyin qaytadan make backup-key."; exit 1; }
 	$(COMPOSE) run --rm --no-deps --user 10001:10001 init age-keygen -o /secrets/backup-key.txt
 	@echo "Quyidagi qatorni .env faylidagi BACKUP_AGE_RECIPIENT= oʻrniga yoz:"
 	@$(COMPOSE) run --rm --no-deps worker sh -c 'printf "BACKUP_AGE_RECIPIENT=%s\n" "$$(age-keygen -y /app/secrets/backup-key.txt)"'
@@ -119,9 +147,12 @@ backup-key-show: ## Print the secret backup key (store it off the server)
 backup: ## Run the encrypted database backup now (fails when the backup does, so make update stops)
 	$(COMPOSE) run --rm --no-deps worker python -m clientscrapper.worker.main backup
 
-restore: ## Restore a backup: make restore FILE=/data/backups/clientscrapper-….dump.age [DRY=1] [FORCE=1]
-	@test -n "$(FILE)" || (echo "usage: make restore FILE=/data/backups/clientscrapper-….dump.age [DRY=1] [FORCE=1]" && exit 1)
-	$(COMPOSE) run --rm --no-deps worker python -m clientscrapper.tools.restore "$(FILE)" \
+# A bare FILE name is looked for in data/backups/ (mounted as /data/backups):
+# the «file» a backup's log line names. A name with a «/» is passed as given.
+restore: ## Restore a backup: make restore FILE=clientscrapper-….dump.age (in data/backups/) [DRY=1] [FORCE=1]
+	@test -n "$(FILE)" || (echo "usage: make restore FILE=clientscrapper-….dump.age (in data/backups/) [DRY=1] [FORCE=1]" && exit 1)
+	$(COMPOSE) run --rm --no-deps worker python -m clientscrapper.tools.restore \
+		"$(if $(findstring /,$(FILE)),$(FILE),/data/backups/$(FILE))" \
 		--identity /app/secrets/backup-key.txt $(if $(call switch,DRY),--dry-run,) $(if $(call switch,FORCE),--force,)
 
 # --- Data -------------------------------------------------------------------

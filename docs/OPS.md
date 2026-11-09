@@ -19,11 +19,12 @@ Telegram accounts, 10:00–17:00 Tashkent (`docs/sotuv-playbook.md`).
 | `make doctor` | checks `.env`, the server and the database (exit 1 on any ❌) |
 | `make up` | `env` → `doctor` → database + migrations → worker, userbot, bot (`SKIP_DOCTOR=1` skips the check) |
 | `make migrate` | `alembic upgrade head` in the `init` container |
-| `make reload` | recreates worker, userbot and bot after an `.env` edit |
+| `make reload` | recreates worker, userbot and bot after an `.env` edit (never re-runs `init`) |
+| `make db-password-sync` | after `POSTGRES_PASSWORD` was changed in `.env` once the database existed: gives the database the new password |
 | `make ps` / `make logs` / `make worker` / `make bot` / `make userbot` | status and logs |
 | `make userbot-login` | one-time Telethon login of the reader account; prints `TELETHON_SESSION` for `.env` |
 | `make backup` / `make backup-key` / `make backup-key-show` | an encrypted backup now / create the key once / print it for the password manager |
-| `make restore FILE=… [DRY=1] [FORCE=1]` | restore a backup (`DRY=1` checks the file only) |
+| `make restore FILE=… [DRY=1] [FORCE=1]` | restore a backup (`DRY=1` checks the file only); a bare file name — the `file` a backup's log line names — is looked for in `data/backups/` |
 | `make import-clients FILE=clients.xlsx [APPLY=1]` | the ERP client export as suppression (the «Boshqa» fallback only) |
 | `make erp-sync WALK=full\|delta\|outcomes\|quarter\|year [ACCEPT_SHRINK=1]` | one ERP feed walk by hand (exit 3 = skipped) |
 | `make push-test` | pushes one visibly synthetic lead to the ERP |
@@ -39,20 +40,32 @@ Telegram accounts, 10:00–17:00 Tashkent (`docs/sotuv-playbook.md`).
 
 1. VPS per 06 §3.5; `ufw` enabled; Docker installed; repo cloned; `make env` (written mode
    600); fill `.env`: a new `POSTGRES_PASSWORD` (`openssl rand -hex 24`, the same inside
-   `DATABASE_URL` — `make backup-key` and `make up` refuse `CHANGE_ME`: the database is created
-   with whatever password the first start finds), `ANTHROPIC_API_KEY`, `ASSISTANT_BOT_TOKEN` and
+   `DATABASE_URL` — every target that can start the database refuses `CHANGE_ME` in either: the
+   database is created with whatever password the first start finds, so do not change it after
+   step 2; if it was changed, `make db-password-sync` gives the database the new one — the doctor
+   says «Baza parolni qabul qilmadi»), `ANTHROPIC_API_KEY`, `ASSISTANT_BOT_TOKEN` and
    `OWNER_TELEGRAM_ID` (step 4's BotFather part and the owner's `/start` to the bot come first —
    the doctor asks Telegram whether the bot can reach the owner), `TELETHON_API_ID` and
    `TELETHON_API_HASH`; `chmod 600 .env`.
-2. `make backup-key`; store the secret key off the server in two places; `BACKUP_AGE_RECIPIENT`
-   set in `.env`.
-3. `make doctor` green; `make up`; `make ps` shows the database healthy and worker, userbot and
-   bot running, each with a fresh heartbeat; `/holat` from the owner's account answers. Until
-   step 5 the reader idles and `/holat` says «Telegram oʻquvchi akkaunti hali ulanmagan» — that
-   is expected, not a fault.
+2. `make backup-key`: it creates and migrates the database first (`Running upgrade … ->
+   0004_directories_topuz`); a failed migration stops it with «Baza tayyorlanmadi …» before any
+   key is made. Store the secret key off the server in two places; `BACKUP_AGE_RECIPIENT` set in
+   `.env`. Run twice, it refuses («allaqachon bor») and make adds its own `Error 1` line.
+3. `make doctor` green; `make up` (its own doctor ends «make up davom etadi»; on its first start
+   the worker takes a catch-up backup and sends the file to the owner); `make ps` shows the
+   database healthy and worker, userbot and bot healthy — a container counts only a heartbeat its
+   own process wrote, so «health: starting» for the first two minutes after `make up` or
+   `make reload` is normal. A bot that cannot start (token empty or refused, no owner id) says
+   why once in `make bot` and stays up, unhealthy — never a restart loop. `/holat` from the
+   owner's account answers. Until step 5's `make reload` the reader idles and `/holat` says
+   «Telegram oʻquvchi akkaunti hali ulanmagan» — that is expected, not a fault.
 4. BotFather: the bot exists, group joining is disabled; the owner and every manager have sent
    `/start` to the bot; `make doctor` shows each manager id reachable.
-5. Reader account: a SIM at least 30 days old, 2FA on, `make userbot-login`, `make reload`;
+5. Reader account: a SIM at least 30 days old, 2FA on, `make userbot-login` (it never touches
+   the database; after the code Telethon prints its own English line «Signed in successfully as
+   …», and «Invalid code» / «Invalid password» on a wrong answer), replace the whole
+   `TELETHON_SESSION=` line in `.env` with the printed one (the doctor refuses a doubled
+   «TELETHON_SESSION=» or a cut paste), `make reload`; the ⛔ reader line leaves `/holat`;
    `/chats` lists the three seed chats within 24 h.
 6. ERP: fullprompt `agent-feed` deployed (the build stamp at `/api/version` is newer than the
    merge — there is no migration, so a migration count proves nothing); the owner's five steps of
@@ -69,7 +82,9 @@ Telegram accounts, 10:00–17:00 Tashkent (`docs/sotuv-playbook.md`).
    $5/month with a hard cap; Brave $5 credit only (the code side is 32 queries/day and ≤ 1,000 a
    month in `costs.ask`); Apify prepaid ≤ $20. The code-side cap is `DAILY_COST_CAP_USD` ($10).
 9. `DEADMAN_PING_URL` configured and a test alert received on the owner's phone; `make backup`
-   run once by hand and the file seen in Telegram; `make restore FILE=… DRY=1` on that file.
+   run once by hand and the file seen in Telegram; `make restore FILE=<file> DRY=1` on that file
+   (`<file>` = the `file` of `make backup`'s «backup written» line; the listing ends «dry run:
+   nothing was written»).
    The smoke cron installed once (`docs/SMOKE.md`: `make -s smoke-cron` into the crontab); the
    digest says nothing about smoke before its first run, so `crontab -l` is the check.
 10. Legal: pd.gov.uz registration filed (owner); `docs/huquqiy-memo.md` §4 signed off; managers
@@ -182,7 +197,8 @@ is the owner's conversation with the managers («menejer javobi»), not a code f
   the row counts compared; `restore_drill_failed` when they do not match.
 - Monthly by hand, on a scratch VPS or laptop: `docker compose up -d db` →
   `make restore FILE=… DRY=1` → `make restore FILE=…` → `make up` (`FORCE=1` only on a non-empty
-  database). Losing the backup key loses every backup.
+  database; a bare file name is looked for in `data/backups/`). Losing the backup key loses every
+  backup.
 
 ## 8. Weekly review (06 §7.2, the owner, Monday 10:00)
 

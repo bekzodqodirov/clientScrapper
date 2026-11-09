@@ -180,6 +180,35 @@ async def test_an_unanswered_check_is_not_unauthorised_and_is_asked_again(sessio
     assert client.named("is_user_authorized") == []
 
 
+async def test_a_check_telegram_never_answers_is_unanswered_not_a_hang(
+    session, monkeypatch
+):
+    """The docker re-run: a path that took the TCP connection and never
+    answered MTProto left get_me waiting for good — no beat at all, and a
+    container that read «healthy» on the previous one's beat. The check has a
+    deadline; past it the reader beats «Telegram did not answer»."""
+
+    class Silent(FakeTelegramClient):
+        async def get_me(self) -> object:
+            self._record("get_me")
+            await asyncio.Event().wait()
+
+    monkeypatch.setattr(userbot, "AUTH_CHECK_SECONDS", 0.05)
+    client = Silent(authorized=(True,))
+    answer = await userbot.authorization(client)
+    assert (answer.authorized, answer.code) == (None, "TimeoutError")
+
+    deps, _ = _deps(stop_after=2)
+    await userbot.supervise(client, deps)
+    beat = await _beat(session)
+    assert beat.detail == {
+        "enabled": True,
+        "authorized": None,
+        "connected": True,
+        "error": "TimeoutError",
+    }
+
+
 # --- serving --------------------------------------------------------------------------
 
 
@@ -402,14 +431,59 @@ async def test_a_reader_not_set_up_beats_its_step_until_stopped(session):
     assert beat.last_seen_at == NOW + timedelta(minutes=2)
 
 
-async def test_connect_gives_up_after_five_tries(monkeypatch):
+async def test_connect_keeps_trying_once_a_minute_and_says_so(session):
+    """The docker re-run: after five misses connect ended the process, and
+    restart: unless-stopped made that a restart loop. It keeps trying once a
+    minute in the same process, each miss a beat that says Telegram could not
+    be reached."""
     client = FakeTelegramClient()
     client.fail[("connect", None)] = ConnectionError("no network")
-    deps, ticker = _deps(stop_after=999)
-    with pytest.raises(SystemExit):
-        await userbot.connect(client, deps)
-    assert len(client.named("connect")) == 5
-    assert ticker.pauses == [5, 10, 20, 40, 80]
+    deps, ticker = _deps(stop_after=7)
+    assert await userbot.connect(client, deps) is False
+    assert len(client.named("connect")) == 7
+    assert ticker.pauses == [5, 10, 20, 40, 60, 60, 60]
+    beat = await _beat(session)
+    assert beat.detail == {
+        "enabled": True,
+        "authorized": None,
+        "connected": False,
+        "error": "ConnectionError",
+    }
+    assert beat.last_seen_at == NOW + timedelta(seconds=75 + 120)
+
+
+async def test_a_connect_answered_with_garbage_is_a_miss_not_a_crash(session):
+    """The docker re-run's sandbox answered MTProto with an HTTP page:
+    Telethon raised IncompleteReadError, which is no OSError, and the reader
+    went down with it (restart: unless-stopped brought it back)."""
+    client = FakeTelegramClient()
+    client.fail[("connect", None)] = asyncio.IncompleteReadError(b"HTTP/1.1", 1347703872)
+    deps, ticker = _deps(stop_after=1)
+    assert await userbot.connect(client, deps) is False
+    assert (await _beat(session)).detail["error"] == "IncompleteReadError"
+
+
+async def test_a_connect_that_never_answers_is_cut_off(monkeypatch):
+    """The docker re-run: Telethon's connect waited for good on a key
+    exchange nobody answered. Each try has a deadline, and what it left
+    behind is disconnected before the next."""
+
+    class Silent(FakeTelegramClient):
+        async def connect(self) -> None:
+            self._record("connect")
+            await asyncio.Event().wait()
+
+    monkeypatch.setattr(userbot, "CONNECT_SECONDS", 0.05)
+    client = Silent()
+    deps, ticker = _deps(stop_after=2)
+    assert await userbot.connect(client, deps) is False
+    assert [c.name for c in client.calls if c.name in ("connect", "disconnect")] == [
+        "connect",
+        "disconnect",
+        "connect",
+        "disconnect",
+    ]
+    assert ticker.pauses == [5, 10]
 
 
 # --- review fixes -----------------------------------------------------------------------

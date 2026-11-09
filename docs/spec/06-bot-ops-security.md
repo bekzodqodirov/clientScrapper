@@ -12,11 +12,16 @@ Owner-facing strings are Uzbek Latin with ʻ/ʼ; all identifiers are English.
 Copied from MIYA `miya/bot/` (`main.py`, `formatting.py`, `keyboards.py`, `notices.py`,
 `handlers.py` → split into `handlers/{review,sources,chats,status,admin,manager}.py`,
 `replies.py` → `texts.py`). Kept verbatim: aiogram 3 long polling with
-`drop_pending_updates=False`; `get_me` retry ×5; HTML default parse mode with the plain-text
+`drop_pending_updates=False`; `get_me` retry ×5 (as built, the docker re-run of 2026-11-09: 5, 10,
+20, 40 s, then once a minute in the same process — an exit was a restart every ~95 s); HTML
+default parse mode with the plain-text
 retry in `_send`; `@dp.errors()` that answers «⚠️ Xatolik yuz berdi — birozdan keyin qaytadan
 urinib koʻring.» so a tapped button never spins; the 5-minute watchdog (`heartbeats.bot`,
 `worker_silent`, in-memory `db_down` memo); `set_my_commands` from `COMMAND_MENU`. Startup
 refuses to run without `ASSISTANT_BOT_TOKEN` and `OWNER_TELEGRAM_ID` (never an unrestricted bot).
+As built (the docker re-run): a bot that cannot start — no token, no owner, a token Telegram
+refuses or one of the wrong shape — logs the `start.*` reason once and idles with no beat
+(unhealthy, never a restart loop); `make reload` after fixing `.env` starts it.
 
 Routers, in registration order:
 
@@ -320,9 +325,9 @@ As built (T-35, the integration and the seam review, wave 4, at `48cc857`; `serv
 |---|---|
 | Provisioning | A new +998 SIM owned by the company, registered to the account on an ordinary phone; profile: real-looking first name, photo, no links; 2FA password set the same day; ageing **≥ 30 days** of normal use (join 2–3 chats by hand, read daily) before the agent logs in and before its first join (03 §2.3, 07 §5.2 — one number everywhere); Telegram Premium optional (raises the chat cap to 1,000 and, per vendor claims, tolerance — UNVERIFIED; the agent caps itself at `USERBOT_MAX_CHATS=60`) |
 | api_id / api_hash | From my.telegram.org under the company account; a **separate** app from MIYA's; stored only in `.env` |
-| Login | `make userbot-login` → `tools/userbot_login.py` (MIYA verbatim): interactive phone, code, 2FA → prints `TELETHON_SESSION=<StringSession>`; paste into `.env`, `make reload`. The string is a full credential; a leak is handled by Settings → Devices → terminate, then a new login |
+| Login | `make userbot-login` → `tools/userbot_login.py` (MIYA verbatim): interactive phone, code, 2FA → prints `TELETHON_SESSION=<StringSession>`; paste into `.env`, `make reload`. The string is a full credential; a leak is handled by Settings → Devices → terminate, then a new login. As built (the docker re-run, 2026-11-09): `run --no-deps` (the login never touches the database, and without it compose re-ran `init`); the prompts are Uzbek, Telethon's own lines after them («Signed in successfully as …», «Invalid code. Please try again.», «Invalid password. Please try again») stay English |
 | One client per session | `AuthKeyDuplicatedError` = two processes on one string; `make doctor` refuses to start when `USERBOT_ENABLED=true` and a second `userbot` container is running; never run the session on a phone and the server at once |
-| Runtime | `connect()` not `start()`; `is_user_authorized()` false → beat `{"enabled": true, "authorized": false, "error": code}` and idle (no login prompt in a container); `USERBOT_ENABLED=false` → beat `{"enabled": false}` and idle forever (the container never exits, so `unless-stopped` is safe). As built (the docker dry run, 2026-11-09): `USERBOT_ENABLED=true` with no session yet — the normal state between `make up` and `make userbot-login` — or with the api id/hash missing, or a session string that does not parse, logs which (never echoing the string), beats `authorized: false` with `error` `NO_SESSION` / `NO_API_KEYS` / `BAD_SESSION` every minute and idles without a client (it used to exit, a restart loop); `userbot_unauthorized` then names the step (`health.USERBOT_SETUP_TEXTS`), not a restriction |
+| Runtime | `connect()` not `start()`; `is_user_authorized()` false → beat `{"enabled": true, "authorized": false, "error": code}` and idle (no login prompt in a container); `USERBOT_ENABLED=false` → beat `{"enabled": false}` and idle forever (the container never exits, so `unless-stopped` is safe). As built (the docker dry run, 2026-11-09): `USERBOT_ENABLED=true` with no session yet — the normal state between `make up` and `make userbot-login` — or with the api id/hash missing, or a session string that does not parse, logs which (never echoing the string), beats `authorized: false` with `error` `NO_SESSION` / `NO_API_KEYS` / `BAD_SESSION` every minute and idles without a client (it used to exit, a restart loop); `userbot_unauthorized` then names the step (`health.USERBOT_SETUP_TEXTS`), not a restriction. Whether a value parses is one rule, `tools/session_string.parse`, which `make doctor` asks too (the re-run's doubled «TELETHON_SESSION=» was green there). Each `get_me` check and each `connect()` has a 60 s deadline (`AUTH_CHECK_SECONDS`, `CONNECT_SECONDS`): a route that took the TCP connection and never answered MTProto left them waiting for good, with no beat. `connect()` never exits: backoff 5, 10, 20, 40 s, then once a minute, every miss (whatever it raises — the sandbox's HTTP answer was an `IncompleteReadError`) beating `authorized: null, connected: false` with the error's code; after five misses it used to end the process, a restart loop |
 | Join policy | `userbot/joiner.py`, daily at a random minute 10:00–20:00, `USERBOT_JOINS_PER_DAY=3`, public usernames only, no invite links, `≥ 90 s` between joins, cap 60 chats, nothing joined while `flood_until` or the global pause is set; the agent **never leaves** a chat — the owner leaves by hand from the phone; `/chats` off only stops reading |
 | About reads | `userbot/about.py` (`read_about`) drains `chat_monitors(status='queued', priority 3)` rows enqueued by enrichment step E3 (04 §3 — E3 itself reads the public `https://t.me/s/<username>` page through `Fetcher`; the worker never imports `telethon`) and by the tout filter (03 §2.3): `GetFullChannelRequest` ≤ 20/day → `evidence` + `observations(kind='profile')`, `GetFullUserRequest` ≤ 50/day (cached 30 d) → `interactions.sender_bio`. With the joiner these are the only raw requests allowed (07 `RAW_ALLOWED`); nothing is read while `flood_until` or the global pause is set |
 | `chat_monitors` defaults | groups and channels `monitor_enabled=true, decided_by='rule:default'`; private chats `false, decided_by='rule:private_off'` and never read (MIYA default flipped; `services/chats.default_monitor_enabled` is the one home); `role='calibration'` rows (GSR's own `@gsrgroupchat`, 03 §2.3) are `monitor_enabled=false` and nothing is read or stored from them — the account may sit in the chat, its members are existing clients |
@@ -388,7 +393,10 @@ volumes: { db_data: {} }
 skeleton processes write no heartbeat until T-08, and a heartbeat-based check now would mark all
 three unhealthy. T-08 decides whether to add one per app service (a `tools/healthcheck <component>`
 that reads `heartbeats.last_seen_at`) — Open question 9; §7.1 step 3 and 07 §3.1 read «healthy» this
-way until then. No service publishes a port to the network; the only host binding is Postgres on `127.0.0.1`
+way until then. As built (T-08; the docker re-run of 2026-11-09): each app service carries
+`tools/healthcheck <component>`, and a beat older than the container's PID 1 (`/proc`) is the
+previous container's and does not count — after `make reload` the old beat read «healthy» for up
+to five minutes over a reader that never beat. No service publishes a port to the network; the only host binding is Postgres on `127.0.0.1`
 for `make psql`. There is no `api` service in v1 (CLAUDE.md: FastAPI optional, not built). No
 reverse proxy, no TLS, no public DNS. `tests/test_compose.py` asserts: no `ports:` entry
 without the `127.0.0.1:` prefix, every app service has `mem_limit`, `env_file`, `depends_on
@@ -417,12 +425,13 @@ clientscrapper`, `CMD ["python", "-m", "clientscrapper.worker.main"]`. Image ≈
 | Target | Does |
 |---|---|
 | `env` | `cp .env.example .env` if missing |
-| `doctor` | builds the image, runs `tools/doctor.py` with `.env` injected: every key of `EXPECTED_ENV_KEYS` present (a test keeps that tuple equal to `.env.example`), `POSTGRES_PASSWORD` inside `DATABASE_URL`, `OWNER_TELEGRAM_ID` numeric, `MANAGER_TELEGRAM_IDS` each reachable via `get_chat`, bot token via `get_me`, `TELETHON_*` when `USERBOT_ENABLED`, `CRM_BASE_URL` starts with `https://` (❌ otherwise: production's Caddy answers an `http://` request with a 308 the agent never follows, 05 §B.1) and, while `feeds_configured()`, answers `GET /api/agent/suppression?limit=1` (200 ok · 404 «kalit yoki manba yoʻq» warning when `CRM_PUSH_ENABLED=false`, error when true · 3xx error); during the «Boshqa» fallback the feed GET is skipped (that key reads nothing, 05 §B.3) and no POST is tried (it would land a lead), `ANTHROPIC_API_KEY` present (no call), `BACKUP_AGE_RECIPIENT` starts `age1` and `secrets/backup-key.txt` exists, RAM ≥ 4 GB, swap ≥ 1 GB, free disk ≥ `DISK_MIN_FREE_GB`, `age`/`pg_dump` binaries, `DIGEST_TIME` inside `REVIEW_HOURS`. Exit 1 on any ❌ |
+| `doctor` | builds the image, runs `tools/doctor.py` with `.env` injected: every key of `EXPECTED_ENV_KEYS` present (a test keeps that tuple equal to `.env.example`), `POSTGRES_PASSWORD` inside `DATABASE_URL`, `OWNER_TELEGRAM_ID` numeric, `MANAGER_TELEGRAM_IDS` each reachable via `get_chat`, bot token via `get_me`, `TELETHON_*` when `USERBOT_ENABLED`, `CRM_BASE_URL` starts with `https://` (❌ otherwise: production's Caddy answers an `http://` request with a 308 the agent never follows, 05 §B.1) and, while `feeds_configured()`, answers `GET /api/agent/suppression?limit=1` (200 ok · 404 «kalit yoki manba yoʻq» warning when `CRM_PUSH_ENABLED=false`, error when true · 3xx error); during the «Boshqa» fallback the feed GET is skipped (that key reads nothing, 05 §B.3) and no POST is tried (it would land a lead), `ANTHROPIC_API_KEY` present (no call), `BACKUP_AGE_RECIPIENT` starts `age1` and `secrets/backup-key.txt` exists, RAM ≥ 4 GB, swap ≥ 1 GB, free disk ≥ `DISK_MIN_FREE_GB`, `age`/`pg_dump` binaries, `DIGEST_TIME` inside `REVIEW_HOURS`. Exit 1 on any ❌. As built (the docker re-run, 2026-11-09): `TELETHON_SESSION`, when set, must parse (`tools/session_string`); a database that answers and refuses the password is ❌ naming `make db-password-sync` (it read «not up yet» and a green summary, then `make up` died on `init`); inside `make up` the all-clear says «make up davom etadi» (`CS_IN_UP`) |
 | `up` | `env` → `doctor` (skip with `SKIP_DOCTOR=1`) → `compose up -d --build db init` → `compose up -d --build worker userbot bot` |
-| `migrate` | `compose run --rm init alembic upgrade head` |
-| `revision m="…"` / `downgrade` | Alembic autogenerate, minting `000N_<slug>` through `scripts/revision_id.py` and `alembic.ini` `file_template = %%(rev)s` (02 §5) / `-1` |
-| `userbot-login` | `compose run --rm -it userbot python -m clientscrapper.tools.userbot_login` |
-| `backup` / `backup-key` / `backup-key-show` / `restore FILE= [DRY=1] [FORCE=1]` | MIYA verbatim (§4.4) |
+| `migrate` | `db-password` → `compose run --rm init alembic upgrade head` |
+| `db-password` / `db-password-sync` | (as built, the docker dry run and its re-run) a prerequisite of every target that can start the db (`backup-key`, `up`, `migrate`, `downgrade`, `reload`, `db-password-sync`): refuses `POSTGRES_PASSWORD` empty or `CHANGE_ME` and a `DATABASE_URL` still holding `CHANGE_ME`, before any docker call / after a password change: `compose up -d --wait db` (the container takes the new value) then `ALTER ROLE` over the container's local socket, the password read by psql from the container's own environment |
+| `revision m="…"` / `downgrade` (`db-password` first) | Alembic autogenerate, minting `000N_<slug>` through `scripts/revision_id.py` and `alembic.ini` `file_template = %%(rev)s` (02 §5) / `-1` |
+| `userbot-login` | `compose run --rm --no-deps -it userbot python -m clientscrapper.tools.userbot_login` |
+| `backup` / `backup-key` / `backup-key-show` / `restore FILE= [DRY=1] [FORCE=1]` | MIYA verbatim (§4.4). As built (the docker re-run): `backup-key` migrates through `compose run --rm init` and stops with «Baza tayyorlanmadi …» when it fails (an attached `up init` exited 0 over a failed init and the key came out anyway); `restore` looks a bare file name up in `/data/backups/` |
 | `update` | `backup` (fails = stop) → `git pull --ff-only` → `compose stop worker userbot bot` → `up IN_UPDATE=1` → `docker image prune -f` → «Yangilandi. Botda /holat ni tekshir.» |
 | `import-clients FILE= [APPLY=1]` | `tools/import_clients.py` → `suppression(manual_import)`; dry run by default; a written import deletes its file from `data/imports/` (the export is every client's phones) |
 | `erp-sync WALK=full\|delta\|outcomes\|quarter\|year [ACCEPT_SHRINK=1]` | `tools/erp_sync.py --<walk>`: one ERP feed walk by hand, the run the scheduler makes; exit 0 ran, 1 failed, 3 skipped (disabled, feeds not configured, already running); any other `WALK` stops make |
@@ -430,7 +439,7 @@ clientscrapper`, `CMD ["python", "-m", "clientscrapper.worker.main"]`. Image ≈
 | `mvp-report [START=YYYY-MM-DD]` | `tools/mvp_report.py`: 07 §3.2's four numbers (T-36) |
 | `smoke [FULL=1]` / `smoke-cron` | the live smoke tests in the Dockerfile `smoke` stage through the compose `smoke` service (`--no-deps`; the quarterly full run with `FULL=1`); `smoke-cron` prints the host crontab lines, guarded to Tashkent time (07 §1.12, `docs/SMOKE.md`) |
 | `purge COMPANY=<uuid> \| PHONE=<tail9> \| TG_USER=<id> \| TG_HANDLE=@<username> [REASON=legal_request\|dnc\|b2c\|owner] [APPLY=1]` | `tools/purge.py` (§5.4; make variables, not flags — `make purge --company` is a make error) |
-| `reload` | `compose up -d --force-recreate worker userbot bot` after editing `.env` |
+| `reload` | `db-password` → `compose up -d --force-recreate --no-deps worker userbot bot` after editing `.env` (`--no-deps`: never `init`'s `chown -R` and migration under the running processes) |
 | `logs` / `ps` / `psql` / `bot` / `worker` / `userbot` | tails and shells |
 | `test` / `lint` / `fmt` / `typecheck` / `check` | `pytest -q` · `ruff check .` · `ruff format .` · `mypy` (the strict `files` list in `pyproject.toml`, 07 §2.3) |
 | `db-test` | a throwaway `postgres:16` on `127.0.0.1:${DB_PORT:-5433}`: creates `cs_test` (migrated to head) and `cs_test_rt` (for `test_migrations`' round trip) and prints both URLs as the line to run (`DATABASE_URL=… CS_MIGRATION_DATABASE_URL=… CS_REQUIRE_DB=1 make test`) |
@@ -927,15 +936,15 @@ weights, 02 AC 1); nothing here waits for a `0002`. The table says where 06 read
 
 ### 7.1 Go-live (ops, English)
 
-1. VPS per §3.5; `ufw` enabled; Docker installed; repo cloned; `make env` (written mode 600); fill `.env` — a new `POSTGRES_PASSWORD` (also inside `DATABASE_URL`; `make backup-key` and `make up` refuse `CHANGE_ME`, since the database is created with whatever the first start finds), `ANTHROPIC_API_KEY`, `ASSISTANT_BOT_TOKEN` and `OWNER_TELEGRAM_ID` (step 4's BotFather part and the owner's `/start` come first: the doctor's `get_chat` needs them), `TELETHON_API_ID`/`TELETHON_API_HASH`; `chmod 600 .env`.
-2. `make backup-key`; secret key stored off-server (two places); `BACKUP_AGE_RECIPIENT` set.
-3. `make doctor` green; `make up`; `make ps` shows db healthy and worker, userbot, bot running, each with a fresh heartbeat (§3.1: the app containers carry no healthcheck of their own unless T-08 adds heartbeat-based ones); `/holat` from the owner account answers.
+1. VPS per §3.5; `ufw` enabled; Docker installed; repo cloned; `make env` (written mode 600); fill `.env` — a new `POSTGRES_PASSWORD` (also inside `DATABASE_URL`; every target that can start the db refuses `CHANGE_ME` in either, since the database is created with whatever the first start finds; changed afterwards → `make db-password-sync`), `ANTHROPIC_API_KEY`, `ASSISTANT_BOT_TOKEN` and `OWNER_TELEGRAM_ID` (step 4's BotFather part and the owner's `/start` come first: the doctor's `get_chat` needs them), `TELETHON_API_ID`/`TELETHON_API_HASH`; `chmod 600 .env`.
+2. `make backup-key` (it creates and migrates the database; a failed migration stops it before any key); secret key stored off-server (two places); `BACKUP_AGE_RECIPIENT` set.
+3. `make doctor` green; `make up`; `make ps` shows db healthy and worker, userbot, bot healthy, each on a heartbeat its own process wrote (§3.1); `/holat` from the owner account answers; the reader's «hali ulanmagan» line is expected until step 5's `make reload`.
 4. BotFather: bot created, group joining disabled; owner and every manager `/start` the bot; `make doctor` shows each manager id reachable.
-5. Reader account: SIM aged ≥ 30 days (§2, 03 §2.3), 2FA, `make userbot-login`, `make reload`, `/chats` lists the 3 seed chats within 24 h.
+5. Reader account: SIM aged ≥ 30 days (§2, 03 §2.3), 2FA, `make userbot-login`, the whole `TELETHON_SESSION=` line replaced in `.env`, `make reload`, `/chats` lists the 3 seed chats within 24 h.
 6. ERP (fullprompt `agent-feed` deployed — the build stamp at `/api/version` is newer than the merge; no migration, so the count proves nothing): the owner's five steps of 05 §A.14 done — key minted, «Qayta qilinmasin» in the dictionary, routing rules A and B present, `kub` mapped after the first test push, `agent_no_contact_reasons` matches the label; `make push-test` → 200 (a new `external_id` each run); `CRM_PUSH_ENABLED=true`; first delta pull shows a non-zero suppression count in `/holat`; the read-only count of client cards whose `phones` is not a JSON array is known (07 §5.3 — on `agent-feed` such a card is never suppressed, 05 §A.13).
 7. Fallback if `agent-feed` is not deployed: the same count first (on production one such card makes every push land nowhere, 05 §B.3); `CRM_PUSH_SOURCE=other`, `make import-clients FILE=clients.xlsx APPLY=1` (exported from an unfiltered client screen, 03 §2.2), `PUSH_DAILY_CAP=10`.
 8. Billing: Anthropic monthly limit $150 and e-mail alert at $100; Google Cloud budget $5/month with hard cap; Brave $5 credit only (the code side is 32 queries/day — 0.165 under the ≥ rule — and ≤ 1,000/month in `costs.ask`, 03 §1.3 / 04 §8 — past the credit the card is charged silently); Apify prepaid ≤ $20.
-9. `DEADMAN_PING_URL` configured and a test alert received on the owner's phone; `make backup` run once by hand and the file seen in Telegram; `make restore … DRY=1` on the file.
+9. `DEADMAN_PING_URL` configured and a test alert received on the owner's phone; `make backup` run once by hand and the file seen in Telegram; `make restore FILE=<file> DRY=1` on the file (a bare name is looked for in `data/backups/`).
 10. Legal: pd.gov.uz registration filed (owner); `docs/huquqiy-memo.md` §4 checklist signed off; managers briefed on `docs/sotuv-playbook.md` §2 (own account, 10:00–17:00, opt-out line).
 11. Week 1 settings: `REVIEW_DAILY_CAP=20`, `PUSH_DAILY_CAP=10`, one manager in `MANAGER_TELEGRAM_IDS`; raise after the first weekly review.
 12. Smoke cron installed: `(crontab -l; make -s smoke-cron) | crontab -` (`docs/SMOKE.md`; the lines fire in Tashkent time whatever the host's zone); `make smoke` run once by hand and its line seen in the next digest.
@@ -1091,3 +1100,19 @@ Not applied here (other files' homes): 2, 5, 11, 16, 20–23, 25, 26, 28, 32, 36
 - §5.1: registry pages without a file, a sole trader's name, card slug and site footer kept nowhere, `url_id` in the directories' logs. §5.4: the purge takes enrichment pages (`meta.for_company`), the `/stir` mark and E3's queued channel names.
 - §7.1: step 14 as landed; step 15, the wave-5 day-1 recordings and the week-1 watch.
 - Open questions 25–26 added: a sole trader's directory phone, a registry phone beside the company's own person.
+
+**The docker dry run and its re-run (2026-11-09)** — the first `docker compose` install of the
+whole OPS §2 path on a throwaway project, then an independent re-run from a fresh clone:
+
+- §1.1: the bot idles on a reason it cannot start under (no exit, no restart loop); `get_me` is
+  asked once a minute after the first five misses.
+- §2: the login runs `--no-deps`; Telethon's own English lines after the prompts; one session
+  parse (`tools/session_string`) for the reader and the doctor; a 60 s deadline on each `get_me`
+  and each `connect()`, and a reader that cannot connect keeps trying and beating instead of
+  exiting.
+- §3.1: a container's healthcheck counts only a beat written after its PID 1 started.
+- §3.2: the PGDG 16 client first on `PATH` (the drill's `pg_restore` was 17).
+- §3.3: `db-password` before every target that can start the db, `db-password-sync`, `reload`
+  and `userbot-login` `--no-deps`, `backup-key` stops on a failed `init`, `restore` reads a bare
+  name from `/data/backups/`; the doctor's refused-password, session and in-`up` lines.
+- §7.1: steps 1–3, 5 and 9 as the install now runs.

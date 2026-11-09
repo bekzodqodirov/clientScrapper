@@ -27,6 +27,18 @@ def _example() -> dict[str, str]:
     return {k: v or "" for k, v in dotenv_values(ROOT / ".env.example").items()}
 
 
+def _fake_session() -> str:
+    """A session string of the right shape over an all-zero key (synthetic:
+    it signs nobody in)."""
+    from telethon.crypto import AuthKey
+    from telethon.sessions import StringSession
+
+    session = StringSession()
+    session.set_dc(2, "149.154.167.51", 443)
+    session.auth_key = AuthKey(bytes(256))
+    return session.save()
+
+
 def _filled() -> dict[str, str]:
     """The example with the owner's required values typed in (synthetic)."""
     env = _example()
@@ -38,7 +50,7 @@ def _filled() -> dict[str, str]:
         OWNER_TELEGRAM_ID="111111111",
         TELETHON_API_ID="1000001",
         TELETHON_API_HASH="placeholder-not-a-hash",
-        TELETHON_SESSION="placeholder-not-a-session",
+        TELETHON_SESSION=_fake_session(),
         BACKUP_AGE_RECIPIENT="age1placeholder",
     )
     return env
@@ -100,6 +112,73 @@ def test_a_password_that_differs_from_the_url_is_an_error():
     env = _filled()
     env.update(POSTGRES_PASSWORD="another")
     assert any("DATABASE_URL" in e for e in _errors(_check(env)))
+
+
+@pytest.mark.parametrize(
+    "paste",
+    [
+        lambda s: "TELETHON_SESSION=" + s,  # the printed line, after the key
+        lambda s: s[:-7],  # a cut paste
+        lambda s: s[1:],  # the first character missed
+    ],
+)
+def test_a_session_that_does_not_parse_is_said_before_make_up(paste):
+    """The docker re-run: «TELETHON_SESSION=TELETHON_SESSION=…» was green
+    here and only the reader, one make reload later, said BAD_SESSION."""
+    env = _filled()
+    env.update(TELETHON_SESSION=paste(env["TELETHON_SESSION"]))
+    errors = _errors(_check(env))
+    assert any(e.startswith("❌ TELETHON_SESSION notoʻgʻri") for e in errors), errors
+    assert env["TELETHON_SESSION"] not in " ".join(errors)
+    env.update(USERBOT_ENABLED="false")
+    assert _errors(_check(env)) == []
+
+
+def test_an_empty_session_is_the_step_after_make_up_not_an_error():
+    env = _filled()
+    env.update(TELETHON_SESSION="")
+    findings = _check(env)
+    assert _errors(findings) == []
+    assert any(
+        f.level == "warn" and f.text.startswith("⚠️ TELETHON_SESSION boʻsh")
+        for f in findings
+    )
+
+
+def test_a_refused_password_is_an_error_that_names_the_cure():
+    """The docker re-run: POSTGRES_PASSWORD changed (in both places) after
+    the database was created read «⚠️ Baza hozircha javob bermayapti» and a
+    green summary, and make up then died on init."""
+    refused = DbState(reachable=False, error="OperationalError", auth_failed=True)
+    errors = _errors(_check(_filled(), db=refused))
+    assert len(errors) == 1 and "make db-password-sync" in errors[0], errors
+    # A URL that differs from POSTGRES_PASSWORD is C4's line alone: the sync
+    # would not cure it.
+    env = _filled()
+    env.update(POSTGRES_PASSWORD="another")
+    errors = _errors(_check(env, db=refused))
+    assert len(errors) == 1 and "DATABASE_URL" in errors[0], errors
+
+
+def test_the_probe_tells_a_refused_password_from_a_database_not_up():
+    import psycopg
+
+    refused = psycopg.OperationalError(
+        'connection failed: connection to server at "172.18.0.2", port 5432 '
+        'failed: FATAL:  password authentication failed for user "clientscrapper"'
+    )
+    down = psycopg.OperationalError(
+        "connection failed: [Errno -2] Name or service not known"
+    )
+    assert doctor.password_refused(refused)
+    assert not doctor.password_refused(down)
+
+
+def test_inside_make_up_the_all_clear_does_not_say_type_make_up():
+    """The docker re-run: make up's own doctor ended «endi: make up»."""
+    findings = _check(_filled())
+    said = doctor.summary(findings, in_up=True)
+    assert said == "✅ Hammasi joyida — make up davom etadi."
 
 
 def test_a_comment_shaped_value_is_an_error():

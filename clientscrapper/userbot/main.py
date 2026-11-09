@@ -58,7 +58,6 @@ from typing import Any, Final
 
 from sqlalchemy.ext.asyncio import AsyncSession
 from telethon import TelegramClient, errors, events
-from telethon.sessions import StringSession
 
 from clientscrapper.config import settings
 from clientscrapper.db.session import engine, session_scope
@@ -70,6 +69,7 @@ from clientscrapper.services.lifecycle import (
     remove_stop_signals,
     run_main,
 )
+from clientscrapper.tools import session_string
 from clientscrapper.userbot import about, backfill, ingest, joiner, limits, tg
 
 log = logging.getLogger(__name__)
@@ -96,6 +96,15 @@ BACKFILL_WINDOW: Final = (time(1, 0), time(6, 0))
 UNAUTHORIZED: Final = "UNAUTHORIZED"
 # A switched-off reader whose one beat did not land tries again this often.
 SWITCHED_OFF_BEAT_RETRY: Final = timedelta(minutes=1)
+# How long one «is the account signed in» check may wait for Telegram. A path
+# that accepts the TCP connection and never answers MTProto (a half-open
+# route) left get_me waiting for good: no beat at all, so neither the
+# «unanswered» beat nor the container's health said anything (the docker
+# re-run). Past this the check reads «Telegram did not answer».
+AUTH_CHECK_SECONDS: Final = 60.0
+# The same for one connect(): with no answer to its key exchange Telethon's
+# connect waited for good — two and a half minutes and counting in the re-run.
+CONNECT_SECONDS: Final = 60.0
 
 
 def _now() -> datetime:
@@ -184,10 +193,11 @@ async def authorization(client: Any) -> Authorization:
     ``client._authorized`` and ``connect()`` never clears it, so after one
     transient error the 15-minute re-check would never reach Telegram again."""
     try:
-        me = await client.get_me()
+        me = await asyncio.wait_for(client.get_me(), AUTH_CHECK_SECONDS)
     except tg.RESTRICTION_ERRORS as exc:
         return Authorization(False, code=tg.error_code(exc))
     except _UNANSWERED as exc:
+        # TimeoutError (AUTH_CHECK_SECONDS) is an OSError: unanswered too.
         return Authorization(None, code=tg.error_code(exc))
     if me is None:
         return Authorization(False)
@@ -468,9 +478,11 @@ async def idle_unauthorized(
         deadline = deps.clock() + RECHECK_UNAUTHORIZED
         try:
             if not client.is_connected():
-                await client.connect()
-        except (OSError, ConnectionError) as exc:
+                await asyncio.wait_for(client.connect(), CONNECT_SECONDS)
+        except Exception as exc:  # whatever connect raises, as in connect()
             log.warning("re-check could not connect", extra={"error": type(exc).__name__})
+            with contextlib.suppress(Exception):
+                await client.disconnect()
             continue
         answer = await authorization(client)
         if answer.authorized:
@@ -482,27 +494,55 @@ async def idle_unauthorized(
     return None
 
 
-async def connect(client: Any, deps: Deps) -> None:
-    """``connect()``, retried with backoff: a container often comes up before
-    the network does, and one failed connect must not burn a restart."""
-    for attempt in range(CONNECT_ATTEMPTS):
+async def connect(client: Any, deps: Deps) -> bool:
+    """``connect()``, each try bounded at ``CONNECT_SECONDS`` and retried with
+    backoff (5, 10, 20, 40 s), then once a minute until it lands: a container
+    often comes up before the network does. Never an exit — after
+    ``CONNECT_ATTEMPTS`` misses it used to end the process, and ``restart:
+    unless-stopped`` made that a restart loop (the docker re-run). Each miss
+    beats ``{"enabled": true, "authorized": null, "connected": false, "error":
+    code}`` («unknown» on ``/holat``, never an alert), so a reader waiting on the
+    network is told from one that hangs. True once connected; False when
+    stopped first."""
+    attempt = 0
+    while not deps.stop.is_set():
         try:
-            await client.connect()
-            return
-        except (OSError, ConnectionError) as exc:
-            wait = 2**attempt * 5
+            await asyncio.wait_for(client.connect(), CONNECT_SECONDS)
+            return True
+        except Exception as exc:
+            # Not only OSError (the deadline's TimeoutError is one): a path that
+            # answered MTProto with an HTTP page made Telethon raise
+            # IncompleteReadError, and the process went down with it (the
+            # re-run's sandbox). Whatever connect raises is a miss.
+            attempt += 1
+            code = tg.error_code(exc)
+            # A connect cut off half way leaves Telethon's sender behind it.
+            with contextlib.suppress(Exception):
+                await client.disconnect()
+            if attempt == CONNECT_ATTEMPTS:
+                log.error(
+                    f"could not reach Telegram after {CONNECT_ATTEMPTS} attempts; "
+                    "trying once a minute",
+                    extra={"error": code},
+                )
+            await beat_userbot(
+                deps,
+                {"enabled": True, "authorized": None, "connected": False, "error": code},
+            )
+            wait = 2 ** (attempt - 1) * 5 if attempt < CONNECT_ATTEMPTS else BEAT_SECONDS
             log.warning(
                 "connect failed; retrying",
                 extra={"error": type(exc).__name__, "wait_s": wait},
             )
             await deps.wait(wait)
-    raise SystemExit(f"could not reach Telegram after {CONNECT_ATTEMPTS} attempts")
+    return False
 
 
 async def supervise(client: Any, deps: Deps) -> None:
     """Connect, then serve while authorised; idle (beating) while not; and
     while Telegram cannot say, beat that and ask again each minute."""
-    await connect(client, deps)
+    if not await connect(client, deps):
+        return
     answer = await authorization(client)
     while not deps.stop.is_set():
         try:
@@ -618,11 +658,11 @@ async def run() -> None:
         return
     # Never echo any part of the string: it is a full credential (06 §2).
     try:
-        session = StringSession(settings.telethon_session)
-    except Exception as exc:
+        session = session_string.parse(settings.telethon_session)
+    except session_string.BadSession as exc:
         log.error(
             "TELETHON_SESSION is not a valid session string "
-            f"({type(exc).__name__}, {len(settings.telethon_session)} characters): "
+            f"({exc}, {len(settings.telethon_session)} characters): "
             "check .env for a repeated TELETHON_SESSION= prefix, quotes or a "
             "truncated paste, then make userbot-login; the reader idles until then"
         )

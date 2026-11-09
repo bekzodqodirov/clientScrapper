@@ -83,9 +83,11 @@ RAW_CALLS = {
     "popen",
 }
 # Where Telethon may be imported (07 §1.2 says userbot/; 06 §5.2 adds the
-# login tool, which must build the StringSession — T-13).
+# login tool, which must build the StringSession — T-13 — and the one parse of
+# a TELETHON_SESSION value the reader and make doctor share: it builds a
+# StringSession and connects nothing — the docker re-run).
 TELETHON_HOMES = ("userbot/",)
-TELETHON_TOOLS = {"tools/userbot_login.py"}
+TELETHON_TOOLS = {"tools/userbot_login.py", "tools/session_string.py"}
 # httpx's homes (07 §1.2). Outside them httpx may be named for its types and
 # exceptions (services/retry.py classifies httpx.TimeoutException) but not
 # for what opens a connection: a client, a transport, a request function.
@@ -260,7 +262,8 @@ def test_telethon_is_imported_only_by_the_reader():
         if _telethon_outside_the_reader(rel(p), tree_of(p), dotted_name(p))
     ]
     assert outside == [], (
-        "only clientscrapper/userbot/ (and tools/userbot_login.py) may import "
+        "only clientscrapper/userbot/ (and tools/userbot_login.py, "
+        "tools/session_string.py) may import "
         f"telethon; services/enrich.py reads t.me/s/ through Fetcher: {outside}"
     )
 
