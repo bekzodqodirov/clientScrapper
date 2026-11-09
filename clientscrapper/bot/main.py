@@ -38,7 +38,7 @@ from datetime import datetime, timedelta
 from typing import Any, Final
 
 from aiogram import Bot, Dispatcher
-from aiogram.exceptions import TelegramAPIError
+from aiogram.exceptions import TelegramAPIError, TelegramUnauthorizedError
 from aiogram.types import (
     BotCommand,
     BotCommandScopeChat,
@@ -46,6 +46,7 @@ from aiogram.types import (
     Message,
 )
 from aiogram.types.error_event import ErrorEvent
+from aiogram.utils.token import TokenValidationError
 from sqlalchemy import exc as sa_exc
 
 from clientscrapper.bot import deliver, handlers
@@ -228,10 +229,15 @@ async def watchdog_loop(notify: health.OwnerNotify, stop: asyncio.Event) -> None
 
 
 async def reach(bot: Bot, *, sleep: Sleep = asyncio.sleep) -> Any:
-    """``get_me`` with MIYA's backoff (5, 10, 20, 40 s); SystemExit after 5."""
+    """``get_me`` with MIYA's backoff (5, 10, 20, 40 s); SystemExit after 5.
+    A token Telegram refuses (401) stops at once with its own words: retrying
+    it only delayed «could not reach Telegram», which sent the owner to check
+    the network (the first docker dry run)."""
     for attempt in range(GET_ME_ATTEMPTS):
         try:
             return await bot.get_me()
+        except TelegramUnauthorizedError:
+            raise SystemExit(t("start.token_refused")) from None
         except Exception as exc:
             if attempt == GET_ME_ATTEMPTS - 1:
                 break
@@ -294,7 +300,12 @@ async def run(
     why = refusal()
     if why is not None:
         raise SystemExit(why)
-    bot = bot or deliver.make_bot()
+    try:
+        bot = bot or deliver.make_bot()
+    except TokenValidationError:
+        # aiogram checks the token's shape before any request: a paste with
+        # a missing piece ended in a traceback.
+        raise SystemExit(t("start.token_refused")) from None
     stop = asyncio.Event()
     installed = install_stop_signals(stop)
     tasks: list[asyncio.Task[Any]] = []

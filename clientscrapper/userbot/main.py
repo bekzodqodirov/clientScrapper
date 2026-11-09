@@ -20,8 +20,13 @@ Safety properties, all deliberate (MIYA's, adapted):
   minute until it lands) and idles without building a client — idle, not
   exit: the container restarts ``unless-stopped``, and a clean exit would be
   restarted in a tight loop.
-* Missing credentials end the process with the keys named; a session string
-  that does not parse says so without echoing any of it.
+* Missing credentials (no session yet — the normal state between ``make up``
+  and ``make userbot-login``) or a session string that does not parse: the
+  process logs which, never echoing the string, beats ``{"enabled": true,
+  "authorized": false, "error": NO_SESSION | NO_API_KEYS | BAD_SESSION}``
+  every minute and idles without building a client (``idle_not_set_up``);
+  ``health`` names the missing step. It used to exit, and under ``restart:
+  unless-stopped`` that was a restart loop (the first docker dry run).
 * ``connect()``, never ``start()``: an unauthorised session would make
   ``start()`` prompt for a phone number on stdin, which in a container never
   returns. Not authorised, or restricted later (banned, revoked, a second
@@ -551,6 +556,29 @@ def _credentials_missing() -> list[str]:
     return [key for key, value in named if not value]
 
 
+async def idle_not_set_up(deps: Deps, *, code: str) -> None:
+    """A reader with no account to read with: beat ``authorized: false`` with
+    ``code`` every minute until stopped, and never build a client. Idle, not
+    exit (``restart: unless-stopped``); ``health`` turns the code into the
+    step the owner has to do (``health.USERBOT_SETUP_TEXTS``)."""
+    detail = {"enabled": True, "authorized": False, "error": code}
+    while not deps.stop.is_set():
+        await beat_userbot(deps, detail)
+        await deps.wait(BEAT_SECONDS)
+
+
+async def _not_set_up(code: str) -> None:
+    """The process side of ``idle_not_set_up``: SIGTERM ends it, the pool goes."""
+    deps = Deps()
+    installed = install_stop_signals(deps.stop)
+    try:
+        await idle_not_set_up(deps, code=code)
+    finally:
+        remove_stop_signals(installed)
+        await engine.dispose()
+        log.info("userbot stopped")
+
+
 async def run() -> None:
     setup_logging("userbot")
     if not settings.userbot_enabled:
@@ -576,20 +604,30 @@ async def run() -> None:
         return
     missing = _credentials_missing()
     if missing:
-        raise SystemExit(
+        log.error(
             f"{', '.join(missing)} must be set when USERBOT_ENABLED=true "
-            "(make userbot-login prints TELETHON_SESSION)"
+            "(make userbot-login prints TELETHON_SESSION, then make reload); "
+            "the reader idles until then",
+            extra={"missing": missing},
         )
+        await _not_set_up(
+            health.USERBOT_NO_SESSION
+            if missing == ["TELETHON_SESSION"]
+            else health.USERBOT_NO_API_KEYS
+        )
+        return
     # Never echo any part of the string: it is a full credential (06 §2).
     try:
         session = StringSession(settings.telethon_session)
     except Exception as exc:
-        raise SystemExit(
+        log.error(
             "TELETHON_SESSION is not a valid session string "
             f"({type(exc).__name__}, {len(settings.telethon_session)} characters): "
             "check .env for a repeated TELETHON_SESSION= prefix, quotes or a "
-            "truncated paste, then make userbot-login"
-        ) from None
+            "truncated paste, then make userbot-login; the reader idles until then"
+        )
+        await _not_set_up(health.USERBOT_BAD_SESSION)
+        return
     client = TelegramClient(
         session,
         settings.telethon_api_id,

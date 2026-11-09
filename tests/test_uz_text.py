@@ -101,6 +101,9 @@ OWNER_TEXT_MODULES = (
     "tools/purge.py",
     # T-36: the MVP report's lines (its words are services/cards').
     "tools/mvp_report.py",
+    # make userbot-login's prompts and lines: the owner runs it himself (the
+    # first docker dry run, 2026-11-09).
+    "tools/userbot_login.py",
 )
 # Modules whose raise messages reach the owner (see the docstring).
 OWNER_RAISE_MODULES = frozenset({"config.py"})

@@ -333,30 +333,73 @@ async def test_a_switched_off_beat_that_did_not_land_is_tried_again(session, mon
     assert beat.detail == {"enabled": False}
 
 
-async def test_missing_credentials_name_every_missing_key(monkeypatch):
+def _not_set_up_spy(monkeypatch) -> list[str]:
+    """run()'s idle for a reader with no account, recorded instead of awaited."""
+    codes: list[str] = []
+
+    async def _spy(code: str) -> None:
+        codes.append(code)
+
+    monkeypatch.setattr(userbot, "_not_set_up", _spy)
+    monkeypatch.setattr(userbot, "setup_logging", lambda *a, **k: None)
+    return codes
+
+
+async def test_missing_credentials_name_every_missing_key_and_idle(monkeypatch, caplog):
+    """The first docker dry run (2026-11-09): with USERBOT_ENABLED=true and no
+    session yet — the state between `make up` and `make userbot-login` — the
+    reader exited, and `restart: unless-stopped` restarted it eleven times in
+    two minutes. It idles now, naming the keys, and no client is built."""
     monkeypatch.setattr(settings, "userbot_enabled", True)
     monkeypatch.setattr(settings, "telethon_api_id", None)
     monkeypatch.setattr(settings, "telethon_api_hash", "")
     monkeypatch.setattr(settings, "telethon_session", "")
-    monkeypatch.setattr(userbot, "setup_logging", lambda *a, **k: None)
-    with pytest.raises(SystemExit) as exit_:
-        await userbot.run()
-    assert "TELETHON_API_ID, TELETHON_API_HASH, TELETHON_SESSION" in str(exit_.value.code)
+    monkeypatch.setattr(userbot, "TelegramClient", None)  # never built
+    codes = _not_set_up_spy(monkeypatch)
+    await userbot.run()
+    assert codes == [health.USERBOT_NO_API_KEYS]
+    assert "TELETHON_API_ID, TELETHON_API_HASH, TELETHON_SESSION" in caplog.text
 
 
-async def test_a_broken_session_string_is_refused_without_echoing_it(monkeypatch):
+async def test_no_session_yet_is_the_login_step(monkeypatch, caplog):
+    monkeypatch.setattr(settings, "userbot_enabled", True)
+    monkeypatch.setattr(settings, "telethon_api_id", 12345)
+    monkeypatch.setattr(settings, "telethon_api_hash", "0" * 32)
+    monkeypatch.setattr(settings, "telethon_session", "")
+    codes = _not_set_up_spy(monkeypatch)
+    await userbot.run()
+    assert codes == [health.USERBOT_NO_SESSION]
+    assert "make userbot-login" in caplog.text
+
+
+async def test_a_broken_session_string_is_refused_without_echoing_it(monkeypatch, caplog):
     secret = "1" + "Q" * 40 + "notasession"
     monkeypatch.setattr(settings, "userbot_enabled", True)
     monkeypatch.setattr(settings, "telethon_api_id", 12345)
     monkeypatch.setattr(settings, "telethon_api_hash", "0" * 32)
     monkeypatch.setattr(settings, "telethon_session", secret)
-    monkeypatch.setattr(userbot, "setup_logging", lambda *a, **k: None)
-    with pytest.raises(SystemExit) as exit_:
-        await userbot.run()
-    text = str(exit_.value.code)
+    codes = _not_set_up_spy(monkeypatch)
+    await userbot.run()
+    assert codes == [health.USERBOT_BAD_SESSION]
+    text = caplog.text
     assert "TELETHON_SESSION is not a valid session string" in text
     assert secret not in text and secret[:6] not in text
     assert f"{len(secret)} characters" in text
+
+
+async def test_a_reader_not_set_up_beats_its_step_until_stopped(session):
+    """idle_not_set_up: one beat a minute naming the code, no client, ended by
+    the stop event — and health names the step, not a restriction."""
+    deps, ticker = _deps(stop_after=3)
+    await userbot.idle_not_set_up(deps, code=health.USERBOT_NO_SESSION)
+    assert ticker.pauses == [userbot.BEAT_SECONDS] * 3
+    beat = await _beat(session)
+    assert beat.detail == {
+        "enabled": True,
+        "authorized": False,
+        "error": health.USERBOT_NO_SESSION,
+    }
+    assert beat.last_seen_at == NOW + timedelta(minutes=2)
 
 
 async def test_connect_gives_up_after_five_tries(monkeypatch):

@@ -48,8 +48,17 @@ RUN set -eu; \
         echo "pg_dump: PGDG unavailable, keeping the distribution client" >&2; \
         rm -f /etc/apt/sources.list.d/pgdg.list; \
     fi; \
-    rm -rf /var/lib/apt/lists/*; \
-    pg_dump --version
+    rm -rf /var/lib/apt/lists/*
+
+# The 16 client first on PATH. Debian's own `postgresql-client` above is 17
+# on trixie, and its pg_wrapper picks the newest installed major — so with
+# both present, pg_dump and pg_restore were 17. pg_restore 17 sends
+# «SET transaction_timeout = 0», which a 16 server refuses: every weekly
+# restore drill failed (measured in the first docker dry run, 2026-11-09).
+# Without PGDG the directory does not exist and the distribution client is
+# used, as before.
+ENV PATH=/usr/lib/postgresql/16/bin:$PATH
+RUN pg_dump --version && pg_restore --version
 
 COPY requirements.txt ./
 

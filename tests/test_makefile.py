@@ -311,3 +311,56 @@ def test_a_one_off_run_never_re_runs_init():
     compose = (ROOT / "docker-compose.yml").read_text()
     smoke = compose.split("\n  smoke:\n", 1)[1].split("\n  searxng:", 1)[0]
     assert "depends_on: { db: { condition: service_healthy } }" in smoke
+
+
+# --- the first install (the docker dry run, 2026-11-09) -----------------------------
+
+
+def _scratch(tmp_path: Path, password: str | None) -> Path:
+    """A copy of the Makefile and .env.example; .env with ``password`` (None:
+    no .env yet)."""
+    for name in ("Makefile", ".env.example"):
+        (tmp_path / name).write_text((ROOT / name).read_text())
+    if password is not None:
+        example = (ROOT / ".env.example").read_text()
+        (tmp_path / ".env").write_text(
+            example.replace(
+                "POSTGRES_PASSWORD=CHANGE_ME", f"POSTGRES_PASSWORD={password}"
+            )
+        )
+    return tmp_path
+
+
+def _make(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    # COMPOSE=true: every docker call is a no-op that succeeds.
+    return subprocess.run(
+        ["make", "-s", "COMPOSE=true", *args],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_make_env_writes_a_file_only_its_owner_reads(tmp_path):
+    cwd = _scratch(tmp_path, None)
+    assert _make(cwd, "env").returncode == 0
+    assert (cwd / ".env").stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.parametrize("target", [["backup-key"], ["up"], ["up", "SKIP_DOCTOR=1"]])
+@pytest.mark.parametrize("password", ["CHANGE_ME", '"CHANGE_ME"', ""])
+def test_the_placeholder_password_never_reaches_a_database(tmp_path, target, password):
+    """`make backup-key` comes before the doctor in OPS §2 and starts the db,
+    which is created with the password .env holds: the placeholder (or
+    nothing) stops make before any docker call, SKIP_DOCTOR=1 included."""
+    cwd = _scratch(tmp_path, password)
+    done = _make(cwd, *target)
+    assert done.returncode != 0
+    assert "POSTGRES_PASSWORD .env da hali «CHANGE_ME» yoki boʻsh" in done.stdout
+    assert not (cwd / "secrets").exists()
+
+
+def test_a_real_password_goes_on(tmp_path):
+    cwd = _scratch(tmp_path, "0123456789abcdef")
+    assert _make(cwd, "backup-key").returncode == 0
+    assert _make(cwd, "up", "SKIP_DOCTOR=1").returncode == 0

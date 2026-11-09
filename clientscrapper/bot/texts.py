@@ -297,6 +297,10 @@ UZ: Final[Mapping[str, str]] = MappingProxyType(
             "OWNER_TELEGRAM_ID boʻsh — hech kimga cheklanmagan botni ishga tushirmayman."
         ),
         "start.no_telegram": "Telegramga 5 urinishda ulanib boʻlmadi.",
+        "start.token_refused": (
+            "ASSISTANT_BOT_TOKEN ni Telegram rad etdi — @BotFather → /mybots → "
+            "API Token; .env ga qaytadan koʻchir, keyin make reload."
+        ),
     }
 )
 

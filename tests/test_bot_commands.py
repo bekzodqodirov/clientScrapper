@@ -1452,6 +1452,35 @@ async def test_the_bot_stops_after_five_failed_get_me(configured):
     assert stop.value.code == t("start.no_telegram")
 
 
+async def test_a_refused_token_stops_at_once_in_its_own_words(configured):
+    """The first docker dry run: a token Telegram refuses was retried five
+    times and ended in «Telegramga 5 urinishda ulanib boʻlmadi», which reads
+    as a network fault."""
+    from aiogram.exceptions import TelegramUnauthorizedError
+    from aiogram.methods import GetMe
+
+    bot, fake = fake_bot()
+    fake.fail("GetMe", TelegramUnauthorizedError(GetMe(), "Unauthorized"), times=5)
+    waits: list[float] = []
+
+    async def sleep(seconds: float) -> None:
+        waits.append(seconds)
+
+    with pytest.raises(SystemExit) as stop:
+        await bot_main.run(bot=bot, sleep=sleep)
+    assert stop.value.code == t("start.token_refused")
+    assert waits == [] and len(fake.named("GetMe")) <= 1
+
+
+async def test_a_token_of_the_wrong_shape_is_said_not_a_traceback(
+    configured, monkeypatch
+):
+    monkeypatch.setattr(settings, "assistant_bot_token", "123456789-no-colon")
+    with pytest.raises(SystemExit) as stop:
+        await bot_main.run()
+    assert stop.value.code == t("start.token_refused")
+
+
 async def test_the_watchdog_says_a_silent_worker_once(session, configured):
     said: list[str] = []
 

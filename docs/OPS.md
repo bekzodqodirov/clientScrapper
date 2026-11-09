@@ -37,12 +37,19 @@ Telegram accounts, 10:00–17:00 Tashkent (`docs/sotuv-playbook.md`).
 
 ## 2. Go-live checklist (06 §7.1)
 
-1. VPS per 06 §3.5; `ufw` enabled; Docker installed; repo cloned; `make env`; fill `.env`;
-   `chmod 600 .env`.
+1. VPS per 06 §3.5; `ufw` enabled; Docker installed; repo cloned; `make env` (written mode
+   600); fill `.env`: a new `POSTGRES_PASSWORD` (`openssl rand -hex 24`, the same inside
+   `DATABASE_URL` — `make backup-key` and `make up` refuse `CHANGE_ME`: the database is created
+   with whatever password the first start finds), `ANTHROPIC_API_KEY`, `ASSISTANT_BOT_TOKEN` and
+   `OWNER_TELEGRAM_ID` (step 4's BotFather part and the owner's `/start` to the bot come first —
+   the doctor asks Telegram whether the bot can reach the owner), `TELETHON_API_ID` and
+   `TELETHON_API_HASH`; `chmod 600 .env`.
 2. `make backup-key`; store the secret key off the server in two places; `BACKUP_AGE_RECIPIENT`
    set in `.env`.
 3. `make doctor` green; `make up`; `make ps` shows the database healthy and worker, userbot and
-   bot running, each with a fresh heartbeat; `/holat` from the owner's account answers.
+   bot running, each with a fresh heartbeat; `/holat` from the owner's account answers. Until
+   step 5 the reader idles and `/holat` says «Telegram oʻquvchi akkaunti hali ulanmagan» — that
+   is expected, not a fault.
 4. BotFather: the bot exists, group joining is disabled; the owner and every manager have sent
    `/start` to the bot; `make doctor` shows each manager id reachable.
 5. Reader account: a SIM at least 30 days old, 2FA on, `make userbot-login`, `make reload`;

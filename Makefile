@@ -10,7 +10,7 @@ COMPOSE := docker compose
 # — so DRY=yes never runs a real restore and APPLY=0 never applies. A plain
 # $(if $(X),…) would read every non-empty value, «0» included, as on.
 switch = $(if $(filter-out 0 1,$(strip $($(1)))),$(error $(1)=$($(1)): use $(1)=1 (on) or $(1)=0 (off)),$(filter 1,$(strip $($(1)))))
-.PHONY: help env doctor up update down reload logs ps psql migrate revision downgrade \
+.PHONY: help env db-password doctor up update down reload logs ps psql migrate revision downgrade \
         bot worker userbot userbot-login backup backup-key backup-key-show restore \
         import-clients erp-sync push-test mvp-report purge install test lint fmt typecheck check db-test hooks smoke smoke-cron
 
@@ -18,15 +18,28 @@ help: ## Show this help
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
 		| awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}'
 
+# Mode 600 from the first byte: the file is about to hold every key and token.
 env: ## Create .env from .env.example if it does not exist
-	@test -f .env || (cp .env.example .env && echo ".env yaratildi — make up dan oldin uni toʻldir")
+	@test -f .env || (umask 077 && cp .env.example .env && chmod 600 .env && echo ".env yaratildi — make up dan oldin uni toʻldir")
+
+# The database is created with the password .env holds the first time the db
+# container starts — `make backup-key` (before the doctor in OPS §2) or
+# `make up`, SKIP_DOCTOR=1 included; changing it afterwards takes an ALTER
+# ROLE by hand. So the shipped placeholder never gets that far (the first
+# docker dry run, 2026-11-09).
+db-password: env
+	@pw="$$(sed -n 's/^POSTGRES_PASSWORD=//p' .env | tail -n 1 | tr -d "\"' \r")"; \
+	if [ -z "$$pw" ] || [ "$$pw" = CHANGE_ME ]; then \
+		echo "POSTGRES_PASSWORD .env da hali «CHANGE_ME» yoki boʻsh — avval almashtir: openssl rand -hex 24 (DATABASE_URL ichida ham shu parol). Baza birinchi ishga tushganda shu parol bilan yaratiladi."; \
+		exit 1; \
+	fi
 
 # --- Docker -----------------------------------------------------------------
 doctor: env ## Check .env, the server and the database before make up
 	$(COMPOSE) build worker
 	$(COMPOSE) run --rm --no-deps -e CS_IN_UPDATE=$(IN_UPDATE) worker python -m clientscrapper.tools.doctor
 
-up: env $(if $(filter 1,$(strip $(SKIP_DOCTOR))),,doctor) ## Build and start everything; init migrates (SKIP_DOCTOR=1 to skip the check)
+up: env db-password $(if $(filter 1,$(strip $(SKIP_DOCTOR))),,doctor) ## Build and start everything; init migrates (SKIP_DOCTOR=1 to skip the check)
 	$(COMPOSE) up -d --build db init
 	$(COMPOSE) up -d --build worker userbot bot
 
@@ -90,7 +103,7 @@ userbot-login: ## One-time Telethon login; prints TELETHON_SESSION for .env
 # The key is written through init's ./secrets mount: the app services mount
 # it read-only (MIYA's worker mounted it writable). As the app's uid, so the
 # worker can read the 0600 file it writes; `up init` handed /secrets over.
-backup-key: ## Create the backup key and print the .env line
+backup-key: db-password ## Create the backup key and print the .env line
 	@test ! -e secrets/backup-key.txt || { echo "secrets/backup-key.txt allaqachon bor — yangisi yaratilmaydi (eski zaxiralar faqat eski kalit bilan ochiladi)."; exit 1; }
 	$(COMPOSE) up init
 	$(COMPOSE) run --rm --no-deps --user 10001:10001 init age-keygen -o /secrets/backup-key.txt

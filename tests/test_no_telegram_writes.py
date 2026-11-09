@@ -849,13 +849,27 @@ def test_the_kill_switch_idles_and_never_builds_a_client(monkeypatch):
     not hasattr(userbot, "TelegramClient"),
     reason="T-13 builds the Telethon reader; the T-01 skeleton never logs in",
 )
-def test_a_missing_session_fails_loudly_naming_the_key(monkeypatch):
+def test_a_missing_session_idles_loudly_naming_the_key(monkeypatch, caplog):
+    """Loud, and idle rather than exit: under ``restart: unless-stopped`` an
+    exit was a restart loop (the first docker dry run, 2026-11-09). The
+    reader logs the key, never builds a client, and waits as «not set up»."""
     monkeypatch.setattr(settings, "userbot_enabled", True)
     monkeypatch.setattr(settings, "telethon_session", "")
+
+    def _explode(*args, **kwargs):  # pragma: no cover - must never run
+        raise AssertionError("TelegramClient was constructed with no session")
+
+    idled: list[str] = []
+
+    async def _idle(code: str) -> None:
+        idled.append(code)
+
+    monkeypatch.setattr(userbot, "TelegramClient", _explode, raising=False)
+    monkeypatch.setattr(userbot, "_not_set_up", _idle, raising=False)
     monkeypatch.setattr(userbot, "setup_logging", lambda *a, **k: None, raising=False)
-    with pytest.raises(SystemExit) as exit_:
-        asyncio.run(userbot.run())
-    assert "TELETHON_SESSION" in str(exit_.value.code)
+    asyncio.run(userbot.run())
+    assert idled, "a missing session must idle the process, not let it exit"
+    assert "TELETHON_SESSION" in caplog.text
 
 
 # --- the owner bot and every other channel ----------------------------------------

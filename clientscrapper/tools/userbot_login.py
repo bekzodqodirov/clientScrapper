@@ -14,17 +14,57 @@ terminate the session, then log in again.
 
 Nothing is read or sent: the tool signs in, prints the string and the
 account's first name, and disconnects.
+
+The owner runs this himself, so the words are his (Uzbek): the prompts are
+the tool's own, not Telethon's English ones — whose phone prompt says «(or bot
+token)» right after the owner has made a bot, and a bot token pasted there
+signs the reader in as that bot. The phone prompt refuses anything that is not
+a phone number. The connect is bounded: without a route to Telegram the
+login used to wait in silence (the first docker dry run, 2026-11-09).
 """
 
 from __future__ import annotations
 
 import asyncio
+import getpass
+import re
 import sys
-from typing import Any
+from collections.abc import Callable
+from typing import Any, Final
 
 from clientscrapper.config import settings
 
 SESSION_KEY = "TELETHON_SESSION"
+CONNECT_TIMEOUT_SECONDS: Final = 60
+# A phone number as typed: digits with an optional «+», spaces, dashes or
+# brackets between them. A bot token («123456:AA…») has a colon and letters.
+PHONE: Final = re.compile(r"\+?\d[\d ()-]{6,}\d")
+PHONE_PROMPT: Final = "Oʻquvchi akkauntning telefon raqami (+998…): "
+NOT_A_PHONE: Final = (
+    "Bu telefon raqami emas. Bot tokeni ham emas — bu yerga oʻquvchi akkaunt "
+    "SIM kartasining raqamini yoz, masalan +998901234567."
+)
+CODE_PROMPT: Final = "Telegram yuborgan kod (akkauntning Telegram ilovasiga keladi): "
+PASSWORD_PROMPT: Final = "Ikki bosqichli tekshiruv (2FA) paroli: "
+CONNECTING: Final = "Telegramga ulanmoqda…"
+NO_CONNECTION: Final = (
+    "Telegramga {seconds} soniyada ulanib boʻlmadi — serverning internetini "
+    "tekshir va qaytadan: make userbot-login"
+)
+MISSING_APP_KEYS: Final = (
+    "Avval .env ga TELETHON_API_ID va TELETHON_API_HASH ni yoz: my.telegram.org → "
+    "API development tools (oʻquvchi akkaunt raqami bilan kir; MIYA ilovasidan "
+    "alohida ilova)."
+)
+
+
+def ask_phone(read: Callable[[str], str] = input) -> str:
+    """The reader account's number; asked again until it looks like one."""
+    while True:
+        answer = read(PHONE_PROMPT).strip()
+        if PHONE.fullmatch(answer):
+            return answer
+        print(NOT_A_PHONE)
 
 
 def session_line(session_string: str) -> str:
@@ -32,7 +72,7 @@ def session_line(session_string: str) -> str:
     return f"{SESSION_KEY}={session_string}"
 
 
-async def _login(client_factory: Any = None) -> None:
+async def _login(client_factory: Any = None) -> bool:
     from telethon import TelegramClient
     from telethon.sessions import StringSession
 
@@ -44,37 +84,48 @@ async def _login(client_factory: Any = None) -> None:
     client = factory(
         StringSession(), settings.telethon_api_id, settings.telethon_api_hash
     )
+    print(CONNECTING, flush=True)
+    try:
+        await asyncio.wait_for(client.connect(), CONNECT_TIMEOUT_SECONDS)
+    except (OSError, ConnectionError, TimeoutError):
+        print(NO_CONNECTION.format(seconds=CONNECT_TIMEOUT_SECONDS), file=sys.stderr)
+        await client.disconnect()
+        return False
     # start() here and only here: this is the one place a person sits at the
     # terminal to type the phone number, the code and the password.
-    await client.start()
+    await client.start(
+        phone=ask_phone,
+        code_callback=lambda: input(CODE_PROMPT),
+        password=lambda: getpass.getpass(PASSWORD_PROMPT),
+    )
     try:
         session_string = client.session.save()
         # The credential goes out first, before anything that could fail:
         # logging in mints a new authorised session on the account, and if the
         # string is lost the login cannot be repeated, only redone — leaving an
         # orphan session behind each time.
-        print("\nAdd this line to the server .env (keep it secret, never commit it):\n")
+        print(
+            "\nQuyidagi qatorni serverdagi .env faylidagi TELETHON_SESSION= oʻrniga "
+            "yoz, keyin: make reload.\nBu qator — akkaunt paroli kabi maxfiy: "
+            "hech kimga yuborma, hech qayerga joylama.\n"
+        )
         print(session_line(session_string) + "\n")
         try:
             me = await client.get_me()
             name = getattr(me, "first_name", None) or getattr(me, "id", "?")
-            print(f"Logged in as: {name}")
+            print(f"Kirildi: {name}")
         except Exception as exc:  # cosmetic only — never lose the session over it
-            print(f"(signed in; could not read the account name: {type(exc).__name__})")
+            print(f"(kirildi; akkaunt nomini oʻqib boʻlmadi: {type(exc).__name__})")
     finally:
         await client.disconnect()
+    return True
 
 
 def main() -> int:
     if not (settings.telethon_api_id and settings.telethon_api_hash):
-        print(
-            "TELETHON_API_ID and TELETHON_API_HASH must be set first "
-            "(my.telegram.org → API development tools, a separate app from MIYA's).",
-            file=sys.stderr,
-        )
+        print(MISSING_APP_KEYS, file=sys.stderr)
         return 1
-    asyncio.run(_login())
-    return 0
+    return 0 if asyncio.run(_login()) else 1
 
 
 if __name__ == "__main__":

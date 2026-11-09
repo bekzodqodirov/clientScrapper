@@ -322,7 +322,7 @@ As built (T-35, the integration and the seam review, wave 4, at `48cc857`; `serv
 | api_id / api_hash | From my.telegram.org under the company account; a **separate** app from MIYA's; stored only in `.env` |
 | Login | `make userbot-login` → `tools/userbot_login.py` (MIYA verbatim): interactive phone, code, 2FA → prints `TELETHON_SESSION=<StringSession>`; paste into `.env`, `make reload`. The string is a full credential; a leak is handled by Settings → Devices → terminate, then a new login |
 | One client per session | `AuthKeyDuplicatedError` = two processes on one string; `make doctor` refuses to start when `USERBOT_ENABLED=true` and a second `userbot` container is running; never run the session on a phone and the server at once |
-| Runtime | `connect()` not `start()`; `is_user_authorized()` false → beat `{"enabled": true, "authorized": false, "error": code}` and idle (no login prompt in a container); `USERBOT_ENABLED=false` → beat `{"enabled": false}` and idle forever (the container never exits, so `unless-stopped` is safe) |
+| Runtime | `connect()` not `start()`; `is_user_authorized()` false → beat `{"enabled": true, "authorized": false, "error": code}` and idle (no login prompt in a container); `USERBOT_ENABLED=false` → beat `{"enabled": false}` and idle forever (the container never exits, so `unless-stopped` is safe). As built (the docker dry run, 2026-11-09): `USERBOT_ENABLED=true` with no session yet — the normal state between `make up` and `make userbot-login` — or with the api id/hash missing, or a session string that does not parse, logs which (never echoing the string), beats `authorized: false` with `error` `NO_SESSION` / `NO_API_KEYS` / `BAD_SESSION` every minute and idles without a client (it used to exit, a restart loop); `userbot_unauthorized` then names the step (`health.USERBOT_SETUP_TEXTS`), not a restriction |
 | Join policy | `userbot/joiner.py`, daily at a random minute 10:00–20:00, `USERBOT_JOINS_PER_DAY=3`, public usernames only, no invite links, `≥ 90 s` between joins, cap 60 chats, nothing joined while `flood_until` or the global pause is set; the agent **never leaves** a chat — the owner leaves by hand from the phone; `/chats` off only stops reading |
 | About reads | `userbot/about.py` (`read_about`) drains `chat_monitors(status='queued', priority 3)` rows enqueued by enrichment step E3 (04 §3 — E3 itself reads the public `https://t.me/s/<username>` page through `Fetcher`; the worker never imports `telethon`) and by the tout filter (03 §2.3): `GetFullChannelRequest` ≤ 20/day → `evidence` + `observations(kind='profile')`, `GetFullUserRequest` ≤ 50/day (cached 30 d) → `interactions.sender_bio`. With the joiner these are the only raw requests allowed (07 `RAW_ALLOWED`); nothing is read while `flood_until` or the global pause is set |
 | `chat_monitors` defaults | groups and channels `monitor_enabled=true, decided_by='rule:default'`; private chats `false, decided_by='rule:private_off'` and never read (MIYA default flipped; `services/chats.default_monitor_enabled` is the one home); `role='calibration'` rows (GSR's own `@gsrgroupchat`, 03 §2.3) are `monitor_enabled=false` and nothing is read or stored from them — the account may sit in the chat, its members are existing clients |
@@ -402,7 +402,10 @@ MIYA's minus torch, ffmpeg and the HF cache: `FROM python:3.12-slim` (tag pinned
 in a comment and refreshed monthly), `ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
 TZ=Asia/Tashkent PIP_DEFAULT_TIMEOUT=120 PIP_RETRIES=10`, `apt-get install --no-install-recommends
 tzdata ca-certificates curl age postgresql-client`, the PGDG `postgresql-client-16` attempt
-(non-fatal, MIYA verbatim, so `pg_dump` matches the server major), `pip install -r
+(non-fatal, MIYA verbatim, so `pg_dump` matches the server major) and `ENV
+PATH=/usr/lib/postgresql/16/bin:$PATH` after it (as built, the docker dry run of 2026-11-09:
+trixie's `postgresql-client` is 17 and pg_wrapper picks the newest major, so without it
+`pg_restore` 17 sent `SET transaction_timeout` to the 16 server and every drill failed), `pip install -r
 requirements.txt` under a cache mount, `COPY alembic.ini alembic clientscrapper`, `useradd
 --uid 10001 clientscrapper`, `mkdir -p /data/evidence /data/backups && chown`, `USER
 clientscrapper`, `CMD ["python", "-m", "clientscrapper.worker.main"]`. Image ≈ 350 MB.
@@ -924,7 +927,7 @@ weights, 02 AC 1); nothing here waits for a `0002`. The table says where 06 read
 
 ### 7.1 Go-live (ops, English)
 
-1. VPS per §3.5; `ufw` enabled; Docker installed; repo cloned; `make env`; fill `.env`; `chmod 600 .env`.
+1. VPS per §3.5; `ufw` enabled; Docker installed; repo cloned; `make env` (written mode 600); fill `.env` — a new `POSTGRES_PASSWORD` (also inside `DATABASE_URL`; `make backup-key` and `make up` refuse `CHANGE_ME`, since the database is created with whatever the first start finds), `ANTHROPIC_API_KEY`, `ASSISTANT_BOT_TOKEN` and `OWNER_TELEGRAM_ID` (step 4's BotFather part and the owner's `/start` come first: the doctor's `get_chat` needs them), `TELETHON_API_ID`/`TELETHON_API_HASH`; `chmod 600 .env`.
 2. `make backup-key`; secret key stored off-server (two places); `BACKUP_AGE_RECIPIENT` set.
 3. `make doctor` green; `make up`; `make ps` shows db healthy and worker, userbot, bot running, each with a fresh heartbeat (§3.1: the app containers carry no healthcheck of their own unless T-08 adds heartbeat-based ones); `/holat` from the owner account answers.
 4. BotFather: bot created, group joining disabled; owner and every manager `/start` the bot; `make doctor` shows each manager id reachable.

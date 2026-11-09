@@ -538,6 +538,28 @@ def test_userbot_silence_and_dead_chats_are_not_said_twice_for_one_cause():
     assert [p.key for p in health.problems(status)] == ["userbot_unauthorized"]
 
 
+@pytest.mark.parametrize(
+    ("code", "fragment"),
+    [
+        (health.USERBOT_NO_SESSION, "make userbot-login"),
+        (health.USERBOT_NO_API_KEYS, "my.telegram.org"),
+        (health.USERBOT_BAD_SESSION, "TELETHON_SESSION notoʻgʻri"),
+    ],
+)
+def test_a_reader_not_set_up_is_told_the_step_not_a_restriction(code, fragment):
+    """The reader's own codes (userbot/main.py idle_not_set_up): between
+    `make up` and `make userbot-login` the alert names the login, never
+    «chiqib ketgan/cheklangan … @SpamBot» — nothing was restricted."""
+    status = healthy_status()
+    status.components["userbot"] = _beat(
+        "userbot", timedelta(minutes=1), enabled=True, authorized=False, error=code
+    )
+    [found] = health.problems(status)
+    assert found.key == "userbot_unauthorized"
+    assert fragment in found.text
+    assert "SpamBot" not in found.text and code not in found.text
+
+
 async def test_a_userbot_telegram_could_not_ask_is_unknown_not_lost_nor_back(session):
     """T-13 beats ``authorized: null`` when Telegram did not answer the check:
     no userbot_unauthorized, no «qayta ulandi» for an earlier one either —

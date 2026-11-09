@@ -1283,6 +1283,32 @@ def userbot_auth(status: Status) -> UserbotAuth | None:
     return None
 
 
+# The reader's own codes for an account it was never given (userbot/main.py):
+# not a restriction — @SpamBot has nothing to say — but a setup step not yet
+# done. Between `make up` and `make userbot-login` this is the normal state,
+# and the alert names the step instead of «chiqib ketgan/cheklangan».
+USERBOT_NO_SESSION: Final = "NO_SESSION"
+USERBOT_NO_API_KEYS: Final = "NO_API_KEYS"
+USERBOT_BAD_SESSION: Final = "BAD_SESSION"
+USERBOT_SETUP_TEXTS: Final[Mapping[str, str]] = {
+    USERBOT_NO_SESSION: (
+        "⛔ Telegram oʻquvchi akkaunti hali ulanmagan (TELETHON_SESSION boʻsh) — "
+        "<code>make userbot-login</code>, chiqqan qatorni .env ga yozing, keyin "
+        "<code>make reload</code>. Oʻquvchi kerak boʻlmasa: USERBOT_ENABLED=false"
+    ),
+    USERBOT_NO_API_KEYS: (
+        "⛔ Telegram oʻquvchi ishga tushmadi: TELETHON_API_ID yoki TELETHON_API_HASH "
+        "boʻsh — my.telegram.org → API development tools; .env ga yozing, keyin "
+        "<code>make reload</code>"
+    ),
+    USERBOT_BAD_SESSION: (
+        "⛔ TELETHON_SESSION notoʻgʻri (qoʻshtirnoq, ikki marta «TELETHON_SESSION=» "
+        "yoki chala nusxa) — .env ni tekshiring yoki <code>make userbot-login</code> "
+        "ni qaytadan; keyin <code>make reload</code>"
+    ),
+}
+
+
 def userbot_unauthorized(status: Status) -> str | None:
     """The userbot's error code when it says it is not authorized, else None."""
     if userbot_auth(status) != "unauthorized":
@@ -1622,7 +1648,8 @@ def problems(status: Status) -> list[Problem]:
     if code is not None:
         add(
             "userbot_unauthorized",
-            "⛔ Telegram oʻquvchi akkaunti chiqib ketgan/cheklangan "
+            USERBOT_SETUP_TEXTS.get(code)
+            or "⛔ Telegram oʻquvchi akkaunti chiqib ketgan/cheklangan "
             f"({escape(code)}). @SpamBot tekshiring; <code>make userbot-login</code>",
         )
     for key in ERP_BREAKER_KEYS:

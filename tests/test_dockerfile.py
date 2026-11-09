@@ -56,3 +56,19 @@ def test_runs_as_uid_10001_after_the_last_copy():
 
 def test_default_command_is_the_worker():
     assert 'CMD ["python", "-m", "clientscrapper.worker.main"]' in DOCKERFILE
+
+
+def test_the_16_client_comes_first_on_path():
+    """pg_dump/pg_restore resolve to the server's major (16), never the
+    distribution's 17 through pg_wrapper: pg_restore 17 sends
+    «SET transaction_timeout», which a 16 server refuses, so every weekly
+    restore drill failed (the first docker dry run, 2026-11-09). The PATH is
+    set after the PGDG install and before anything runs the tools."""
+    lines = DOCKERFILE.splitlines()
+    [path] = [i for i, line in enumerate(lines) if line.startswith("ENV PATH=")]
+    assert lines[path] == "ENV PATH=/usr/lib/postgresql/16/bin:$PATH"
+    pgdg = next(i for i, line in enumerate(lines) if "postgresql-client-16" in line)
+    assert pgdg < path
+    # In the app stage, which the smoke stage and the final image build on.
+    stages = [i for i, line in enumerate(lines) if line.startswith("FROM ")]
+    assert stages[0] < path < stages[1]
