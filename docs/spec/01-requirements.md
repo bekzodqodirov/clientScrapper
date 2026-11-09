@@ -93,6 +93,8 @@ question below is decided as its ⭐ option; the «Meanwhile» lines are superse
 | 5 | **(a)** | Quotes-sent is judged from the lead's current stage name: a configurable list of «price was given» stage names (default: stages whose name contains «narx», plus every `won` stage), approximate and labelled so. The owner can correct the list later. | T-36 |
 | 6 | **(a)** | Seller rule in `docs/sotuv-playbook.md`: after the first message press «📞 Bogʻlandim» or move the stage, and write only from an ERP-connected Telegram account. The metric stays as measured, with the under-count note. | Playbook (done), T-29 briefing |
 
+**Answered by Bekzod on 2026-11-09** — «3 a» (who receives the agent's cards in the pilot): **the owner only, for now.** `MANAGER_TELEGRAM_IDS` stays empty, so every review card goes to `OWNER_TELEGRAM_ID`; his ✅ pushes the lead to the ERP, where the ERP's own routing gives it to a seller (no agent-specific routing rule is required — 05 §A.14 step 3 stays optional). A «👤 Menejerga» handoff (a Telegram-only prospect with no phone) waits in `hold` until a manager is listed (06 §3.4, `reviews.handoff`); naming the first pilot manager later is one `.env` line plus `make reload`. Owner of the work: T-29.
+
 
 Raised by the T-07 verification (2026-10-24) against the ERP as built (fullprompt `agent-feed` at
 `23fe1736`, 05 Part A): requirements in §2 and §5 that the ERP cannot satisfy today. None of them is
