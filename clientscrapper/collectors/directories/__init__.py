@@ -500,7 +500,7 @@ class Directories(Collector):
             extra={"source": spec.source_key, "url_id": url_id(url)},
         )
         if isinstance(exc, TRANSPORT_FAILURES):
-            self._strike(spec, "transport")
+            self._site_failure(spec, "transport")
 
     def _refused(self, spec: SiteSpec, url: str, status: int) -> None:
         """The server answered a 5xx (the Fetcher's retries spent): counted
@@ -511,9 +511,9 @@ class Directories(Collector):
             status,
             extra={"source": spec.source_key, "url_id": url_id(url)},
         )
-        self._strike(spec, "http")
+        self._site_failure(spec, "http")
 
-    def _strike(self, spec: SiteSpec, kind: str) -> None:
+    def _site_failure(self, spec: SiteSpec, kind: str) -> None:
         self._streak += 1
         if self._streak >= TRANSPORT_STREAK:
             raise _SiteDown(spec.site, kind)

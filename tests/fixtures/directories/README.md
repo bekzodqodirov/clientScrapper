@@ -31,7 +31,8 @@ no cookies, no reveal/XHR call was made anywhere.
   are held by more than one differently named firm; `+998900000001` by eight rows on all four
   sites), and one top.uz firm has another number on each page. The parsers' and the crawl's tests read numbers per
   row only; a test that resolves these observations into companies merges unrelated firms by
-  phone and must give each `source_ref` a number of its own first.
+  phone and must give each `source_ref` a number of its own first
+  (`tests/test_wave5_pipeline.renumber_directory_phones` does, the wave-5 seam review).
 - **No rubrika of target goods for yellowpages:** the one recorded rubrika (stationery
   wholesale, Tashkent) is held by the category filter by design (9 of its 15 rows). 03 §2.6
   picks the rubrika slugs from the rubric index (`optov|wholesale` + target goods), which was
