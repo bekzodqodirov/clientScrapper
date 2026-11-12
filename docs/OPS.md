@@ -61,25 +61,42 @@ Telegram accounts, 10:00–17:00 Tashkent (`docs/sotuv-playbook.md`).
    «Telegram oʻquvchi akkaunti hali ulanmagan» — that is expected, not a fault.
 4. BotFather: the bot exists, group joining is disabled; the owner and every manager have sent
    `/start` to the bot; `make doctor` shows each manager id reachable.
-5. Reader account: a SIM at least 30 days old, 2FA on, `make userbot-login` (it never touches
-   the database). Every prompt and line is the tool's own, in Uzbek: Telethon's English ones
-   («Signed in successfully as …», «Invalid code», «Invalid password») are gone. Only on a bad
-   line to Telegram do Telethon's English connection warnings («Attempt 1 at connecting failed:
-   …») still come before the Uzbek sentence.
-   - The number **with its country code**: `+998901234567`, or `998 90 123-45-67` (taken as
-     +998…). A number without it is refused and says why: Telegram reads «901234567» as +90…
-     (Turkey) and sends the code to somebody else's number. A bot token is refused too.
+5. Reader account: a SIM at least 30 days old, 2FA on, and **logged in to the official
+   Telegram app on the reader phone first**: Telegram then sends the login code to that app's
+   chat named «Telegram». A third-party login such as this one may get no SMS at all
+   (core.telegram.org/api/auth: in some conditions only the official apps receive a code by
+   SMS or call). Then `make userbot-login` (it never touches the database). Every prompt and
+   line is the tool's own, in Uzbek: Telethon's English ones («Signed in successfully as …»,
+   «Invalid code», «Invalid password») are gone. Only on a bad line to Telegram do Telethon's
+   English connection warnings («Attempt 1 at connecting failed: …») still come before the
+   Uzbek sentence; a route answered by a proxy or a block page is the same «Telegramga … ulanib
+   boʻlmadi» sentence, never a traceback.
+   - The number **with its country code**: `+998901234567`, `998 90 123-45-67` or
+     `00998901234567` (taken as +998…). A number without it is refused, and so is
+     `+90 123 45 67` (a «+» put on, the 998 left off): written without +998, Telegram reads the
+     number as another country's («90…» is Turkey, +90). Whether that is why the code did not
+     come on the first install (2026-11-12) is **not verified** — the next two lines on the
+     screen will show it. A number of another country is taken only after typing «ha». A bot
+     token is refused too.
    - «Kod soʻralmoqda: +99890*****67» — the number it asked for, masked; check the country and
      operator code here.
    - Then where Telegram says the code went. «Telegram ilovasiga keldi» means the code is
      **not** an SMS: it is in the chat named «Telegram» in the Telegram app where this number is
-     already logged in (the reader phone, or a computer). Otherwise SMS, a phone call, the
-     account's login e-mail (its pattern is shown) or fragment.com. When Telegram can send it
-     another way the next line says which and after how many seconds; typing `qayta` at the code
-     prompt asks for it again that way (and asks for a fresh code after «Kodning muddati
-     tugagan»).
-   - The code is digits (spaces are fine); three wrong codes or three wrong 2FA passwords end
-     the login with exit 1.
+     already logged in (the reader phone, or a computer); if that app holds several accounts,
+     switch to the reader account. «SMS bilan yuborildi» comes with the warning that the SMS may
+     not come, and what then: log in to the reader account in the official app on the phone,
+     Ctrl+C, run `make userbot-login` again — the code then comes to the app. Otherwise a phone
+     call, the account's login e-mail (its pattern is shown; the code is typed like any other)
+     or fragment.com.
+   - Type the code by hand. Never send it to any chat, Saved Messages included: Telegram cancels
+     a login code that was sent in a chat.
+   - «(kelmasa: qayta)» is in the code prompt only when Telegram offers another way; the line
+     above it says which way and after how many seconds. Typing `qayta` too early says how long
+     to wait and asks nothing; a resend Telegram refuses keeps the code already sent. After
+     «Kodning muddati tugagan» `qayta` asks for a fresh code.
+   - The code is digits (spaces and dashes are fine; an SMS word or phrase is typed as is);
+     three wrong codes or three wrong 2FA passwords end the login with exit 1. One Ctrl+C stops
+     it.
    - If Telegram first wants a login e-mail on the account, the tool says so and stops: open the
      reader account in the official Telegram app and set it (or log in there once), then run the
      login again.
@@ -88,7 +105,9 @@ Telegram accounts, 10:00–17:00 Tashkent (`docs/sotuv-playbook.md`).
      this number, an invalid or banned number, no Telegram account on the number (open one in
      the official app; the tool never signs up), wrong `TELETHON_API_ID`/`TELETHON_API_HASH`
      (re-copy from my.telegram.org), a published api id, every way of sending the code used up,
-     a lost connection. Anything else names its class: send that name to the developer.
+     a version Telegram no longer accepts (send it to the developer), a lost connection.
+     Anything else is «Kutilmagan xato (…)» or «Telegram kutilmagan javob berdi (…)» with the
+     error's text on a second line: send both lines to the developer.
    Then replace the whole `TELETHON_SESSION=` line in `.env` with the printed one (the doctor
    refuses a doubled «TELETHON_SESSION=» or a cut paste), `make reload`; the ⛔ reader line
    leaves `/holat`; `/chats` lists the three seed chats within 24 h.

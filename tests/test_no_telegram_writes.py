@@ -4,10 +4,11 @@
 07 §1.2 and 06 §5.3. MIYA's userbot guard with its sender deleted: there is no
 sender in v1, so ``SENDER_WRITE_FUNCTIONS`` is empty and the exemption branch
 is gone — a write call may appear nowhere in the reader, called or kept as a
-bound method. Two raw requests are allowed, each in one named function (the
-joiner and the ``about`` reader), and history is read only where the owner
-asked for it. The reader is userbot/, every module importing Telethon and
-every module importing the reader; outside it, a module handed the client
+bound method. Raw requests are allowed only where RAW_ALLOWED names them, each
+in one named function (the joiner, the ``about`` reader, and the login tool's
+two auth calls), and history is read only where the owner asked for it. The
+reader is userbot/, every module importing Telethon and every module
+importing the reader; outside it, a module handed the client
 still may not use Telethon's write methods.
 
 The aiogram side and the other channels are fenced here too: the owner bot
@@ -134,7 +135,8 @@ RAW_WRITE_REQUESTS = {
     "DeleteChatUserRequest",
 }
 # The only raw requests there are, each in one function (07 §1.2): the joiner
-# (≤ 3 joins a day, 03 §2.3) and the channel/user ``about`` reader (06 §2).
+# (≤ 3 joins a day, 03 §2.3), the channel/user ``about`` reader (06 §2), and the
+# login tool's auth.resendCode and e-mail auth.signIn (06 §2 Login).
 RAW_ALLOWED: dict[tuple[str, str], set[str]] = {
     ("userbot/joiner.py", "join_one"): {"JoinChannelRequest", "GetFullChannelRequest"},
     ("userbot/about.py", "read_about"): {"GetFullChannelRequest", "GetFullUserRequest"},
@@ -143,6 +145,11 @@ RAW_ALLOWED: dict[tuple[str, str], set[str]] = {
     # chat write — test_the_login_tool_may_only_resend_its_code pins that the
     # allowance stays inside telethon.tl.functions.auth and off the write set.
     ("tools/userbot_login.py", "_resend_code"): {"ResendCodeRequest"},
+    # make userbot-login with a code sent to the login e-mail: auth.signIn with
+    # that code in email_verification, which Telethon's sign_in never fills
+    # (it only sends phone_code). Signing the account in, not a chat write;
+    # pinned the same way.
+    ("tools/userbot_login.py", "_sign_in_by_email"): {"SignInRequest"},
 }
 LOGIN_TOOL = "tools/userbot_login.py"
 # Joining is one function, reached from one scheduler entry whose cap test
@@ -605,11 +612,12 @@ def test_the_reader_never_writes_to_telegram(path):
     assert not offending, f"{rel(path)} writes to Telegram: {offending}"
 
 
-def test_the_login_tool_may_only_resend_its_code():
+def test_the_login_tool_may_only_make_its_auth_calls():
     """The login tool's raw-request allowance is auth.* and nothing that
     writes: a request added there by name must be one of Telegram's auth
     calls, and never one of RAW_WRITE_REQUESTS (the owner's first install,
-    2026-11-12: «qayta» re-sends the login code)."""
+    2026-11-12: «qayta» re-sends the login code; a code sent to the login
+    e-mail signs in through auth.signIn's email_verification)."""
     from telethon.tl.functions import auth
 
     granted = {
@@ -618,7 +626,7 @@ def test_the_login_tool_may_only_resend_its_code():
         if path == LOGIN_TOOL
         for name in names
     }
-    assert granted == {"ResendCodeRequest"}
+    assert granted == {"ResendCodeRequest", "SignInRequest"}
     assert not granted & RAW_WRITE_REQUESTS
     assert all(isinstance(getattr(auth, name, None), type) for name in granted)
 
