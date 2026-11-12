@@ -1009,8 +1009,13 @@ async def test_without_an_own_transaction_the_callers_savepoint_takes_the_row(
         assert await rows(other) == []  # not committed yet: it is the caller's
     [row] = await rows(session)
     assert row["cost_usd"] == D("0.000114") and row["model"] == EXTRACT
+    # pg_locks is the whole cluster's: only this database's locks are this
+    # test's (another run on the same server holds its own).
     held = await session.scalar(
-        sa.text("SELECT count(*) FROM pg_locks WHERE locktype = 'advisory'")
+        sa.text(
+            "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND database = "
+            "(SELECT oid FROM pg_database WHERE datname = current_database())"
+        )
     )
     assert held == 0  # the session lock was given back
 

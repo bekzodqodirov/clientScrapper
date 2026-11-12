@@ -90,7 +90,9 @@ this process sends a message to anyone else, ever.
 
 ``make collect`` runs one built collector slot's ``job`` once, in a one-off
 process beside the leader (:func:`collect_now`, ``tools/collect.py``): the
-function the scheduler registers, no leader lock taken.
+function the scheduler registers, no leader lock taken; the source's own
+``COLLECT_LOCK`` held instead, which the leader's reclaim of a dead worker's
+runs respects.
 """
 
 from __future__ import annotations
@@ -101,7 +103,7 @@ import functools
 import logging
 import re
 import sys
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, time, timedelta, tzinfo
 from pathlib import Path
@@ -121,6 +123,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.base import BaseTrigger
 from apscheduler.triggers.combining import OrTrigger
 from apscheduler.triggers.interval import IntervalTrigger
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from clientscrapper.collectors import erp_sync, runner
 from clientscrapper.collectors.base import Collector
@@ -1346,7 +1349,9 @@ async def reclaim_runs(
     margin, 2 h 30 min in which every ERP cadence was skipped
     ``already_running`` and suppression went stale. Only (source, variant)
     pairs of built slots: a run another process makes (the reader's
-    ``telegram_monitor.backfill``) is not touched. Returns how many."""
+    ``telegram_monitor.backfill``) is not touched; nor is a source a one-off
+    ``make collect`` holds now (its :data:`COLLECT_LOCK`): that row is a
+    live process's. Returns how many."""
     now = now or datetime.now(settings.tz)
     pairs = sorted(
         {
@@ -1359,6 +1364,15 @@ async def reclaim_runs(
         return 0
     variant = sa.func.coalesce(CollectorRun.meta["variant"].astext, "")
     async with session_scope() as session:
+        live = await held_elsewhere(session, (key for key, _ in pairs))
+        pairs = [pair for pair in pairs if pair[0] not in live]
+        if live:
+            log.info(
+                "a make collect run is going; its source is left alone",
+                extra={"sources": sorted(live)},
+            )
+        if not pairs:
+            return 0
         result = await session.execute(
             sa.update(CollectorRun)
             .where(
@@ -1394,12 +1408,13 @@ LEADER_RETRY: Final = timedelta(seconds=60)
 LEADER_CHECK: Final = timedelta(seconds=60)
 
 
-class Leadership:
-    """The ``LEADER_LOCK`` advisory lock on a connection of its own, held for
-    the process's life (a session lock goes with its connection: a killed
-    worker frees it at once)."""
+class SessionLock:
+    """A session-level advisory lock, ``pg_try_advisory_lock(hashtext(name))``,
+    on a connection of its own, held until released (a session lock goes
+    with its connection: a killed process frees it at once)."""
 
-    def __init__(self, database_url: str | None = None) -> None:
+    def __init__(self, name: str, database_url: str | None = None) -> None:
+        self.name = name
         self._dsn = plain_dsn(database_url or settings.database_url)
         self._conn: Any = None
 
@@ -1415,7 +1430,7 @@ class Leadership:
         )
         try:
             asked = await conn.execute(
-                "SELECT pg_try_advisory_lock(hashtext(%s))", (LEADER_LOCK,)
+                "SELECT pg_try_advisory_lock(hashtext(%s))", (self.name,)
             )
             got = await asked.fetchone()
         except BaseException:
@@ -1446,6 +1461,44 @@ class Leadership:
         if conn is not None:
             with contextlib.suppress(Exception):
                 await conn.close()
+
+
+class Leadership(SessionLock):
+    """The ``LEADER_LOCK`` advisory lock on a connection of its own, held for
+    the process's life (a session lock goes with its connection: a killed
+    worker frees it at once)."""
+
+    def __init__(self, database_url: str | None = None) -> None:
+        super().__init__(LEADER_LOCK, database_url)
+
+
+# ``make collect`` (:func:`collect_now`) holds this lock, per source, for its
+# run's life, in a one-off process the leader cannot see: the leader's
+# reclaim of a dead worker's runs (:func:`reclaim_runs`) leaves a source
+# alone while its lock is held — a live one-off's ``running`` row is not a
+# dead worker's (the make-collect review, finding 1: closed as abandoned, it
+# freed the source for a second, concurrent run of the same site).
+COLLECT_LOCK: Final = "cs:collect:{key}"
+
+
+def collect_lock(source_key: str) -> str:
+    return COLLECT_LOCK.format(key=source_key)
+
+
+async def held_elsewhere(session: AsyncSession, keys: Iterable[str]) -> set[str]:
+    """The sources whose :data:`COLLECT_LOCK` another session holds now (a
+    one-off ``make collect`` run). Asked with ``pg_try_advisory_xact_lock``:
+    obtained means free, and the transaction's end lets it go."""
+    held: set[str] = set()
+    for key in sorted(set(keys)):
+        free = await session.scalar(
+            sa.select(
+                sa.func.pg_try_advisory_xact_lock(sa.func.hashtext(collect_lock(key)))
+            )
+        )
+        if not free:
+            held.add(key)
+    return held
 
 
 async def _wait(stop: asyncio.Event, delay: timedelta) -> bool:
@@ -1595,21 +1648,36 @@ async def collect_now(slot: JobSlot) -> runner.RunReport:
     cost cap ``costs.ask`` meets is told as it would be) and with this
     process's shared Fetcher, closed after. It takes no leader lock (nor
     releases one), reclaims no run and catches nothing up: the worker that
-    leads goes on scheduling beside it, and the runner's one-running claim
-    (``ux_collector_runs_one_running``) keeps the two from running one source
-    at once (``already_running``)."""
+    leads goes on scheduling beside it. It holds the source's
+    :data:`COLLECT_LOCK` for the run's life instead, so the leader's
+    :func:`reclaim_runs` (a worker restart, a resume) leaves its row alone;
+    the runner's one-running claim (``ux_collector_runs_one_running``) keeps
+    the scheduler's run and this one apart (``already_running``). A second
+    ``make collect`` of the source finds the lock held and runs nothing: its
+    report is the runner's own ``already_running`` skip, with no row."""
     job = slot.job
     if job is None or slot.source_key is None:
         raise ValueError(f"{slot.id} is not a built collector slot")
-    bot = connect_owner_bot()
-    wire()
+    lock = SessionLock(collect_lock(slot.source_key))
+    if not await lock.acquire():
+        return runner.RunReport(
+            slot.source_key,
+            health.collector_component(slot.source_key, slot.variant),
+            "skipped",
+            meta={"note": "already_running"},
+        )
     try:
-        report: runner.RunReport = await job()
+        bot = connect_owner_bot()
+        wire()
+        try:
+            report: runner.RunReport = await job()
+        finally:
+            fetcher, _shared.fetcher = _shared.fetcher, None
+            if fetcher is not None:
+                await fetcher.aclose()
+            await disconnect_owner_bot(bot)
     finally:
-        fetcher, _shared.fetcher = _shared.fetcher, None
-        if fetcher is not None:
-            await fetcher.aclose()
-        await disconnect_owner_bot(bot)
+        await lock.release()
     return report
 
 
@@ -1693,9 +1761,12 @@ def main(argv: list[str] | None = None) -> int:
         return asyncio.run(backup_now())
     if args[:1] == ["collect"]:
         setup_logging("worker")
-        # Imported here: the tool imports this module (its JOB_TABLE).
-        from clientscrapper.tools import collect
-
+        try:
+            # Imported here: the tool imports this module (its JOB_TABLE).
+            from clientscrapper.tools import collect
+        except KeyboardInterrupt:
+            # Ctrl-C before the tool is loaded: nothing ran, no traceback.
+            return 2
         return collect.main(args[1:])
     if args:
         raise SystemExit(f"unknown arguments: {args} (only «backup» or «collect»)")

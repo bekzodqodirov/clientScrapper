@@ -45,44 +45,66 @@ is the run the scheduler makes — the worker's own job for that slot of `JOB_TA
 one-off container beside the running worker, which keeps its scheduler lock and its
 schedule: robots.txt, the per-host pace, the 403/429 breaker, the daily page budget,
 `costs.ask` before any paid call, the evidence store and the `collector_runs` row are all
-the scheduled run's. The two never run one source at once: whichever claims it first runs,
-the other is told «… hozir yigʻilmoqda …».
+the scheduled run's. The one-off holds its source's own lock (`cs:collect:<source>`) for the
+run's life: a worker that starts or resumes meanwhile (`make reload`, `make update`, a crash
+restart) leaves that run alone instead of closing it as a dead worker's, and a second `make
+collect` of the same source is told a run is going and runs nothing. The scheduler's own run
+of that source and the manual one never overlap either: whichever claims it first runs, the
+other is told «… hozir yigʻilmoqda …», with the latest time the source frees.
 
 - **Which sources.** `make collect` with no `SOURCE` prints the ones it takes, read from the
   worker's table: the built collectors (today `directories`, `exhibitors`). A slot whose
   collector is not built yet (`hh_vacancies`, OLX, Instagram, the maps …) says «hali
-  qurilmagan» and is offered the day its task fills the slot. `telegram_monitor` is refused
-  (the userbot reads the chats all the time), the ERP feeds too (`make erp-sync`).
-- **Refusals** are one Uzbek sentence, exit 1, nothing written, each saying what to do: the
-  source switched off (switch it on in `/manbalar`), paused (until when, Tashkent time, and
-  why: a 403/429 breaker or low precision), `/toxtat` (`/yoq`), `COLLECTORS_ENABLED=false`.
-  For `directories` the parent row **and** at least one site row must be on —
-  `goldenpages.uz`, `yellowpages.uz`, `top.uz`, `glotr.uz` (§2 step 12): the parent alone
-  crawls nothing, and the refusal names each site's state.
-- **`FULL=1`** (the monthly full crawl) is refused for now: the full crawl's site is chosen
-  by the date (one site a night, the 1st–7th, 23:00), and on its own night that job crawls
-  it anyway, out of the same day's page budget a manual run would spend first. Choosing a
-  site by hand is later work.
+  qurilmagan» and is offered the day its task fills the slot. A variant slot (a source's
+  second cadence, such as `directories_full`) is run by hand only when named in
+  `tools/collect.MANUAL_VARIANTS` (none today). `telegram_monitor` is refused (the userbot
+  reads the chats all the time), the ERP feeds too (`make erp-sync`).
+- **Refusals** are one Uzbek sentence, exit 1, each saying what to do, and nothing is written
+  — except when the scheduler's run claimed the source first: the runner then writes its
+  usual `skipped` row, as a scheduled overlap would. The source switched off (switch it on in
+  `/manbalar`), paused (until when, Tashkent time, and why: a 403/429 breaker or low
+  precision), `/toxtat` (`/yoq`), `COLLECTORS_ENABLED=false`, today's page budget spent (try
+  after midnight, Tashkent time). For `directories` the parent row **and** at least one site
+  row must be on — `goldenpages.uz`, `yellowpages.uz`, `top.uz`, `glotr.uz` (§2 step 12; on
+  the next page of `/manbalar`, ▶️): the parent alone crawls nothing, and the refusal names
+  each site's state.
+- **The 1st–7th, and `FULL=1`.** On the 1st–4th of a month a plain `make collect
+  SOURCE=directories` reads that night's site in full (goldenpages.uz on the 1st,
+  yellowpages.uz on the 2nd, top.uz on the 3rd, glotr.uz on the 4th; the 5th–7th's sites are
+  not built) and the others' new rows only — the run the Thursday diff makes on such a day —
+  and says so before it starts («📅 Bugun oyning …-kuni …»): more pages, more time, and the
+  23:00 full crawl that night then reads with what is left of the day's page budget.
+  `FULL=1` (the monthly full crawl on its own) is refused for now: its site is chosen by the
+  date, and on its own night the 23:00 job crawls it anyway. Choosing a site by hand is later
+  work.
+- **The day's page budget is shared.** A manual run spends the same Tashkent day's pages as
+  the scheduled runs of its source: a manual directories run on a Thursday leaves less for
+  that night's 23:00 diff, and a second manual run the same day may find the budget spent.
 - **How long.** Minutes to an hour or two: list pages and a card per new company, about 0.3
   requests a second per site; the run's deadline is 2 hours. Its log lines go to the
   terminal (not `make worker`). Ctrl-C stops it cleanly — the run is closed `cancelled`,
-  nothing it found is written, the next run reads again. Use `tmux` or `screen` if the SSH
-  session may drop.
+  nothing it found is written, the next run reads again. If the SSH session may drop, run it
+  inside `tmux` or `screen` (on a fresh Ubuntu install them first: `apt install tmux`). If
+  the terminal is lost anyway, the run's result is in the bot: `/manbalar` → the source's ℹ️
+  lists its last runs (time, status, pages, new rows).
 - **The summary** is read from the run's own `collector_runs` row, never counted again: the
   time it took, pages and requests, new rows («yangi yozuv»: a company card or list row
   this source never wrote before), per site for the directories (list pages, company cards,
-  list rows, already seen, new; robots, failed cards, non-200 list answers) or per show list
-  for the exhibitors (Uzbek companies kept of the rows read), then what cut the run
-  (robots.txt, the page or dollar budget, the deadline, a 403/429 breaker — the source is
-  then paused 6 h — CAPTCHA pages). The run number («yurish #N») is the `collector_runs.id`.
-  Exit 0 when the run finished (`ok` or `partial`, even with no new company), 1 refused,
-  2 failed or stopped.
+  list rows, already seen, new; robots, failed cards, non-200 list answers; a paused site
+  with its pause's end; the sites the run never reached) or per show list for the
+  exhibitors (Uzbek companies kept of the rows read), then what cut the run (robots.txt, the
+  page or dollar budget, the deadline, a 403/429 breaker — the source is then paused 6 h —
+  CAPTCHA pages). The run number («yurish #N») is the `collector_runs.id`. Exit 0 when the
+  run finished (`ok` or `partial`, even with no new company), 1 refused, 2 failed or stopped;
+  a failed run, the database down («Baza javob bermayapti — avval make up …») or the tool's
+  own failure each end with what to do.
 - **When cards arrive.** The rest is the running worker's, on its own schedule: the
   resolver (every 2 minutes) turns the rows into companies, enrichment (07:00–22:00) looks
   for a phone, the scorer (every 15 minutes) scores them, and the review job sends cards to
   the bot inside `REVIEW_HOURS` (Mon–Sat, default 09:00–18:00), at most `REVIEW_DAILY_CAP`
   a day. Directory and exhibitor rows often carry no phone: only the candidates that reach
-  review become cards, so «yangi yozuv 40 ta» is not 40 cards.
+  review become cards, so «yangi yozuv 40 ta» is not 40 cards. A run with no new row says
+  so instead («Bu yurishda yangi yozuv topilmadi …»).
 
 ## 2. Go-live checklist (06 §7.1)
 

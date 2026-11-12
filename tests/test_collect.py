@@ -13,11 +13,19 @@ What is pinned:
   a run already going (the runner's own one-running claim decides it);
 * a switched-on source runs the slot's own ``job`` — the very function the
   scheduler registers for it, ``collector_job(<Collector>)`` — in this
-  process, with no leader lock taken, no run reclaimed, no catch-up;
+  process, with no leader work at all (recorded, and behaviourally: the
+  leader's lock stays free, another built slot's open run stays open), and
+  the source's own make-collect lock held, which the leader's reclaim of a
+  dead worker's runs respects and a second ``make collect`` meets;
+* a built variant is offered only by name (``MANUAL_VARIANTS``), a spent page
+  budget is refused before the run, and a plain directories run on the
+  1st–7th says before the crawl that the night's site is read in full;
 * the summary is the run's own ``collector_runs`` row: its counters, and per
   site for the directories (``meta.subsources`` / ``meta.sources``), per list
   for the exhibitors (``meta.lists``) — end to end on the recorded directory
-  pages too; exit 0 for a finished run, 2 for a failed one.
+  pages too; exit 0 for a finished run, 2 for a failed one;
+* Ctrl-C, a stop signal, the database down and a crash each end in one
+  Uzbek line with what to do, exit 2, never a traceback.
 
 ``sources`` is seeded configuration: every row a test switches is put back
 (07 §1.0).
@@ -25,13 +33,17 @@ What is pinned:
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+import asyncio
+import os
+import signal
+from collections.abc import AsyncIterator, Callable, Iterator
 from dataclasses import replace
 from datetime import datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
 import httpx
+import psycopg
 import pytest
 import sqlalchemy as sa
 
@@ -73,14 +85,17 @@ KEPT = (
 FULL_REFUSED = (
     "FULL=1 hozircha yoʻq: kataloglarning toʻliq yurishini worker oʻzi qiladi — "
     "har oyning 1–7-kunlari soat 23:00 da, har kecha bitta sayt (qaysi saytligini "
-    "sana belgilaydi). Saytni qoʻlda tanlash keyinroq quriladi. Hozir yangi "
-    "kompaniyalar uchun: make collect SOURCE=directories."
+    "sana belgilaydi); shu kunlarda oddiy make collect SOURCE=directories ham "
+    "oʻsha kunning saytini toʻliq oʻqiydi. Saytni qoʻlda tanlash keyinroq "
+    "quriladi. Hozir yangi kompaniyalar uchun: make collect SOURCE=directories."
 )
 NEXT = (
     "➡️ Topilgan kompaniyalarni ishlab turgan worker oʻz jadvali boʻyicha tekshiradi "
     "va baholaydi; kartalar botga dushanba–shanba 09:00–18:00 oraligʻida keladi, "
     "kuniga koʻpi bilan 40 ta."
 )
+NO_NEW = "Bu yurishda yangi yozuv topilmadi — botga undan yangi karta kelmaydi."
+RETRY = "↻ Keyinroq qayta urinib koʻring; takrorlansa botda /holat ni koʻring."
 
 
 # --- which sources (the worker's table) ------------------------------------------
@@ -98,11 +113,30 @@ def test_make_collect_takes_the_tables_built_collectors_and_nothing_else():
         if collect.is_collector(slot) and slot.primary:
             # Offered, or named as another process's (the reader) or command's.
             assert (slot.id in offered) != (slot.source_key in collect.ELSEWHERE), slot
+        elif collect.is_collector(slot):
+            # A built variant is judged by name before it is run by hand: its
+            # own refusal, allowed, or another process's — never by default.
+            decided = (
+                (slot.id in collect.NO_MANUAL)
+                + (slot.id in collect.MANUAL_VARIANTS)
+                + (slot.source_key in collect.ELSEWHERE)
+            )
+            assert decided == 1, slot
     # Derived, not listed: a slot a later task fills is offered that day.
     filled = tuple(replace(s, job=_noop) if s.id == "hh_vacancies" else s for s in table)
     assert collect.allowed(filled) == ("directories", "hh_vacancies", "exhibitors")
     assert collect.choose("hh_vacancies", table=filled) == next(
         s for s in filled if s.id == "hh_vacancies"
+    )
+    # A variant a later task fills is not run by hand until it is named.
+    night = tuple(
+        replace(s, job=_noop) if s.id in ("serp_layer", "serp_layer_night") else s
+        for s in table
+    )
+    assert collect.allowed(night) == ("serp_layer", "directories", "exhibitors")
+    assert collect.choose("serp_layer_night", table=night) == collect.Refused(
+        "serp_layer_night qoʻlda ishga tushirilmaydi — u faqat oʻz jadvali boʻyicha "
+        "yuradi. Hozir mumkin: serp_layer, directories, exhibitors."
     )
 
 
@@ -142,8 +176,16 @@ REFUSALS = [
     (["directories_full"], FULL_REFUSED),
     (
         ["exhibitors", "full"],
-        "exhibitors uchun «full» yurishi yoʻq — FULL=1 siz ishga tushiring: "
-        "make collect SOURCE=exhibitors.",
+        "exhibitors uchun «full» yurishi yoʻq — FULL=1 ni qoʻymasdan ishga "
+        "tushiring: make collect SOURCE=exhibitors.",
+    ),
+    # Plain words, no option parser: no English help, no usage error.
+    (["-h"], f"«-h» degan manba yoʻq. Hozir mumkin: {ALLOWED}."),
+    (["--x"], f"«--x» degan manba yoʻq. Hozir mumkin: {ALLOWED}."),
+    (
+        ["directories", "full", "more"],
+        "Qaysi manbani yigʻay? make collect SOURCE=<manba> deb yozing. "
+        f"Hozir mumkin: {ALLOWED}.",
     ),
 ]
 
@@ -175,7 +217,27 @@ def test_full_is_refused_because_the_full_crawl_picks_its_site_by_the_night():
             assert full, day
         else:
             assert full == [], day
-    assert collect.NO_MANUAL == {"directories_full": FULL_REFUSED}
+    assert collect.NO_MANUAL == {"directories_full": "full_refused"}
+
+
+def test_a_plain_directories_run_on_the_1st_to_7th_crawls_that_night_s_site_in_full():
+    """``plan(None, …)`` at a daytime hour, every day of a month: on a full
+    night's day the night's site is crawled in full (the others by their
+    diff) — the run says so before the crawl (``full_today``); on any other
+    day every site is a diff and nothing is said."""
+    for day in range(1, 32):
+        now = datetime(2026, 12, day, 10, 0, tzinfo=TZ)
+        weekly = directories.diff_due("0 23 * * 4", now)
+        due = directories.plan(None, now, diff_due=weekly)
+        full = [sub.site for sub, mode in due if mode == "full"]
+        assert {sub.site for sub, _ in due} == {s.site for s in directories.SUBSOURCES}
+        if day in directories.FULL_NIGHTS:
+            assert full == [s.site for s in directories.SUBSOURCES if s.full_night == day]
+        else:
+            assert full == [], day
+        sites = collect.Sites(running=(), full=tuple(full), switches=())
+        note = collect.full_today(sites, now)
+        assert (note is not None) == bool(full), day
 
 
 # --- the summary, rendered from a run row -----------------------------------------
@@ -325,6 +387,7 @@ def test_the_summary_names_each_exhibitor_list_and_what_cut_the_run():
         "⚠️ CAPTCHA sahifalari: 2 ta (oʻqilmadi).",
         "⚠️ Baza 1 ta yozuvni qabul qilmadi.",
         NEXT,
+        RETRY,
     ]
     assert collect.exit_code(run.status) == collect.EXIT_FAILED
     assert [x for x in lines if problems(x, rendered=True)] == []
@@ -343,7 +406,45 @@ def test_a_run_with_no_list_this_week_says_so_and_a_failed_empty_run_says_no_nex
     out = collect.render(failed, title="Kataloglar", titles=TITLES)
     assert out[0].startswith("❌ Kataloglar (directories) — yigʻish xato bilan tugadi:")
     assert "ConnectError" in out[0]
-    assert NEXT not in out
+    assert NEXT not in out and NO_NEW not in out
+    # A failed run ends with what to do.
+    assert out[-1] == RETRY
+
+
+def test_a_run_that_found_nothing_new_says_so_instead_of_promising_cards():
+    """Zero new rows (a spent budget, a quiet week): no «➡️ … kartalar …»
+    line, the plain fact instead; the sites the run never reached are named,
+    and a paused site says until when (its row's ``paused_until``)."""
+    meta = {
+        "mode": "diff",
+        "unchanged": 0,
+        "skipped_robots": 0,
+        "subsources": {
+            "goldenpages": site(pages=0),
+            "yellowpages": {"skipped": "paused"},
+        },
+        "exhausted": "pages",
+    }
+    run = a_run(status="partial", pages=0, requests=1, new_observations=0, meta=meta)
+    until = datetime(2026, 11, 13, 9, 30, tzinfo=TZ)
+    lines = collect.render(
+        run,
+        title="Kataloglar",
+        titles=TITLES,
+        paused={"directories_yellowpages": until},
+    )
+    assert lines[2:] == [
+        "• goldenpages.uz (yangilari): 0 roʻyxat sahifasi, 0 kompaniya kartasi, "
+        "0 roʻyxat qatori; avval koʻrilgan 0 ta, yangi yozuv 0 ta.",
+        "• yellowpages.uz: oʻtkazildi — 13.11 09:30 gacha pauzada.",
+        "• Yurish bu saytlargacha yetmadi: top.uz, glotr.uz.",
+        "• Hali qurilmagan saytlar (oʻtkazildi): prom.uz, uzts.uz, openinfo.uz, "
+        "uzpharm-control.uz.",
+        "⚠️ Bugungi sahifa limiti tugadi — qolgani keyingi yurishda oʻqiladi.",
+        NO_NEW,
+    ]
+    assert collect.exit_code(run.status) == collect.EXIT_DONE
+    assert [x for x in lines if problems(x, rendered=True)] == []
 
 
 def test_the_next_line_reads_review_hours_and_the_daily_cap(monkeypatch):
@@ -439,8 +540,8 @@ async def test_directories_switched_off_with_no_site_on_names_the_site_rows_too(
     assert out.lines == (
         "Kataloglar oʻchiq — avval botda /manbalar → Kataloglar ni yoqing, keyin "
         "qaytadan make collect SOURCE=directories. Saytlaridan ham kamida bittasini "
-        "yoqing: goldenpages.uz oʻchiq, yellowpages.uz oʻchiq, top.uz oʻchiq, "
-        "glotr.uz oʻchiq.",
+        "yoqing (ular /manbalar roʻyxatining keyingi sahifasida — ▶️ bilan oʻting): "
+        "goldenpages.uz oʻchiq, yellowpages.uz oʻchiq, top.uz oʻchiq, glotr.uz oʻchiq.",
     )
     assert out.code == collect.EXIT_REFUSED
     assert await runs(session) == []
@@ -463,9 +564,9 @@ async def test_the_directories_alone_are_refused_until_a_site_of_theirs_is_on(
     assert out.lines == (
         "Kataloglar yoqilgan, lekin saytlaridan hech biri ishlamaydi: goldenpages.uz "
         "oʻchiq, yellowpages.uz oʻchiq, top.uz oʻchiq, glotr.uz 19.11 15:00 gacha "
-        "pauzada. Avval botda /manbalar → kamida bittasini yoqing (yolgʻiz "
-        "«Kataloglar» hech narsa oʻqimaydi), keyin qaytadan make collect "
-        "SOURCE=directories.",
+        "pauzada. Avval botda /manbalar → kamida bittasini yoqing (saytlar "
+        "roʻyxatning keyingi sahifasida — ▶️ bilan oʻting; yolgʻiz «Kataloglar» hech "
+        "narsa oʻqimaydi), keyin qaytadan make collect SOURCE=directories.",
     )
     assert out.code == collect.EXIT_REFUSED
     assert never_runs == []
@@ -547,23 +648,49 @@ def offline(monkeypatch) -> None:
     )
 
 
+# The leader's entry points: the lock, the reclaim of a dead worker's runs
+# (and its guarded wrapper), the catch-up (and its), the wait and the keep.
+LEADER_WORK = (
+    "Leadership",
+    "reclaim_runs",
+    "reclaim_dead_runs",
+    "catch_up",
+    "take_over",
+    "wait_for_leadership",
+    "keep_leadership",
+)
+
+
 @pytest.fixture
-def no_leadership(monkeypatch) -> None:
+def no_leadership(monkeypatch) -> Iterator[list[str]]:
     """A manual run never touches the scheduler's lock, a dead worker's runs
-    or the catch-up: each raises here."""
+    or the catch-up. Each entry point records its call (a raise would be
+    swallowed by the guarded wrappers, ``reclaim_dead_runs``/``take_over``,
+    the make-collect review's finding 3) and the record must stay empty."""
+    called: list[str] = []
 
-    def lock(*args: Any, **kwargs: Any) -> None:
-        raise AssertionError("make collect took the leader lock")
+    def recorder(name: str) -> Callable[..., Any]:
+        async def record(*args: Any, **kwargs: Any) -> Any:
+            called.append(name)
 
-    async def reclaim(*args: Any, **kwargs: Any) -> int:
-        raise AssertionError("make collect reclaimed the running worker's runs")
+        return record
 
-    async def catch(*args: Any, **kwargs: Any) -> None:
-        raise AssertionError("make collect caught the scheduler's jobs up")
+    for name in LEADER_WORK:
+        assert hasattr(worker, name), name
+        monkeypatch.setattr(worker, name, recorder(name))
+    yield called
+    assert called == []
 
-    monkeypatch.setattr(worker, "Leadership", lock)
-    monkeypatch.setattr(worker, "reclaim_runs", reclaim)
-    monkeypatch.setattr(worker, "catch_up", catch)
+
+async def lock_free(name: str) -> bool:
+    """Nobody holds the advisory lock ``name`` (asked from a session of its
+    own, the transaction's lock let go at once)."""
+    async with SessionLocal() as s:
+        free = await s.scalar(
+            sa.select(sa.func.pg_try_advisory_xact_lock(sa.func.hashtext(name)))
+        )
+        await s.rollback()
+    return bool(free)
 
 
 async def test_a_run_already_going_is_the_runner_s_own_claim(
@@ -589,7 +716,8 @@ async def test_a_run_already_going_is_the_runner_s_own_claim(
     assert out == collect.Outcome(
         (
             "Kataloglar hozir yigʻilmoqda (12.11 14:10 da boshlangan) — tugashini "
-            "kuting va keyinroq qayta urinib koʻring.",
+            "kuting va keyinroq qayta urinib koʻring; eng kechi 12.11 16:40 da "
+            "boʻshaydi.",
         ),
         collect.EXIT_REFUSED,
     )
@@ -605,13 +733,27 @@ async def test_a_switched_on_source_runs_the_job_the_scheduler_registers(
 ):
     """The slot's own job, the very object ``build_scheduler`` registers for
     ``directories`` — ``collector_job(Directories)``, no variant, the shared
-    Fetcher — and the summary is the row its run wrote."""
+    Fetcher — and the summary is the row its run wrote. While it runs the
+    leader's lock is nobody's (no leader work, behaviourally: another built
+    slot's open run — the scheduler's ERP walk — is left running), and the
+    source's own make-collect lock is held."""
     await switch("directories", enabled=True)
     await switch("directories_goldenpages", enabled=True)
     row = a_run(id=None, meta=DIRECTORIES_META)
     session.add(row)
+    erp = CollectorRun(
+        source_key="erp_sync",
+        started_at=NOW - timedelta(minutes=5),
+        status="running",
+        meta={
+            "variant": "delta",
+            "deadline_at": (NOW + timedelta(hours=1)).isoformat(),
+        },
+    )
+    session.add(erp)
     await session.commit()
     run_id = row.id
+    locks: list[tuple[bool, bool]] = []
     ran: list[tuple[type, str | None, object]] = []
 
     async def run_collector(cls, *, fetcher, now, variant=None, **kw):
@@ -627,6 +769,12 @@ async def test_a_switched_on_source_runs_the_job_the_scheduler_registers(
 
         async def spy() -> Any:
             called.append(slot_.id)
+            locks.append(
+                (
+                    await lock_free(worker.LEADER_LOCK),
+                    await lock_free(worker.collect_lock("directories")),
+                )
+            )
             return await job()
 
         return replace(slot_, job=spy)
@@ -651,6 +799,12 @@ async def test_a_switched_on_source_runs_the_job_the_scheduler_registers(
     ]
     expected = tuple(x.replace("#41", f"#{run_id}") for x in DIRECTORIES_SUMMARY)
     assert out == collect.Outcome(expected, collect.EXIT_DONE)
+    # The leader's lock was free throughout, the source's own lock held, and
+    # let go after; the scheduler's ERP run was not touched.
+    assert locks == [(True, False)]
+    assert await lock_free(worker.collect_lock("directories"))
+    await session.refresh(erp)
+    assert (erp.status, erp.error) == ("running", None)
 
 
 async def test_the_summary_is_read_off_the_run_s_own_row(session):
@@ -718,3 +872,300 @@ async def test_end_to_end_the_recorded_directories_say_each_site(
     assert (yellow["pages"], yellow["rows"], yellow["list_status"]) == (2, 16, {"404": 8})
     assert (gold["rows"], gold["known"], gold["list_status"]) == (27, 0, {"404": 5})
     assert run.new_observations == 28 + 16
+
+
+# --- the source's own lock: a second manual run, the leader's reclaim ----------
+
+
+async def test_a_second_make_collect_of_a_source_finds_its_lock_held(
+    session, sources, no_leadership
+):
+    """Another one-off holds the source (its COLLECT_LOCK): nothing runs,
+    nothing is written, and the owner is told a run is going."""
+    await switch("exhibitors", enabled=True)
+    other = worker.SessionLock(worker.collect_lock("exhibitors"))
+    assert await other.acquire()
+    try:
+        out = await collect.collect(slot("exhibitors"), now=NOW)
+    finally:
+        await other.release()
+    assert out == collect.Outcome(
+        (
+            "Koʻrgazmalar hozir yigʻilmoqda — tugashini kuting va keyinroq qayta "
+            "urinib koʻring.",
+        ),
+        collect.EXIT_REFUSED,
+    )
+    assert await runs(session) == []
+
+
+async def test_the_leader_s_reclaim_leaves_a_make_collect_run_alone(session):
+    """The make-collect review's finding 1: a worker that (re)starts during a
+    manual run (``make reload``, a crash restart) closed its row as a dead
+    worker's and freed the source for a second, concurrent crawl. While the
+    one-off holds the source's lock the row stays; once its process is gone
+    (the lock with its connection) the reclaim closes it as before."""
+    started = NOW - timedelta(minutes=5)
+    row = CollectorRun(
+        source_key="directories",
+        started_at=started,
+        status="running",
+        meta={"deadline_at": (started + timedelta(hours=2)).isoformat()},
+    )
+    session.add(row)
+    await session.commit()
+    manual = worker.SessionLock(worker.collect_lock("directories"))
+    assert await manual.acquire()
+    try:
+        assert await worker.reclaim_runs(now=NOW) == 0
+        await session.refresh(row)
+        assert (row.status, row.error) == ("running", None)
+    finally:
+        await manual.release()
+    assert await worker.reclaim_runs(now=NOW) == 1
+    await session.refresh(row)
+    assert (row.status, row.error) == ("failed", runner.ABANDONED)
+
+
+# --- the day's page budget, read before the run ------------------------------------
+
+
+async def test_a_spent_page_budget_is_refused_before_the_run(
+    session, sources, never_runs
+):
+    """The runner's own ``build_budget`` (read only): a source with no page
+    left today would claim a row and stop at its first request, and the
+    summary would read like a success — it is said before, nothing runs."""
+    await switch("exhibitors", enabled=True, daily_page_budget=10)
+    spent = a_run(
+        id=None,
+        source_key="exhibitors",
+        status="ok",
+        started_at=NOW - timedelta(hours=2),
+        finished_at=NOW - timedelta(hours=1),
+        pages=10,
+        meta={},
+    )
+    session.add(spent)
+    await session.commit()
+    out = await collect.collect(slot("exhibitors"), now=NOW)
+    assert out == collect.Outcome(
+        (
+            "Koʻrgazmalar uchun bugungi sahifa limiti tugagan — bugun boshqa sahifa "
+            "oʻqilmaydi. Ertaga (Toshkent vaqti bilan 00:00 dan keyin) qayta urinib "
+            "koʻring.",
+        ),
+        collect.EXIT_REFUSED,
+    )
+    assert never_runs == []
+    assert await runs(session) == [("exhibitors", "ok", None)]
+
+
+# --- the 1st–7th: a plain directories run crawls the night's site in full --------
+
+FULL_TODAY = (
+    "📅 Bugun oyning 2-kuni — yellowpages.uz ning oylik toʻliq yurishi kuni: bu "
+    "yurish uni toʻliq oʻqiydi (koʻproq sahifa va vaqt ketadi), qolgan saytlardan "
+    "faqat yangilarini."
+)
+TONIGHT = (
+    " Kechki 23:00 dagi toʻliq yurish shu kunning qolgan sahifa limiti bilan ishlaydi."
+)
+
+
+async def test_a_full_night_s_day_is_said_before_the_crawl(session, sources, monkeypatch):
+    """The make-collect review's finding 2: on the 1st–7th ``plan(None, …)``
+    crawls that night's site in full — said before the crawl, with the 23:00
+    full crawl's share of the day while it is still ahead; nothing on another
+    day, nor when the night's site is switched off."""
+    await switch("directories", enabled=True)
+    await switch("directories_yellowpages", enabled=True)
+    morning = datetime(2026, 12, 2, 10, 0, tzinfo=TZ)
+    assert await collect.check(slot("directories"), now=morning) == collect.Ready(
+        notes=(FULL_TODAY + TONIGHT,)
+    )
+    late = datetime(2026, 12, 2, 23, 30, tzinfo=TZ)
+    assert await collect.check(slot("directories"), now=late) == collect.Ready(
+        notes=(FULL_TODAY,)
+    )
+    other = datetime(2026, 12, 8, 10, 0, tzinfo=TZ)
+    assert await collect.check(slot("directories"), now=other) == collect.Ready()
+    goldens = datetime(2026, 12, 1, 10, 0, tzinfo=TZ)  # goldenpages' night, off
+    assert await collect.check(slot("directories"), now=goldens) == collect.Ready()
+    assert problems(FULL_TODAY + TONIGHT, rendered=True) == set()
+
+    async def claimed(slot_: worker.JobSlot) -> RunReport:
+        return RunReport("directories", "collector:directories", "skipped")
+
+    monkeypatch.setattr(worker, "collect_now", claimed)
+    heard: list[str] = []
+    await collect.collect(slot("directories"), now=morning, say=heard.append)
+    assert heard[1:] == [FULL_TODAY + TONIGHT]
+
+
+# --- Ctrl-C, a stop signal, the crash paths ----------------------------------------
+
+
+def stop_once_installed(monkeypatch, sig: int) -> None:
+    """``sig`` is sent to this process right after the tool installs its
+    handlers (never before: unhandled, it would end the test run)."""
+    real = collect.install_stop_signals
+
+    def installing(stop: asyncio.Event) -> tuple[int, ...]:
+        installed = real(stop)
+        asyncio.get_running_loop().call_soon(os.kill, os.getpid(), sig)
+        return installed
+
+    monkeypatch.setattr(collect, "install_stop_signals", installing)
+
+
+async def test_a_stop_signal_cancels_the_work_and_returns_none(monkeypatch):
+    stop_once_installed(monkeypatch, signal.SIGTERM)
+    work: asyncio.Future[collect.Outcome] = asyncio.get_running_loop().create_future()
+    task = asyncio.ensure_future(collect.until_stopped(work))
+    done, _ = await asyncio.wait({task}, timeout=5)
+    if task not in done:
+        task.cancel()
+    assert task in done, "the stop did not end the wait (the work was not cancelled)"
+    assert task.result() is None
+    assert work.cancelled()
+
+
+async def test_ctrl_c_mid_crawl_closes_the_run_cancelled_and_says_so(
+    session, sources, monkeypatch, capsys
+):
+    """The make-collect review's finding 4: Ctrl-C while the crawl hangs on
+    a site — the run task is cancelled, the runner closes its row
+    ``failed``/``cancelled``, the source's lock is let go, the owner reads
+    «⏹ …», exit 2."""
+    await switch("directories", enabled=True)
+    await switch("directories_goldenpages", enabled=True)
+    monkeypatch.setattr(worker, "datetime", frozen_at(NOW))
+    monkeypatch.setattr(collect, "datetime", frozen_at(NOW))
+    never = asyncio.Event()
+
+    async def hang(request: httpx.Request) -> httpx.Response:
+        await never.wait()
+        raise AssertionError("unreachable")
+
+    monkeypatch.setattr(
+        worker, "shared_fetcher", lambda: Fetcher(transport=httpx.MockTransport(hang))
+    )
+
+    async def interrupt_once_running() -> None:
+        for _ in range(400):
+            async with SessionLocal() as s:
+                going = await s.scalar(
+                    sa.select(sa.func.count(CollectorRun.id)).where(
+                        CollectorRun.status == "running"
+                    )
+                )
+            if going:
+                os.kill(os.getpid(), signal.SIGINT)
+                return
+            await asyncio.sleep(0.05)
+
+    killer = asyncio.ensure_future(interrupt_once_running())
+    main = asyncio.ensure_future(collect._main(slot("directories")))
+    done, _ = await asyncio.wait({main}, timeout=30)
+    killer.cancel()
+    if main not in done:
+        main.cancel()
+    assert main in done, "Ctrl-C did not stop the run"
+    assert main.result() == collect.EXIT_FAILED
+    out = capsys.readouterr().out.splitlines()
+    assert out[0].startswith("▶️ Kataloglar (directories) yigʻilmoqda…")
+    assert out[-1] == (
+        "⏹ Toʻxtatildi: yigʻish bekor qilindi, bu yurishda topilganlar yozilmadi. "
+        "Keyingi yurish qaytadan oʻqiydi."
+    )
+    assert await runs(session) == [("directories", "failed", "cancelled")]
+    assert await lock_free(worker.collect_lock("directories"))
+
+
+DB_DOWN_BEFORE = (
+    "⛔ Baza javob bermayapti — yigʻish boshlanmadi. Avval make up (yoki make "
+    "doctor), keyin qaytadan make collect SOURCE=exhibitors."
+)
+
+
+async def test_a_database_that_does_not_answer_is_said_with_what_to_do(
+    monkeypatch, capsys
+):
+    """The make-collect review's finding 5: the database down (``make down``,
+    the wrong port) is a foreseeable state — one line with the next step,
+    exit 2, no traceback anywhere."""
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    nowhere = create_async_engine("postgresql+psycopg://none:none@127.0.0.1:1/none")
+    monkeypatch.setattr(collect, "SessionLocal", async_sessionmaker(nowhere))
+    monkeypatch.setattr(collect, "engine", nowhere)
+    assert await collect._main(slot("exhibitors")) == collect.EXIT_FAILED
+    out, err = capsys.readouterr()
+    assert out == DB_DOWN_BEFORE + "\n"
+    assert "Traceback" not in out + err
+    assert problems(DB_DOWN_BEFORE, rendered=True) == set()
+
+
+@pytest.mark.parametrize(
+    ("started", "error", "line"),
+    [
+        (
+            False,
+            ValueError("boom"),
+            "❌ Kutilmagan xato (ValueError) — yigʻish boshlanmadi, hech narsa "
+            "yozilmadi (tafsiloti yuqoridagi log qatorida). Keyinroq qayta urinib "
+            "koʻring; takrorlansa botda /holat ni koʻring.",
+        ),
+        (
+            True,
+            RuntimeError("boom"),
+            "❌ Kutilmagan xato (RuntimeError) — yigʻish tugamadi (tafsiloti "
+            "yuqoridagi log qatorida). Keyinroq qayta urinib koʻring; takrorlansa "
+            "botda /holat ni koʻring.",
+        ),
+        (
+            True,
+            psycopg.OperationalError("gone"),
+            "⛔ Baza javob bermay qoldi — yigʻish tugamadi. Avval make up (yoki make "
+            "doctor), keyin qaytadan make collect SOURCE=exhibitors.",
+        ),
+    ],
+    ids=["before", "during", "db_during"],
+)
+async def test_a_crash_is_one_line_with_what_to_do_never_a_traceback(
+    monkeypatch, capsys, started, error, line
+):
+    async def ready(slot_: worker.JobSlot, *, now: datetime) -> Any:
+        if not started:
+            raise error
+        return collect.Ready()
+
+    async def no_titles(keys: Any) -> dict[str, str]:
+        return {}
+
+    async def crash(slot_: worker.JobSlot) -> RunReport:
+        raise error
+
+    monkeypatch.setattr(collect, "check", ready)
+    monkeypatch.setattr(collect, "source_titles", no_titles)
+    monkeypatch.setattr(worker, "collect_now", crash)
+    assert await collect._main(slot("exhibitors")) == collect.EXIT_FAILED
+    out, err = capsys.readouterr()
+    assert out.splitlines()[-1] == line
+    assert "Traceback" not in out
+    assert problems(line, rendered=True) == set()
+
+
+def test_a_ctrl_c_outside_the_run_s_own_handler_is_the_stop_sentence(monkeypatch, capsys):
+    """The first and last moments of the process, before the run's handler
+    is installed or after it is gone: the sentence, not a traceback."""
+
+    async def interrupted(slot_: worker.JobSlot, progress: Any = None) -> int:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(collect, "_main", interrupted)
+    assert worker.main(["collect", "exhibitors"]) == collect.EXIT_FAILED
+    out, err = capsys.readouterr()
+    assert out == "⏹ Toʻxtatildi: yigʻish boshlanmadi, hech narsa yozilmadi.\n"
+    assert "Traceback" not in err

@@ -20,15 +20,21 @@ The run is the slot's own ``job`` — what ``build_scheduler`` registers,
 ``collector_runs`` row. The worker that leads keeps its scheduler and its
 leader lock: nothing here takes or releases the lock, reclaims a run or
 catches a job up; the runner's one-running claim keeps the two processes
-from running one source at once (``already_running``).
+from running one source at once (``already_running``). The one-off holds
+its source's ``COLLECT_LOCK`` for the run's life, so a worker that starts or
+resumes meanwhile (``make reload``, ``make update``, a crash restart) leaves
+its ``running`` row alone instead of closing it as a dead worker's; a second
+``make collect`` of the same source finds the lock held and runs nothing.
 
 Before the run, the runner's own reasons not to run are asked
 (``runner.skip_reason``: COLLECTORS_ENABLED, ``/toxtat``, the row switched
 off, a pause), and for the directories the fan-out's per-site rule
 (``directories.skip_reason`` over ``directories.plan``: the parent row alone
-crawls nothing). A refusal is one Uzbek sentence and exit 1, and writes
-nothing; one the runner meets itself (another run claimed the source first)
-is said the same way.
+crawls nothing), then the day's page budget (``runner.build_budget``, read
+only: a source with no page left today crawls nothing). A refusal is one
+Uzbek sentence and exit 1, and writes nothing — except the one the runner
+meets itself (the scheduler's run claimed the source first), which writes
+the runner's usual ``skipped`` row, as a scheduled overlap would.
 
 After it, the summary is the run's own ``collector_runs`` row — its counters
 and its ``meta`` as the runner wrote them (per site for the directories,
@@ -42,24 +48,31 @@ a day.
 directories' full crawl picks its site by the night (``SubSource.
 full_night``: one site a night, the 1st–7th), so on the 8th–31st
 ``plan("full", …)`` crawls nothing in full, and on its own night the 23:00
-job crawls that site anyway — out of the same day's page budget a manual run
-would spend first. Choosing the site by hand is later work (docs/OPS.md).
+job crawls that site anyway. Choosing the site by hand is later work
+(docs/OPS.md). A plain run on the 1st–7th is ``plan(None, …)`` — the night's
+site in full beside the others' diff, the run the Thursday diff makes on such
+a day — and it says so before the crawl (:data:`TEXT` ``full_today``): it
+spends the same day's page budget the 23:00 full crawl then reads with. A
+variant slot is run by hand only when named in :data:`MANUAL_VARIANTS` (none
+today): a later task's variant is judged before it is offered.
 
 Exit codes: 0 the run finished (``ok`` or ``partial``, new companies or
-none), 1 refused (nothing ran), 2 the run failed or was stopped.
+none), 1 refused (nothing ran), 2 the run failed or was stopped, the database
+did not answer, or the tool itself failed.
 """
 
 from __future__ import annotations
 
-import argparse
 import asyncio
 import contextlib
 import logging
+import sys
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, time
 from typing import Any, Final
 
+import psycopg
 import sqlalchemy as sa
 
 from clientscrapper.collectors import directories, runner
@@ -101,14 +114,19 @@ TEXT: Final[dict[str, str]] = {
     ),
     "erp": "ERP roʻyxatlari make erp-sync bilan yangilanadi, make collect emas.",
     "no_variant": (
-        "{key} uchun «{variant}» yurishi yoʻq — FULL=1 siz ishga tushiring: "
-        "make collect SOURCE={key}."
+        "{key} uchun «{variant}» yurishi yoʻq — FULL=1 ni qoʻymasdan ishga "
+        "tushiring: make collect SOURCE={key}."
     ),
     "full_refused": (
         "FULL=1 hozircha yoʻq: kataloglarning toʻliq yurishini worker oʻzi qiladi — "
-        "har oyning 1–7-kunlari soat 23:00 da, har kecha bitta sayt (qaysi saytligini "
-        "sana belgilaydi). Saytni qoʻlda tanlash keyinroq quriladi. Hozir yangi "
-        "kompaniyalar uchun: make collect SOURCE=directories."
+        "har oyning 1–7-kunlari soat {at} da, har kecha bitta sayt (qaysi saytligini "
+        "sana belgilaydi); shu kunlarda oddiy make collect SOURCE=directories ham "
+        "oʻsha kunning saytini toʻliq oʻqiydi. Saytni qoʻlda tanlash keyinroq "
+        "quriladi. Hozir yangi kompaniyalar uchun: make collect SOURCE=directories."
+    ),
+    "variant_refused": (
+        "{key} qoʻlda ishga tushirilmaydi — u faqat oʻz jadvali boʻyicha yuradi. "
+        "Hozir mumkin: {allowed}."
     ),
     "no_row": "{key} uchun sources qatori yoʻq — avval make migrate.",
     "collectors_disabled": (
@@ -123,11 +141,20 @@ TEXT: Final[dict[str, str]] = {
         "{title} oʻchiq — avval botda /manbalar → {title} ni yoqing, keyin qaytadan "
         "make collect SOURCE={key}."
     ),
-    "and_sites": " Saytlaridan ham kamida bittasini yoqing: {sites}.",
+    "and_sites": (
+        " Saytlaridan ham kamida bittasini yoqing (ular /manbalar roʻyxatining "
+        "keyingi sahifasida — ▶️ bilan oʻting): {sites}."
+    ),
     "no_site": (
         "{title} yoqilgan, lekin saytlaridan hech biri ishlamaydi: {sites}. Avval "
-        "botda /manbalar → kamida bittasini yoqing (yolgʻiz «{title}» hech narsa "
-        "oʻqimaydi), keyin qaytadan make collect SOURCE={key}."
+        "botda /manbalar → kamida bittasini yoqing (saytlar roʻyxatning keyingi "
+        "sahifasida — ▶️ bilan oʻting; yolgʻiz «{title}» hech narsa oʻqimaydi), "
+        "keyin qaytadan make collect SOURCE={key}."
+    ),
+    "no_pages": (
+        "{title} uchun bugungi sahifa limiti tugagan — bugun boshqa sahifa "
+        "oʻqilmaydi. Ertaga (Toshkent vaqti bilan 00:00 dan keyin) qayta urinib "
+        "koʻring."
     ),
     "site_off": "{title} oʻchiq",
     "site_paused": "{title} {until} gacha pauzada",
@@ -143,7 +170,7 @@ TEXT: Final[dict[str, str]] = {
     "why_other": "sabab: {reason}",
     "already_running": (
         "{title} hozir yigʻilmoqda ({since} da boshlangan) — tugashini kuting va "
-        "keyinroq qayta urinib koʻring."
+        "keyinroq qayta urinib koʻring; eng kechi {free} da boʻshaydi."
     ),
     "already_running_bare": (
         "{title} hozir yigʻilmoqda — tugashini kuting va keyinroq qayta urinib koʻring."
@@ -155,13 +182,37 @@ TEXT: Final[dict[str, str]] = {
         "bilan): bir necha daqiqadan bir-ikki soatgacha ketishi mumkin. Toʻxtatish: "
         "Ctrl-C."
     ),
+    "full_today": (
+        "📅 Bugun oyning {day}-kuni — {sites} ning oylik toʻliq yurishi kuni: bu "
+        "yurish uni toʻliq oʻqiydi (koʻproq sahifa va vaqt ketadi), qolgan "
+        "saytlardan faqat yangilarini."
+    ),
+    "full_tonight": (
+        " Kechki {at} dagi toʻliq yurish shu kunning qolgan sahifa limiti bilan "
+        "ishlaydi."
+    ),
     "stopped": (
         "⏹ Toʻxtatildi: yigʻish bekor qilindi, bu yurishda topilganlar yozilmadi. "
         "Keyingi yurish qaytadan oʻqiydi."
     ),
+    "stopped_early": "⏹ Toʻxtatildi: yigʻish boshlanmadi, hech narsa yozilmadi.",
+    "db_down": (
+        "⛔ Baza javob bermayapti — yigʻish boshlanmadi. Avval make up (yoki make "
+        "doctor), keyin qaytadan make collect SOURCE={key}."
+    ),
+    "db_down_during": (
+        "⛔ Baza javob bermay qoldi — yigʻish tugamadi. Avval make up (yoki make "
+        "doctor), keyin qaytadan make collect SOURCE={key}."
+    ),
     "crashed": (
-        "❌ Kutilmagan xato ({error}) — yigʻish tugamadi. Tafsiloti yuqoridagi log "
-        "qatorlarida."
+        "❌ Kutilmagan xato ({error}) — yigʻish tugamadi (tafsiloti yuqoridagi log "
+        "qatorida). Keyinroq qayta urinib koʻring; takrorlansa botda /holat ni "
+        "koʻring."
+    ),
+    "crashed_early": (
+        "❌ Kutilmagan xato ({error}) — yigʻish boshlanmadi, hech narsa yozilmadi "
+        "(tafsiloti yuqoridagi log qatorida). Keyinroq qayta urinib koʻring; "
+        "takrorlansa botda /holat ni koʻring."
     ),
     # --- the summary -------------------------------------------------------------------
     "head_ok": "✅ {title} ({key}) — yigʻish tugadi, {took} davom etdi (yurish #{run}).",
@@ -181,10 +232,12 @@ TEXT: Final[dict[str, str]] = {
     "site_skipped": "• {title}: oʻtkazildi — {why}.",
     "site_trouble": "  ⚠️ {what}.",
     "sites_not_built": "• Hali qurilmagan saytlar (oʻtkazildi): {sites}.",
+    "sites_not_reached": "• Yurish bu saytlargacha yetmadi: {sites}.",
     "mode_diff": "yangilari",
     "mode_full": "toʻliq",
     "skip_disabled": "/manbalar da oʻchiq",
     "skip_paused": "pauzada",
+    "skip_paused_until": "{until} gacha pauzada",
     "skip_no_sources_row": "sources qatori yoʻq",
     "t_robots": "robots.txt taqiqladi: {n}",
     "t_card_errors": "karta olinmadi: {n}",
@@ -234,6 +287,8 @@ TEXT: Final[dict[str, str]] = {
         "tekshiradi va baholaydi; kartalar botga dushanba–shanba {start}–{end} "
         "oraligʻida keladi, kuniga koʻpi bilan {cap} ta."
     ),
+    "no_new": "Bu yurishda yangi yozuv topilmadi — botga undan yangi karta kelmaydi.",
+    "retry": "↻ Keyinroq qayta urinib koʻring; takrorlansa botda /holat ni koʻring.",
     "took_s": "{s} soniya",
     "took_m": "{m} daqiqa {s} soniya",
     "took_h": "{h} soat {m} daqiqa",
@@ -244,8 +299,14 @@ ELSEWHERE: Final[Mapping[str, str]] = {
     TelegramMonitor.key: TEXT["telegram"],
     ErpSync.key: TEXT["erp"],
 }
-# Built slots a manual run refuses, and why (the module docstring: FULL=1).
-NO_MANUAL: Final[Mapping[str, str]] = {"directories_full": TEXT["full_refused"]}
+# Built variant slots a manual run refuses with their own sentence (a TEXT
+# key, the module docstring: FULL=1).
+NO_MANUAL: Final[Mapping[str, str]] = {"directories_full": "full_refused"}
+# Built variant (non-primary) slots a manual run may start. None today: any
+# other variant a later task builds is refused («faqat oʻz jadvali boʻyicha»)
+# until somebody judges a daytime run of its cadence and names it here
+# (tests/test_collect.py's fence turns red until then).
+MANUAL_VARIANTS: Final[frozenset[str]] = frozenset()
 # The runner's skip notes (runner.skip_reason, its claim) said in words.
 SKIP_TEXT: Final[Mapping[str, str]] = {
     "collectors_disabled": TEXT["collectors_disabled"],
@@ -339,8 +400,30 @@ def choose(
     if chosen is None:
         return Refused(TEXT["no_variant"].format(key=key, variant=wanted))
     if chosen.id in NO_MANUAL:
-        return Refused(NO_MANUAL[chosen.id])
+        return Refused(TEXT[NO_MANUAL[chosen.id]].format(at=clock_of(chosen)))
+    if not chosen.primary and chosen.id not in MANUAL_VARIANTS:
+        return Refused(TEXT["variant_refused"].format(key=chosen.id, allowed=names))
     return chosen
+
+
+def clock_of(slot: JobSlot) -> str:
+    """The time of day a slot's first cron fires (``0 23 1-7 * *`` → 23:00)."""
+    minute, hour = [*slot.triggers[0].split(), "", ""][:2]
+    if minute.isdigit() and hour.isdigit():
+        return f"{int(hour):02d}:{int(minute):02d}"
+    return slot.triggers[0]
+
+
+def full_slot(table: Iterable[JobSlot] | None = None) -> JobSlot | None:
+    """The directories' monthly full crawl (the ``full`` variant slot)."""
+    return next(
+        (
+            s
+            for s in (worker.job_table() if table is None else table)
+            if s.source_key == directories.PARENT and s.variant == FULL and s.job
+        ),
+        None,
+    )
 
 
 # --- may it run now (the runner's and the fan-out's own rules) ---------------------
@@ -366,9 +449,11 @@ def pause_why(source: Source) -> str:
 @dataclass(frozen=True, slots=True)
 class Sites:
     """The directories' sites as the run would see them now: those it would
-    crawl, and every built site's own switch with its state."""
+    crawl, those of them it would crawl in full (the 1st–7th's site), and
+    every built site's own switch with its state."""
 
     running: tuple[str, ...]
+    full: tuple[str, ...]
     switches: tuple[str, ...]
 
 
@@ -377,11 +462,11 @@ async def directory_sites(variant: str | None, now: datetime) -> Sites:
     then ``directories.skip_reason`` per site."""
     rows = await directories.sub_rows()
     due = directories.plan(variant, now, diff_due=directories.diff_due(rows.cron, now))
-    running = tuple(
-        sub.site
-        for sub, _mode in due
+    going = [
+        (sub, mode)
+        for sub, mode in due
         if directories.skip_reason(sub, rows.states.get(sub.source_key), now) is None
-    )
+    ]
     own = [
         sub
         for sub in directories.SUBSOURCES
@@ -397,7 +482,30 @@ async def directory_sites(variant: str | None, now: datetime) -> Sites:
         elif state.paused_until is not None and state.paused_until > now:
             until = at(state.paused_until)
             switches.append(TEXT["site_paused"].format(title=title, until=until))
-    return Sites(running, tuple(switches))
+    return Sites(
+        running=tuple(sub.site for sub, _mode in going),
+        full=tuple(
+            titles.get(sub.source_key, sub.host) for sub, mode in going if mode == "full"
+        ),
+        switches=tuple(switches),
+    )
+
+
+def full_today(sites: Sites, now: datetime) -> str | None:
+    """Said before a directories run that crawls a site in full (a plain run
+    on the 1st–7th, ``plan(None, …)``), so the owner knows the run is the
+    big one and that the 23:00 full crawl gets what is left of the day."""
+    if not sites.full:
+        return None
+    local = now.astimezone(settings.tz)
+    text = TEXT["full_today"].format(day=local.day, sites=", ".join(sites.full))
+    night = full_slot()
+    if night is not None:
+        clock = clock_of(night)
+        with contextlib.suppress(ValueError):
+            if local.time() < time.fromisoformat(clock):
+                text += TEXT["full_tonight"].format(at=clock)
+    return text
 
 
 async def source_titles(keys: Iterable[str]) -> dict[str, str]:
@@ -409,15 +517,38 @@ async def source_titles(keys: Iterable[str]) -> dict[str, str]:
         return {str(key): str(title) for key, title in rows.all()}
 
 
-async def running_since(source_key: str) -> datetime | None:
+@dataclass(frozen=True, slots=True)
+class Going:
+    """The source's ``running`` row: when it started, and the latest it
+    frees the source (its deadline plus the runner's stale margin: a process
+    that died with it open is overtaken then)."""
+
+    since: datetime
+    free: datetime
+
+
+async def running_row(source_key: str) -> Going | None:
     async with SessionLocal() as session:
-        found: datetime | None = await session.scalar(
-            sa.select(sa.func.min(CollectorRun.started_at)).where(
-                CollectorRun.source_key == source_key,
-                CollectorRun.status == "running",
+        found = (
+            await session.execute(
+                sa.select(CollectorRun.started_at, CollectorRun.meta)
+                .where(
+                    CollectorRun.source_key == source_key,
+                    CollectorRun.status == "running",
+                )
+                .order_by(CollectorRun.started_at)
+                .limit(1)
             )
-        )
-        return found
+        ).first()
+    if found is None:
+        return None
+    started, meta = found
+    due = started + runner.DEFAULT_DEADLINE
+    stamp = (meta or {}).get("deadline_at")
+    if isinstance(stamp, str):
+        with contextlib.suppress(ValueError):
+            due = datetime.fromisoformat(stamp)
+    return Going(since=started, free=due + runner.STALE_MARGIN)
 
 
 async def said(
@@ -438,23 +569,40 @@ async def said(
             title=title, until=at(source.paused_until), why=pause_why(source)
         )
     if note == "already_running":
-        since = await running_since(key)
-        if since is None:
+        going = await running_row(key)
+        if going is None:
             return TEXT["already_running_bare"].format(title=title)
-        return TEXT["already_running"].format(title=title, since=at(since))
+        return TEXT["already_running"].format(
+            title=title, since=at(going.since), free=at(going.free)
+        )
     return TEXT["unavailable"].format(title=title, note=note)
 
 
-async def refusal(slot: JobSlot, *, now: datetime) -> Refused | None:
+@dataclass(frozen=True, slots=True)
+class Ready:
+    """It may run: the lines said after the start line, before the crawl."""
+
+    notes: tuple[str, ...] = ()
+
+
+async def check(slot: JobSlot, *, now: datetime) -> Refused | Ready:
     """Why ``slot`` may not run now, before anything is claimed or fetched:
-    the runner's own ``skip_reason`` on its row, then for the directories the
-    fan-out's per-site rule. None: it may."""
+    the runner's own ``skip_reason`` on its row, for the directories the
+    fan-out's per-site rule, then the day's page budget (the runner's own
+    ``build_budget``, read only). Ready: it may, with what to say first."""
     assert slot.source_key is not None
     async with SessionLocal() as session:
         source = await session.get(Source, slot.source_key)
         if source is None:
             return Refused(TEXT["no_row"].format(key=slot.source_key))
         note = await runner.skip_reason(session, source, now)
+        budget = (
+            None
+            if note is not None
+            else await runner.build_budget(
+                session, source, now=now, deadline=runner.DEFAULT_DEADLINE
+            )
+        )
     sites = (
         await directory_sites(slot.variant, now)
         if slot.source_key == directories.PARENT
@@ -468,7 +616,16 @@ async def refusal(slot: JobSlot, *, now: datetime) -> Refused | None:
                 title=source.title_uz, key=slot.id, sites=", ".join(sites.switches)
             )
         )
-    return None
+    if budget is not None and budget.pages <= 0:
+        return Refused(TEXT["no_pages"].format(title=source.title_uz))
+    notes = full_today(sites, now) if sites is not None else None
+    return Ready(notes=(notes,) if notes else ())
+
+
+async def refusal(slot: JobSlot, *, now: datetime) -> Refused | None:
+    """:func:`check`'s refusal, or None: it may run."""
+    checked = await check(slot, now=now)
+    return checked if isinstance(checked, Refused) else None
 
 
 # --- the summary: the run's own row ----------------------------------------------
@@ -495,29 +652,44 @@ def _new_of(meta: Mapping[str, Any], source_key: str) -> int:
     return _count(found.get("observations")) if isinstance(found, Mapping) else 0
 
 
-def site_lines(meta: Mapping[str, Any], titles: Mapping[str, str]) -> list[str]:
+def site_lines(
+    meta: Mapping[str, Any],
+    titles: Mapping[str, str],
+    paused: Mapping[str, datetime | None] | None = None,
+) -> list[str]:
     """The directories, one line per site the run named (``meta.subsources``,
-    in ``SUBSOURCES`` order), its new rows from ``meta.sources``."""
+    in ``SUBSOURCES`` order), its new rows from ``meta.sources``; a paused
+    site with its row's ``paused_until`` (``paused``); and the built sites a
+    plain run planned (``plan(None, …)``: every site) but never reached, its
+    budget or deadline spent before them (unbuilt ones are named as such)."""
     subs = meta.get("subsources")
     if not isinstance(subs, Mapping):
         return []
     lines: list[str] = []
     not_built: list[str] = []
+    not_reached: list[str] = []
     for sub in directories.SUBSOURCES:
-        data = subs.get(sub.site)
-        if not isinstance(data, Mapping):
-            continue
         title = (
             titles.get(sub.source_key, sub.host)
             if sub.source_key != directories.PARENT
             else sub.host
         )
+        data = subs.get(sub.site)
+        if not isinstance(data, Mapping):
+            if sub.spec is None:
+                not_built.append(title)
+            elif meta.get("variant") is None:
+                not_reached.append(title)
+            continue
         skipped = data.get("skipped")
         if skipped == "not_built":
             not_built.append(title)
             continue
         if isinstance(skipped, str):
             why = TEXT.get(f"skip_{skipped}", skipped)
+            until = (paused or {}).get(sub.source_key)
+            if skipped == "paused" and until is not None:
+                why = TEXT["skip_paused_until"].format(until=at(until))
             lines.append(TEXT["site_skipped"].format(title=title, why=why))
             continue
         lines.append(
@@ -545,6 +717,8 @@ def site_lines(meta: Mapping[str, Any], titles: Mapping[str, str]) -> list[str]:
             trouble.append(TEXT["t_status"].format(codes=codes))
         if trouble:
             lines.append(TEXT["site_trouble"].format(what=" · ".join(trouble)))
+    if not_reached:
+        lines.append(TEXT["sites_not_reached"].format(sites=", ".join(not_reached)))
     if not_built:
         lines.append(TEXT["sites_not_built"].format(sites=", ".join(not_built)))
     return lines
@@ -625,10 +799,17 @@ def next_line() -> str:
     )
 
 
-def render(run: CollectorRun, *, title: str, titles: Mapping[str, str]) -> list[str]:
+def render(
+    run: CollectorRun,
+    *,
+    title: str,
+    titles: Mapping[str, str],
+    paused: Mapping[str, datetime | None] | None = None,
+) -> list[str]:
     """The summary of one finished run, read off its ``collector_runs`` row:
     the head, the totals, per site (directories) or per list (exhibitors),
-    what cut it, and where its companies go next."""
+    what cut it, where its companies go next (or that it found none), and
+    for a failed run what to do."""
     meta: Mapping[str, Any] = run.meta or {}
     when = took(run.started_at, run.finished_at)
     head = {"ok": "head_ok", "partial": "head_partial"}.get(run.status, "head_failed")
@@ -641,11 +822,15 @@ def render(run: CollectorRun, *, title: str, titles: Mapping[str, str]) -> list[
             pages=run.pages, requests=run.requests, new=run.new_observations
         ),
     ]
-    lines += site_lines(meta, titles)
+    lines += site_lines(meta, titles, paused)
     lines += list_lines(meta)
     lines += warning_lines(run)
-    if run.status != "failed" or run.new_observations:
+    if run.new_observations:
         lines.append(next_line())
+    elif run.status != "failed":
+        lines.append(TEXT["no_new"])
+    if exit_code(run.status) != EXIT_DONE:
+        lines.append(TEXT["retry"])
     return lines
 
 
@@ -659,14 +844,16 @@ async def summary(run_id: int) -> Outcome:
         run = await session.get(CollectorRun, run_id)
         if run is None:
             raise LookupError(f"collector run {run_id} is gone")
-        titles = {
-            str(key): str(value)
-            for key, value in (
-                await session.execute(sa.select(Source.key, Source.title_uz))
-            ).all()
-        }
+        rows = (
+            await session.execute(
+                sa.select(Source.key, Source.title_uz, Source.paused_until)
+            )
+        ).all()
+    titles = {str(key): str(value) for key, value, _ in rows}
+    paused = {str(key): until for key, _, until in rows}
     title = titles.get(run.source_key, run.source_key)
-    return Outcome(tuple(render(run, title=title, titles=titles)), exit_code(run.status))
+    lines = render(run, title=title, titles=titles, paused=paused)
+    return Outcome(tuple(lines), exit_code(run.status))
 
 
 # --- the run ----------------------------------------------------------------------
@@ -675,20 +862,41 @@ async def summary(run_id: int) -> Outcome:
 Say = Callable[[str], None]
 
 
-async def collect(slot: JobSlot, *, now: datetime, say: Say | None = None) -> Outcome:
+@dataclass(slots=True)
+class Progress:
+    """How far a run got: ``started`` once the slot's job was handed over
+    (what a stop or a failure is then said as: «tugamadi», not
+    «boshlanmadi»)."""
+
+    started: bool = False
+
+
+async def collect(
+    slot: JobSlot,
+    *,
+    now: datetime,
+    say: Say | None = None,
+    progress: Progress | None = None,
+) -> Outcome:
     """Refuse, or run ``slot``'s own job once (``worker.collect_now``) and
-    read its run back. ``say`` hears the start line before the crawl."""
-    refused = await refusal(slot, now=now)
-    if refused is not None:
-        return Outcome((refused.text,), EXIT_REFUSED)
+    read its run back. ``say`` hears the start line (and, on the 1st–7th, the
+    directories' full-crawl note) before the crawl."""
+    checked = await check(slot, now=now)
+    if isinstance(checked, Refused):
+        return Outcome((checked.text,), EXIT_REFUSED)
     assert slot.source_key is not None
     titles = await source_titles([slot.source_key])
     if say is not None:
         say(TEXT["start"].format(title=titles.get(slot.source_key, slot.id), key=slot.id))
+        for note in checked.notes:
+            say(note)
     log.info("manual collect", extra={"job": slot.id, "variant": slot.variant})
+    if progress is not None:
+        progress.started = True
     report = await worker.collect_now(slot)
     if report.status == "skipped":
-        # The runner's own refusal, met after ours (another run claimed it).
+        # The runner's own refusal, met after ours (another run claimed it),
+        # or another make collect holding the source's lock.
         async with SessionLocal() as session:
             source = await session.get(Source, slot.source_key)
         note = str(report.meta.get("note") or "")
@@ -722,22 +930,44 @@ async def until_stopped(work: asyncio.Future[Outcome]) -> Outcome | None:
         remove_stop_signals(installed)
 
 
-async def _main(slot: JobSlot) -> int:
+# The database not answering (``make down``, a restart, the wrong port): a
+# foreseeable state with a next step, not «unexpected».
+DB_DOWN: Final = (
+    sa.exc.OperationalError,
+    sa.exc.InterfaceError,
+    psycopg.OperationalError,
+    ConnectionError,
+)
+
+
+async def _main(slot: JobSlot, progress: Progress | None = None) -> int:
+    progress = progress if progress is not None else Progress()
     try:
         work = asyncio.ensure_future(
-            collect(slot, now=datetime.now(settings.tz), say=_say)
+            collect(slot, now=datetime.now(settings.tz), say=_say, progress=progress)
         )
         outcome = await until_stopped(work)
+    except DB_DOWN as exc:
+        log.error(
+            "make collect: the database did not answer",
+            extra={"job": slot.id, "error": type(exc).__name__},
+        )
+        said_ = "db_down_during" if progress.started else "db_down"
+        print(TEXT[said_].format(key=slot.id))
+        return EXIT_FAILED
     except Exception as exc:
-        # The run's own failures end in its row; this is the tool's (the
-        # database gone, a bookkeeping write refused). Logged redacted.
+        # The run's own failures end in its row; this is the tool's (a
+        # bookkeeping write refused, a bug). Logged redacted, the owner's
+        # line last.
         log.error("make collect failed", exc_info=True, extra={"job": slot.id})
-        print(TEXT["crashed"].format(error=type(exc).__name__))
+        said_ = "crashed" if progress.started else "crashed_early"
+        print(TEXT[said_].format(error=type(exc).__name__))
         return EXIT_FAILED
     finally:
-        await engine.dispose()
+        with contextlib.suppress(Exception):
+            await engine.dispose()
     if outcome is None:
-        print(TEXT["stopped"])
+        print(TEXT["stopped" if progress.started else "stopped_early"])
         return EXIT_FAILED
     print("\n".join(outcome.lines))
     return outcome.code
@@ -747,33 +977,43 @@ def _say(line: str) -> None:
     print(line, flush=True)
 
 
-def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        prog="collect", description="run one collector now (make collect)"
-    )
-    parser.add_argument("source", nargs="?", default="", help="a JOB_TABLE slot id")
-    parser.add_argument("variant", nargs="?", default=None, help="e.g. full")
-    return parser.parse_args(argv)
-
-
 def main(argv: Sequence[str] | None = None) -> int:
     """``worker.main collect <slot> [<variant>]``: a refusal the table alone
-    decides is said before any connection is opened."""
-    args = parse_args(argv)
-    picked = choose(args.source, args.variant or None)
-    if isinstance(picked, Refused):
-        print(picked.text)
-        return EXIT_REFUSED
-    return asyncio.run(_main(picked))
+    decides is said before any connection is opened. The arguments are read
+    as plain words (no option parser: ``-h`` is a source name nobody has, not
+    an English help page); a Ctrl-C the run's own handler did not catch (the
+    first moments, the last) is the stop sentence, not a traceback."""
+    args = list(sys.argv[1:] if argv is None else argv)
+    progress = Progress()
+    try:
+        if len(args) > 2:
+            picked: JobSlot | Refused = Refused(
+                TEXT["usage"].format(allowed=", ".join(allowed()))
+            )
+        else:
+            source = args[0] if args else ""
+            variant = args[1] if len(args) > 1 else ""
+            picked = choose(source, variant.strip() or None)
+        if isinstance(picked, Refused):
+            print(picked.text)
+            return EXIT_REFUSED
+        return asyncio.run(_main(picked, progress))
+    except KeyboardInterrupt:
+        print(TEXT["stopped" if progress.started else "stopped_early"])
+        return EXIT_FAILED
 
 
 __all__ = [
     "ELSEWHERE",
+    "MANUAL_VARIANTS",
     "NO_MANUAL",
     "TEXT",
     "Outcome",
+    "Progress",
+    "Ready",
     "Refused",
     "allowed",
+    "check",
     "choose",
     "collect",
     "main",

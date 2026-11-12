@@ -185,13 +185,17 @@ erp-sync: ## One ERP feed walk: make erp-sync WALK=full|delta|outcomes|quarter|y
 # one-off container beside the running worker. --no-deps (never init) and no
 # db-password guard: the database is up and nothing here can start it, as
 # `make backup`. It takes no leader lock, so the running worker keeps its
-# scheduler; the runner's one-running claim keeps the two from running one
-# source at once. Without SOURCE it prints the sources it takes (read from
-# the table). FULL=1 asks for the «full» variant (refused today: docs/OPS.md).
-# Exit 1 = refused (nothing ran), 2 = the run failed.
+# scheduler; it holds its source's own lock instead, which the worker's
+# reclaim of a dead worker's runs respects (a `make reload` meanwhile leaves
+# the run alone), and the runner's one-running claim keeps the scheduler's
+# run of that source and this one apart. Without SOURCE it prints the
+# sources it takes (read from the table). SOURCE reaches the shell
+# single-quoted: a pasted backtick or $( ) is a name, never a command.
+# FULL=1 asks for the «full» variant (refused today: docs/OPS.md).
+# Exit 1 = refused (nothing ran), 2 = the run failed or was stopped.
 collect: ## Run one collector now: make collect SOURCE=<source> [FULL=1] (no SOURCE: the list)
 	$(COMPOSE) run --rm --no-deps worker python -m clientscrapper.worker.main collect \
-		"$(strip $(SOURCE))" $(if $(call switch,FULL),full,)
+		'$(subst ','\'',$(strip $(SOURCE)))' $(if $(call switch,FULL),full,)
 
 push-test: ## Push one visibly synthetic lead to the ERP (05 §B.1)
 	$(COMPOSE) run --rm --no-deps worker python -m clientscrapper.tools.push_test

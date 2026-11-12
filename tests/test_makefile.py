@@ -240,6 +240,23 @@ def test_make_collect_runs_one_collector_in_a_one_off_beside_the_worker():
     for off in ([], ["FULL=0"], ["FULL="]):
         assert _one_run("collect", "SOURCE=exhibitors", *off)[2][-1] == "exhibitors"
     assert _one_run("collect")[2][-1] == ""
+    # SOURCE reaches the shell as data, single-quoted: a pasted backtick,
+    # $( ) or quote is a (refused) source name, never a command or a broken
+    # line (the make-collect review's finding 11). Run with `echo` in place
+    # of docker compose: the word it prints is the one the CLI would get.
+    tick = chr(96)
+    pasted = f"a{tick}id{tick}$$(id)\"b'c"
+    word = f"a{tick}id{tick}$(id)\"b'c"
+    assert _one_run("collect", f"SOURCE={pasted}")[2][-1] == word
+    echoed = subprocess.run(
+        ["make", "-s", "collect", "COMPOSE=echo", f"SOURCE={pasted}"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert echoed.rstrip("\n").endswith(f" collect {word}")
+    assert "uid=" not in echoed
     done = subprocess.run(
         ["make", "-s", "-n", "collect", "SOURCE=directories", "FULL=yes"],
         cwd=ROOT,
