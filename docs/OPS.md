@@ -62,11 +62,36 @@ Telegram accounts, 10:00–17:00 Tashkent (`docs/sotuv-playbook.md`).
 4. BotFather: the bot exists, group joining is disabled; the owner and every manager have sent
    `/start` to the bot; `make doctor` shows each manager id reachable.
 5. Reader account: a SIM at least 30 days old, 2FA on, `make userbot-login` (it never touches
-   the database; after the code Telethon prints its own English line «Signed in successfully as
-   …», and «Invalid code» / «Invalid password» on a wrong answer), replace the whole
-   `TELETHON_SESSION=` line in `.env` with the printed one (the doctor refuses a doubled
-   «TELETHON_SESSION=» or a cut paste), `make reload`; the ⛔ reader line leaves `/holat`;
-   `/chats` lists the three seed chats within 24 h.
+   the database). Every prompt and line is the tool's own, in Uzbek: Telethon's English ones
+   («Signed in successfully as …», «Invalid code», «Invalid password») are gone. Only on a bad
+   line to Telegram do Telethon's English connection warnings («Attempt 1 at connecting failed:
+   …») still come before the Uzbek sentence.
+   - The number **with its country code**: `+998901234567`, or `998 90 123-45-67` (taken as
+     +998…). A number without it is refused and says why: Telegram reads «901234567» as +90…
+     (Turkey) and sends the code to somebody else's number. A bot token is refused too.
+   - «Kod soʻralmoqda: +99890*****67» — the number it asked for, masked; check the country and
+     operator code here.
+   - Then where Telegram says the code went. «Telegram ilovasiga keldi» means the code is
+     **not** an SMS: it is in the chat named «Telegram» in the Telegram app where this number is
+     already logged in (the reader phone, or a computer). Otherwise SMS, a phone call, the
+     account's login e-mail (its pattern is shown) or fragment.com. When Telegram can send it
+     another way the next line says which and after how many seconds; typing `qayta` at the code
+     prompt asks for it again that way (and asks for a fresh code after «Kodning muddati
+     tugagan»).
+   - The code is digits (spaces are fine); three wrong codes or three wrong 2FA passwords end
+     the login with exit 1.
+   - If Telegram first wants a login e-mail on the account, the tool says so and stops: open the
+     reader account in the official Telegram app and set it (or log in there once), then run the
+     login again.
+   - Every refusal is one Uzbek sentence and exit 1, never a traceback: a flood wait (in
+     seconds, minutes or hours — wait it out; trying sooner makes it longer), too many codes for
+     this number, an invalid or banned number, no Telegram account on the number (open one in
+     the official app; the tool never signs up), wrong `TELETHON_API_ID`/`TELETHON_API_HASH`
+     (re-copy from my.telegram.org), a published api id, every way of sending the code used up,
+     a lost connection. Anything else names its class: send that name to the developer.
+   Then replace the whole `TELETHON_SESSION=` line in `.env` with the printed one (the doctor
+   refuses a doubled «TELETHON_SESSION=» or a cut paste), `make reload`; the ⛔ reader line
+   leaves `/holat`; `/chats` lists the three seed chats within 24 h.
 6. ERP: fullprompt `agent-feed` deployed (the build stamp at `/api/version` is newer than the
    merge — there is no migration, so a migration count proves nothing); the owner's five steps of
    05 §A.14 done (key minted, «Qayta qilinmasin» in the lost-reason dictionary, routing rules A

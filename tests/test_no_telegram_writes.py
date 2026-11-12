@@ -138,7 +138,13 @@ RAW_WRITE_REQUESTS = {
 RAW_ALLOWED: dict[tuple[str, str], set[str]] = {
     ("userbot/joiner.py", "join_one"): {"JoinChannelRequest", "GetFullChannelRequest"},
     ("userbot/about.py", "read_about"): {"GetFullChannelRequest", "GetFullUserRequest"},
+    # make userbot-login's «qayta»: auth.resendCode asks Telegram to send the
+    # login code to the account itself again (06 §2). An auth call, not a
+    # chat write — test_the_login_tool_may_only_resend_its_code pins that the
+    # allowance stays inside telethon.tl.functions.auth and off the write set.
+    ("tools/userbot_login.py", "_resend_code"): {"ResendCodeRequest"},
 }
+LOGIN_TOOL = "tools/userbot_login.py"
 # Joining is one function, reached from one scheduler entry whose cap test
 # runs on a fake clock (T-13).
 JOIN_REQUESTS = {"JoinChannelRequest", "ImportChatInviteRequest"}
@@ -597,6 +603,24 @@ def test_the_reader_never_writes_to_telegram(path):
     RAW_ALLOWED names them (there is no sender in v1)."""
     offending = _offences(rel(path), path.read_text(encoding="utf-8"))
     assert not offending, f"{rel(path)} writes to Telegram: {offending}"
+
+
+def test_the_login_tool_may_only_resend_its_code():
+    """The login tool's raw-request allowance is auth.* and nothing that
+    writes: a request added there by name must be one of Telegram's auth
+    calls, and never one of RAW_WRITE_REQUESTS (the owner's first install,
+    2026-11-12: «qayta» re-sends the login code)."""
+    from telethon.tl.functions import auth
+
+    granted = {
+        name
+        for (path, _function), names in RAW_ALLOWED.items()
+        if path == LOGIN_TOOL
+        for name in names
+    }
+    assert granted == {"ResendCodeRequest"}
+    assert not granted & RAW_WRITE_REQUESTS
+    assert all(isinstance(getattr(auth, name, None), type) for name in granted)
 
 
 def test_joins_happen_in_join_one_reached_only_from_join_daily():
