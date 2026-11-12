@@ -27,6 +27,7 @@ Telegram accounts, 10:00–17:00 Tashkent (`docs/sotuv-playbook.md`).
 | `make restore FILE=… [DRY=1] [FORCE=1]` | restore a backup (`DRY=1` checks the file only); a bare file name — the `file` a backup's log line names — is looked for in `data/backups/` |
 | `make import-clients FILE=clients.xlsx [APPLY=1]` | the ERP client export as suppression (the «Boshqa» fallback only) |
 | `make erp-sync WALK=full\|delta\|outcomes\|quarter\|year [ACCEPT_SHRINK=1]` | one ERP feed walk by hand (exit 3 = skipped) |
+| `make collect SOURCE=… [FULL=1]` | one collector run now, the run its cron makes (§1.1); without `SOURCE` it lists the sources it takes |
 | `make push-test` | pushes one visibly synthetic lead to the ERP |
 | `make mvp-report [START=YYYY-MM-DD]` | the pilot's four MVP numbers (§4 below) |
 | `make purge COMPANY=… \| PHONE=… \| TG_USER=… \| TG_HANDLE=@… [REASON=…] [APPLY=1]` | forget a subject (06 §5.4): the plan's counts first, nothing changes without `APPLY=1`; `REASON` is `legal_request` (the default, as `/unut`), `dnc`, `b2c` or `owner`; `TG_HANDLE` is `/unut @username`'s rule for a person kept under no contact (the ids the username was seen on) |
@@ -35,6 +36,53 @@ Telegram accounts, 10:00–17:00 Tashkent (`docs/sotuv-playbook.md`).
 | `make test` | ruff + mypy + pytest (needs Postgres: `make db-test` prints the line) |
 
 `CLAUDE.md`'s command table is held to the Makefile by `tests/test_claude_commands.py`.
+
+### 1.1 Running a source now (`make collect`)
+
+`make collect SOURCE=directories` (or `SOURCE=exhibitors`) runs that collector once, now,
+instead of waiting for its cron (directories: Thursday 23:00; exhibitors: Monday 09:00). It
+is the run the scheduler makes — the worker's own job for that slot of `JOB_TABLE`, in a
+one-off container beside the running worker, which keeps its scheduler lock and its
+schedule: robots.txt, the per-host pace, the 403/429 breaker, the daily page budget,
+`costs.ask` before any paid call, the evidence store and the `collector_runs` row are all
+the scheduled run's. The two never run one source at once: whichever claims it first runs,
+the other is told «… hozir yigʻilmoqda …».
+
+- **Which sources.** `make collect` with no `SOURCE` prints the ones it takes, read from the
+  worker's table: the built collectors (today `directories`, `exhibitors`). A slot whose
+  collector is not built yet (`hh_vacancies`, OLX, Instagram, the maps …) says «hali
+  qurilmagan» and is offered the day its task fills the slot. `telegram_monitor` is refused
+  (the userbot reads the chats all the time), the ERP feeds too (`make erp-sync`).
+- **Refusals** are one Uzbek sentence, exit 1, nothing written, each saying what to do: the
+  source switched off (switch it on in `/manbalar`), paused (until when, Tashkent time, and
+  why: a 403/429 breaker or low precision), `/toxtat` (`/yoq`), `COLLECTORS_ENABLED=false`.
+  For `directories` the parent row **and** at least one site row must be on —
+  `goldenpages.uz`, `yellowpages.uz`, `top.uz`, `glotr.uz` (§2 step 12): the parent alone
+  crawls nothing, and the refusal names each site's state.
+- **`FULL=1`** (the monthly full crawl) is refused for now: the full crawl's site is chosen
+  by the date (one site a night, the 1st–7th, 23:00), and on its own night that job crawls
+  it anyway, out of the same day's page budget a manual run would spend first. Choosing a
+  site by hand is later work.
+- **How long.** Minutes to an hour or two: list pages and a card per new company, about 0.3
+  requests a second per site; the run's deadline is 2 hours. Its log lines go to the
+  terminal (not `make worker`). Ctrl-C stops it cleanly — the run is closed `cancelled`,
+  nothing it found is written, the next run reads again. Use `tmux` or `screen` if the SSH
+  session may drop.
+- **The summary** is read from the run's own `collector_runs` row, never counted again: the
+  time it took, pages and requests, new rows («yangi yozuv»: a company card or list row
+  this source never wrote before), per site for the directories (list pages, company cards,
+  list rows, already seen, new; robots, failed cards, non-200 list answers) or per show list
+  for the exhibitors (Uzbek companies kept of the rows read), then what cut the run
+  (robots.txt, the page or dollar budget, the deadline, a 403/429 breaker — the source is
+  then paused 6 h — CAPTCHA pages). The run number («yurish #N») is the `collector_runs.id`.
+  Exit 0 when the run finished (`ok` or `partial`, even with no new company), 1 refused,
+  2 failed or stopped.
+- **When cards arrive.** The rest is the running worker's, on its own schedule: the
+  resolver (every 2 minutes) turns the rows into companies, enrichment (07:00–22:00) looks
+  for a phone, the scorer (every 15 minutes) scores them, and the review job sends cards to
+  the bot inside `REVIEW_HOURS` (Mon–Sat, default 09:00–18:00), at most `REVIEW_DAILY_CAP`
+  a day. Directory and exhibitor rows often carry no phone: only the candidates that reach
+  review become cards, so «yangi yozuv 40 ta» is not 40 cards.
 
 ## 2. Go-live checklist (06 §7.1)
 

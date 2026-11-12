@@ -210,6 +210,54 @@ def test_make_backup_runs_the_nightly_job_itself():
     assert command == ["python", "-m", "clientscrapper.worker.main", "backup"]
 
 
+def _one_run(*args: str) -> tuple[str, dict[str, str], list[str]]:
+    """The one `docker compose run` of a recipe, its continuation lines joined."""
+    out = dry_run(*args).replace("\\\n", " ")
+    [line] = [x for x in out.splitlines() if "compose run" in x]
+    return _compose_run(line)
+
+
+def test_make_collect_runs_one_collector_in_a_one_off_beside_the_worker():
+    """`make collect` (tools/collect.py): the worker's own `collect` in a
+    one-off worker container — --no-deps, never init, and no db-password
+    guard: the database is up and nothing here can start it (`make
+    backup`'s pattern). SOURCE goes through as given (an empty one prints
+    the list), FULL=1 is the «full» variant; and it is in `make help`."""
+    service, options, command = _one_run("collect", "SOURCE=directories")
+    assert service == "worker"
+    assert set(options) == {"--rm", "--no-deps"}
+    assert command == [
+        "python",
+        "-m",
+        "clientscrapper.worker.main",
+        "collect",
+        "directories",
+    ]
+    assert _one_run("collect", "SOURCE=directories", "FULL=1")[2][-2:] == [
+        "directories",
+        "full",
+    ]
+    for off in ([], ["FULL=0"], ["FULL="]):
+        assert _one_run("collect", "SOURCE=exhibitors", *off)[2][-1] == "exhibitors"
+    assert _one_run("collect")[2][-1] == ""
+    done = subprocess.run(
+        ["make", "-s", "-n", "collect", "SOURCE=directories", "FULL=yes"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    assert done.returncode != 0
+    assert "FULL=yes: use FULL=1 (on) or FULL=0 (off)" in done.stderr
+    lines = (ROOT / "Makefile").read_text().splitlines()
+    head = next(x for x in lines if x.startswith("collect:"))
+    assert "db-password" not in head.split("##")[0]
+    assert " up " not in dry_run("collect", "SOURCE=directories")
+    helped = subprocess.run(
+        ["make", "-s", "help"], cwd=ROOT, capture_output=True, text=True, check=True
+    ).stdout
+    assert any(" collect " in x and "SOURCE=" in x for x in helped.splitlines())
+
+
 # --- switches: «1» is on, empty or «0» is off, anything else stops make ------------
 
 

@@ -12,7 +12,7 @@ COMPOSE := docker compose
 switch = $(if $(filter-out 0 1,$(strip $($(1)))),$(error $(1)=$($(1)): use $(1)=1 (on) or $(1)=0 (off)),$(filter 1,$(strip $($(1)))))
 .PHONY: help env db-password db-password-sync doctor up update down reload logs ps psql migrate \
         revision downgrade bot worker userbot userbot-login backup backup-key backup-key-show restore \
-        import-clients erp-sync push-test mvp-report purge install test lint fmt typecheck check db-test hooks smoke smoke-cron
+        import-clients erp-sync collect push-test mvp-report purge install test lint fmt typecheck check db-test hooks smoke smoke-cron
 
 help: ## Show this help
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -179,6 +179,19 @@ erp_walk = $(if $(and $(filter $(ERP_WALKS),$(WALK)),$(filter 1,$(words $(WALK))
 erp-sync: ## One ERP feed walk: make erp-sync WALK=full|delta|outcomes|quarter|year [ACCEPT_SHRINK=1]
 	$(COMPOSE) run --rm --no-deps worker python -m clientscrapper.tools.erp_sync --$(erp_walk) \
 		$(if $(call switch,ACCEPT_SHRINK),--accept-shrink,)
+
+# One collector run now, the run its cron would make (06 §3.3,
+# tools/collect.py): the worker's own job for that JOB_TABLE slot, in a
+# one-off container beside the running worker. --no-deps (never init) and no
+# db-password guard: the database is up and nothing here can start it, as
+# `make backup`. It takes no leader lock, so the running worker keeps its
+# scheduler; the runner's one-running claim keeps the two from running one
+# source at once. Without SOURCE it prints the sources it takes (read from
+# the table). FULL=1 asks for the «full» variant (refused today: docs/OPS.md).
+# Exit 1 = refused (nothing ran), 2 = the run failed.
+collect: ## Run one collector now: make collect SOURCE=<source> [FULL=1] (no SOURCE: the list)
+	$(COMPOSE) run --rm --no-deps worker python -m clientscrapper.worker.main collect \
+		"$(strip $(SOURCE))" $(if $(call switch,FULL),full,)
 
 push-test: ## Push one visibly synthetic lead to the ERP (05 §B.1)
 	$(COMPOSE) run --rm --no-deps worker python -m clientscrapper.tools.push_test

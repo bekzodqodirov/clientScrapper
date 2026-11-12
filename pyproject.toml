@@ -138,6 +138,8 @@ files = [
     "clientscrapper/services/enrich.py",
     "clientscrapper/collectors/company_site.py",
     "clientscrapper/collectors/telegram_page.py",
+    # make collect: one collector run now (the worker's own job)
+    "clientscrapper/tools/collect.py",
 ]
 
 # APScheduler 3 ships no type information.

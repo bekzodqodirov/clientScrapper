@@ -104,6 +104,8 @@ OWNER_TEXT_MODULES = (
     # make userbot-login's prompts and lines: the owner runs it himself (the
     # first docker dry run, 2026-11-09).
     "tools/userbot_login.py",
+    # make collect's refusals and the run's summary: the owner runs it himself.
+    "tools/collect.py",
 )
 # Modules whose raise messages reach the owner (see the docstring).
 OWNER_RAISE_MODULES = frozenset({"config.py"})

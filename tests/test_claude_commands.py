@@ -75,6 +75,7 @@ def test_the_table_is_read_whole():
         ("backup", []),
         ("restore", ["FILE"]),
         ("import-clients", ["FILE"]),
+        ("collect", ["SOURCE"]),
     ]
 
 
@@ -103,6 +104,7 @@ COMMENTS = {
     "backup": "",
     "restore": "",
     "import-clients": "suppression fallback before the ERP feed exists",
+    "collect": "run one collector now, as its cron would (no SOURCE: the list)",
 }
 PROMISES = {
     "up": ["docker compose up -d", "db init", "worker userbot bot"],
@@ -113,6 +115,8 @@ PROMISES = {
     "backup": ["clientscrapper.worker.main backup"],
     "restore": ["clientscrapper.tools.restore"],
     "import-clients": ["clientscrapper.tools.import_clients"],
+    # The worker's own job for the slot (tools/collect.py), in a one-off.
+    "collect": ["clientscrapper.worker.main collect", "run --rm --no-deps worker"],
 }
 
 
@@ -135,6 +139,7 @@ def test_a_command_a_comment_names_is_what_the_recipe_runs(target):
         "userbot-login": ["userbot_login"],
         "test": ["ruff", "mypy", "pytest"],
         "import-clients": ["import_clients"],
+        "collect": ["worker.main collect"],
     }[target]
     for word in words:
         assert word in out, (target, word)

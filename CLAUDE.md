@@ -89,6 +89,7 @@ make userbot-login # create the Telethon StringSession for the reader account
 make test          # ruff + mypy (scoped) + pytest (needs postgres)
 make backup / make restore FILE=…
 make import-clients FILE=clients.xlsx   # suppression fallback before the ERP feed exists
+make collect SOURCE=directories   # run one collector now, as its cron would (no SOURCE: the list)
 ```
 
 ## Where the truth lives

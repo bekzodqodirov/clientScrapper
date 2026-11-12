@@ -87,6 +87,10 @@ callable ``(text) -> delivered`` with no recipient argument, wired by
 when a bot token and an owner are configured; without them nothing is
 delivered, nothing is marked said, and every problem stays due. Nothing in
 this process sends a message to anyone else, ever.
+
+``make collect`` runs one built collector slot's ``job`` once, in a one-off
+process beside the leader (:func:`collect_now`, ``tools/collect.py``): the
+function the scheduler registers, no leader lock taken.
 """
 
 from __future__ import annotations
@@ -536,10 +540,12 @@ def shared_fetcher() -> http_layer.Fetcher:
 
 def collector_job(cls: type[Collector], variant: str | None = None) -> Job:
     """The scheduler entry of one collector cadence: ``runner.run_collector``
-    with the shared Fetcher, at the wall clock of the run (03 §1.2)."""
+    with the shared Fetcher, at the wall clock of the run (03 §1.2). Its
+    ``RunReport`` is returned: the scheduler drops it, ``make collect``
+    (:func:`collect_now`) reads the run's row by its id."""
 
-    async def job() -> None:
-        await run_collector(
+    async def job() -> runner.RunReport:
+        return await run_collector(
             cls, fetcher=shared_fetcher(), now=datetime.now(settings.tz), variant=variant
         )
 
@@ -1581,6 +1587,32 @@ async def backup_now(*, now: datetime | None = None) -> int:
     return 0 if result.ok else 1
 
 
+async def collect_now(slot: JobSlot) -> runner.RunReport:
+    """``make collect`` (06 §3.3, ``tools/collect.py``): one run of a collector
+    slot's own ``job`` — the function :func:`build_scheduler` registers for
+    it, ``collector_job(<Collector>, <variant>)`` — in this one-off process,
+    wired as the scheduler's process is (the owner seams, :func:`wire`: a
+    cost cap ``costs.ask`` meets is told as it would be) and with this
+    process's shared Fetcher, closed after. It takes no leader lock (nor
+    releases one), reclaims no run and catches nothing up: the worker that
+    leads goes on scheduling beside it, and the runner's one-running claim
+    (``ux_collector_runs_one_running``) keeps the two from running one source
+    at once (``already_running``)."""
+    job = slot.job
+    if job is None or slot.source_key is None:
+        raise ValueError(f"{slot.id} is not a built collector slot")
+    bot = connect_owner_bot()
+    wire()
+    try:
+        report: runner.RunReport = await job()
+    finally:
+        fetcher, _shared.fetcher = _shared.fetcher, None
+        if fetcher is not None:
+            await fetcher.aclose()
+        await disconnect_owner_bot(bot)
+    return report
+
+
 async def run() -> None:
     setup_logging("worker")
     bot = connect_owner_bot()
@@ -1651,13 +1683,22 @@ async def run() -> None:
 
 def main(argv: list[str] | None = None) -> int:
     """``python -m clientscrapper.worker.main`` runs the scheduler;
-    ``… main backup`` runs one backup (``make backup``)."""
+    ``… main backup`` runs one backup (``make backup``); ``… main collect
+    <slot> [<variant>]`` runs one collector now (``make collect``,
+    ``tools/collect.py``, which prints its lines: the tools are the
+    package's terminal)."""
     args = sys.argv[1:] if argv is None else argv
     if args == ["backup"]:
         setup_logging("worker")
         return asyncio.run(backup_now())
+    if args[:1] == ["collect"]:
+        setup_logging("worker")
+        # Imported here: the tool imports this module (its JOB_TABLE).
+        from clientscrapper.tools import collect
+
+        return collect.main(args[1:])
     if args:
-        raise SystemExit(f"unknown arguments: {args} (only «backup»)")
+        raise SystemExit(f"unknown arguments: {args} (only «backup» or «collect»)")
     return run_main(run)
 
 
