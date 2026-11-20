@@ -69,7 +69,11 @@ row's own observation where it has one. A kept list row is its own evidence
 the row in the fragment, ``row_url``), never the page's: an evidence row has
 one excerpt, and a lead card's quote must be found in the row's own words.
 A stop on a budget, a deadline or a breaker keeps what was found, the list
-rows of the cards not reached included.
+rows of the cards not reached included. A budget or the deadline ends the
+run; a breaker ends that site's night only (``stops.blocked``,
+``Collector.site_blocks``): the runner pauses that site's row and the other
+sites are read on (the first live run, 2026-11-18, lost three sites to
+goldenpages' 403s).
 
 **One bad request costs that request** (the T-22 review): a list page or a
 card that fails in transport once the Fetcher's retries are spent
@@ -160,7 +164,8 @@ _NEVER: Final = datetime.min.replace(tzinfo=UTC)
 # answering (the other sites still run).
 TRANSPORT_STREAK: Final = 5
 # What one request can raise that costs that request only; BudgetExhausted
-# and HostPaused (a breaker) stop the run and are caught before these.
+# (the run's) and HostPaused (a breaker: the site's night) are caught before
+# these.
 REQUEST_FAILURES: Final = (*TRANSPORT_FAILURES, FetchError)
 OWED_PROM: Final = (
     "refused by the site: Cloudflare 403 on robots.txt and /tags/optom/ "
@@ -425,6 +430,10 @@ class Directories(Collector):
     default_cron = "0 23 * * 4"
     default_rps = 0.5
     default_page_budget = 600
+    # At one request per 10 s (http.SITE_MAX_RPS) the 600-page budget alone
+    # is 1 h 40 min before a retry's wait: the default two hours would cut a
+    # full night short. 23:00 to 05:00 at most.
+    run_deadline = timedelta(hours=6)
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
@@ -483,6 +492,19 @@ class Directories(Collector):
                 self.incomplete.append(
                     f"{sub.site}: {TRANSPORT_STREAK} failed requests in a row "
                     f"({down.kind}), the rest of its night not read"
+                )
+            except HostPaused as paused:
+                # One site's 403/429 streak (or a breaker already open for its
+                # host) ends that site's night and pauses that site's row, not
+                # the parent: the other sites are read on (the first live run,
+                # 2026-11-18, lost three sites to goldenpages' 403s). The page
+                # budget and the deadline are shared, and still end the run.
+                stats["stops"]["blocked"] += 1
+                self._ran[sub.site] = "blocked"
+                self.site_blocks[sub.source_key] = paused
+                self.incomplete.append(
+                    f"{sub.site}: the site answered 403/429 (host {paused.host}), "
+                    "paused for the breaker's hours; the other sites read on"
                 )
         return self.found
 

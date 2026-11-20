@@ -329,6 +329,40 @@ def test_the_summary_names_each_directory_site_from_the_run_s_meta():
     assert [x for x in lines if problems(x, rendered=True)] == []
 
 
+def test_one_site_that_turned_us_away_is_said_on_its_own_line_not_as_the_run_s():
+    """The first live run (2026-11-18) lost every site to goldenpages' 403s.
+    Now that site alone is paused and the others are read: the summary says
+    so on the site's line, and the run-wide «⛔ … manba pauzaga» line — which
+    would say the whole source stopped — is kept for a block nothing
+    contained."""
+    meta = {
+        **DIRECTORIES_META,
+        "subsources": {
+            **DIRECTORIES_META["subsources"],
+            "goldenpages": site(pages=1, list_status={"403": 5}, stops={"blocked": 1}),
+        },
+        "blocked_hosts": ["www.goldenpages.uz"],
+        "site_blocks": {"directories_goldenpages": "www.goldenpages.uz"},
+    }
+    lines = collect.render(a_run(meta=meta), title="Kataloglar", titles=TITLES)
+    at = lines.index(
+        "• goldenpages.uz (yangilari): 1 roʻyxat sahifasi, 0 kompaniya kartasi, "
+        "0 roʻyxat qatori; avval koʻrilgan 0 ta, yangi yozuv 28 ta."
+    )
+    assert lines[at + 1] == (
+        "  ⚠️ sayt toʻsdi (403/429) — faqat shu sayt 6 soatga pauzaga qoʻyildi, "
+        "qolgan saytlar oʻqildi · roʻyxat javoblari: 403×5."
+    )
+    assert not [x for x in lines if x.startswith("⛔")]
+    assert [x for x in lines if problems(x, rendered=True)] == []
+    # A host the collector did not contain is still the run's own stop.
+    meta["blocked_hosts"] = ["www.goldenpages.uz", "glotr.uz"]
+    lines = collect.render(a_run(meta=meta), title="Kataloglar", titles=TITLES)
+    assert "⛔ Sayt toʻsdi (403/429): glotr.uz — manba 6 soatga pauzaga qoʻyildi." in (
+        lines
+    )
+
+
 def test_the_summary_names_each_exhibitor_list_and_what_cut_the_run():
     meta = {
         "unchanged": 0,
@@ -794,8 +828,8 @@ async def test_a_switched_on_source_runs_the_job_the_scheduler_registers(
     assert worker._shared.fetcher is None  # closed after the run
     assert said == [
         "▶️ Kataloglar (directories) yigʻilmoqda… Saytlar sekin oʻqiladi (har biriga "
-        "hurmat bilan): bir necha daqiqadan bir-ikki soatgacha ketishi mumkin. "
-        "Toʻxtatish: Ctrl-C."
+        "hurmat bilan, 10 soniyada bitta sahifa): bir necha daqiqadan bir necha "
+        "soatgacha ketishi mumkin. Toʻxtatish: Ctrl-C."
     ]
     expected = tuple(x.replace("#41", f"#{run_id}") for x in DIRECTORIES_SUMMARY)
     assert out == collect.Outcome(expected, collect.EXIT_DONE)

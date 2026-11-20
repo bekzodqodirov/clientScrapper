@@ -544,6 +544,90 @@ async def test_a_breaker_the_collector_swallowed_still_fails_the_run(
     )
 
 
+class Containing(Hammering):
+    """A fan-out collector that stops one site on its breaker and names the
+    site's row (``Collector.site_blocks``), as the directories do."""
+
+    async def collect(self, session, budget):
+        try:
+            await super().collect(session, budget)
+        except http.HostPaused as paused:
+            self.site_blocks["directories_goldenpages"] = paused
+            self.incomplete.append("goldenpages: blocked")
+        return self.found
+
+
+async def test_a_block_the_collector_contained_pauses_that_site_s_row_not_the_run_s(
+    session, directories, clock, tmp_path
+):
+    """The difference from ``Swallowing``: the collector NAMED the row the
+    blocked site belongs to, so that row is paused for the breaker's hours
+    and the run ends on what it read (``partial``) — the source that
+    schedules every site goes on."""
+    async with SessionLocal() as s:
+        row = await s.get(Source, "directories_goldenpages")
+        assert row is not None
+        snapshot = {name: getattr(row, name) for name in KEPT}
+    try:
+        site = directory_site(clock, **{f"{EX}/blocked": httpx.Response(403)})
+        report = await run(Containing, fetcher_for(site), clock, tmp_path)
+        assert (report.status, report.error) == ("partial", None)
+        [run_row] = await runs(session)
+        assert run_row.meta["site_blocks"] == {
+            "directories_goldenpages": "www.goldenpages.example.uz"
+        }
+        assert run_row.meta["incomplete"] == ["goldenpages: blocked"]
+        assert run_row.new_observations == 2
+
+        parent = await source_row(session)
+        assert (parent.paused_until, parent.breaker_until) == (None, None)
+        gold = await session.get(
+            Source, "directories_goldenpages", populate_existing=True
+        )
+        assert gold is not None
+        until = clock.now() + BREAKER_PAUSE
+        reason = "host_blocked:www.goldenpages.example.uz"
+        assert (gold.paused_until, gold.paused_reason) == (until, reason)
+        assert (gold.breaker_until, gold.breaker_reason) == (until, reason)
+    finally:
+        async with SessionLocal() as s:
+            await s.execute(
+                sa.update(Source)
+                .where(Source.key == "directories_goldenpages")
+                .values(**snapshot)
+            )
+            await s.commit()
+
+
+async def test_a_run_lasts_its_collector_s_own_deadline_unless_one_is_given(
+    session, directories, clock, tmp_path
+):
+    """The directories read at one request per 10 s and get six hours
+    (``Directories.run_deadline``); a collector that names none keeps two."""
+    from clientscrapper.collectors.directories import Directories
+
+    seen: list[timedelta] = []
+
+    class Timed(Directory):
+        async def collect(self, session, budget):
+            assert self.started_at is not None
+            seen.append(budget.deadline - self.started_at)
+            return []
+
+    class Long(Timed):
+        run_deadline = timedelta(hours=6)
+
+    assert Directory.run_deadline == timedelta(hours=2)
+    assert Directories.run_deadline == timedelta(hours=6)
+    site = directory_site(clock)
+    await run(Timed, fetcher_for(site), clock, tmp_path)
+    clock.advance(60)
+    await run(Long, fetcher_for(site), clock, tmp_path)
+    clock.advance(60)
+    await run(Long, fetcher_for(site), clock, tmp_path, deadline=timedelta(hours=1))
+    assert seen == [timedelta(hours=2), timedelta(hours=6), timedelta(hours=1)]
+
+
 # --- budgets ----------------------------------------------------------------------------
 
 

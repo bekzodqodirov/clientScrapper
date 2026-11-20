@@ -179,8 +179,8 @@ TEXT: Final[dict[str, str]] = {
     # --- the run ---------------------------------------------------------------------
     "start": (
         "▶️ {title} ({key}) yigʻilmoqda… Saytlar sekin oʻqiladi (har biriga hurmat "
-        "bilan): bir necha daqiqadan bir-ikki soatgacha ketishi mumkin. Toʻxtatish: "
-        "Ctrl-C."
+        "bilan, 10 soniyada bitta sahifa): bir necha daqiqadan bir necha "
+        "soatgacha ketishi mumkin. Toʻxtatish: Ctrl-C."
     ),
     "full_today": (
         "📅 Bugun oyning {day}-kuni — {sites} ning oylik toʻliq yurishi kuni: bu "
@@ -244,6 +244,10 @@ TEXT: Final[dict[str, str]] = {
     "t_parse_errors": "sahifani oʻqib boʻlmadi: {n}",
     "t_dropped": "2024 dan eski karta tashlandi: {n}",
     "t_down": "sayt javob bermay qoldi",
+    "t_blocked": (
+        "sayt toʻsdi (403/429) — faqat shu sayt {hours} soatga pauzaga qoʻyildi, "
+        "qolgan saytlar oʻqildi"
+    ),
     "t_status": "roʻyxat javoblari: {codes}",
     "list": (
         "• {show} {year}: {status} — {kept} ta oʻzbek kompaniya ({rows} qatordan), "
@@ -711,6 +715,10 @@ def site_lines(
         stops = data.get("stops")
         if isinstance(stops, Mapping) and (stops.get("transport") or stops.get("http")):
             trouble.append(TEXT["t_down"])
+        if isinstance(stops, Mapping) and stops.get("blocked"):
+            trouble.append(
+                TEXT["t_blocked"].format(hours=int(BREAKER_PAUSE.total_seconds() // 3600))
+            )
         answers = data.get("list_status")
         if isinstance(answers, Mapping) and answers:
             codes = ", ".join(f"{c}×{_count(n)}" for c, n in sorted(answers.items()))
@@ -768,8 +776,13 @@ def warning_lines(run: CollectorRun) -> list[str]:
         lines.append(TEXT["w_cost"].format(code=meta.get("refused") or exhausted))
     elif isinstance(exhausted, str) and exhausted in EXHAUSTED:
         lines.append(EXHAUSTED[exhausted])
-    blocked = meta.get("blocked_hosts")
-    if isinstance(blocked, list) and blocked:
+    # A host one site's breaker tripped is said on that site's line
+    # (``t_blocked``): this line is a block that stopped the whole run.
+    sites = meta.get("site_blocks")
+    contained = set(sites.values()) if isinstance(sites, Mapping) else set()
+    hosts = meta.get("blocked_hosts")
+    blocked = [h for h in hosts if h not in contained] if isinstance(hosts, list) else []
+    if blocked:
         lines.append(
             TEXT["w_blocked"].format(
                 hosts=", ".join(str(h) for h in blocked),

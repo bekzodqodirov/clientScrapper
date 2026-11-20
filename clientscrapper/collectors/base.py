@@ -24,14 +24,14 @@ import dataclasses
 import hashlib
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Final, Literal
 from urllib.parse import quote, urldefrag
 
 from clientscrapper.services.health import collector_component
-from clientscrapper.services.http import BudgetExhausted, Fetcher
+from clientscrapper.services.http import BudgetExhausted, Fetcher, HostPaused
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -201,7 +201,14 @@ class Collector(ABC):
     and could not read whole when no budget stopped it — a list under half
     its organiser's count, a list the site removed, a walk the site cut
     short (03 §2.8): the runner ends such an ``ok`` run ``partial`` and
-    writes them into ``meta.incomplete``."""
+    writes them into ``meta.incomplete``. ``site_blocks`` names the
+    sub-source rows a fan-out collector stopped reading because their host's
+    breaker opened (a 403/429 streak), each with the ``HostPaused`` it
+    caught: the runner pauses those rows, not the collector's own, and the
+    run goes on with its other sites (one site's block is no reason to stop
+    the others — the first live directories run, 2026-11-18). ``run_deadline``
+    is how long one run may take (the runner's ``deadline`` when none is
+    passed)."""
 
     key: ClassVar[str]
     family: ClassVar[str]
@@ -209,6 +216,7 @@ class Collector(ABC):
     default_cron: ClassVar[str | None] = None
     default_rps: ClassVar[float] = 0.3
     default_page_budget: ClassVar[int] = 500
+    run_deadline: ClassVar[timedelta] = timedelta(hours=2)
     # Seeds sources.daily_cost_cap_usd.
     default_usd_cap: ClassVar[Decimal] = Decimal("0")
     heartbeat: ClassVar[str]
@@ -239,6 +247,7 @@ class Collector(ABC):
         self.supplied: dict[tuple[str, str], Supplied] = {}
         self.evidence_root: Path | None = None
         self.incomplete: list[str] = []
+        self.site_blocks: dict[str, HostPaused] = {}
 
     @classmethod
     def unavailable(cls) -> str | None:

@@ -43,7 +43,15 @@ ROWS = (
     "directories_prom",
     "directories_topuz",
 )
-KEPT = ("enabled", "paused_until", "paused_reason", "daily_page_budget", "last_run_at")
+KEPT = (
+    "enabled",
+    "paused_until",
+    "paused_reason",
+    "breaker_until",
+    "breaker_reason",
+    "daily_page_budget",
+    "last_run_at",
+)
 TRADING_HOUSE = (
     "/company/international-business-and-travel-sp-ooo-uzbeksko-kitayskiy-"
     "torgovyy-dom-predstavitelstvo"
@@ -616,6 +624,64 @@ async def test_a_host_that_stops_answering_stops_its_own_site_only(
     assert by_source["directories_topuz"] and by_source["directories_glotr"]
 
 
+async def test_a_site_that_turns_us_away_pauses_its_own_row_and_the_others_read_on(
+    session, rows, tmp_path
+):
+    """The first live run (2026-11-18): goldenpages answered 403 after nine
+    pages, the breaker opened, and the whole night failed — yellowpages,
+    top.uz and glotr were never asked. One site's 403/429 streak now ends
+    that site's night and pauses that site's row for the breaker's hours;
+    the other sites are read, the parent row is not paused, and the run is
+    ``partial`` with the site named."""
+    clock = FakeClock(THURSDAY)
+    web = Web(clock)
+    web.site.add(
+        "https://www.goldenpages.uz/rubrics/",
+        lambda request: httpx.Response(403, headers=HTML, text="forbidden"),
+    )
+    report = await run(web, clock, tmp_path)
+    assert (report.status, report.error) == ("partial", None), report
+    meta = report.meta
+    assert meta["site_blocks"] == {"directories_goldenpages": "www.goldenpages.uz"}
+    assert meta["subsources"]["goldenpages"]["stops"]["blocked"] == 1
+    assert meta["incomplete"] == [
+        "goldenpages: the site answered 403/429 (host www.goldenpages.uz), paused "
+        "for the breaker's hours; the other sites read on"
+    ]
+    # Five 403s, and not one request more to that host.
+    gold = [s.path for s in web.site.seen if s.request.url.host == "www.goldenpages.uz"]
+    assert gold == ["/robots.txt"] + ["/rubrics/"] * 5
+    for host in ("www.yellowpages.uz", "top.uz", "glotr.uz"):
+        assert web.urls(host), host
+    by_source = await observations(session)
+    assert "directories_goldenpages" not in by_source
+    for key in ("directories_yellowpages", "directories_topuz", "directories_glotr"):
+        assert by_source[key], key
+
+    async with SessionLocal() as s:
+        found = {
+            r.key: r
+            for r in await s.scalars(sa.select(Source).where(Source.key.in_(ROWS)))
+        }
+    reason = "host_blocked:www.goldenpages.uz"
+    gp_row = found["directories_goldenpages"]
+    assert (gp_row.paused_reason, gp_row.breaker_reason) == (reason, reason)
+    assert gp_row.paused_until == gp_row.breaker_until
+    assert gp_row.paused_until is not None and gp_row.paused_until > clock.now()
+    parent = found["directories"]
+    assert (parent.paused_until, parent.breaker_until) == (None, None)
+    for key in ("directories_yellowpages", "directories_topuz", "directories_glotr"):
+        assert found[key].paused_until is None, key
+
+    # The next night skips the paused site and reads the others.
+    clock.advance(60)
+    again = Web(clock)
+    second = await run(again, clock, tmp_path)
+    assert second.meta["subsources"]["goldenpages"] == {"skipped": "paused"}
+    assert again.urls("www.goldenpages.uz") == []
+    assert again.urls("top.uz")
+
+
 async def test_a_page_the_parser_cannot_read_costs_that_page(session, rows, tmp_path):
     for key in ("directories_yellowpages", "directories_glotr"):
         await switch(key, enabled=False)
@@ -815,16 +881,16 @@ async def test_a_seed_reads_at_most_max_list_pages(session, rows, tmp_path, monk
     ]
 
 
-async def test_the_directories_are_paced_under_03_s_half_a_request_a_second(
+async def test_the_directories_are_read_one_page_every_ten_seconds(
     session, rows, tmp_path
 ):
-    """03 §2.6: «Rate 0.5 rps max». The directory hosts have their own pace
-    (HOST_RPS), so a COLLECTOR_RPS_DEFAULT raised for other hosts does not
-    raise theirs."""
+    """03 §2.6 as the owner set it (2026-11-18): one request per 10 s per
+    site (http.SITE_MAX_RPS), so a COLLECTOR_RPS_DEFAULT raised for other
+    hosts does not raise theirs."""
     from clientscrapper.services import http
 
     for host in ("www.goldenpages.uz", "www.yellowpages.uz", "top.uz", "glotr.uz"):
-        assert http.HOST_RPS[host] <= 0.5, host
+        assert http.HOST_RPS[host] <= 0.1, host
     for key in (
         "directories_yellowpages",
         "directories_glotr",
@@ -842,7 +908,7 @@ async def test_the_directories_are_paced_under_03_s_half_a_request_a_second(
     )
     assert report.status == "ok"
     times = [s.at for s in web.site.seen if s.request.url.host == "top.uz"]
-    assert len(times) > 5 and all(b - a >= 2.0 for a, b in pairwise(times))
+    assert len(times) > 5 and all(b - a >= 10.0 for a, b in pairwise(times))
 
 
 async def only_goldenpages() -> None:

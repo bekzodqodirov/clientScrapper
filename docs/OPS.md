@@ -43,7 +43,7 @@ Telegram accounts, 10:00–17:00 Tashkent (`docs/sotuv-playbook.md`).
 instead of waiting for its cron (directories: Thursday 23:00; exhibitors: Monday 09:00). It
 is the run the scheduler makes — the worker's own job for that slot of `JOB_TABLE`, in a
 one-off container beside the running worker, which keeps its scheduler lock and its
-schedule: robots.txt, the per-host pace, the 403/429 breaker, the daily page budget,
+schedule: robots.txt, the per-host pace (one request per 10 s per site), the 403/429 breaker, the daily page budget,
 `costs.ask` before any paid call, the evidence store and the `collector_runs` row are all
 the scheduled run's. The one-off holds its source's own lock (`cs:collect:<source>`) for the
 run's life: a worker that starts or resumes meanwhile (`make reload`, `make update`, a crash
@@ -94,7 +94,10 @@ other is told «… hozir yigʻilmoqda …», with the latest time the source fr
   with its pause's end; the sites the run never reached) or per show list for the
   exhibitors (Uzbek companies kept of the rows read), then what cut the run (robots.txt, the
   page or dollar budget, the deadline, a 403/429 breaker — the source is then paused 6 h —
-  CAPTCHA pages). The run number («yurish #N») is the `collector_runs.id`. Exit 0 when the
+  CAPTCHA pages). For the directories a 403/429 streak stops and pauses only the site that
+  answered it («faqat shu sayt … pauzaga qoʻyildi»); the other sites are read on. A run can
+  take hours: at one page per 10 s, start it in the background
+  (`nohup make collect SOURCE=directories > ~/collect-dir.log 2>&1 &`). The run number («yurish #N») is the `collector_runs.id`. Exit 0 when the
   run finished (`ok` or `partial`, even with no new company), 1 refused, 2 failed or stopped;
   a failed run, the database down («Baza javob bermayapti — avval make up …») or the tool's
   own failure each end with what to do.

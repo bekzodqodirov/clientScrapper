@@ -105,9 +105,15 @@ async def test_a_collector_cannot_replace_the_user_agent(clock):
 # --- pacing -------------------------------------------------------------------
 
 
+# The bucket itself is measured with the site cap off (``site_max_rps=None``):
+# at the cap every interval below would be 10 s.
+
+
 async def test_two_requests_to_one_host_are_one_interval_apart(clock):
     site = site_with(clock, {f"{EX}/p1": page(), f"{EX}/p2": page(), f"{EX}/p3": page()})
-    fetcher = fetcher_for(site, host_rps={"www.namuna.example.uz": 0.5})
+    fetcher = fetcher_for(
+        site, host_rps={"www.namuna.example.uz": 0.5}, site_max_rps=None
+    )
     for name in ("p1", "p2", "p3"):
         await fetcher.get(f"{EX}/{name}", source="directories", budget=budget())
     times = [s.at for s in site.seen]
@@ -116,11 +122,51 @@ async def test_two_requests_to_one_host_are_one_interval_apart(clock):
 
 async def test_the_default_rate_is_point_three_per_second(clock):
     site = site_with(clock, {f"{EX}/p1": page()})
-    fetcher = fetcher_for(site, rps_default=0.3)
+    fetcher = fetcher_for(site, rps_default=0.3, site_max_rps=None)
     await fetcher.get(f"{EX}/p1", source="directories", budget=budget())
     assert site.seen[1].at == pytest.approx(1 / 0.3)
-    assert http.HOST_RPS["www.olx.uz"] == 0.33
     assert http.HOST_RPS["api.hh.ru"] == 1.0
+
+
+async def test_every_site_we_read_is_asked_at_most_once_every_ten_seconds(clock):
+    """The owner's rule (2026-11-18, «3 soniya juda tez»): whatever the
+    table, the default or a short Crawl-delay says, a site is asked once
+    every 10 s — goldenpages answered 403 after nine pages at one per 3.3 s."""
+    site = site_with(clock, {f"{EX}/p1": page(), f"{EX}/p2": page()})
+    fetcher = fetcher_for(site, rps_default=2.0, host_rps={"www.namuna.example.uz": 1.0})
+    for name in ("p1", "p2"):
+        await fetcher.get(f"{EX}/{name}", source="directories", budget=budget())
+    assert [s.at for s in site.seen] == [0.0, 10.0, 20.0]
+    assert http.SITE_MAX_RPS == 0.1
+    # The table records no site faster than the cap: a row there that reads
+    # faster would be a promise the Fetcher does not keep.
+    sites = {h for h in http.HOST_RPS if http.pace_key(h) not in http.unpaced_hosts()}
+    assert sites and all(http.HOST_RPS[h] <= http.SITE_MAX_RPS for h in sites)
+
+
+async def test_the_apis_and_our_own_erp_keep_their_own_pace(clock, monkeypatch):
+    """The cap is for the sites we read: a documented API (its published
+    limit) and the ERP are not sites, and are asked at their own pace."""
+    # Written with «www.», asked without: one site either way (pace_key).
+    monkeypatch.setattr(
+        http.settings, "crm_base_url", "https://www.erp.namuna.example.uz"
+    )
+    erp = "https://erp.namuna.example.uz"
+    site = site_with(
+        clock,
+        {
+            f"{erp}/robots.txt": ALLOW_ALL,
+            f"{erp}/api/agent/suppression": page(),
+            f"{erp}/api/agent/outcomes": page(),
+        },
+    )
+    fetcher = fetcher_for(site, rps_default=1.0)
+    for path in ("suppression", "outcomes"):
+        await fetcher.get(f"{erp}/api/agent/{path}", source="erp_sync", budget=budget())
+    erp_times = [s.at for s in site.seen if s.request.url.host == "erp.namuna.example.uz"]
+    assert erp_times == [0.0, 1.0, 2.0]
+    assert fetcher.unpaced >= http.ROBOTS_OPTOUT_HOSTS
+    assert "api.hh.ru" in fetcher.unpaced
 
 
 async def test_two_hosts_interleave(clock):
@@ -134,7 +180,7 @@ async def test_two_hosts_interleave(clock):
             f"{other}/b1": page(),
         },
     )
-    fetcher = fetcher_for(site, rps_default=0.25)
+    fetcher = fetcher_for(site, rps_default=0.25, site_max_rps=None)
     await fetcher.get(f"{EX}/a1", source="directories", budget=budget())  # 0, 4
     await fetcher.get(f"{other}/b1", source="directories", budget=budget())
     await fetcher.get(f"{EX}/a2", source="directories", budget=budget())
@@ -151,7 +197,8 @@ async def test_two_hosts_interleave(clock):
 
 
 async def test_a_slower_crawl_delay_wins(clock):
-    robots = httpx.Response(200, text="User-agent: *\nCrawl-delay: 10\nDisallow:\n")
+    # Slower than the 10 s site cap too: a site's own longer Crawl-delay wins.
+    robots = httpx.Response(200, text="User-agent: *\nCrawl-delay: 15\nDisallow:\n")
     site = Site(
         clock,
         {f"{EX}/robots.txt": robots, f"{EX}/a": page(), f"{EX}/b": page()},
@@ -159,7 +206,7 @@ async def test_a_slower_crawl_delay_wins(clock):
     fetcher = fetcher_for(site, rps_default=1.0)
     await fetcher.get(f"{EX}/a", source="directories", budget=budget())
     await fetcher.get(f"{EX}/b", source="directories", budget=budget())
-    assert [s.at for s in site.seen] == [0.0, 10.0, 20.0]
+    assert [s.at for s in site.seen] == [0.0, 15.0, 30.0]
 
 
 # --- robots.txt -----------------------------------------------------------------

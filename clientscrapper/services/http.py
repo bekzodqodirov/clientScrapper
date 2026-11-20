@@ -1,15 +1,18 @@
 """The only way a collector touches the network (03 §1.1).
 
 ``Fetcher`` wraps one ``httpx.AsyncClient`` and adds, per request: our
-``USER_AGENT`` (never replaced), robots.txt (``clientScrapperBot``, then
-``*``), a per-host token bucket (``HOST_RPS``; a slower ``Crawl-delay`` wins),
-the page budget and the run deadline, the conditional GET against the stored
-evidence copy (``If-None-Match`` / ``If-Modified-Since`` → 304), ``Retry-After``
-and ``with_backoff`` for transient answers, a 5 MB body cap, same-site
-redirects only, and the per-host breaker: **5 consecutive 403/429** (a
-CAPTCHA page counts as a 403, a 2xx resets) pause the host for 6 h in this
-process and raise ``HostBlocked``; the runner then pauses the source row and
-ends the run ``failed`` + ``error='host_blocked'``.
+``USER_AGENT`` (never replaced), robots.txt (``clientScrapperBot``, then ``*``),
+a per-host token bucket (``HOST_RPS``; a slower ``Crawl-delay`` wins; every site
+we read is held to one request per 10 s, ``SITE_MAX_RPS``, the documented APIs
+and the ERP excepted), the page budget and the run deadline, the conditional GET
+against the stored evidence copy (``If-None-Match`` / ``If-Modified-Since`` →
+304), ``Retry-After`` and ``with_backoff`` for transient answers, a 5 MB body
+cap, same-site redirects only, and the per-host breaker: **5 consecutive
+403/429** (a CAPTCHA page counts as a 403, a 2xx resets) pause the host for 6 h
+in this process and raise ``HostBlocked``; the runner then pauses the source row
+and ends the run ``failed`` + ``error='host_blocked'`` — or, when a fan-out
+collector contained it to one site (``Collector.site_blocks``), pauses that
+site's row and lets the run go on.
 
 Shared, process-wide state (buckets, robots cache, breaker counters) lives in
 ``HostState``; per-run state (the counters a ``collector_runs`` row carries,
@@ -86,30 +89,30 @@ HOST_RPS: Final[Mapping[str, float]] = {
     "searchapi.api.cloud.yandex.net": 1.0,
     "operation.api.cloud.yandex.net": 2.0,
     "catalog.api.2gis.com": 1.0,
-    "www.olx.uz": 0.33,
-    "2gis.uz": 0.2,
-    # 04 §3 E4: the registry is read at 1 request / 3 s whatever the global
-    # default says.
-    "orginfo.uz": 0.33,
-    "html.duckduckgo.com": 0.1,
     "graph.facebook.com": 1.0,
     "api.apify.com": 1.0,
-    # 03 §2.6: the directories at «0.5 rps max» — the recorded pace, whatever
-    # COLLECTOR_RPS_DEFAULT is raised to for other hosts (the T-22 review).
-    "www.goldenpages.uz": 0.3,
-    "www.yellowpages.uz": 0.3,
-    "top.uz": 0.3,
-    "glotr.uz": 0.3,
-    # 03 §2.8: the exhibitor lists at «1 req/3 s», whatever the default is
-    # raised to (the wave-5 seam review; ``sources.exhibitors.rps`` is read by
-    # nothing — the pace is this table's).
-    "automechanika.uz": 0.33,
-    "catalog.automechanika.uz": 0.33,
-    "uzbuild.uz": 0.33,
-    "power-uzbekistan.uz": 0.33,
-    "caitme.uz": 0.33,
-    "mebelexpo.uz": 0.33,
-    "textileexpo.uz": 0.33,
+    # Every site we READ is at one request per 10 s (SITE_MAX_RPS, the
+    # owner's rule of 2026-11-18), whatever this table, COLLECTOR_RPS_DEFAULT
+    # or a Crawl-delay shorter than 10 s says; the rows below record the
+    # sites, each at that pace. 03 §2.6 (directories), 03 §2.8 (exhibitor
+    # lists) and 04 §3 E4 (the registry) once read 0.3-0.5 rps:
+    # www.goldenpages.uz answered 403 after nine pages at one per 3.3 s.
+    "www.olx.uz": 0.1,
+    "2gis.uz": 0.1,
+    "orginfo.uz": 0.1,
+    "html.duckduckgo.com": 0.1,
+    "www.goldenpages.uz": 0.1,
+    "www.yellowpages.uz": 0.1,
+    "top.uz": 0.1,
+    "glotr.uz": 0.1,
+    # ``sources.<key>.rps`` is read by nothing — the pace is this table's.
+    "automechanika.uz": 0.1,
+    "catalog.automechanika.uz": 0.1,
+    "uzbuild.uz": 0.1,
+    "power-uzbekistan.uz": 0.1,
+    "caitme.uz": 0.1,
+    "mebelexpo.uz": 0.1,
+    "textileexpo.uz": 0.1,
 }
 # Documented JSON APIs with a key: the only hosts a request may skip robots.txt
 # for (``obey_robots=False``, and every ``post_json``). The call sites are
@@ -138,6 +141,24 @@ METERED_HOSTS: Final = frozenset(
         "api.apify.com",
     }
 )
+
+# The owner's rule (2026-11-18, «hamma saytlar uchun 10 soniya … 3 soniya
+# juda tez»): a site the agent reads — a directory, a show's list, a
+# company's own pages, t.me/s, the registry, a search page — is asked at most
+# once every 10 s, whatever HOST_RPS, COLLECTOR_RPS_DEFAULT or a short
+# Crawl-delay says (a longer Crawl-delay still wins). The documented APIs
+# (ROBOTS_OPTOUT_HOSTS) keep their own published limits, and so does our own
+# ERP (CRM_BASE_URL's host): neither is a site we read.
+SITE_MAX_RPS: Final = 0.1
+
+
+def unpaced_hosts() -> frozenset[str]:
+    """The hosts SITE_MAX_RPS leaves at their own pace, as pace keys (with
+    and without ``www.`` alike): the documented APIs and the ERP."""
+    crm = urlsplit(settings.crm_base_url).hostname
+    hosts = ROBOTS_OPTOUT_HOSTS | ({crm.lower()} if crm else frozenset())
+    return frozenset(pace_key(h) for h in hosts)
+
 
 BREAKER_THRESHOLD: Final = 5
 BREAKER_PAUSE: Final = timedelta(hours=6)
@@ -526,11 +547,15 @@ class Fetcher:
         monotonic: Callable[[], float] = time.monotonic,
         wall: Callable[[], datetime] = _default_wall,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        site_max_rps: float | None = SITE_MAX_RPS,
     ) -> None:
         self.rps_default = (
             rps_default if rps_default is not None else settings.collector_rps_default
         )
         self.host_rps = dict(host_rps)
+        # None only in the pacing tests, which measure the bucket itself.
+        self.site_max_rps = site_max_rps
+        self.unpaced = unpaced_hosts()
         self.robots_ttl = robots_ttl
         self.robots_dir = robots_dir
         self.agent = agent
@@ -1047,6 +1072,8 @@ class Fetcher:
 
     def _interval(self, host: str, authority: str) -> float:
         rps = self.host_rps.get(host, self.rps_default)
+        if self.site_max_rps is not None and pace_key(host) not in self.unpaced:
+            rps = min(rps, self.site_max_rps)
         interval = 1.0 / rps
         robots = self._hosts.robots.get(authority)
         delay = robots.crawl_delay() if robots is not None else None

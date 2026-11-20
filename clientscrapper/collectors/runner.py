@@ -47,8 +47,13 @@ collector made itself, ``costs.ModelUnavailable``) or the deadline stopped the
 run; ``failed`` + ``error='host_blocked'`` when a host
 breaker tripped — the source is paused 6 h (``paused_until`` for the runner,
 ``breaker_until`` for the health problem ``collector_blocked``, both with
-reason ``host_blocked:<host>``); ``failed`` + the error class for anything
-else. What a stopped collector put in ``Collector.found`` is still written.
+reason ``host_blocked:<host>``) — unless the collector contained the block
+to one of its sub-sources (``Collector.site_blocks``): then that sub-source's
+row is paused the same way, ``meta.site_blocks`` names it, and the run ends
+on what the collector says of the rest (``partial`` with the site in
+``meta.incomplete``); ``failed`` + the error class for anything else. What a
+stopped collector put in ``Collector.found`` is still written. The run's
+deadline is ``Collector.run_deadline`` unless the caller passes one.
 """
 
 from __future__ import annotations
@@ -739,7 +744,7 @@ async def run_collector(
     cost_gate_for: GateFactory | None = ask_gate,
     serp: object | None = None,
     evidence_root: Path | None = None,
-    deadline: timedelta = DEFAULT_DEADLINE,
+    deadline: timedelta | None = None,
     clock: Callable[[], datetime] | None = None,
 ) -> RunReport:
     """One run of ``collector_cls`` at ``now``; see the module docstring.
@@ -751,6 +756,8 @@ async def run_collector(
     key = collector_cls.key
     component = health.collector_component(key, variant)
     version = f"{key}@{collector_cls.version}"
+    # The collector's own (``Collector.run_deadline``) unless a caller says.
+    deadline = deadline if deadline is not None else collector_cls.run_deadline
 
     def finished() -> datetime:
         stamp = clock() if clock is not None else datetime.now(settings.tz)
@@ -845,7 +852,11 @@ async def run_collector(
                     error,
                     extra={"source": key, "run_id": run_id, "error": error},
                 )
-            blocked = list(run_fetcher.stats.blocked_hosts)
+            # A site a fan-out collector stopped reading on its own breaker
+            # pauses that site's row (below), not this run's source: only a
+            # host the collector did not contain fails the run.
+            contained = {paused.host for paused in collector.site_blocks.values()}
+            blocked = [h for h in run_fetcher.stats.blocked_hosts if h not in contained]
             if watch.paused and stopped is None:
                 stopped = (GLOBAL_PAUSE, "")
                 if status == "ok":
@@ -919,6 +930,10 @@ async def run_collector(
                 variant=variant, fetcher=run_fetcher, written=written, stopped=stopped
             )
             meta = {**collector.run_meta, **meta}
+            if collector.site_blocks:
+                meta["site_blocks"] = {
+                    k: paused.host for k, paused in collector.site_blocks.items()
+                }
             if collector.incomplete:
                 meta["incomplete"] = list(collector.incomplete)
             end = finished()
@@ -942,6 +957,18 @@ async def run_collector(
             await session.execute(
                 sa.update(Source).where(Source.key == key).values(**source_values)
             )
+            for site_key, paused in collector.site_blocks.items():
+                site_reason = f"{BLOCKED_ERROR}:{paused.host}"
+                await session.execute(
+                    sa.update(Source)
+                    .where(Source.key == site_key)
+                    .values(
+                        paused_until=paused.until,
+                        paused_reason=site_reason,
+                        breaker_until=paused.until,
+                        breaker_reason=site_reason,
+                    )
+                )
             detail: dict[str, Any] = {
                 "phase": "end",
                 "run_id": run_id,
